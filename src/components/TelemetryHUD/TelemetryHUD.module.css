@@ -1,0 +1,36 @@
+.hud {
+  position: absolute;
+  top: 36px;
+  right: 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  pointer-events: none;
+  background: rgba(16, 16, 22, 0.85);
+  border: 1px solid #2a2a2e;
+  border-radius: 4px;
+  padding: 14px 18px;
+  backdrop-filter: blur(6px);
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.metricLabel {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(200, 200, 204, 0.6);
+}
+
+.metricValue {
+  font-size: 22px;
+  font-weight: 300;
+  letter-spacing: 0.05em;
+  color: #5DCAA5;
+  line-height: 1;
+}

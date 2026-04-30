@@ -1,0 +1,52 @@
+.pianoRoll {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 44px;
+  overflow: hidden;
+  z-index: 10;
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,0.92) 80%, transparent 100%);
+          mask-image: linear-gradient(to right, rgba(0,0,0,0.92) 80%, transparent 100%);
+}
+
+.whiteKeys {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.whiteKey {
+  flex: 1;
+  background: #1a1a20;
+  border-bottom: 1px solid #2a2a2e;
+  border-radius: 0 2px 2px 0;
+  transition: background 0.04s ease;
+}
+
+.whiteKey.active {
+  background: rgba(93, 202, 165, 0.82);
+}
+
+.blackKeys {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.blackKey {
+  position: absolute;
+  left: 0;
+  width: 62%;
+  background: #0e0e10;
+  border-radius: 0 2px 2px 0;
+  border-bottom: 1px solid #1a1a20;
+  z-index: 1;
+  transition: background 0.04s ease;
+}
+
+.blackKey.active {
+  background: #5DCAA5;
+}

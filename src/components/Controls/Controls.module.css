@@ -1,0 +1,148 @@
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 28px;
+  border-top: 1px solid #2a2a2e;
+  background: linear-gradient(to top, #16161c, #0e0e10);
+  gap: 16px;
+}
+
+/* ── Select cluster ──────────────────────────────────────────── */
+.selectGroup {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.selectWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.selectLabel {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(200, 200, 204, 0.45);
+}
+
+/* Chevron arrow as inline SVG data URI in accent colour */
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: transparent;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235DCAA5' fill-opacity='0.7'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  border: 1px solid rgba(93, 202, 165, 0.35);
+  color: rgba(93, 202, 165, 0.8);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 7px 30px 7px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  outline: none;
+  min-width: 148px;
+  transition: border-color 0.2s, color 0.2s;
+}
+
+.select:hover,
+.select:focus {
+  border-color: rgba(93, 202, 165, 0.7);
+  color: #5DCAA5;
+}
+
+.select option {
+  background: #16161c;
+  color: #c8c8cc;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* ── Button cluster (record + engage/disengage) ─────────────── */
+.buttonGroup {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* ── Record button ───────────────────────────────────────────── */
+.recordBtn {
+  background: transparent;
+  border: 1px solid rgba(93, 202, 165, 0.5);
+  color: rgba(93, 202, 165, 0.7);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  padding: 10px 24px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+
+.recordBtn:hover:not(:disabled) {
+  border-color: rgba(93, 202, 165, 0.9);
+  color: #5DCAA5;
+}
+
+.recordBtn:disabled {
+  cursor: default;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.45; }
+}
+
+.recordActive {
+  border-color: rgba(224, 85, 85, 0.8) !important;
+  color: #e05555 !important;
+  animation: pulse 800ms ease-in-out infinite;
+}
+
+/* ── Engage / Disengage button ───────────────────────────────── */
+.engageBtn {
+  background: transparent;
+  border: 1px solid rgba(93, 202, 165, 0.7);
+  color: #5DCAA5;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  padding: 10px 32px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+  flex-shrink: 0;
+}
+
+.engageBtn:hover {
+  border-color: #5DCAA5;
+  color: #5DCAA5;
+}
+
+.disengageBtn {
+  background: transparent;
+  border: 1px solid rgba(224, 112, 112, 0.7);
+  color: #E07070;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  padding: 10px 32px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+  flex-shrink: 0;
+}
+
+.disengageBtn:hover {
+  border-color: #E07070;
+  color: #E07070;
+}
