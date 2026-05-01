@@ -50,3 +50,13 @@
 .blackKey.active {
   background: #5DCAA5;
 }
+
+/* Arp flash — inset shadow overlays any background without fighting .active */
+@keyframes arpFlash {
+  from { box-shadow: inset 0 0 0 100px rgba(255, 209, 102, 0.92); }
+  to   { box-shadow: inset 0 0 0 100px rgba(255, 209, 102, 0); }
+}
+
+.flash {
+  animation: arpFlash 180ms ease-out forwards;
+}

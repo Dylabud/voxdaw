@@ -23,8 +23,9 @@ NOTE_GRID.forEach(({ note, isBlack }) => {
 
 // ── Component ─────────────────────────────────────────────────────────────
 const PianoRoll = forwardRef(function PianoRoll(_, ref) {
-  const keyMapRef    = useRef(new Map());
-  const activeSetRef = useRef(new Set());
+  const keyMapRef      = useRef(new Map());
+  const activeSetRef   = useRef(new Set());
+  const flashTimersRef = useRef(new Map());
 
   useImperativeHandle(ref, () => ({
     setNotes(noteNames) {
@@ -34,6 +35,24 @@ const PianoRoll = forwardRef(function PianoRoll(_, ref) {
       for (const n of prev) { if (!next.has(n)) map.get(n)?.classList.remove(styles.active); }
       for (const n of next) { if (!prev.has(n)) map.get(n)?.classList.add(styles.active); }
       activeSetRef.current = next;
+    },
+
+    flashNote(noteName, durationMs = 180) {
+      const el = keyMapRef.current.get(noteName);
+      if (!el) return;
+      // Cancel any in-progress flash so re-triggering the same key restarts cleanly
+      const prev = flashTimersRef.current.get(noteName);
+      if (prev !== undefined) {
+        clearTimeout(prev);
+        el.classList.remove(styles.flash);
+        void el.offsetWidth; // force reflow to restart CSS animation
+      }
+      el.classList.add(styles.flash);
+      const timer = setTimeout(() => {
+        el.classList.remove(styles.flash);
+        flashTimersRef.current.delete(noteName);
+      }, durationMs);
+      flashTimersRef.current.set(noteName, timer);
     },
   }), []);
 

@@ -120,11 +120,15 @@ export default function useAudioEngine(hudRefs) {
   const disposeTimerRef   = useRef(null);
 
   // Arp refs
-  const arpVoiceRef   = useRef(null);
-  const arpVolRef     = useRef(null);
-  const arpPatternRef = useRef(null);
-  const arpModeRef    = useRef('off');
-  const arpRateRef    = useRef('8n');
+  const arpVoiceRef        = useRef(null);
+  const arpVolRef          = useRef(null);
+  const arpPatternRef      = useRef(null);
+  const arpModeRef         = useRef('off');
+  const arpRateRef         = useRef('8n');
+  // Delta-check refs — pattern is only rewritten when these values change
+  const appliedArpModeRef  = useRef(null);
+  const appliedArpRootRef  = useRef(null);
+  const appliedArpRateRef  = useRef(null);
 
   const startAudio = useCallback(async () => {
     if (disposeTimerRef.current !== null) {
@@ -185,6 +189,7 @@ export default function useAudioEngine(hudRefs) {
           HOLD_MAP[arpRateRef.current] ?? '16n',
           time,
         );
+        hudRefsRef.current?.pianoRoll?.current?.flashNote(normalizeNote(note), 180);
       }, ['C4'], 'upDown');
       arpPattern.interval = '8n';
       arpPattern.start(0);
@@ -235,7 +240,10 @@ export default function useAudioEngine(hudRefs) {
       arpPatternRef.current.mute = true;
       arpPatternRef.current.stop();
     }
-    arpModeRef.current = 'off';
+    arpModeRef.current      = 'off';
+    appliedArpModeRef.current = null;
+    appliedArpRateRef.current = null;
+    appliedArpRootRef.current = null;
     Tone.Transport.stop();
 
     hudRefsRef.current?.pianoRoll?.current?.setNotes([]);
@@ -354,10 +362,11 @@ export default function useAudioEngine(hudRefs) {
         }
         hud?.pianoRoll?.current?.setNotes(activeNoteNames);
 
-        // Update arp pattern root in real time (no-op when muted)
-        if (arpActive) {
+        // Update arp pattern root only when it actually changes
+        if (arpActive && root !== appliedArpRootRef.current) {
           const pat = arpPatternRef.current;
           if (pat) pat.values = buildArpNotes(root, arpModeRef.current);
+          appliedArpRootRef.current = root;
         }
 
         if (hud?.pitch?.current)
@@ -380,10 +389,9 @@ export default function useAudioEngine(hudRefs) {
 
         // Arp mode (rotation-robust finger detection)
         const { middleOut, ringOut, pinkyOut } = getArpFingerStates(hand);
-        const mode     = getArpMode(middleOut, ringOut, pinkyOut);
-        const tilt     = getWristTiltDeg(hand);
-        const rate     = getArpRate(tilt);
-        const prevMode = arpModeRef.current;
+        const mode = getArpMode(middleOut, ringOut, pinkyOut);
+        const tilt = getWristTiltDeg(hand);
+        const rate = getArpRate(tilt);
 
         arpRateRef.current = rate;
 
@@ -391,11 +399,24 @@ export default function useAudioEngine(hudRefs) {
         let spreadDb = 3;
         if (mode !== 'off') {
           spreadDb = getArpSpreadDb(hand, { middleOut, ringOut, pinkyOut }, arpHandSize);
+          // Volume ramps every frame — it's a continuous gesture parameter
           arpVolRef.current?.volume.rampTo(spreadDb, 0.05);
-          if (pat) {
-            pat.values   = buildArpNotes(currentRootRef.current, mode);
-            pat.pattern  = ARP_PATTERN_TYPE[mode];
-            pat.interval = rate;
+
+          // Only rewrite pattern structure when mode, rate, or root actually changed
+          const rootNow = currentRootRef.current;
+          if (
+            mode    !== appliedArpModeRef.current ||
+            rate    !== appliedArpRateRef.current ||
+            rootNow !== appliedArpRootRef.current
+          ) {
+            if (pat) {
+              pat.values   = buildArpNotes(rootNow, mode);
+              pat.pattern  = ARP_PATTERN_TYPE[mode];
+              pat.interval = rate;
+            }
+            appliedArpModeRef.current = mode;
+            appliedArpRateRef.current = rate;
+            appliedArpRootRef.current = rootNow;
           }
         }
         arpModeRef.current = mode;
