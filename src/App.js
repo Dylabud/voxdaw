@@ -15,8 +15,10 @@ export default function App() {
   const filterRef    = useRef(null);
   const vibratoRef   = useRef(null);
   const chordRef     = useRef(null);
+  const arpRef       = useRef(null);
+  const arpVolRef    = useRef(null);
   const pianoRollRef = useRef(null);
-  const hudRefs = { pitch: pitchRef, reverb: reverbRef, velocity: velocityRef, filter: filterRef, vibrato: vibratoRef, chord: chordRef, pianoRoll: pianoRollRef };
+  const hudRefs = { pitch: pitchRef, reverb: reverbRef, velocity: velocityRef, filter: filterRef, vibrato: vibratoRef, chord: chordRef, arp: arpRef, arpVol: arpVolRef, pianoRoll: pianoRollRef };
 
   const { videoRef, isActive, error, engage, disengage } = useCameraStream();
   const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, volumeRef } = useAudioEngine(hudRefs);
@@ -54,6 +56,8 @@ export default function App() {
           filterRef={filterRef}
           vibratoRef={vibratoRef}
           chordRef={chordRef}
+          arpRef={arpRef}
+          arpVolRef={arpVolRef}
         />
       </div>
       <Controls

@@ -1,6 +1,10 @@
 import { useRef, useCallback } from 'react';
 import * as Tone from 'tone';
-import { calculateDistance, calculateDistance2D, mapRange, snapToNearest, isFingerExtended, normalizeNote } from '../utils/dsp';
+import {
+  calculateDistance, calculateDistance2D, mapRange,
+  snapToNearest, isFingerExtended, normalizeNote,
+  getArpFingerStates, getWristTiltDeg, getArpSpreadDb,
+} from '../utils/dsp';
 import { SCALES, NOTE_GRID } from '../utils/scales';
 
 // Semitone intervals — explicit counts eliminate ratio approximation ambiguity
@@ -19,6 +23,62 @@ const INIT_FREQS = [
   Tone.Frequency(440).transpose(ST_MIN7).toFrequency(),
 ];
 
+// ── Arp constants ──────────────────────────────────────────────────────────────
+
+const ARP_PATTERN_TYPE = {
+  simple:        'upDown',
+  complex:       'upDown',
+  complexRandom: 'randomWalk',
+  simpleRandom:  'random',
+  octave:        'upDown',
+};
+
+const ARP_MODE_LABEL = {
+  off:           'OFF',
+  simple:        'SIMPLE',
+  complex:       'COMPLEX',
+  complexRandom: 'CMPLX RND',
+  simpleRandom:  'SMP RND',
+  octave:        'OCTAVE',
+};
+
+// Maps interval → held note duration (half the step for clean articulation)
+const HOLD_MAP = { '4n': '8n', '8n': '16n', '16n': '32n' };
+
+// middle | ring | pinky → mode string
+function getArpMode(middleOut, ringOut, pinkyOut) {
+  if (!middleOut && !pinkyOut) return 'off';
+  if (!middleOut &&  pinkyOut) return 'octave';
+  if ( middleOut && !ringOut && !pinkyOut) return 'simple';
+  if ( middleOut &&  ringOut && !pinkyOut) return 'complex';
+  if ( middleOut &&  ringOut &&  pinkyOut) return 'complexRandom';
+  if ( middleOut && !ringOut &&  pinkyOut) return 'simpleRandom';
+  return 'off';
+}
+
+// Builds a Tone.js note-string array (major triad intervals) relative to rootHz.
+function buildArpNotes(rootHz, mode) {
+  const root = Tone.Frequency(rootHz).toNote();
+  const t = (n, st) => Tone.Frequency(n).transpose(st).toNote();
+  switch (mode) {
+    case 'simple':        return [root, t(root, 4), t(root, 7)];
+    case 'complex':       return [root, t(root,4), t(root,7), t(root,12), t(root,16), t(root,19)];
+    case 'complexRandom': return [root, t(root,4), t(root,7), t(root,12), t(root,16), t(root,19)];
+    case 'simpleRandom':  return [root, t(root,4), t(root,7)];
+    case 'octave':        return [root, t(root,12)];
+    default:              return [root];
+  }
+}
+
+// Maps absolute wrist tilt (degrees from vertical) → Tone.js interval string
+function getArpRate(tiltDeg) {
+  if (tiltDeg < 20) return '4n';
+  if (tiltDeg < 60) return '8n';
+  return '16n';
+}
+
+// ── Voice factories ────────────────────────────────────────────────────────────
+
 function makeAnalogVoice(oscType, initDb = VOICE_DB) {
   return new Tone.Synth({
     oscillator: { type: oscType },
@@ -29,9 +89,9 @@ function makeAnalogVoice(oscType, initDb = VOICE_DB) {
 
 function makeStringsVoice(initDb = VOICE_DB) {
   return new Tone.FMSynth({
-    harmonicity:        1,   // modulator at fundamental — harmonic, not metallic
-    modulationIndex:    1.5, // minimal phase scrape → rosin friction, not FM laser
-    oscillator:         { type: 'sawtooth' }, // Helmholtz slip-stick waveform
+    harmonicity:        1,
+    modulationIndex:    1.5,
+    oscillator:         { type: 'sawtooth' },
     modulation:         { type: 'sine' },
     envelope:           { attack: 0.4, decay: 0.2, sustain: 0.8, release: 1.2 },
     modulationEnvelope: { attack: 0.6, decay: 0.2, sustain: 0.5, release: 1.2 },
@@ -39,23 +99,32 @@ function makeStringsVoice(initDb = VOICE_DB) {
   });
 }
 
+// ── Hook ───────────────────────────────────────────────────────────────────────
+
 export default function useAudioEngine(hudRefs) {
   const hudRefsRef = useRef(hudRefs);
   hudRefsRef.current = hudRefs;
 
-  const analogVoicesRef  = useRef(null); // [root, 3rd, 5th, 7th] — Tone.Synth
-  const stringsVoicesRef = useRef(null); // [root, 3rd, 5th, 7th] — Tone.FMSynth
-  const activeVoicesRef  = useRef(null); // points to the active set
-  const filterRef        = useRef(null);
-  const vibratoRef       = useRef(null);
-  const reverbRef        = useRef(null);
-  const volumeRef        = useRef(null);
-  const oscTypeRef       = useRef('sine');
-  const scaleRef         = useRef(SCALES.cMajor);
+  const analogVoicesRef   = useRef(null);
+  const stringsVoicesRef  = useRef(null);
+  const activeVoicesRef   = useRef(null);
+  const filterRef         = useRef(null);
+  const vibratoRef        = useRef(null);
+  const reverbRef         = useRef(null);
+  const volumeRef         = useRef(null);
+  const oscTypeRef        = useRef('sine');
+  const scaleRef          = useRef(SCALES.cMajor);
   const instrumentNameRef = useRef('analog');
-  const currentRootRef   = useRef(440);
-  const isStartedRef     = useRef(false);
-  const disposeTimerRef  = useRef(null);
+  const currentRootRef    = useRef(440);
+  const isStartedRef      = useRef(false);
+  const disposeTimerRef   = useRef(null);
+
+  // Arp refs
+  const arpVoiceRef   = useRef(null);
+  const arpVolRef     = useRef(null);
+  const arpPatternRef = useRef(null);
+  const arpModeRef    = useRef('off');
+  const arpRateRef    = useRef('8n');
 
   const startAudio = useCallback(async () => {
     if (disposeTimerRef.current !== null) {
@@ -66,7 +135,7 @@ export default function useAudioEngine(hudRefs) {
     await Tone.start();
 
     if (!analogVoicesRef.current) {
-      // Shared effects chain — all voices from both instruments sum at the filter input
+      // Shared effects chain
       const vol = new Tone.Volume(-6).toDestination();
 
       const reverb = new Tone.Reverb({ decay: 3, wet: 0 });
@@ -79,7 +148,7 @@ export default function useAudioEngine(hudRefs) {
       const filter = new Tone.Filter({ frequency: 5000, type: 'lowpass', rolloff: -24 });
       filter.connect(vibrato);
 
-      // Analog: root at VOICE_DB, harmonics muted (chord-gated)
+      // Analog chord voices
       const analogVoices = [
         makeAnalogVoice(oscTypeRef.current),
         makeAnalogVoice(oscTypeRef.current, VOICE_MUTE),
@@ -87,7 +156,7 @@ export default function useAudioEngine(hudRefs) {
         makeAnalogVoice(oscTypeRef.current, VOICE_MUTE),
       ];
 
-      // Strings: all muted until instrument is switched to (analog is default)
+      // Strings chord voices
       const stringsVoices = [
         makeStringsVoice(VOICE_MUTE),
         makeStringsVoice(VOICE_MUTE),
@@ -97,31 +166,59 @@ export default function useAudioEngine(hudRefs) {
 
       [...analogVoices, ...stringsVoices].forEach(v => v.connect(filter));
 
+      // Arp voice — routes directly to Destination, fully independent of the
+      // pinch-controlled master volume that governs the chord/filter chain.
+      const arpVol = new Tone.Volume(6).toDestination();
+
+      const arpVoice = new Tone.Synth({
+        oscillator: { type: 'triangle' },
+        envelope:   { attack: 0.005, decay: 0.12, sustain: 0.3, release: 0.25 },
+        volume:     0,
+      });
+      arpVoice.connect(arpVol);
+
+      // Pattern always runs on the transport; gated by arpModeRef inside the callback.
+      const arpPattern = new Tone.Pattern((time, note) => {
+        if (arpModeRef.current === 'off') return;
+        arpVoiceRef.current?.triggerAttackRelease(
+          note,
+          HOLD_MAP[arpRateRef.current] ?? '16n',
+          time,
+        );
+      }, ['C4'], 'upDown');
+      arpPattern.interval = '8n';
+      arpPattern.start(0);
+
       filterRef.current        = filter;
       vibratoRef.current       = vibrato;
       reverbRef.current        = reverb;
       volumeRef.current        = vol;
       analogVoicesRef.current  = analogVoices;
       stringsVoicesRef.current = stringsVoices;
+      arpVoiceRef.current      = arpVoice;
+      arpVolRef.current        = arpVol;
+      arpPatternRef.current    = arpPattern;
 
-      // Set active set from cached instrument choice
       activeVoicesRef.current = instrumentNameRef.current === 'strings'
         ? stringsVoices
         : analogVoices;
 
-      // Prime all 8 voices — envelopes are initialised, only volume determines audibility
       const activeSet   = activeVoicesRef.current;
       const inactiveSet = activeSet === analogVoices ? stringsVoices : analogVoices;
       activeSet.forEach((v, i)   => v.triggerAttack(INIT_FREQS[i]));
       inactiveSet.forEach((v, i) => v.triggerAttack(INIT_FREQS[i]));
-
-      // Root of the active set is the only audible voice on startup
       activeSet[0].volume.value = VOICE_DB;
+
+      Tone.Transport.bpm.value = 120;
+      Tone.Transport.start();
     } else {
-      // Re-engage: re-trigger all voices at startup frequencies
+      // Re-engage: voices still alive (dispose timer was cleared)
       const allVoices = [...analogVoicesRef.current, ...stringsVoicesRef.current];
       allVoices.forEach((v, i) => v.triggerAttack(INIT_FREQS[i % 4]));
       activeVoicesRef.current[0].volume.value = VOICE_DB;
+
+      arpModeRef.current = 'off';
+      Tone.Transport.start();
     }
 
     isStartedRef.current = true;
@@ -129,21 +226,37 @@ export default function useAudioEngine(hudRefs) {
 
   const stopAudio = useCallback(() => {
     if (!isStartedRef.current || !analogVoicesRef.current) return;
+
     const allVoices = [...analogVoicesRef.current, ...stringsVoicesRef.current];
     allVoices.forEach(v => v.triggerRelease());
+
+    // Stop arp pattern immediately (before dispose timer)
+    if (arpPatternRef.current) {
+      arpPatternRef.current.mute = true;
+      arpPatternRef.current.stop();
+    }
+    arpModeRef.current = 'off';
+    Tone.Transport.stop();
+
     hudRefsRef.current?.pianoRoll?.current?.setNotes([]);
     isStartedRef.current = false;
 
-    // 1600ms allows the strings 1.2s release to fully complete before disposal
     disposeTimerRef.current = setTimeout(() => {
       allVoices.forEach(v => v.dispose());
+      arpPatternRef.current?.dispose();
+      arpVoiceRef.current?.dispose();
+      arpVolRef.current?.dispose();
       filterRef.current?.dispose();
       vibratoRef.current?.dispose();
       reverbRef.current?.dispose();
       volumeRef.current?.dispose();
+
       analogVoicesRef.current  = null;
       stringsVoicesRef.current = null;
       activeVoicesRef.current  = null;
+      arpPatternRef.current    = null;
+      arpVoiceRef.current      = null;
+      arpVolRef.current        = null;
       filterRef.current        = null;
       vibratoRef.current       = null;
       reverbRef.current        = null;
@@ -168,17 +281,12 @@ export default function useAudioEngine(hudRefs) {
       const indexTip = hand[8];
       const dist = calculateDistance(thumbTip, indexTip);
 
-      // CSS scaleX(-1) mirrors the display; MediaPipe reads the raw frame.
-      // User's right hand is on the LEFT in the raw frame → MediaPipe labels "Left".
       const label = handednesses[i][0].categoryName;
 
       if (label === 'Left') {
+        // ── RIGHT HAND: pitch + chord voicing + Z-filter + volume ──────
         pitchHandFound = true;
 
-        // ── RIGHT HAND: pitch + cascading chord voicing + Z-filter + volume ──
-        // Safe zone [0.15, 0.7]: bottom tightened (was 0.85) because the user's
-        // wrist physically tops out around y≈0.74 — anything beyond is unreachable.
-        // 0.7 puts C3 (idx 24) at wrist.y≈0.7 with margin to spare.
         const SAFE_TOP    = 0.15;
         const SAFE_BOTTOM = 0.7;
         const safeY    = Math.max(0, Math.min(1, (wrist.y - SAFE_TOP) / (SAFE_BOTTOM - SAFE_TOP)));
@@ -187,19 +295,18 @@ export default function useAudioEngine(hudRefs) {
         const root     = snapToNearest(rawPitch, scaleRef.current);
         currentRootRef.current = root;
 
-        // Optical depth: wrist→midMCP 2D distance grows as hand nears camera
         const midMCP   = hand[9];
         const handSize = calculateDistance2D(wrist, midMCP);
         const cutoff   = mapRange(handSize, 0.08, 0.35, 400, 10000);
         filterRef.current.frequency.rampTo(cutoff, 0.05);
 
-        // Normalize pinch by hand size so velocity is stable at any distance
         const normalizedPinch = calculateDistance2D(thumbTip, indexTip) / handSize;
         const db = mapRange(normalizedPinch, 0.2, 1.2, -40, 0);
         volumeRef.current.volume.rampTo(db, 0.05);
 
-        // ── Cascading chord gates ──────────────────────────────────────
-        // MCP landmark pairs: middle=12/9, ring=16/13, pinky=20/17
+        const arpActive = arpModeRef.current !== 'off';
+
+        // ── Chord gate logic (always runs — arp layers on top) ──────────
         const middleUp = isFingerExtended(hand, 12, 9);
         const ringUp   = isFingerExtended(hand, 16, 13);
         const pinkyUp  = isFingerExtended(hand, 20, 17);
@@ -234,16 +341,9 @@ export default function useAudioEngine(hudRefs) {
         else if ( middleUp && !ringUp  &&  pinkyUp) chordName = 'MIN 7';
         else                                        chordName = 'MAJ 7';
 
-        if (hud?.pitch?.current)
-          hud.pitch.current.textContent = `${Math.round(root)} Hz`;
-        if (hud?.filter?.current)
-          hud.filter.current.textContent = `${Math.round(cutoff)} Hz`;
-        if (hud?.velocity?.current)
-          hud.velocity.current.textContent = `${Math.round(mapRange(normalizedPinch, 0.2, 1.2, 0, 100))}%`;
         if (hud?.chord?.current)
           hud.chord.current.textContent = chordName;
 
-        // ── Piano roll note names ──────────────────────────────────────
         const activeNoteNames = [normalizeNote(Tone.Frequency(root).toNote())];
         if (middleUp) {
           activeNoteNames.push(normalizeNote(Tone.Frequency(root).transpose(thirdST).toNote()));
@@ -254,17 +354,64 @@ export default function useAudioEngine(hudRefs) {
         }
         hud?.pianoRoll?.current?.setNotes(activeNoteNames);
 
+        // Update arp pattern root in real time (no-op when muted)
+        if (arpActive) {
+          const pat = arpPatternRef.current;
+          if (pat) pat.values = buildArpNotes(root, arpModeRef.current);
+        }
+
+        if (hud?.pitch?.current)
+          hud.pitch.current.textContent = `${Math.round(root)} Hz`;
+        if (hud?.filter?.current)
+          hud.filter.current.textContent = `${Math.round(cutoff)} Hz`;
+        if (hud?.velocity?.current)
+          hud.velocity.current.textContent = `${Math.round(mapRange(normalizedPinch, 0.2, 1.2, 0, 100))}%`;
+
       } else {
-        // ── LEFT HAND: reverb wet + vibrato depth ───────────────────────
+        // ── LEFT HAND: reverb + vibrato + arp control ───────────────────
+
         const wet   = mapRange(dist, 0.03, 0.20, 0, 1);
         const depth = mapRange(wrist.y, 0, 1, 0.8, 0);
         reverbRef.current.wet.rampTo(wet, 0.05);
         vibratoRef.current.depth.rampTo(depth, 0.05);
 
+        // Hand size on the arp hand — normalizes spread against camera distance
+        const arpHandSize = calculateDistance2D(wrist, hand[9]);
+
+        // Arp mode (rotation-robust finger detection)
+        const { middleOut, ringOut, pinkyOut } = getArpFingerStates(hand);
+        const mode     = getArpMode(middleOut, ringOut, pinkyOut);
+        const tilt     = getWristTiltDeg(hand);
+        const rate     = getArpRate(tilt);
+        const prevMode = arpModeRef.current;
+
+        arpRateRef.current = rate;
+
+        const pat = arpPatternRef.current;
+        let spreadDb = 3;
+        if (mode !== 'off') {
+          spreadDb = getArpSpreadDb(hand, { middleOut, ringOut, pinkyOut }, arpHandSize);
+          arpVolRef.current?.volume.rampTo(spreadDb, 0.05);
+          if (pat) {
+            pat.values   = buildArpNotes(currentRootRef.current, mode);
+            pat.pattern  = ARP_PATTERN_TYPE[mode];
+            pat.interval = rate;
+          }
+        }
+        arpModeRef.current = mode;
+
         if (hud?.reverb?.current)
           hud.reverb.current.textContent = `${Math.round(wet * 100)}%`;
         if (hud?.vibrato?.current)
           hud.vibrato.current.textContent = `${Math.round(depth * 100)}%`;
+        if (hud?.arp?.current)
+          hud.arp.current.textContent = mode === 'off'
+            ? 'OFF'
+            : `${ARP_MODE_LABEL[mode]} ${rate}`;
+        if (hud?.arpVol?.current)
+          hud.arpVol.current.textContent = mode === 'off'
+            ? '--'
+            : `${Math.round(spreadDb)} dB`;
       }
     }
 
@@ -279,12 +426,9 @@ export default function useAudioEngine(hudRefs) {
     const oldVoices = activeVoicesRef.current;
     if (newVoices === oldVoices) return;
 
-    // Crossfade: mute outgoing set, unmute root of incoming set
     oldVoices.forEach(v => v.volume.rampTo(VOICE_MUTE, 0.1));
     newVoices[0].volume.rampTo(VOICE_DB, 0.1);
-    // Voices 1–3 of the new set will be gated correctly by the next rAF frame
 
-    // Snap frequencies of the incoming set to the current root immediately
     const root = currentRootRef.current;
     newVoices[0].frequency.rampTo(root, 0.05);
     newVoices[1].frequency.rampTo(Tone.Frequency(root).transpose(ST_MAJ3).toFrequency(), 0.05);
@@ -296,7 +440,6 @@ export default function useAudioEngine(hudRefs) {
 
   const setOscType = useCallback((type) => {
     oscTypeRef.current = type;
-    // Only applies to analog voices — FMSynth strings use a fixed preset
     analogVoicesRef.current?.forEach(v => { v.oscillator.type = type; });
   }, []);
 

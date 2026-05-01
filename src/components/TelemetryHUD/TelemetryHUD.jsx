@@ -1,9 +1,11 @@
 import styles from './TelemetryHUD.module.css';
 
 // Value spans are written to directly via refs in the rAF loop — zero re-renders.
-export default function TelemetryHUD({ pitchRef, reverbRef, velocityRef, filterRef, vibratoRef, chordRef }) {
+export default function TelemetryHUD({ pitchRef, reverbRef, velocityRef, filterRef, vibratoRef, chordRef, arpRef, arpVolRef }) {
   const metrics = [
     { key: 'pitch',    ref: pitchRef    },
+    { key: 'arp',      ref: arpRef      },
+    { key: 'arp vol',  ref: arpVolRef   },
     { key: 'chord',    ref: chordRef    },
     { key: 'filter',   ref: filterRef   },
     { key: 'reverb',   ref: reverbRef   },

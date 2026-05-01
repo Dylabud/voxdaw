@@ -1,3 +1,9 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+---
+
 # VoxDaw - System Instructions & Coding Standards
 
 ## Session Initialization Protocol
@@ -6,27 +12,103 @@
 2. `ARCHITECTURE.md` (Technical stack and data flow)
 3. `PLAN.md` (Current project state and immediate next steps)
 
+---
+
+## Commands
+
+```bash
+npm start       # Dev server (CRA, port 3000)
+npm run build   # Production build
+npm test        # Jest + React Testing Library (watch mode)
+```
+
+No linter config beyond CRA defaults (`eslint-config-react-app`). Source maps suppressed via `GENERATE_SOURCEMAP=false` in `.env` to silence a known MediaPipe upstream warning.
+
+---
+
+## Architecture
+
+### Data Flow (per animation frame)
+```
+getUserMedia → <video> → MediaPipe HandLandmarker.detectForVideo()
+  → result.landmarks[]  (21 × {x,y,z} normalized 0–1, Y-down)
+  → result.handednesses[]
+  → updateParams(landmarks, handednesses)   ← called inside rAF tick
+      ├─ Right hand (MediaPipe "Left") → pitch / chord / filter / volume / arp
+      └─ Left hand  (MediaPipe "Right") → reverb wet / vibrato depth
+```
+
+**MediaPipe handedness inversion:** The display canvas is CSS-mirrored (`scaleX(-1)`), but MediaPipe reads the raw un-mirrored frame. The user's physical right hand appears on the left side of the raw frame, so MediaPipe labels it `"Left"`. In `updateParams`, `label === 'Left'` is the pitch/chord/arp hand.
+
+### Zero-Re-render Rule
+`updateParams` runs inside a `requestAnimationFrame` loop. **No React state is ever written inside this function.** All live parameter updates go directly to:
+- Tone.js audio node params via `.rampTo()` (50ms ramp prevents zipper noise)
+- DOM elements via `.textContent` using refs collected in the `hudRefs` object
+- Imperative component handles (e.g., `pianoRollRef.current.setNotes()`)
+
+### Audio Graph
+```
+[analogVoices × 4]  ─┐
+[stringsVoices × 4] ─┤→ Filter → Vibrato → Reverb → Volume → Destination
+[arpVoice × 1]      ─┘   (lowpass −24 dB/oct)
+```
+All voice sets connect to the same `filter` node input; Tone.js sums them automatically. The active instrument set is tracked by `activeVoicesRef`; the inactive set is muted to `VOICE_MUTE = −80 dB`. The arp voice has a dedicated `Tone.Volume` before the filter so its gain is independent of the pinch-velocity volume on the main chain.
+
+### Key Refs in `useAudioEngine`
+| Ref | Purpose |
+|-----|---------|
+| `analogVoicesRef` | 4× `Tone.Synth` — [root, 3rd, 5th, 7th] |
+| `stringsVoicesRef` | 4× `Tone.FMSynth` — [root, 3rd, 5th, 7th] |
+| `activeVoicesRef` | Points to whichever voice set is currently audible |
+| `currentRootRef` | Last computed root frequency in Hz — consumed by the arp |
+| `scaleRef` | `Float32Array` of sorted Hz values for `snapToNearest()` binary search |
+| `filterRef / vibratoRef / reverbRef / volumeRef` | Shared effects chain nodes |
+
+### `dsp.js` Utility Reference
+| Function | Notes |
+|----------|-------|
+| `calculateDistance2D(p1, p2)` | XY Euclidean on normalized landmarks |
+| `calculateDistance(p1, p2)` | XYZ Euclidean |
+| `mapRange(v, inMin, inMax, outMin, outMax)` | Clamped linear map |
+| `isFingerExtended(hand, tipIdx, pipIdx)` | Y-comparison — reliable only on non-rotated hands |
+| `snapToNearest(hz, sortedFloat32Array)` | O(log n) binary search for scale quantization |
+| `normalizeNote(note)` | Tone.js flat names → sharp names (for PianoRoll key lookup) |
+
+### PianoRoll Component
+`PianoRoll` is a `forwardRef` component exposing one imperative method: `ref.current.setNotes(noteNames[])`. Internal `Map` gives O(1) key lookup; diff-based class toggling means frames with no chord change produce zero DOM writes.
+
+### Loop Station
+`useLoopStation(volumeRef)` taps a `Tone.Recorder` after `volumeRef`. Records 8 s (4 bars @ 120 BPM), decodes via `rawContext.decodeAudioData`, then plays back through a `Tone.Player(loop:true)` directly to `Destination` — bypassing the effects chain. Does **not** use `Tone.Transport`.
+
+### MediaPipe Landmark Index Quick Reference
+| Index | Landmark |
+|-------|----------|
+| 0 | Wrist |
+| 4 | Thumb Tip |
+| 5, 9, 13, 17 | Index / Middle / Ring / Pinky MCP |
+| 6, 10, 14, 18 | Index / Middle / Ring / Pinky PIP |
+| 8, 12, 16, 20 | Index / Middle / Ring / Pinky Tip |
+| 9 | Middle MCP — also used as hand-size reference point |
+
+---
+
 ## The Team & Roles
-* **User (Dylan):** Project Owner and Lead Developer. You are working with Dylan, who is driving the project forward. Ensure your explanations are clear, digestible, and educational.
-* **You (Claude):** Senior Executive Software Engineer. Your job is to write production-ready, highly efficient, and mathematically correct code. You prioritize performance and low latency above all else.
-* **Gemini:** Technical Project Manager & Systems Architect. Gemini defines the high-level strategy, maintains the project roadmap, and drafts foundational documentation. Gemini acts as a strategic sounding board for Dylan, conceptualizing complex DSP math, UI/UX aesthetics, and data flow architecture before handing off precise execution blueprints to you. Gemini keeps the overall project vision focused, clean, and highly efficient.
+* **User (Dylan):** Project Owner and Lead Developer. Ensure explanations are clear and educational.
+* **You (Claude):** Senior Executive Software Engineer. Write production-ready, highly efficient, mathematically correct code. Prioritize performance and low latency above all else.
+* **Gemini:** Technical Project Manager & Systems Architect. Defines high-level strategy, maintains the project roadmap, and drafts foundational documentation before handing precise execution blueprints to Claude.
+
+---
 
 ## Documentation Maintenance
-* You are responsible for helping maintain the project documentation.
-* Do not make sweeping architectural changes to the codebase without first suggesting an update to `architecture.md` and getting Dylan's approval.
-* When a task is completed, you must update `PLAN.md` by moving the task from "Future Steps" to the "Completed Steps Log" and documenting the date and brief technical details of the implementation.
+* Do not make sweeping architectural changes without first proposing an update to `ARCHITECTURE.md` and getting Dylan's approval.
+* When a task is completed, move it from "Future Steps" to the "Completed Steps Log" in `PLAN.md` with the date and brief technical details.
 
-## Project Overview
-We are building **VoxDaw**, a fully functional, next-generation DAW. 
-Currently, we are focusing on **Tool 2**: A live electronic instrument that captures real-time video via webcam and uses hand gesture recognition to modulate audio parameters (pitch, vibrato, reverb, velocity, volume) dynamically.
+---
 
 ## Core Directives & Standards
-1.  **Zero-Latency Tolerance:** Audio and visual processing must run with the absolute minimum latency possible. Utilize `requestAnimationFrame` for visual updates and dedicated AudioWorklets for sound generation to prevent UI thread blocking.
-2.  **Mathematical Precision:** All DSP (Digital Signal Processing) and gesture mapping calculations must be mathematically sound and optimized for efficiency. Avoid heavy, unoptimized loops in the render cycle.
-3.  **Strict Aesthetic:** The UI must adhere to a minimalist, "dark premium" design system. The interface should feel like a high-end, professional audio tool. We will utilize one of the following palettes (Dylan will finalize):
-    * *Option A (Deep Space & Mint):* Background `#0e0e10`, Accent `#5DCAA5`
-    * *Option B (Obsidian & Cyan):* Background `#0B0C10`, Accent `#66FCF1` (Cyber-audio vibe)
-    * *Option C (Midnight & Amethyst):* Background `#0A0914`, Accent `#9D4EDD` (Smooth, synth-wave vibe)
-    * *Option D (Charcoal & Crimson):* Background `#121212`, Accent `#E50914` (Aggressive, hardware-centric vibe)
-4.  **Code Quality:** Keep components small, modular, and strictly typed. We are utilizing React and Vite. Ensure state management is highly optimized to prevent unnecessary re-renders.
-5.  **Communication:** When proposing a solution, briefly explain *why* it is the most efficient and mathematically correct approach before providing the code.
+
+1. **Zero-Latency Tolerance:** Use `requestAnimationFrame` for visual updates and Tone.js ramp methods for audio. Never block the rAF loop.
+2. **Mathematical Precision:** All DSP and gesture-mapping calculations must be mathematically sound. Avoid unoptimized loops in the render cycle.
+3. **Strict Aesthetic — Option A (Deep Space & Mint):** Background `#0e0e10`, Accent `#5DCAA5`. All UI must feel like a high-end professional audio tool.
+4. **Code Quality:** Small, modular components. Optimize state to prevent unnecessary re-renders. The rAF loop must touch zero React state.
+5. **Communication:** Briefly explain *why* a solution is the most efficient/correct approach before providing code.

@@ -43,3 +43,39 @@ export function snapToNearest(hz, sortedFreqs) {
   if (lo > 0 && hz - sortedFreqs[lo - 1] < sortedFreqs[lo] - hz) return sortedFreqs[lo - 1];
   return sortedFreqs[lo];
 }
+
+// Rotation-robust finger state detection for middle/ring/pinky.
+// Compares wrist-to-tip distance vs wrist-to-PIP distance — valid at any wrist rotation angle.
+// Use this instead of isFingerExtended when the wrist may be tilted (e.g. arp mode).
+export function getArpFingerStates(hand) {
+  const wrist = hand[0];
+  const check = (tip, pip) =>
+    calculateDistance2D(wrist, hand[tip]) > calculateDistance2D(wrist, hand[pip]) * 1.1;
+  return {
+    middleOut: check(12, 10),
+    ringOut:   check(16, 14),
+    pinkyOut:  check(20, 18),
+  };
+}
+
+// Returns absolute wrist tilt in degrees from vertical (upright = 0°).
+// Uses wrist(0) → middle MCP(9) vector; atan2 baseline in Y-down camera space is −90°.
+export function getWristTiltDeg(hand) {
+  const wrist = hand[0], mcp = hand[9];
+  const rawDeg = Math.atan2(mcp.y - wrist.y, mcp.x - wrist.x) * (180 / Math.PI);
+  return Math.abs(rawDeg + 90);
+}
+
+// Returns arp volume (dB) derived from spatial spread between extended finger tips.
+// Defaults to −6 dB when fewer than 2 fingers are extended (single-finger mode).
+// handSize (wrist→midMCP distance) normalizes spread against camera distance.
+export function getArpSpreadDb(hand, { middleOut, ringOut, pinkyOut }, handSize) {
+  const extended = [];
+  if (middleOut) extended.push(hand[12]);
+  if (ringOut)   extended.push(hand[16]);
+  if (pinkyOut)  extended.push(hand[20]);
+  if (extended.length < 2) return 3;
+  const rawSpread = calculateDistance2D(extended[0], extended[extended.length - 1]);
+  const normalized = rawSpread / handSize;
+  return mapRange(normalized, 0.3, 2.0, -6, 12);
+}
