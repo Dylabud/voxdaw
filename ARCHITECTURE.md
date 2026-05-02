@@ -140,6 +140,9 @@ Because both panels are out of normal flow, toggling them does not cause the cen
 
 `useMidi` hook owns the WebSocket lifecycle. `sendMidi(type, note, velocity)` is a stable `useCallback` over refs — safe to call inside rAF/Tone callbacks. Chord MIDI uses a per-frame `Set<number>` diff to send only changed noteon/noteoff events. Arp MIDI schedules noteoff via `setTimeout(holdMs)` where `holdMs = Tone.Transport.toSeconds(HOLD_MAP[rate]) * 1000`. `panicAllNotes()` bypasses the enabled-check and fires noteoff for all active notes — called first in `handleDisengage`.
 
+### Connection Error Fallback (MidiModal)
+`useMidi` accepts an optional `onConnectionError` callback. If the WebSocket `onerror` fires (i.e., the bridge server is not running), the callback is invoked before `ws.close()` cascades state back to disabled. `App.js` passes `() => setShowMidiModal(true)` as this callback, which renders `<MidiModal>` — a `position: fixed; z-index: 100` overlay with a blurred backdrop. The modal provides a download link (`/VoxDaw-MIDI-Bridge.zip`) and a cancel button; clicking either or the backdrop dismisses it. The bridge ZIP is served from `public/VoxDaw-MIDI-Bridge.zip`.
+
 ---
 
 ## 10. MediaPipe Landmark Index Quick Reference

@@ -2,7 +2,7 @@ import { useState, useRef, useCallback } from 'react';
 
 const WS_URL = 'ws://localhost:8080';
 
-export default function useMidi() {
+export default function useMidi(onConnectionError) {
   const [isMidiEnabled, setIsMidiEnabled] = useState(false);
   const wsRef           = useRef(null);
   const midiEnabledRef  = useRef(false);      // ref shadow — safe inside rAF/Tone callbacks
@@ -39,7 +39,7 @@ export default function useMidi() {
       const ws = new WebSocket(WS_URL);
       ws.onopen  = () => { midiEnabledRef.current = true;  setIsMidiEnabled(true);  };
       ws.onclose = () => { midiEnabledRef.current = false; setIsMidiEnabled(false); };
-      ws.onerror = () => ws.close(); // cascades into onclose for UI cleanup
+      ws.onerror = () => { onConnectionError?.(); ws.close(); };
       wsRef.current = ws;
     }
   }, [panicAllNotes]);

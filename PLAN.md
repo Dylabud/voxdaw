@@ -6,21 +6,25 @@
 
 ---
 
+## Status: Work In Progress
+VoxDaw is actively under development. Core gesture engine, audio DSP chain, arpeggiator, piano roll, loop station, and MIDI output are complete. Remaining work is focused on visual polish and further UX refinement.
+
+---
+
 ## Future Steps
 
-### Phase 1: Environment & Engine Initialization
-* [ ] Initialize React + Vite frontend environment.
-
-### Phase 2: Visual Input & Gesture Tracking
+### Visual Polish
 * [ ] Apply a stylized filter (dot-matrix/silhouette) to the live camera feed in the main UI viewport.
-
-### Phase 4: Polish & Refinement
-* [ ] Visual stylization filter (dot-matrix/silhouette) on camera feed.
 * [ ] Optimize for latency and ensure the React component tree is not unnecessarily re-rendering.
+
+### MIDI
+* [ ] Bundle and publish the VoxDaw Bridge Node server (`public/VoxDaw-MIDI-Bridge.zip`) with setup instructions.
 
 ---
 
 ## Completed Steps Log
+
+* **[2026-05-02] Phase 16 — MIDI Bridge Missing Modal:** Added graceful error handling for failed WebSocket connections. `useMidi` now accepts an optional `onConnectionError` callback; `ws.onerror` calls it before closing, allowing the caller to react to a refused connection. Created `MidiModal` component (`src/components/MidiModal/MidiModal.jsx` + `.module.css`) — `position: fixed; z-index: 100` overlay with `backdrop-filter: blur(4px)`, a dark `#111114` modal box with `#5DCAA5` accent border, a heading, body copy, a primary download `<a href="/VoxDaw-MIDI-Bridge.zip" download>` button, and a ghost cancel button. Clicking the backdrop also dismisses the modal. `App.js` adds `showMidiModal` state wired to the error callback, imports and conditionally renders `<MidiModal>` after `TelemetryHUD`.
 
 * **[2026-05-01] Phase 15 — Absolute Panel Layout + Collapsible Panels:** Switched both the Controls sidebar and TelemetryHUD from flow-positioned elements to `position: absolute` overlays. Controls: `left: 0; top: 0; height: 100vh; z-index: 10; transform: translateX(0)` → collapsed: `transform: translateX(-100%); opacity: 0` with 0.3s ease transition on explicit properties (not `transition: all`). TelemetryHUD: `position: absolute; right: 24px; top: 50%; transform: translateY(-50%)` → collapsed: `transform: translateX(120%) translateY(-50%); opacity: 0` (both transforms composed to preserve vertical centering during animation). HUD height uses `clamp(180px, calc(55vw * (9/16)), 450px)` to track camera aspect-ratio height. `.app` changed to `position: relative; display: flex; justify-content: center; align-items: center` so the camera stage (`div.stage`) is permanently centered in the viewport regardless of panel state. `showControls` / `showAnalytics` boolean state added to `App.js`. Two independent `position: absolute; z-index: 50` toggle buttons (`leftToggleBtn` / `rightToggleBtn`) placed directly in `App.js` (not inside the panels) so they remain visible and clickable through panel collapse animations. Viewport resized to `width: 65vw; max-width: 1000px; aspect-ratio: 16/9`.
 

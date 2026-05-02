@@ -8,6 +8,7 @@ import useMidi from './hooks/useMidi';
 import Viewport from './components/Viewport/Viewport';
 import TelemetryHUD from './components/TelemetryHUD/TelemetryHUD';
 import Controls from './components/Controls/Controls';
+import MidiModal from './components/MidiModal/MidiModal';
 
 export default function App() {
   const pitchRef     = useRef(null);
@@ -26,8 +27,9 @@ export default function App() {
   const [arpOctaveShift, setArpOctaveShiftState] = useState(false);
   const [showControls,   setShowControls]        = useState(true);
   const [showAnalytics,  setShowAnalytics]        = useState(true);
+  const [showMidiModal,  setShowMidiModal]        = useState(false);
 
-  const { isMidiEnabled, toggleMidi, sendMidi, panicAllNotes } = useMidi();
+  const { isMidiEnabled, toggleMidi, sendMidi, panicAllNotes } = useMidi(() => setShowMidiModal(true));
   const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, volumeRef } = useAudioEngine(hudRefs, sendMidi);
 
   const handleGlobalOctave = useCallback((val) => {
@@ -112,6 +114,8 @@ export default function App() {
         arpRef={arpRef}
         arpVolRef={arpVolRef}
       />
+
+      {showMidiModal && <MidiModal onClose={() => setShowMidiModal(false)} />}
     </div>
   );
 }
