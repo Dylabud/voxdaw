@@ -14,6 +14,7 @@ VoxDaw is a live gesture instrument — a React browser app that maps real-time 
 | Styling | CSS Modules, Option A palette (`#0e0e10` bg / `#5DCAA5` accent) |
 | Gesture tracking | `@mediapipe/tasks-vision` 0.10.35 — `HandLandmarker` |
 | Audio DSP | `Tone.js` 15.1.22 (Web Audio API wrapper) |
+| Vocoder DSP | Native Web Audio API (`AudioContext`, `BiquadFilterNode`, `WaveShaperNode`, `AnalyserNode`) — independent of Tone.js |
 | MIDI output | Native `WebSocket` → local Node.js WS server at `ws://localhost:8080` |
 
 ---
@@ -103,13 +104,13 @@ Four refs (`appliedArpModeRef`, `appliedArpRateRef`, `appliedArpRootRef`, `appli
 Eight metrics (PITCH, ARP, ARP VOL, CHORD, FILTER, REVERB, VIBRATO, VELOCITY) updated via DOM refs in the rAF loop. `position: absolute; right: 24px; top: 50%; transform: translateY(-50%)` — floats over the layout, vertically centered. Collapses via `transform: translateX(120%) translateY(-50%); opacity: 0` with 0.3s ease transition. Height: `clamp(180px, calc(65vw * (9/16)), 450px)` to track camera feed height.
 
 ### Controls sidebar
-`position: absolute; left: 0; top: 0; height: 100vh; width: 200px; z-index: 10`. Four labeled sections: **Master Engine** (tempo, octave, scale), **Synth Voice** (instrument, oscillator), **Arpeggiator** (arp +1 oct toggle), **Output** (MIDI toggle, conditional record). Collapses via `transform: translateX(-100%); opacity: 0` with 0.3s ease. Controlled by `showControls` state in `App.js`.
+`position: absolute; left: 0; top: 0; height: 100vh; width: 200px; z-index: 10`. Four labeled sections: **Master Engine** (tempo, octave, scale), **Synth Voice** (instrument, oscillator), **Arpeggiator** (arp +1 oct toggle), **Output** (MIDI toggle, Vocoder toggle, conditional record). Collapses via `transform: translateX(-100%); opacity: 0` with 0.3s ease. Controlled by `showControls` state in `App.js`.
 
 ### Toggle buttons
 Two `position: absolute; z-index: 50` buttons in `App.js` (`.leftToggleBtn` at `top: 16px; left: 16px`, `.rightToggleBtn` at `top: 16px; right: 16px`). Placed outside the panels so they are never affected by the panels' `opacity: 0` collapse state.
 
 ### Viewport
-`width: 65vw; max-width: 1000px; aspect-ratio: 16/9`. Hosts the mirrored `<video>` feed, the MediaPipe skeleton `<canvas>` overlay, the PianoRoll overlay, and the LoopProgress bar. Both video and canvas use `transform: scaleX(-1)` to mirror for natural interaction.
+`width: 65vw; max-width: 1000px; aspect-ratio: 16/9`. Hosts the mirrored `<video>` feed, the MediaPipe skeleton `<canvas>` overlay, the PianoRoll overlay, the LoopProgress bar, and the `VocoderTerminal` overlay. Both video and canvas use `transform: scaleX(-1)` to mirror for natural interaction.
 
 ---
 
@@ -141,11 +142,45 @@ Because both panels are out of normal flow, toggling them does not cause the cen
 `useMidi` hook owns the WebSocket lifecycle. `sendMidi(type, note, velocity)` is a stable `useCallback` over refs — safe to call inside rAF/Tone callbacks. Chord MIDI uses a per-frame `Set<number>` diff to send only changed noteon/noteoff events. Arp MIDI schedules noteoff via `setTimeout(holdMs)` where `holdMs = Tone.Transport.toSeconds(HOLD_MAP[rate]) * 1000`. `panicAllNotes()` bypasses the enabled-check and fires noteoff for all active notes — called first in `handleDisengage`.
 
 ### Connection Error Fallback (MidiModal)
-`useMidi` accepts an optional `onConnectionError` callback. If the WebSocket `onerror` fires (i.e., the bridge server is not running), the callback is invoked before `ws.close()` cascades state back to disabled. `App.js` passes `() => setShowMidiModal(true)` as this callback, which renders `<MidiModal>` — a `position: fixed; z-index: 100` overlay with a blurred backdrop. The modal provides a download link (`/VoxDaw-MIDI-Bridge.zip`) and a cancel button; clicking either or the backdrop dismisses it. The bridge ZIP is served from `public/VoxDaw-MIDI-Bridge.zip`.
+`useMidi` accepts an optional `onConnectionError` callback. If the WebSocket `onerror` fires (i.e., the bridge server is not running), the callback is invoked before `ws.close()` cascades state back to disabled. `App.js` passes `() => setShowMidiModal(true)` as this callback, which renders `<MidiModal>` — a `position: fixed; z-index: 100` overlay with a blurred backdrop.
+
+`MidiModal` is a 4-view state-routed setup guide controlled by internal `view` state (`'menu'` | `'returning'` | `'windows'` | `'mac'`). The menu view routes users to reconnect instructions or OS-specific first-time setup. Windows and Mac views include Node.js and (Windows only) loopMIDI installation steps, each with a `<a href="/VoxDaw-MIDI-Bridge.zip" download>` primary button. The bridge ZIP is served from `public/VoxDaw-MIDI-Bridge.zip`.
 
 ---
 
-## 10. MediaPipe Landmark Index Quick Reference
+## 10. Vocoder Engine
+
+### `useVocoder` hook (`src/hooks/useVocoder.js`)
+A standalone 16-band phase-vocoder built entirely on the native Web Audio API, independent of Tone.js.
+
+**Signal graph:**
+```
+micSource ──┬──→ modPreGain (×10) ──→ [16 × modBPF → rectifier → envLP → gainNode.gain]
+            │                                                            ↓
+            │                          carrierBus ──→ [16 × carrBPF → gainNode] ──→ outputGain ──→ wetGain ──┐
+            └──→ dryGain (raw mic) ─────────────────────────────────────────────────────────────────────────────┴──→ AnalyserNode → destination
+```
+
+**Filter bank:** 16 log-spaced bands from 100 Hz to 8000 Hz. Each band: modulator `BiquadFilter` (bandpass, Q=2.5) → full-wave `WaveShaper` rectifier → 20 Hz LP envelope follower. The LP output is connected to the corresponding carrier `GainNode.gain` AudioParam — audio-rate envelope control with zero polling.
+
+**Carrier:** 4 sawtooth `OscillatorNode`s (one per chord voice). Frequencies and per-osc gains are updated every rAF frame via `updateNotes(freqs[])` using `setTargetAtTime(τ=10ms)` — zero node churn.
+
+**Dry/Wet:** `wetGain` and `dryGain` both connect to a shared `AnalyserNode` (fftSize 512) before `ctx.destination`. `mix` param (0–1) cross-fades linearly: `wetGain.gain = mix`, `dryGain.gain = 1 - mix`.
+
+**Exposed API:** `startVocoder()`, `stopVocoder()`, `updateNotes(freqs[])`, `updateVocoderParams({ q, envHz, modGain, outGain, mix })`, `getAnalyserData(Uint8Array)`, `isVocoderActive`.
+
+**`getUserMedia` constraints:** `echoCancellation: false`, `noiseSuppression: false`, `autoGainControl: false`, `channelCount: 1` — raw mono signal prevents Chrome's AEC/AGC from triggering Windows driver feedback-loop protection.
+
+### `VocoderTerminal` component (`src/components/VocoderTerminal/`)
+A `position: absolute; bottom: 12px; left: 56px; z-index: 50` overlay inside `.viewport` (which is `position: relative`). Zero impact on DOM flow or camera layout.
+
+- **Canvas visualizer (250×60):** rAF loop calls `getAnalyserData`, groups 256 FFT bins into 40 bars by peak, alpha-scales bar color by amplitude. Writes only to `canvas.getContext('2d')` — never touches React state.
+- **5 range sliders:** Wet/Dry, Filter Q, Env Speed, Mic Gain, Output Gain. A single `handleSlider` callback updates local display state and calls `updateVocoderParams` directly. Audio params change immediately via the hook's node refs.
+- Rendered conditionally inside `Viewport` when `isVocoderActive` is true. Three props threaded through `App.js → Viewport → VocoderTerminal`: `isVocoderActive`, `getAnalyserData`, `updateVocoderParams`.
+
+---
+
+## 11. MediaPipe Landmark Index Quick Reference
 
 | Index | Landmark |
 |-------|----------|

@@ -103,9 +103,10 @@ function makeStringsVoice(initDb = VOICE_DB) {
 
 // ── Hook ───────────────────────────────────────────────────────────────────────
 
-export default function useAudioEngine(hudRefs, sendMidi) {
-  const hudRefsRef  = useRef(hudRefs);  hudRefsRef.current  = hudRefs;
-  const sendMidiRef = useRef(sendMidi); sendMidiRef.current = sendMidi;
+export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
+  const hudRefsRef       = useRef(hudRefs);       hudRefsRef.current       = hudRefs;
+  const sendMidiRef      = useRef(sendMidi);      sendMidiRef.current      = sendMidi;
+  const updateVocoderRef = useRef(updateVocoder); updateVocoderRef.current = updateVocoder;
 
   const analogVoicesRef   = useRef(null);
   const stringsVoicesRef  = useRef(null);
@@ -391,6 +392,12 @@ export default function useAudioEngine(hudRefs, sendMidi) {
         }
         hud?.pianoRoll?.current?.setNotes(activeNoteNames);
 
+        // Feed active chord frequencies to the vocoder carrier
+        const vocoderFreqs = [root];
+        if (middleUp) { vocoderFreqs.push(thirdFreq, fifthFreq); }
+        if (pinkyUp)  { vocoderFreqs.push(seventhFreq); }
+        updateVocoderRef.current?.(vocoderFreqs);
+
         // ── Chord MIDI diff ─────────────────────────────────────────────
         const newMidiSet = new Set();
         newMidiSet.add(Math.round(Tone.Frequency(root).toMidi()));
@@ -496,6 +503,7 @@ export default function useAudioEngine(hudRefs, sendMidi) {
       const smLost = sendMidiRef.current;
       if (smLost) chordMidiRef.current.forEach(n => smLost('noteoff', n));
       chordMidiRef.current = new Set();
+      updateVocoderRef.current?.([]);
     }
   }, []);
 

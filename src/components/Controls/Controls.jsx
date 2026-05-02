@@ -12,6 +12,7 @@ export default function Controls({
   isActive,
   onOscTypeChange, onScaleChange, onInstrumentChange, onTempoChange,
   isMidiEnabled, onToggleMidi,
+  isVocoderActive, onToggleVocoder,
   globalOctave, onGlobalOctaveChange,
   arpOctaveShift, onArpOctaveShiftToggle,
   onRecord, isRecording, isLooping,
@@ -137,6 +138,13 @@ export default function Controls({
           onClick={onToggleMidi}
         >
           {isMidiEnabled ? '● midi' : '[ midi ]'}
+        </button>
+
+        <button
+          className={isVocoderActive ? styles.toggleBtnActive : styles.toggleBtn}
+          onClick={onToggleVocoder}
+        >
+          {isVocoderActive ? '● vocoder' : '[ vocoder ]'}
         </button>
 
         {isActive && (

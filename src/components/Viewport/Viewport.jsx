@@ -1,8 +1,13 @@
 import styles from './Viewport.module.css';
 import LoopProgress from '../LoopProgress/LoopProgress';
 import PianoRoll from '../PianoRoll/PianoRoll';
+import VocoderTerminal from '../VocoderTerminal/VocoderTerminal';
 
-export default function Viewport({ videoRef, canvasRef, isActive, error, progressRef, isRecording, isLooping, pianoRollRef }) {
+export default function Viewport({
+  videoRef, canvasRef, isActive, error,
+  progressRef, isRecording, isLooping, pianoRollRef,
+  isVocoderActive, getAnalyserData, updateVocoderParams,
+}) {
   return (
     <div className={styles.viewport}>
       <LoopProgress progressRef={progressRef} isRecording={isRecording} isLooping={isLooping} />
@@ -21,6 +26,12 @@ export default function Viewport({ videoRef, canvasRef, isActive, error, progres
       )}
       {error && (
         <span className={styles.errorLabel}>[ err: {error} ]</span>
+      )}
+      {isVocoderActive && (
+        <VocoderTerminal
+          getAnalyserData={getAnalyserData}
+          updateVocoderParams={updateVocoderParams}
+        />
       )}
     </div>
   );

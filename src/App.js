@@ -5,6 +5,7 @@ import useHandTracking from './hooks/useHandTracking';
 import useAudioEngine from './hooks/useAudioEngine';
 import useLoopStation from './hooks/useLoopStation';
 import useMidi from './hooks/useMidi';
+import useVocoder from './hooks/useVocoder';
 import Viewport from './components/Viewport/Viewport';
 import TelemetryHUD from './components/TelemetryHUD/TelemetryHUD';
 import Controls from './components/Controls/Controls';
@@ -30,7 +31,16 @@ export default function App() {
   const [showMidiModal,  setShowMidiModal]        = useState(false);
 
   const { isMidiEnabled, toggleMidi, sendMidi, panicAllNotes } = useMidi(() => setShowMidiModal(true));
-  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, volumeRef } = useAudioEngine(hudRefs, sendMidi);
+  const { startVocoder, stopVocoder, updateNotes: updateVocoderNotes, updateVocoderParams, getAnalyserData, isVocoderActive } = useVocoder();
+  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, volumeRef } = useAudioEngine(hudRefs, sendMidi, updateVocoderNotes);
+
+  const handleToggleVocoder = useCallback(async () => {
+    if (isVocoderActive) {
+      stopVocoder();
+    } else {
+      await startVocoder();
+    }
+  }, [isVocoderActive, startVocoder, stopVocoder]);
 
   const handleGlobalOctave = useCallback((val) => {
     setGlobalOctaveState(val);
@@ -75,6 +85,8 @@ export default function App() {
         onTempoChange={setTempo}
         isMidiEnabled={isMidiEnabled}
         onToggleMidi={toggleMidi}
+        isVocoderActive={isVocoderActive}
+        onToggleVocoder={handleToggleVocoder}
         globalOctave={globalOctave}
         onGlobalOctaveChange={handleGlobalOctave}
         arpOctaveShift={arpOctaveShift}
@@ -94,6 +106,9 @@ export default function App() {
           isRecording={isRecording}
           isLooping={isLooping}
           pianoRollRef={pianoRollRef}
+          isVocoderActive={isVocoderActive}
+          getAnalyserData={getAnalyserData}
+          updateVocoderParams={updateVocoderParams}
         />
         <button
           className={isActive ? 'disengageBtn' : 'engageBtn'}
