@@ -1,9 +1,10 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import './App.css';
 import useCameraStream from './hooks/useCameraStream';
 import useHandTracking from './hooks/useHandTracking';
 import useAudioEngine from './hooks/useAudioEngine';
 import useLoopStation from './hooks/useLoopStation';
+import useMidi from './hooks/useMidi';
 import Viewport from './components/Viewport/Viewport';
 import TelemetryHUD from './components/TelemetryHUD/TelemetryHUD';
 import Controls from './components/Controls/Controls';
@@ -21,7 +22,24 @@ export default function App() {
   const hudRefs = { pitch: pitchRef, reverb: reverbRef, velocity: velocityRef, filter: filterRef, vibrato: vibratoRef, chord: chordRef, arp: arpRef, arpVol: arpVolRef, pianoRoll: pianoRollRef };
 
   const { videoRef, isActive, error, engage, disengage } = useCameraStream();
-  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, volumeRef } = useAudioEngine(hudRefs);
+  const [globalOctave,   setGlobalOctaveState]   = useState(0);
+  const [arpOctaveShift, setArpOctaveShiftState] = useState(false);
+  const [showControls,   setShowControls]        = useState(true);
+  const [showAnalytics,  setShowAnalytics]        = useState(true);
+
+  const { isMidiEnabled, toggleMidi, sendMidi, panicAllNotes } = useMidi();
+  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, volumeRef } = useAudioEngine(hudRefs, sendMidi);
+
+  const handleGlobalOctave = useCallback((val) => {
+    setGlobalOctaveState(val);
+    setGlobalOctave(val);
+  }, [setGlobalOctave]);
+
+  const handleArpOctaveShift = useCallback((bool) => {
+    setArpOctaveShiftState(bool);
+    setArpOctaveShift(bool);
+  }, [setArpOctaveShift]);
+
   const { isRecording, isLooping, startRecording, dispose, progressRef } = useLoopStation(volumeRef);
   const canvasRef = useHandTracking(videoRef, isActive, updateParams);
 
@@ -31,14 +49,40 @@ export default function App() {
   }, [startAudio, engage]);
 
   const handleDisengage = useCallback(() => {
+    panicAllNotes();
     disengage();
     stopAudio();
     dispose();
-  }, [disengage, stopAudio, dispose]);
+  }, [panicAllNotes, disengage, stopAudio, dispose]);
 
   return (
     <div className="app">
-      <div className="mainStage">
+      <button className="leftToggleBtn" onClick={() => setShowControls(v => !v)}>
+        {showControls ? '‹' : '›'}
+      </button>
+      <button className="rightToggleBtn" onClick={() => setShowAnalytics(v => !v)}>
+        {showAnalytics ? '›' : '‹'}
+      </button>
+
+      <Controls
+        collapsed={!showControls}
+        isActive={isActive}
+        onOscTypeChange={setOscType}
+        onScaleChange={setScale}
+        onInstrumentChange={setInstrument}
+        onTempoChange={setTempo}
+        isMidiEnabled={isMidiEnabled}
+        onToggleMidi={toggleMidi}
+        globalOctave={globalOctave}
+        onGlobalOctaveChange={handleGlobalOctave}
+        arpOctaveShift={arpOctaveShift}
+        onArpOctaveShiftToggle={handleArpOctaveShift}
+        onRecord={startRecording}
+        isRecording={isRecording}
+        isLooping={isLooping}
+      />
+
+      <div className="stage">
         <Viewport
           videoRef={videoRef}
           canvasRef={canvasRef}
@@ -49,27 +93,24 @@ export default function App() {
           isLooping={isLooping}
           pianoRollRef={pianoRollRef}
         />
-        <TelemetryHUD
-          pitchRef={pitchRef}
-          reverbRef={reverbRef}
-          velocityRef={velocityRef}
-          filterRef={filterRef}
-          vibratoRef={vibratoRef}
-          chordRef={chordRef}
-          arpRef={arpRef}
-          arpVolRef={arpVolRef}
-        />
+        <button
+          className={isActive ? 'disengageBtn' : 'engageBtn'}
+          onClick={isActive ? handleDisengage : handleEngage}
+        >
+          {isActive ? '[ disengage ]' : '[ engage ]'}
+        </button>
       </div>
-      <Controls
-        isActive={isActive}
-        onEngage={handleEngage}
-        onDisengage={handleDisengage}
-        onOscTypeChange={setOscType}
-        onScaleChange={setScale}
-        onInstrumentChange={setInstrument}
-        onRecord={startRecording}
-        isRecording={isRecording}
-        isLooping={isLooping}
+
+      <TelemetryHUD
+        collapsed={!showAnalytics}
+        pitchRef={pitchRef}
+        reverbRef={reverbRef}
+        velocityRef={velocityRef}
+        filterRef={filterRef}
+        vibratoRef={vibratoRef}
+        chordRef={chordRef}
+        arpRef={arpRef}
+        arpVolRef={arpVolRef}
       />
     </div>
   );

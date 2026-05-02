@@ -1,36 +1,78 @@
 .hud {
   position: absolute;
-  top: 36px;
-  right: 36px;
+  right: 24px;
+  top: 50%;
+  width: 140px;
+  /* height matches camera: 55vw × (9/16), capped at camera max-width equivalent */
+  height: clamp(180px, calc(55vw * (9 / 16)), 450px);
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  pointer-events: none;
-  background: rgba(16, 16, 22, 0.85);
+  justify-content: space-between;
+  background: #111114;
   border: 1px solid #2a2a2e;
   border-radius: 4px;
-  padding: 14px 18px;
-  backdrop-filter: blur(6px);
+  padding: 12px 10px;
+  z-index: 10;
+  transform: translateY(-50%);
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+.collapsed {
+  /* compose translateY(-50%) so vertical centering holds during animation */
+  transform: translateX(120%) translateY(-50%);
+  opacity: 0;
+}
+
+/* ── Collapse tab (protrudes from left edge, always clickable) ── */
+.collapseTab {
+  position: absolute;
+  right: 100%;       /* sits just outside the panel's left border */
+  top: 50%;
+  transform: translateY(-50%);
+  appearance: none;
+  background: #111114;
+  border: 1px solid #2a2a2e;
+  border-right: none;
+  color: rgba(93, 202, 165, 0.5);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  width: 20px;
+  height: 40px;
+  border-radius: 3px 0 0 3px;
+  cursor: pointer;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s, border-color 0.2s;
+  z-index: 11;
+}
+
+.collapseTab:hover,
+.controls .collapseTab:hover {
+  color: #5DCAA5;
+  border-color: rgba(93, 202, 165, 0.5);
 }
 
 .metric {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 2px;
+  gap: 1px;
 }
 
 .metricLabel {
   font-size: 9px;
-  letter-spacing: 0.2em;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: rgba(200, 200, 204, 0.6);
+  color: rgba(200, 200, 204, 0.72);
 }
 
 .metricValue {
-  font-size: 22px;
+  font-size: 13px;
   font-weight: 300;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.03em;
   color: #5DCAA5;
   line-height: 1;
 }

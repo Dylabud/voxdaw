@@ -7,7 +7,7 @@ const SCALE_INTERVALS = {
 const midiToHz = (n) => 440 * Math.pow(2, (n - 69) / 12);
 
 // Iterates MIDI 0–127 (monotonically increasing) → output is pre-sorted, no sort() needed
-function buildScaleFreqs(intervals, minHz = 150, maxHz = 900) {
+function buildScaleFreqs(intervals, minHz = 20, maxHz = 2000) {
   const freqs = [];
   for (let n = 0; n <= 127; n++) {
     if (intervals.includes(n % 12)) {

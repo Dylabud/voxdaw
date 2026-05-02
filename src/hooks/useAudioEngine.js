@@ -56,16 +56,18 @@ function getArpMode(middleOut, ringOut, pinkyOut) {
   return 'off';
 }
 
-// Builds a Tone.js note-string array (major triad intervals) relative to rootHz.
-function buildArpNotes(rootHz, mode) {
+// Builds a Tone.js note-string array relative to rootHz.
+// thirdST is ST_MAJ3 (4) or ST_MIN3 (3) — mirrors the live chord quality from the pitch hand.
+function buildArpNotes(rootHz, mode, thirdST) {
   const root = Tone.Frequency(rootHz).toNote();
   const t = (n, st) => Tone.Frequency(n).transpose(st).toNote();
+  const th = thirdST ?? ST_MAJ3;
   switch (mode) {
-    case 'simple':        return [root, t(root, 4), t(root, 7)];
-    case 'complex':       return [root, t(root,4), t(root,7), t(root,12), t(root,16), t(root,19)];
-    case 'complexRandom': return [root, t(root,4), t(root,7), t(root,12), t(root,16), t(root,19)];
-    case 'simpleRandom':  return [root, t(root,4), t(root,7)];
-    case 'octave':        return [root, t(root,12)];
+    case 'simple':        return [root, t(root, th), t(root, 7)];
+    case 'complex':       return [root, t(root, th), t(root, 7), t(root, 12), t(root, 12 + th), t(root, 19)];
+    case 'complexRandom': return [root, t(root, th), t(root, 7), t(root, 12), t(root, 12 + th), t(root, 19)];
+    case 'simpleRandom':  return [root, t(root, th), t(root, 7)];
+    case 'octave':        return [root, t(root, 12)];
     default:              return [root];
   }
 }
@@ -101,9 +103,9 @@ function makeStringsVoice(initDb = VOICE_DB) {
 
 // ── Hook ───────────────────────────────────────────────────────────────────────
 
-export default function useAudioEngine(hudRefs) {
-  const hudRefsRef = useRef(hudRefs);
-  hudRefsRef.current = hudRefs;
+export default function useAudioEngine(hudRefs, sendMidi) {
+  const hudRefsRef  = useRef(hudRefs);  hudRefsRef.current  = hudRefs;
+  const sendMidiRef = useRef(sendMidi); sendMidiRef.current = sendMidi;
 
   const analogVoicesRef   = useRef(null);
   const stringsVoicesRef  = useRef(null);
@@ -116,8 +118,16 @@ export default function useAudioEngine(hudRefs) {
   const scaleRef          = useRef(SCALES.cMajor);
   const instrumentNameRef = useRef('analog');
   const currentRootRef    = useRef(440);
+  const bpmRef            = useRef(120);
+  const globalOctaveRef   = useRef(0);    // semitone transpose in octave steps (-2 to +2)
+  const arpOctaveShiftRef = useRef(false); // forces arp root one octave above chord root
   const isStartedRef      = useRef(false);
   const disposeTimerRef   = useRef(null);
+
+  // MIDI tracking refs
+  const chordMidiRef   = useRef(new Set()); // chord MIDI notes currently on (for diff)
+  const arpMidiTimers  = useRef([]);        // arp noteoff setTimeout IDs
+  const arpVelocityRef = useRef(100);       // live arp velocity from spread gesture
 
   // Arp refs
   const arpVoiceRef        = useRef(null);
@@ -129,6 +139,9 @@ export default function useAudioEngine(hudRefs) {
   const appliedArpModeRef  = useRef(null);
   const appliedArpRootRef  = useRef(null);
   const appliedArpRateRef  = useRef(null);
+  const appliedArpThirdRef = useRef(null);
+  // Tracks the current chord quality so the arp mirrors it
+  const arpThirdSTRef      = useRef(ST_MAJ3);
 
   const startAudio = useCallback(async () => {
     if (disposeTimerRef.current !== null) {
@@ -172,7 +185,7 @@ export default function useAudioEngine(hudRefs) {
 
       // Arp voice — routes directly to Destination, fully independent of the
       // pinch-controlled master volume that governs the chord/filter chain.
-      const arpVol = new Tone.Volume(6).toDestination();
+      const arpVol = new Tone.Volume(-12).toDestination();
 
       const arpVoice = new Tone.Synth({
         oscillator: { type: 'triangle' },
@@ -190,6 +203,12 @@ export default function useAudioEngine(hudRefs) {
           time,
         );
         hudRefsRef.current?.pianoRoll?.current?.flashNote(normalizeNote(note), 180);
+
+        const midiNote = Math.round(Tone.Frequency(note).toMidi());
+        sendMidiRef.current?.('noteon', midiNote, arpVelocityRef.current);
+        const holdMs = Tone.Transport.toSeconds(HOLD_MAP[arpRateRef.current] ?? '16n') * 1000;
+        const tid = setTimeout(() => sendMidiRef.current?.('noteoff', midiNote, 0), holdMs);
+        arpMidiTimers.current.push(tid);
       }, ['C4'], 'upDown');
       arpPattern.interval = '8n';
       arpPattern.start(0);
@@ -214,7 +233,7 @@ export default function useAudioEngine(hudRefs) {
       inactiveSet.forEach((v, i) => v.triggerAttack(INIT_FREQS[i]));
       activeSet[0].volume.value = VOICE_DB;
 
-      Tone.Transport.bpm.value = 120;
+      Tone.Transport.bpm.value = bpmRef.current;
       Tone.Transport.start();
     } else {
       // Re-engage: voices still alive (dispose timer was cleared)
@@ -235,15 +254,23 @@ export default function useAudioEngine(hudRefs) {
     const allVoices = [...analogVoicesRef.current, ...stringsVoicesRef.current];
     allVoices.forEach(v => v.triggerRelease());
 
+    // Cancel pending arp MIDI noteoff timers and flush active chord MIDI notes
+    arpMidiTimers.current.forEach(clearTimeout);
+    arpMidiTimers.current = [];
+    const sm = sendMidiRef.current;
+    if (sm) chordMidiRef.current.forEach(n => sm('noteoff', n));
+    chordMidiRef.current = new Set();
+
     // Stop arp pattern immediately (before dispose timer)
     if (arpPatternRef.current) {
       arpPatternRef.current.mute = true;
       arpPatternRef.current.stop();
     }
     arpModeRef.current      = 'off';
-    appliedArpModeRef.current = null;
-    appliedArpRateRef.current = null;
-    appliedArpRootRef.current = null;
+    appliedArpModeRef.current  = null;
+    appliedArpRateRef.current  = null;
+    appliedArpRootRef.current  = null;
+    appliedArpThirdRef.current = null;
     Tone.Transport.stop();
 
     hudRefsRef.current?.pianoRoll?.current?.setNotes([]);
@@ -299,7 +326,7 @@ export default function useAudioEngine(hudRefs) {
         const SAFE_BOTTOM = 0.7;
         const safeY    = Math.max(0, Math.min(1, (wrist.y - SAFE_TOP) / (SAFE_BOTTOM - SAFE_TOP)));
         const gridIdx  = Math.min(Math.floor(safeY * NOTE_GRID.length), NOTE_GRID.length - 1);
-        const rawPitch = Tone.Frequency(NOTE_GRID[gridIdx].note).toFrequency();
+        const rawPitch = Tone.Frequency(NOTE_GRID[gridIdx].note).transpose(globalOctaveRef.current * 12).toFrequency();
         const root     = snapToNearest(rawPitch, scaleRef.current);
         currentRootRef.current = root;
 
@@ -311,6 +338,7 @@ export default function useAudioEngine(hudRefs) {
         const normalizedPinch = calculateDistance2D(thumbTip, indexTip) / handSize;
         const db = mapRange(normalizedPinch, 0.2, 1.2, -40, 0);
         volumeRef.current.volume.rampTo(db, 0.05);
+        const chordVel = Math.max(1, Math.min(127, Math.round(mapRange(normalizedPinch, 0.2, 1.2, 0, 127))));
 
         const arpActive = arpModeRef.current !== 'off';
 
@@ -320,6 +348,7 @@ export default function useAudioEngine(hudRefs) {
         const pinkyUp  = isFingerExtended(hand, 20, 17);
 
         const thirdST   = ringUp ? ST_MAJ3 : ST_MIN3;
+        arpThirdSTRef.current = thirdST;
         const seventhST = ringUp ? ST_MAJ7 : ST_MIN7;
 
         const thirdFreq   = Tone.Frequency(root).transpose(thirdST).toFrequency();
@@ -362,11 +391,29 @@ export default function useAudioEngine(hudRefs) {
         }
         hud?.pianoRoll?.current?.setNotes(activeNoteNames);
 
-        // Update arp pattern root only when it actually changes
-        if (arpActive && root !== appliedArpRootRef.current) {
+        // ── Chord MIDI diff ─────────────────────────────────────────────
+        const newMidiSet = new Set();
+        newMidiSet.add(Math.round(Tone.Frequency(root).toMidi()));
+        if (middleUp) {
+          newMidiSet.add(Math.round(Tone.Frequency(root).transpose(thirdST).toMidi()));
+          newMidiSet.add(Math.round(Tone.Frequency(root).transpose(ST_P5).toMidi()));
+        }
+        if (pinkyUp) {
+          newMidiSet.add(Math.round(Tone.Frequency(root).transpose(seventhST).toMidi()));
+        }
+        const smChord = sendMidiRef.current;
+        if (smChord) {
+          chordMidiRef.current.forEach(n => { if (!newMidiSet.has(n)) smChord('noteoff', n); });
+          newMidiSet.forEach(n => { if (!chordMidiRef.current.has(n)) smChord('noteon', n, chordVel); });
+        }
+        chordMidiRef.current = newMidiSet;
+
+        // Update arp pattern root/quality only when they actually change
+        if (arpActive && (root !== appliedArpRootRef.current || thirdST !== appliedArpThirdRef.current)) {
           const pat = arpPatternRef.current;
-          if (pat) pat.values = buildArpNotes(root, arpModeRef.current);
-          appliedArpRootRef.current = root;
+          if (pat) pat.values = buildArpNotes(root, arpModeRef.current, thirdST);
+          appliedArpRootRef.current  = root;
+          appliedArpThirdRef.current = thirdST;
         }
 
         if (hud?.pitch?.current)
@@ -401,22 +448,30 @@ export default function useAudioEngine(hudRefs) {
           spreadDb = getArpSpreadDb(hand, { middleOut, ringOut, pinkyOut }, arpHandSize);
           // Volume ramps every frame — it's a continuous gesture parameter
           arpVolRef.current?.volume.rampTo(spreadDb, 0.05);
+          // Map spreadDb [-12, 3] → MIDI velocity [1, 127] (monotonic, same gesture)
+          arpVelocityRef.current = Math.max(1, Math.min(127, Math.round(mapRange(spreadDb, -12, 3, 1, 127))));
 
-          // Only rewrite pattern structure when mode, rate, or root actually changed
-          const rootNow = currentRootRef.current;
+          // Only rewrite pattern structure when mode, rate, root, or chord quality actually changed
+          const rootNow        = currentRootRef.current;
+          const effectiveArpRoot = arpOctaveShiftRef.current
+            ? Tone.Frequency(rootNow).transpose(12).toFrequency()
+            : rootNow;
+          const thirdNow = arpThirdSTRef.current;
           if (
-            mode    !== appliedArpModeRef.current ||
-            rate    !== appliedArpRateRef.current ||
-            rootNow !== appliedArpRootRef.current
+            mode             !== appliedArpModeRef.current  ||
+            rate             !== appliedArpRateRef.current  ||
+            effectiveArpRoot !== appliedArpRootRef.current  ||
+            thirdNow         !== appliedArpThirdRef.current
           ) {
             if (pat) {
-              pat.values   = buildArpNotes(rootNow, mode);
+              pat.values   = buildArpNotes(effectiveArpRoot, mode, thirdNow);
               pat.pattern  = ARP_PATTERN_TYPE[mode];
               pat.interval = rate;
             }
-            appliedArpModeRef.current = mode;
-            appliedArpRateRef.current = rate;
-            appliedArpRootRef.current = rootNow;
+            appliedArpModeRef.current  = mode;
+            appliedArpRateRef.current  = rate;
+            appliedArpRootRef.current  = effectiveArpRoot;
+            appliedArpThirdRef.current = thirdNow;
           }
         }
         arpModeRef.current = mode;
@@ -436,7 +491,27 @@ export default function useAudioEngine(hudRefs) {
       }
     }
 
-    if (!pitchHandFound) hud?.pianoRoll?.current?.setNotes([]);
+    if (!pitchHandFound) {
+      hud?.pianoRoll?.current?.setNotes([]);
+      const smLost = sendMidiRef.current;
+      if (smLost) chordMidiRef.current.forEach(n => smLost('noteoff', n));
+      chordMidiRef.current = new Set();
+    }
+  }, []);
+
+  const setTempo = useCallback((bpm) => {
+    bpmRef.current = bpm;
+    Tone.Transport.bpm.rampTo(bpm, 0.1);
+  }, []);
+
+  const setGlobalOctave = useCallback((val) => {
+    globalOctaveRef.current = val;
+  }, []);
+
+  const setArpOctaveShift = useCallback((bool) => {
+    arpOctaveShiftRef.current = bool;
+    // Force the delta check to rebuild the pattern on the next frame
+    appliedArpRootRef.current = null;
   }, []);
 
   const setInstrument = useCallback((name) => {
@@ -468,5 +543,5 @@ export default function useAudioEngine(hudRefs) {
     scaleRef.current = SCALES[key];
   }, []);
 
-  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, volumeRef };
+  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, volumeRef };
 }

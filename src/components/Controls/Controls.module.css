@@ -1,52 +1,116 @@
+/* ── Sidebar shell ───────────────────────────────────────────── */
 .controls {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 200px;
+  height: 100vh;
+  background: #111114;
+  border-right: 1px solid #2a2a2e;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 28px;
-  border-top: 1px solid #2a2a2e;
-  background: linear-gradient(to top, #16161c, #0e0e10);
-  gap: 16px;
+  flex-direction: column;
+  z-index: 10;
+  transform: translateX(0);
+  transition: transform 0.3s ease, opacity 0.3s ease;
 }
 
-/* ── Select cluster ──────────────────────────────────────────── */
-.selectGroup {
-  display: flex;
-  align-items: center;
-  gap: 20px;
+.collapsed {
+  transform: translateX(-100%);
+  opacity: 0;
 }
 
-.selectWrap {
+/* ── Collapse tab (protrudes from right edge, always clickable) ── */
+.collapseTab {
+  position: absolute;
+  left: 100%;        /* sits just outside the panel's right border */
+  top: 50%;
+  transform: translateY(-50%);
+  appearance: none;
+  background: #111114;
+  border: 1px solid #2a2a2e;
+  border-left: none;
+  color: rgba(93, 202, 165, 0.5);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  width: 20px;
+  height: 40px;
+  border-radius: 0 3px 3px 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s, border-color 0.2s;
+  z-index: 11;
+}
+
+/* ── Header ──────────────────────────────────────────────────── */
+.header {
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid #2a2a2e;
+  font-size: 10px;
+  letter-spacing: 0.35em;
+  text-transform: uppercase;
+  color: #5DCAA5;
+
+  /* Add these 3 lines to push the text to the right */
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+/* ── Section blocks ──────────────────────────────────────────── */
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #1e1e22;
+}
+
+.sectionTitle {
+  font-size: 7px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: rgba(200, 200, 204, 0.55);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 4px;
+  margin-bottom: 2px;
+}
+
+/* ── Field (label + control) ─────────────────────────────────── */
+.field {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.selectLabel {
+.label {
   font-size: 9px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: rgba(200, 200, 204, 0.45);
 }
 
-/* Chevron arrow as inline SVG data URI in accent colour */
+/* ── Select dropdown ─────────────────────────────────────────── */
 .select {
   appearance: none;
   -webkit-appearance: none;
-  background-color: transparent;
+  width: 100%;
+  background-color: #0e0e10;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235DCAA5' fill-opacity='0.7'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 10px center;
-  border: 1px solid rgba(93, 202, 165, 0.35);
+  background-position: right 8px center;
+  border: 1px solid rgba(93, 202, 165, 0.3);
   color: rgba(93, 202, 165, 0.8);
   font-family: inherit;
   font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  padding: 7px 30px 7px 12px;
+  padding: 6px 26px 6px 10px;
   border-radius: 2px;
   cursor: pointer;
   outline: none;
-  min-width: 148px;
   transition: border-color 0.2s, color 0.2s;
 }
 
@@ -63,37 +127,137 @@
   letter-spacing: 0.08em;
 }
 
-/* ── Button cluster (record + engage/disengage) ─────────────── */
-.buttonGroup {
+/* ── BPM / number input ──────────────────────────────────────── */
+.bpmInput {
+  appearance: textfield;
+  -webkit-appearance: textfield;
+  width: 100%;
+  background-color: #0e0e10;
+  border: 1px solid rgba(93, 202, 165, 0.3);
+  color: rgba(93, 202, 165, 0.8);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  padding: 6px 10px;
+  border-radius: 2px;
+  outline: none;
+  transition: border-color 0.2s, color 0.2s;
+  text-align: center;
+}
+
+.bpmInput::-webkit-inner-spin-button,
+.bpmInput::-webkit-outer-spin-button { opacity: 0; }
+
+.bpmInput:hover,
+.bpmInput:focus {
+  border-color: rgba(93, 202, 165, 0.7);
+  color: #5DCAA5;
+}
+
+/* ── Octave cluster ──────────────────────────────────────────── */
+.octaveGroup {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 4px;
+}
+
+.octaveBtn {
+  appearance: none;
+  background: #0e0e10;
+  border: 1px solid rgba(93, 202, 165, 0.3);
+  color: rgba(93, 202, 165, 0.8);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  width: 28px;
+  height: 26px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+}
+
+.octaveBtn:hover {
+  border-color: rgba(93, 202, 165, 0.7);
+  color: #5DCAA5;
+}
+
+.octaveValue {
+  flex: 1;
+  font-size: 11px;
+  font-family: inherit;
+  letter-spacing: 0.08em;
+  color: rgba(93, 202, 165, 0.8);
+  text-align: center;
+}
+
+/* ── Toggle buttons (MIDI, ARP shift) ────────────────────────── */
+.toggleBtn {
+  appearance: none;
+  width: 100%;
+  background: transparent;
+  border: 1px solid rgba(93, 202, 165, 0.3);
+  color: rgba(93, 202, 165, 0.5);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  padding: 6px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+  text-align: left;
+}
+
+.toggleBtn:hover {
+  border-color: rgba(93, 202, 165, 0.6);
+  color: rgba(93, 202, 165, 0.8);
+}
+
+.toggleBtnActive {
+  appearance: none;
+  width: 100%;
+  background: rgba(93, 202, 165, 0.06);
+  border: 1px solid rgba(93, 202, 165, 0.75);
+  color: #5DCAA5;
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  padding: 6px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+  text-align: left;
 }
 
 /* ── Record button ───────────────────────────────────────────── */
 .recordBtn {
+  appearance: none;
+  width: 100%;
   background: transparent;
-  border: 1px solid rgba(93, 202, 165, 0.5);
+  border: 1px solid rgba(93, 202, 165, 0.4);
   color: rgba(93, 202, 165, 0.7);
   font-family: inherit;
-  font-size: 11px;
+  font-size: 10px;
   letter-spacing: 0.25em;
   text-transform: uppercase;
-  padding: 10px 24px;
+  padding: 6px 12px;
   border-radius: 2px;
   cursor: pointer;
   transition: border-color 0.2s, color 0.2s;
+  text-align: left;
 }
 
 .recordBtn:hover:not(:disabled) {
-  border-color: rgba(93, 202, 165, 0.9);
+  border-color: rgba(93, 202, 165, 0.8);
   color: #5DCAA5;
 }
 
-.recordBtn:disabled {
-  cursor: default;
-}
+.recordBtn:disabled { cursor: default; }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
@@ -106,43 +270,3 @@
   animation: pulse 800ms ease-in-out infinite;
 }
 
-/* ── Engage / Disengage button ───────────────────────────────── */
-.engageBtn {
-  background: transparent;
-  border: 1px solid rgba(93, 202, 165, 0.7);
-  color: #5DCAA5;
-  font-family: inherit;
-  font-size: 11px;
-  letter-spacing: 0.25em;
-  text-transform: uppercase;
-  padding: 10px 32px;
-  border-radius: 2px;
-  cursor: pointer;
-  transition: border-color 0.2s, color 0.2s;
-  flex-shrink: 0;
-}
-
-.engageBtn:hover {
-  border-color: #5DCAA5;
-  color: #5DCAA5;
-}
-
-.disengageBtn {
-  background: transparent;
-  border: 1px solid rgba(224, 112, 112, 0.7);
-  color: #E07070;
-  font-family: inherit;
-  font-size: 11px;
-  letter-spacing: 0.25em;
-  text-transform: uppercase;
-  padding: 10px 32px;
-  border-radius: 2px;
-  cursor: pointer;
-  transition: border-color 0.2s, color 0.2s;
-  flex-shrink: 0;
-}
-
-.disengageBtn:hover {
-  border-color: #E07070;
-  color: #E07070;
-}

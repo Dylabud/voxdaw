@@ -74,8 +74,8 @@ export function getArpSpreadDb(hand, { middleOut, ringOut, pinkyOut }, handSize)
   if (middleOut) extended.push(hand[12]);
   if (ringOut)   extended.push(hand[16]);
   if (pinkyOut)  extended.push(hand[20]);
-  if (extended.length < 2) return 3;
+  if (extended.length < 2) return -12;
   const rawSpread = calculateDistance2D(extended[0], extended[extended.length - 1]);
   const normalized = rawSpread / handSize;
-  return mapRange(normalized, 0.3, 2.0, -6, 12);
+  return mapRange(normalized, 0.3, 2.0, -12, 3);
 }
