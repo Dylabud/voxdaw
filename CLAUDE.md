@@ -75,7 +75,11 @@ All voice sets connect to the same `filter` node input; Tone.js sums them automa
 | `normalizeNote(note)` | Tone.js flat names → sharp names (for PianoRoll key lookup) |
 
 ### PianoRoll Component
-`PianoRoll` is a `forwardRef` component exposing one imperative method: `ref.current.setNotes(noteNames[])`. Internal `Map` gives O(1) key lookup; diff-based class toggling means frames with no chord change produce zero DOM writes.
+`PianoRoll` is a `forwardRef` component exposing two imperative methods:
+- `ref.current.setNotes(noteNames[])` — diff-based class toggling via an internal `Set`; frames with no chord change produce zero DOM writes.
+- `ref.current.flashNote(noteName, durationMs)` — adds a `.flash` CSS animation (gold inset `box-shadow`) to a single key for `durationMs` ms. `flashTimersRef` (Map) allows rapid re-fires on the same key to cancel the previous timer and restart the animation cleanly via forced reflow (`void el.offsetWidth`). Called directly from the `Tone.Pattern` callback (not via `Tone.Draw`) — the Pattern callback runs in the main thread and DOM calls are safe there.
+
+**Arp pattern delta-check:** Three refs — `appliedArpModeRef`, `appliedArpRateRef`, `appliedArpRootRef` — track the last values written to `arpPatternRef`. `pat.values / .pattern / .interval` are only reassigned when one of these changes, preventing Tone.Pattern from restarting its step counter every frame. All three are reset to `null` in `stopAudio` so re-engage always seeds the fresh pattern.
 
 ### Loop Station
 `useLoopStation(volumeRef)` taps a `Tone.Recorder` after `volumeRef`. Records 8 s (4 bars @ 120 BPM), decodes via `rawContext.decodeAudioData`, then plays back through a `Tone.Player(loop:true)` directly to `Destination` — bypassing the effects chain. Does **not** use `Tone.Transport`.
