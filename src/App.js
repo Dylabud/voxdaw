@@ -26,14 +26,16 @@ export default function App() {
   const { videoRef, isActive, error, engage, disengage } = useCameraStream();
   const [globalOctave,   setGlobalOctaveState]   = useState(0);
   const [arpOctaveShift, setArpOctaveShiftState] = useState(false);
-  const [arpFxEnabled,   setArpFxEnabledState]   = useState(false);
-  const [showControls,   setShowControls]        = useState(true);
+  const [arpFxEnabled,      setArpFxEnabledState]   = useState(false);
+  const [isArpTerminalOpen, setIsArpTerminalOpen]   = useState(false);
+  const [arpSpeedSnap,      setArpSpeedSnapState]   = useState(true);
+  const [showControls,      setShowControls]        = useState(true);
   const [showAnalytics,  setShowAnalytics]        = useState(true);
   const [showMidiModal,  setShowMidiModal]        = useState(false);
 
   const { isMidiEnabled, toggleMidi, sendMidi, panicAllNotes } = useMidi(() => setShowMidiModal(true));
   const { startVocoder, stopVocoder, updateNotes: updateVocoderNotes, updateVocoderParams, getAnalyserData, isVocoderActive } = useVocoder();
-  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, volumeRef } = useAudioEngine(hudRefs, sendMidi, updateVocoderNotes);
+  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, volumeRef } = useAudioEngine(hudRefs, sendMidi, updateVocoderNotes);
 
   const handleToggleVocoder = useCallback(async () => {
     if (isVocoderActive) {
@@ -57,6 +59,11 @@ export default function App() {
     setArpFxEnabledState(bool);
     setArpFx(bool);
   }, [setArpFx]);
+
+  const handleArpSpeedSnap = useCallback((bool) => {
+    setArpSpeedSnapState(bool);
+    setArpSpeedSnap(bool);
+  }, [setArpSpeedSnap]);
 
   const { isRecording, isLooping, startRecording, dispose, progressRef } = useLoopStation(volumeRef);
   const canvasRef = useHandTracking(videoRef, isActive, updateParams);
@@ -99,6 +106,8 @@ export default function App() {
         onArpOctaveShiftToggle={handleArpOctaveShift}
         arpFxEnabled={arpFxEnabled}
         onArpFxToggle={handleArpFx}
+        isArpTerminalOpen={isArpTerminalOpen}
+        onArpTerminalToggle={setIsArpTerminalOpen}
         onRecord={startRecording}
         isRecording={isRecording}
         isLooping={isLooping}
@@ -117,6 +126,11 @@ export default function App() {
           isVocoderActive={isVocoderActive}
           getAnalyserData={getAnalyserData}
           updateVocoderParams={updateVocoderParams}
+          isArpTerminalOpen={isArpTerminalOpen}
+          updateArpDelayTime={setArpDelayTime}
+          updateArpDelayMix={setArpDelayMix}
+          arpSpeedSnap={arpSpeedSnap}
+          onArpSpeedSnapToggle={handleArpSpeedSnap}
         />
         <button
           className={isActive ? 'disengageBtn' : 'engageBtn'}

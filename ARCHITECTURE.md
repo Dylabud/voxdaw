@@ -48,11 +48,13 @@ getUserMedia → <video> → HandLandmarker.detectForVideo()
 
 ```
 [analogVoices × 4]  ─┐
-[stringsVoices × 4] ─┤→ ArpVol → Filter → Vibrato → Reverb → Volume → Destination
-[arpVoice × 1]      ─┘   (arp has dedicated Tone.Volume before the filter)
+[stringsVoices × 4] ─┤→ Filter → Vibrato → Reverb → Volume → Destination
+[arpVoice × 1]      ─┘
+  arpVoice → arpVol → arpDelay → arpBypassGain → Destination  (default path)
+                               → arpFxGain     → Filter       (fx path, toggled by setArpFx)
 ```
 
-All voice sets connect to the same `filter` node input; Tone.js sums them. The active instrument set is tracked by `activeVoicesRef`; the inactive set is muted to `VOICE_MUTE = −80 dB`. The arp voice has a dedicated `Tone.Volume` (`arpVolRef`) before the filter so its gain is independent of the pinch-velocity volume on the main chain.
+All chord voice sets connect to the same `filter` node input; Tone.js sums them. The active instrument set is tracked by `activeVoicesRef`; the inactive set is muted to `VOICE_MUTE = −80 dB`. The arp voice has a dedicated `Tone.Volume` (`arpVolRef`) before `arpDelay` so its gain is independent of the pinch-velocity volume on the main chain. `Tone.FeedbackDelay` (`arpDelayRef`) sits between `arpVol` and the bypass/fx split; `wet=0` at init so it is transparent until raised via ArpTerminal.
 
 ### Key refs in `useAudioEngine`
 
@@ -67,13 +69,16 @@ All voice sets connect to the same `filter` node input; Tone.js sums them. The a
 | `globalOctaveRef` | Integer −2 to +2; applied via `.transpose(n * 12)` to raw pitch |
 | `arpOctaveShiftRef` | Boolean; adds 12 semitones to `effectiveArpRoot` |
 | `filterRef / vibratoRef / reverbRef / volumeRef / arpVolRef` | Shared effects chain nodes |
+| `arpDelayRef` | `Tone.FeedbackDelay` — on arp path between `arpVol` and bypass/fx split |
+| `arpSpeedSnapRef` | Boolean — when `true`, rate snaps to 3 discrete bands; when `false`, fluid lerp mode |
+| `smoothedFluidIntervalRef` | Float (seconds) — lerp accumulator for fluid speed; written by rAF, read by Pattern callback |
 | `sendMidiRef` | Shadow ref of `sendMidi` from `useMidi` — safe to call inside rAF |
 | `chordMidiRef` | `Set<number>` — MIDI notes active last frame, used for diff-based noteon/noteoff |
 | `arpMidiTimers` | `number[]` — pending `setTimeout` IDs for arp noteoff scheduling |
 
 ### Arp pattern delta-check
 
-Four refs (`appliedArpModeRef`, `appliedArpRateRef`, `appliedArpRootRef`, `appliedArpThirdRef`) track the last values written to `arpPatternRef`. The pattern is only rebuilt when one of these changes, preventing `Tone.Pattern` from restarting its step counter every frame. All four reset to `null` in `stopAudio`.
+Four refs (`appliedArpModeRef`, `appliedArpRateRef`, `appliedArpRootRef`, `appliedArpThirdRef`) track the last values written to `arpPatternRef`. The pattern `values` and `pattern` fields are only rebuilt when mode/root/third change. `interval` is handled separately: in snap mode the rAF delta-check applies it on band transitions; in fluid mode the rAF loop only lerps `smoothedFluidIntervalRef` (never touches the scheduler), and the `Tone.Pattern` callback sets `arpPattern.interval = smoothedFluidIntervalRef.current` at note-fire time — safe inside the Tone.js scheduling context. All delta refs reset to `null`/`0.5` in `stopAudio`.
 
 ---
 
@@ -104,13 +109,16 @@ Four refs (`appliedArpModeRef`, `appliedArpRateRef`, `appliedArpRootRef`, `appli
 Eight metrics (PITCH, ARP, ARP VOL, CHORD, FILTER, REVERB, VIBRATO, VELOCITY) updated via DOM refs in the rAF loop. `position: absolute; right: 24px; top: 50%; transform: translateY(-50%)` — floats over the layout, vertically centered. Collapses via `transform: translateX(120%) translateY(-50%); opacity: 0` with 0.3s ease transition. Height: `clamp(180px, calc(65vw * (9/16)), 450px)` to track camera feed height.
 
 ### Controls sidebar
-`position: absolute; left: 0; top: 0; height: 100vh; width: 200px; z-index: 10`. Four labeled sections: **Master Engine** (tempo, octave, scale), **Synth Voice** (instrument, oscillator), **Arpeggiator** (arp +1 oct toggle), **Output** (MIDI toggle, Vocoder toggle, conditional record). Collapses via `transform: translateX(-100%); opacity: 0` with 0.3s ease. Controlled by `showControls` state in `App.js`.
+`position: absolute; left: 0; top: 0; height: 100vh; width: 200px; z-index: 10`. Four labeled sections: **Master Engine** (tempo, octave, scale), **Synth Voice** (instrument, oscillator), **Arpeggiator** (arp +1 oct, arp thru fx, arp controls), **Output** (MIDI toggle, Vocoder toggle, conditional record). Collapses via `transform: translateX(-100%); opacity: 0` with 0.3s ease. Controlled by `showControls` state in `App.js`.
+
+### ArpTerminal
+`position: absolute; bottom: 12px; right: 56px; z-index: 50` inside `.viewport`. Draggable via same ref-based architecture as `VocoderTerminal`. No canvas visualizer. Two vertical DAW faders: `dly` (5-stop: 0/'1/4'/'1/8'/'1/16'/'1/32' — controls `arpDelayRef.delayTime`) and `wet` (FeedbackDelay mix 0–1 via `wet.rampTo`). `[ speed snap ]` toggle at bottom controls `arpSpeedSnapRef` in the audio engine. Mounted/unmounted via `[ arp controls ]` toggle in the Controls Arpeggiator section; fader state resets to defaults on remount while audio node params persist independently.
 
 ### Toggle buttons
 Two `position: absolute; z-index: 50` buttons in `App.js` (`.leftToggleBtn` at `top: 16px; left: 16px`, `.rightToggleBtn` at `top: 16px; right: 16px`). Placed outside the panels so they are never affected by the panels' `opacity: 0` collapse state.
 
 ### Viewport
-`width: 65vw; max-width: 1000px; aspect-ratio: 16/9`. Hosts the mirrored `<video>` feed, the MediaPipe skeleton `<canvas>` overlay, the PianoRoll overlay, the LoopProgress bar, and the `VocoderTerminal` overlay. Both video and canvas use `transform: scaleX(-1)` to mirror for natural interaction.
+`width: 65vw; max-width: 1000px; aspect-ratio: 16/9`. Hosts the mirrored `<video>` feed, the MediaPipe skeleton `<canvas>` overlay, the PianoRoll overlay, the LoopProgress bar, the `VocoderTerminal` overlay, and the `ArpTerminal` overlay. Both video and canvas use `transform: scaleX(-1)` to mirror for natural interaction.
 
 ---
 

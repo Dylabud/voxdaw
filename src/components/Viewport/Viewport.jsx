@@ -2,11 +2,13 @@ import styles from './Viewport.module.css';
 import LoopProgress from '../LoopProgress/LoopProgress';
 import PianoRoll from '../PianoRoll/PianoRoll';
 import VocoderTerminal from '../VocoderTerminal/VocoderTerminal';
+import ArpTerminal from '../ArpTerminal/ArpTerminal';
 
 export default function Viewport({
   videoRef, canvasRef, isActive, error,
   progressRef, isRecording, isLooping, pianoRollRef,
   isVocoderActive, getAnalyserData, updateVocoderParams,
+  isArpTerminalOpen, updateArpDelayTime, updateArpDelayMix, arpSpeedSnap, onArpSpeedSnapToggle,
 }) {
   return (
     <div className={styles.viewport}>
@@ -31,6 +33,14 @@ export default function Viewport({
         <VocoderTerminal
           getAnalyserData={getAnalyserData}
           updateVocoderParams={updateVocoderParams}
+        />
+      )}
+      {isArpTerminalOpen && (
+        <ArpTerminal
+          updateArpDelayTime={updateArpDelayTime}
+          updateArpDelayMix={updateArpDelayMix}
+          speedSnap={arpSpeedSnap}
+          onSpeedSnapToggle={onArpSpeedSnapToggle}
         />
       )}
     </div>

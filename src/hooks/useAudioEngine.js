@@ -136,7 +136,10 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
   const arpBypassGainRef   = useRef(null); // dry path → Destination
   const arpFxGainRef       = useRef(null); // wet path → filter chain
   const arpFxEnabledRef    = useRef(false);
-  const arpPatternRef      = useRef(null);
+  const arpDelayRef        = useRef(null);
+  const arpSpeedSnapRef      = useRef(true);
+  const smoothedFluidIntervalRef = useRef(0.5);
+  const arpPatternRef        = useRef(null);
   const arpModeRef         = useRef('off');
   const arpRateRef         = useRef('8n');
   const currentArpFreqRef  = useRef(null); // last note fired by the arp Pattern
@@ -195,8 +198,12 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       const arpBypassGain = new Tone.Gain(1).toDestination(); // default: bypass active
       const arpFxGain     = new Tone.Gain(0);                 // default: fx path silent
       arpFxGain.connect(filter);
-      arpVol.connect(arpBypassGain);
-      arpVol.connect(arpFxGain);
+
+      // FeedbackDelay sits between arpVol and the bypass/fx split; wet=0 at init (transparent)
+      const arpDelay = new Tone.FeedbackDelay({ delayTime: '8n', feedback: 0.3, wet: 0 });
+      arpDelay.connect(arpBypassGain);
+      arpDelay.connect(arpFxGain);
+      arpVol.connect(arpDelay);
 
       const arpVoice = new Tone.Synth({
         oscillator: { type: 'triangle' },
@@ -208,11 +215,16 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       // Pattern always runs on the transport; gated by arpModeRef inside the callback.
       const arpPattern = new Tone.Pattern((time, note) => {
         if (arpModeRef.current === 'off') return;
-        arpVoiceRef.current?.triggerAttackRelease(
-          note,
-          HOLD_MAP[arpRateRef.current] ?? '16n',
-          time,
-        );
+        let gateLength;
+        if (arpSpeedSnapRef.current) {
+          gateLength = HOLD_MAP[arpRateRef.current] ?? '16n';
+        } else {
+          // Apply the lerp-smoothed interval at note-fire time — safe inside the scheduler
+          const fluidTime = smoothedFluidIntervalRef.current;
+          arpPattern.interval = fluidTime;
+          gateLength = fluidTime * 0.5;
+        }
+        arpVoiceRef.current?.triggerAttackRelease(note, gateLength, time);
         hudRefsRef.current?.pianoRoll?.current?.flashNote(normalizeNote(note), 180);
 
         // Track live arp frequency so the vocoder carrier can follow the melodic line
@@ -235,6 +247,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       stringsVoicesRef.current = stringsVoices;
       arpVoiceRef.current      = arpVoice;
       arpVolRef.current        = arpVol;
+      arpDelayRef.current      = arpDelay;
       arpBypassGainRef.current = arpBypassGain;
       arpFxGainRef.current     = arpFxGain;
       arpPatternRef.current    = arpPattern;
@@ -293,6 +306,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
     appliedArpRateRef.current  = null;
     appliedArpRootRef.current  = null;
     appliedArpThirdRef.current = null;
+    smoothedFluidIntervalRef.current = 0.5;
     Tone.Transport.stop();
 
     hudRefsRef.current?.pianoRoll?.current?.setNotes([]);
@@ -303,6 +317,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       arpPatternRef.current?.dispose();
       arpVoiceRef.current?.dispose();
       arpVolRef.current?.dispose();
+      arpDelayRef.current?.dispose();
       arpBypassGainRef.current?.dispose();
       arpFxGainRef.current?.dispose();
       filterRef.current?.dispose();
@@ -316,6 +331,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       arpPatternRef.current    = null;
       arpVoiceRef.current      = null;
       arpVolRef.current        = null;
+      arpDelayRef.current      = null;
       arpBypassGainRef.current = null;
       arpFxGainRef.current     = null;
       filterRef.current        = null;
@@ -480,27 +496,39 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
           // Map spreadDb [-12, 3] → MIDI velocity [1, 127] (monotonic, same gesture)
           arpVelocityRef.current = Math.max(1, Math.min(127, Math.round(mapRange(spreadDb, -12, 3, 1, 127))));
 
-          // Only rewrite pattern structure when mode, rate, root, or chord quality actually changed
-          const rootNow        = currentRootRef.current;
+          // Rewrite values/pattern only when structural params change (rate excluded)
+          const rootNow          = currentRootRef.current;
           const effectiveArpRoot = arpOctaveShiftRef.current
             ? Tone.Frequency(rootNow).transpose(12).toFrequency()
             : rootNow;
           const thirdNow = arpThirdSTRef.current;
           if (
             mode             !== appliedArpModeRef.current  ||
-            rate             !== appliedArpRateRef.current  ||
             effectiveArpRoot !== appliedArpRootRef.current  ||
             thirdNow         !== appliedArpThirdRef.current
           ) {
             if (pat) {
-              pat.values   = buildArpNotes(effectiveArpRoot, mode, thirdNow);
-              pat.pattern  = ARP_PATTERN_TYPE[mode];
-              pat.interval = rate;
+              pat.values  = buildArpNotes(effectiveArpRoot, mode, thirdNow);
+              pat.pattern = ARP_PATTERN_TYPE[mode];
             }
             appliedArpModeRef.current  = mode;
-            appliedArpRateRef.current  = rate;
             appliedArpRootRef.current  = effectiveArpRoot;
             appliedArpThirdRef.current = thirdNow;
+          }
+
+          // Interval: discrete snap or fluid continuous
+          if (arpSpeedSnapRef.current) {
+            if (rate !== appliedArpRateRef.current) {
+              if (pat) pat.interval = rate;
+              appliedArpRateRef.current = rate;
+            }
+          } else {
+            // Fluid: lerp toward target (8%/frame) — decoupled from the scheduler;
+            // the pattern callback reads this ref and applies it at note-fire time
+            const targetInterval = mapRange(tilt, 0, 90, 0.5, 0.05);
+            smoothedFluidIntervalRef.current +=
+              (targetInterval - smoothedFluidIntervalRef.current) * 0.08;
+            appliedArpRateRef.current = null; // ensure snap re-applies when toggled back
           }
         }
         arpModeRef.current = mode;
@@ -586,6 +614,19 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
     scaleRef.current = SCALES[key];
   }, []);
 
+  const setArpDelayTime = useCallback((subdivision) => {
+    if (arpDelayRef.current) arpDelayRef.current.delayTime.value = subdivision;
+  }, []);
+
+  const setArpDelayMix = useCallback((value) => {
+    if (arpDelayRef.current) arpDelayRef.current.wet.rampTo(value, 0.05);
+  }, []);
+
+  const setArpSpeedSnap = useCallback((bool) => {
+    arpSpeedSnapRef.current = bool;
+    appliedArpRateRef.current = null; // force interval reapply on next frame
+  }, []);
+
   const setArpFx = useCallback((enabled) => {
     arpFxEnabledRef.current = enabled;
     if (!arpBypassGainRef.current) return;
@@ -593,5 +634,5 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
     arpFxGainRef.current.gain.rampTo(enabled ? 1 : 0, 0.05);
   }, []);
 
-  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, volumeRef };
+  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, volumeRef };
 }

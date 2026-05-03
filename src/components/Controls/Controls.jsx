@@ -16,6 +16,7 @@ export default function Controls({
   globalOctave, onGlobalOctaveChange,
   arpOctaveShift, onArpOctaveShiftToggle,
   arpFxEnabled, onArpFxToggle,
+  isArpTerminalOpen, onArpTerminalToggle,
   onRecord, isRecording, isLooping,
 }) {
   const [instrument, setInstrumentState] = useState('analog');
@@ -134,6 +135,13 @@ export default function Controls({
           onClick={() => onArpFxToggle?.(!arpFxEnabled)}
         >
           {arpFxEnabled ? '● arp thru fx' : '[ arp thru fx ]'}
+        </button>
+
+        <button
+          className={isArpTerminalOpen ? styles.toggleBtnActive : styles.toggleBtn}
+          onClick={() => onArpTerminalToggle?.(!isArpTerminalOpen)}
+        >
+          {isArpTerminalOpen ? '● arp controls' : '[ arp controls ]'}
         </button>
       </div>
 
