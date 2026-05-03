@@ -1,7 +1,7 @@
 .terminal {
   position: absolute;
   bottom: 12px;
-  left: 56px; /* clears the 44px PianoRoll with a small gap */
+  left: 56px;
   z-index: 50;
   width: 250px;
   background: rgba(14, 14, 16, 0.92);
@@ -21,6 +21,12 @@
   color: #5DCAA5;
   padding-bottom: 6px;
   border-bottom: 1px solid rgba(93, 202, 165, 0.15);
+  cursor: grab;
+  user-select: none;
+}
+
+.terminalHeader:active {
+  cursor: grabbing;
 }
 
 .visualizer {
@@ -31,26 +37,32 @@
   border: 1px solid rgba(93, 202, 165, 0.12);
 }
 
+/* ── Vertical fader layout ────────────────────────────────────────── */
 .sliders {
   display: flex;
-  flex-direction: column;
-  gap: 7px;
+  flex-direction: row;
+  justify-content: space-around;
+  align-items: flex-end;
+  padding-top: 4px;
 }
 
 .sliderRow {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
 }
 
 .sliderMeta {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
 }
 
 .sliderLabel {
-  font-size: 8px;
+  font-size: 7px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: rgba(200, 200, 204, 0.5);
@@ -63,54 +75,91 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Range input ──────────────────────────────────────────────────── */
+/* ── Fader track wrapper ──────────────────────────────────────────── */
+.faderTrack {
+  position: relative;
+  width: 28px;
+  height: 80px;
+}
+
+/* ── Range input (rotated to vertical) ───────────────────────────── */
 .slider {
   -webkit-appearance: none;
   appearance: none;
-  width: 100%;
+  position: absolute;
+  width: 80px;
   height: 3px;
-  background: rgba(93, 202, 165, 0.15);
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) rotate(-90deg);
+  transform-origin: center center;
+  background: rgba(93, 202, 165, 0.10);
   border-radius: 2px;
   outline: none;
   cursor: pointer;
 }
 
+/* ── Fader cap ────────────────────────────────────────────────────── */
+/*
+ * The input is rotated -90deg, so CSS `height` maps to visual width.
+ * width: 8px  → 8px tall visually (short axis of cap)
+ * height: 28px → 28px wide visually (long axis of cap)
+ * linear-gradient(to bottom, ...) runs horizontally in visual space,
+ * so the 2px band at 50% becomes the center indicator line. ✓
+ */
 .slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  background: #5DCAA5;
-  border: none;
-  box-shadow: 0 0 4px rgba(93, 202, 165, 0.6);
+  width: 8px;
+  height: 28px;
+  border-radius: 2px;
+  background:
+    linear-gradient(
+      to bottom,
+      transparent calc(50% - 1px),
+      rgba(93, 202, 165, 0.9) calc(50% - 1px),
+      rgba(93, 202, 165, 0.9) calc(50% + 1px),
+      transparent calc(50% + 1px)
+    ),
+    #111416;
+  border: 1px solid rgba(93, 202, 165, 0.35);
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.6), 0 0 5px rgba(93, 202, 165, 0.15);
+  margin-top: -13px; /* (trackH/2) - (thumbH/2) = 1.5 - 14 = -12.5px */
   cursor: pointer;
-  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .slider::-webkit-slider-thumb:hover {
-  transform: scale(1.25);
-  box-shadow: 0 0 8px rgba(93, 202, 165, 0.9);
+  border-color: rgba(93, 202, 165, 0.7);
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.6), 0 0 10px rgba(93, 202, 165, 0.4);
 }
 
 .slider::-moz-range-thumb {
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  background: #5DCAA5;
-  border: none;
-  box-shadow: 0 0 4px rgba(93, 202, 165, 0.6);
+  width: 8px;
+  height: 28px;
+  border-radius: 2px;
+  background:
+    linear-gradient(
+      to bottom,
+      transparent calc(50% - 1px),
+      rgba(93, 202, 165, 0.9) calc(50% - 1px),
+      rgba(93, 202, 165, 0.9) calc(50% + 1px),
+      transparent calc(50% + 1px)
+    ),
+    #111416;
+  border: 1px solid rgba(93, 202, 165, 0.35);
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.6);
   cursor: pointer;
 }
 
 .slider::-webkit-slider-runnable-track {
   height: 3px;
   border-radius: 2px;
-  background: rgba(93, 202, 165, 0.15);
+  background: rgba(93, 202, 165, 0.10);
 }
 
 .slider::-moz-range-track {
   height: 3px;
   border-radius: 2px;
-  background: rgba(93, 202, 165, 0.15);
+  background: rgba(93, 202, 165, 0.10);
 }

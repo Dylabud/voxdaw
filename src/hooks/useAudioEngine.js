@@ -133,9 +133,13 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
   // Arp refs
   const arpVoiceRef        = useRef(null);
   const arpVolRef          = useRef(null);
+  const arpBypassGainRef   = useRef(null); // dry path → Destination
+  const arpFxGainRef       = useRef(null); // wet path → filter chain
+  const arpFxEnabledRef    = useRef(false);
   const arpPatternRef      = useRef(null);
   const arpModeRef         = useRef('off');
   const arpRateRef         = useRef('8n');
+  const currentArpFreqRef  = useRef(null); // last note fired by the arp Pattern
   // Delta-check refs — pattern is only rewritten when these values change
   const appliedArpModeRef  = useRef(null);
   const appliedArpRootRef  = useRef(null);
@@ -184,9 +188,15 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
 
       [...analogVoices, ...stringsVoices].forEach(v => v.connect(filter));
 
-      // Arp voice — routes directly to Destination, fully independent of the
-      // pinch-controlled master volume that governs the chord/filter chain.
-      const arpVol = new Tone.Volume(-12).toDestination();
+      // Arp voice — parallel routing: bypass path goes directly to Destination;
+      // fx path enters the filter chain. Toggle between them via setArpFx().
+      const arpVol = new Tone.Volume(-12); // gesture-controlled; sits upstream of both paths
+
+      const arpBypassGain = new Tone.Gain(1).toDestination(); // default: bypass active
+      const arpFxGain     = new Tone.Gain(0);                 // default: fx path silent
+      arpFxGain.connect(filter);
+      arpVol.connect(arpBypassGain);
+      arpVol.connect(arpFxGain);
 
       const arpVoice = new Tone.Synth({
         oscillator: { type: 'triangle' },
@@ -205,6 +215,9 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
         );
         hudRefsRef.current?.pianoRoll?.current?.flashNote(normalizeNote(note), 180);
 
+        // Track live arp frequency so the vocoder carrier can follow the melodic line
+        currentArpFreqRef.current = Tone.Frequency(note).toFrequency();
+
         const midiNote = Math.round(Tone.Frequency(note).toMidi());
         sendMidiRef.current?.('noteon', midiNote, arpVelocityRef.current);
         const holdMs = Tone.Transport.toSeconds(HOLD_MAP[arpRateRef.current] ?? '16n') * 1000;
@@ -222,6 +235,8 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       stringsVoicesRef.current = stringsVoices;
       arpVoiceRef.current      = arpVoice;
       arpVolRef.current        = arpVol;
+      arpBypassGainRef.current = arpBypassGain;
+      arpFxGainRef.current     = arpFxGain;
       arpPatternRef.current    = arpPattern;
 
       activeVoicesRef.current = instrumentNameRef.current === 'strings'
@@ -241,6 +256,11 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       const allVoices = [...analogVoicesRef.current, ...stringsVoicesRef.current];
       allVoices.forEach((v, i) => v.triggerAttack(INIT_FREQS[i % 4]));
       activeVoicesRef.current[0].volume.value = VOICE_DB;
+
+      // Restore arp routing state
+      const fxOn = arpFxEnabledRef.current;
+      if (arpBypassGainRef.current) arpBypassGainRef.current.gain.value = fxOn ? 0 : 1;
+      if (arpFxGainRef.current)     arpFxGainRef.current.gain.value     = fxOn ? 1 : 0;
 
       arpModeRef.current = 'off';
       Tone.Transport.start();
@@ -267,7 +287,8 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       arpPatternRef.current.mute = true;
       arpPatternRef.current.stop();
     }
-    arpModeRef.current      = 'off';
+    arpModeRef.current         = 'off';
+    currentArpFreqRef.current  = null;
     appliedArpModeRef.current  = null;
     appliedArpRateRef.current  = null;
     appliedArpRootRef.current  = null;
@@ -282,6 +303,8 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       arpPatternRef.current?.dispose();
       arpVoiceRef.current?.dispose();
       arpVolRef.current?.dispose();
+      arpBypassGainRef.current?.dispose();
+      arpFxGainRef.current?.dispose();
       filterRef.current?.dispose();
       vibratoRef.current?.dispose();
       reverbRef.current?.dispose();
@@ -293,6 +316,8 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       arpPatternRef.current    = null;
       arpVoiceRef.current      = null;
       arpVolRef.current        = null;
+      arpBypassGainRef.current = null;
+      arpFxGainRef.current     = null;
       filterRef.current        = null;
       vibratoRef.current       = null;
       reverbRef.current        = null;
@@ -309,6 +334,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
     const voices = activeVoicesRef.current;
 
     let pitchHandFound = false;
+    let arpHandFound   = false;
 
     for (let i = 0; i < landmarks.length; i++) {
       const hand = landmarks[i];
@@ -324,7 +350,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
         pitchHandFound = true;
 
         const SAFE_TOP    = 0.15;
-        const SAFE_BOTTOM = 0.7;
+        const SAFE_BOTTOM = 0.88;
         const safeY    = Math.max(0, Math.min(1, (wrist.y - SAFE_TOP) / (SAFE_BOTTOM - SAFE_TOP)));
         const gridIdx  = Math.min(Math.floor(safeY * NOTE_GRID.length), NOTE_GRID.length - 1);
         const rawPitch = Tone.Frequency(NOTE_GRID[gridIdx].note).transpose(globalOctaveRef.current * 12).toFrequency();
@@ -392,10 +418,13 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
         }
         hud?.pianoRoll?.current?.setNotes(activeNoteNames);
 
-        // Feed active chord frequencies to the vocoder carrier
+        // Feed active chord + live arp frequencies to the vocoder carrier
         const vocoderFreqs = [root];
         if (middleUp) { vocoderFreqs.push(thirdFreq, fifthFreq); }
         if (pinkyUp)  { vocoderFreqs.push(seventhFreq); }
+        if (arpModeRef.current !== 'off' && currentArpFreqRef.current !== null) {
+          vocoderFreqs.push(currentArpFreqRef.current);
+        }
         updateVocoderRef.current?.(vocoderFreqs);
 
         // ── Chord MIDI diff ─────────────────────────────────────────────
@@ -415,14 +444,6 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
         }
         chordMidiRef.current = newMidiSet;
 
-        // Update arp pattern root/quality only when they actually change
-        if (arpActive && (root !== appliedArpRootRef.current || thirdST !== appliedArpThirdRef.current)) {
-          const pat = arpPatternRef.current;
-          if (pat) pat.values = buildArpNotes(root, arpModeRef.current, thirdST);
-          appliedArpRootRef.current  = root;
-          appliedArpThirdRef.current = thirdST;
-        }
-
         if (hud?.pitch?.current)
           hud.pitch.current.textContent = `${Math.round(root)} Hz`;
         if (hud?.filter?.current)
@@ -432,6 +453,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
 
       } else {
         // ── LEFT HAND: reverb + vibrato + arp control ───────────────────
+        arpHandFound = true;
 
         const wet   = mapRange(dist, 0.03, 0.20, 0, 1);
         const depth = mapRange(wrist.y, 0, 1, 0.8, 0);
@@ -505,6 +527,19 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       chordMidiRef.current = new Set();
       updateVocoderRef.current?.([]);
     }
+
+    if (!arpHandFound && arpModeRef.current !== 'off') {
+      arpModeRef.current         = 'off';
+      currentArpFreqRef.current  = null;
+      // Reset delta-check refs so re-detection always rebuilds the pattern
+      appliedArpModeRef.current  = null;
+      appliedArpRateRef.current  = null;
+      appliedArpRootRef.current  = null;
+      appliedArpThirdRef.current = null;
+      arpVoiceRef.current?.triggerRelease();
+      if (hud?.arp?.current)    hud.arp.current.textContent    = 'OFF';
+      if (hud?.arpVol?.current) hud.arpVol.current.textContent = '--';
+    }
   }, []);
 
   const setTempo = useCallback((bpm) => {
@@ -551,5 +586,12 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
     scaleRef.current = SCALES[key];
   }, []);
 
-  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, volumeRef };
+  const setArpFx = useCallback((enabled) => {
+    arpFxEnabledRef.current = enabled;
+    if (!arpBypassGainRef.current) return;
+    arpBypassGainRef.current.gain.rampTo(enabled ? 0 : 1, 0.05);
+    arpFxGainRef.current.gain.rampTo(enabled ? 1 : 0, 0.05);
+  }, []);
+
+  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, volumeRef };
 }

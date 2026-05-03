@@ -4,11 +4,9 @@
   top: 0;
   bottom: 0;
   width: 44px;
-  overflow: hidden;
+  overflow: visible;
   z-index: 10;
   pointer-events: none;
-  -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,0.92) 80%, transparent 100%);
-          mask-image: linear-gradient(to right, rgba(0,0,0,0.92) 80%, transparent 100%);
 }
 
 .whiteKeys {
@@ -20,10 +18,22 @@
 
 .whiteKey {
   flex: 1;
+  position: relative;
   background: #1a1a20;
   border-bottom: 1px solid #2a2a2e;
   border-radius: 0 2px 2px 0;
   transition: background 0.04s ease;
+}
+
+.whiteKey::after {
+  content: '';
+  position: absolute;
+  left: 100%;
+  bottom: -1px;
+  width: 180px;
+  height: 1px;
+  background: linear-gradient(to right, rgba(93, 202, 165, 0.4), transparent);
+  pointer-events: none;
 }
 
 .whiteKey.active {

@@ -15,6 +15,7 @@ export default function Controls({
   isVocoderActive, onToggleVocoder,
   globalOctave, onGlobalOctaveChange,
   arpOctaveShift, onArpOctaveShiftToggle,
+  arpFxEnabled, onArpFxToggle,
   onRecord, isRecording, isLooping,
 }) {
   const [instrument, setInstrumentState] = useState('analog');
@@ -126,6 +127,13 @@ export default function Controls({
           onClick={() => onArpOctaveShiftToggle?.(!arpOctaveShift)}
         >
           {arpOctaveShift ? '● arp +1 oct' : '[ arp +1 oct ]'}
+        </button>
+
+        <button
+          className={arpFxEnabled ? styles.toggleBtnActive : styles.toggleBtn}
+          onClick={() => onArpFxToggle?.(!arpFxEnabled)}
+        >
+          {arpFxEnabled ? '● arp thru fx' : '[ arp thru fx ]'}
         </button>
       </div>
 

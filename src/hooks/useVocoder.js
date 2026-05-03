@@ -3,14 +3,14 @@ import { useRef, useCallback, useState } from 'react';
 const NUM_BANDS      = 16;
 const BAND_MIN_HZ    = 100;
 const BAND_MAX_HZ    = 8000;
-const CARRIER_VOICES = 4;
+const CARRIER_VOICES = 5; // 4 chord voices + 1 arp voice
 
 // Initial defaults — overridable live via updateVocoderParams
-const INIT_Q          = 2.5;
-const INIT_ENV_HZ     = 20;
-const INIT_MOD_GAIN   = 10;
-const INIT_OUT_GAIN   = 6;
-const INIT_MIX        = 1.0; // fully wet by default
+const INIT_Q          = 10.0;
+const INIT_ENV_HZ     = 50;
+const INIT_MOD_GAIN   = 17;
+const INIT_OUT_GAIN   = 13;
+const INIT_MIX        = 0.32;
 
 const BAND_FREQS = (() => {
   const freqs = new Float32Array(NUM_BANDS);
