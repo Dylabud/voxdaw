@@ -5,12 +5,12 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(10, 10, 12, 0.72);
+  background: var(--overlay-bg);
   backdrop-filter: blur(6px);
 }
 
 .panel {
-  background: #111114;
+  background: var(--bg-panel);
   border: 1px dashed rgba(93, 202, 165, 0.75);
   border-radius: 4px;
   width: 65vw;
@@ -30,7 +30,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .title {
@@ -39,20 +39,20 @@
   font-weight: 700;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: #5DCAA5;
+  color: var(--accent-color);
 }
 
 .closeBtn {
   background: none;
   border: none;
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--text-muted);
   font-size: 18px;
   line-height: 1;
   cursor: pointer;
   padding: 2px 4px;
   transition: color 0.15s;
 }
-.closeBtn:hover { color: #fff; }
+.closeBtn:hover { color: var(--text-primary); }
 
 /* ── Tab nav ─────────────────────────────────────────────── */
 
@@ -60,7 +60,7 @@
   display: flex;
   gap: 2px;
   padding: 10px 20px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .tab,
@@ -74,14 +74,14 @@
   letter-spacing: 0.12em;
   cursor: pointer;
   transition: all 0.15s;
-  color: rgba(255, 255, 255, 0.3);
+  color: var(--text-dimmer);
   margin-bottom: -1px;
 }
-.tab:hover { color: rgba(255, 255, 255, 0.6); }
+.tab:hover { color: var(--text-muted); }
 
 .tabActive {
-  color: #5DCAA5;
-  border-bottom-color: #5DCAA5;
+  color: var(--accent-color);
+  border-bottom-color: var(--accent-color);
 }
 
 /* ── Subheader ───────────────────────────────────────────── */
@@ -91,8 +91,8 @@
   font-family: 'Courier New', monospace;
   font-size: 9px;
   letter-spacing: 0.06em;
-  color: rgba(255, 255, 255, 0.35);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  color: var(--text-dimmer);
+  border-bottom: 1px solid var(--border-faint);
 }
 
 /* ── Column labels ───────────────────────────────────────── */
@@ -107,7 +107,7 @@
   font-size: 8px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.25);
+  color: var(--text-dimmest);
 }
 
 /* ── Row list ────────────────────────────────────────────── */
@@ -130,7 +130,7 @@
 .emptyState {
   font-family: 'Courier New', monospace;
   font-size: 10px;
-  color: rgba(255, 255, 255, 0.2);
+  color: var(--text-dimmest);
   text-align: center;
   padding: 20px 0;
   letter-spacing: 0.06em;
@@ -143,8 +143,8 @@
   align-items: center;
   padding: 6px 8px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: var(--row-bg);
+  border: 1px solid var(--row-border);
   transition: border-color 0.15s;
 }
 .row:hover { border-color: rgba(93, 202, 165, 0.15); }
@@ -156,8 +156,8 @@
   align-items: center;
   padding: 6px 8px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: var(--row-bg);
+  border: 1px solid var(--row-border);
   transition: border-color 0.15s;
 }
 .rowNarrow:hover { border-color: rgba(93, 202, 165, 0.15); }
@@ -166,10 +166,10 @@
 
 .select {
   appearance: none;
-  background: #16161c url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%235DCAA5'/%3E%3C/svg%3E") no-repeat right 8px center;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--input-bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%235DCAA5'/%3E%3C/svg%3E") no-repeat right 8px center;
+  border: 1px solid var(--border-mid);
   border-radius: 3px;
-  color: rgba(255, 255, 255, 0.82);
+  color: var(--text-primary);
   font-family: 'Courier New', monospace;
   font-size: 9px;
   letter-spacing: 0.04em;
@@ -180,14 +180,20 @@
 }
 .select:hover { border-color: rgba(93, 202, 165, 0.4); }
 .select:focus { outline: none; border-color: rgba(93, 202, 165, 0.6); }
-.select option { background: #16161c; color: #fff; }
+.select option { background: var(--input-bg); color: var(--text-primary); }
+
+.warningSelect {
+  border-color: var(--warning-color) !important;
+  box-shadow: 0 0 6px rgba(238, 210, 2, 0.15);
+  color: var(--warning-color);
+}
 
 /* ── Arrow glyph ─────────────────────────────────────────── */
 
 .arrow {
   font-family: 'Courier New', monospace;
   font-size: 12px;
-  color: rgba(93, 202, 165, 0.5);
+  color: var(--form-text-dim);
   text-align: center;
 }
 
@@ -196,7 +202,7 @@
 .invertBtn,
 .invertBtnActive {
   background: none;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--border-mid);
   border-radius: 3px;
   font-family: 'Courier New', monospace;
   font-size: 13px;
@@ -205,13 +211,13 @@
   width: 100%;
   cursor: pointer;
   transition: all 0.15s;
-  color: rgba(255, 255, 255, 0.3);
+  color: var(--text-dimmer);
 }
 .invertBtn:hover { border-color: rgba(93, 202, 165, 0.3); color: rgba(93, 202, 165, 0.6); }
 
 .invertBtnActive {
   border-color: rgba(93, 202, 165, 0.5);
-  color: #5DCAA5;
+  color: var(--accent-color);
   background: rgba(93, 202, 165, 0.08);
 }
 .invertBtnActive:hover { background: rgba(93, 202, 165, 0.15); }
@@ -220,9 +226,9 @@
 
 .deleteBtn {
   background: none;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-subtle);
   border-radius: 3px;
-  color: rgba(255, 255, 255, 0.25);
+  color: var(--text-dimmest);
   font-size: 14px;
   line-height: 1;
   padding: 4px 0;
@@ -243,16 +249,16 @@
   align-items: center;
   justify-content: space-between;
   padding: 12px 20px 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--border-subtle);
   gap: 10px;
 }
 
 .addBtn,
 .resetBtn {
   background: none;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--border-mid);
   border-radius: 3px;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--text-muted);
   font-family: 'Courier New', monospace;
   font-size: 9px;
   letter-spacing: 0.1em;
@@ -262,12 +268,11 @@
 }
 .addBtn:hover {
   border-color: rgba(93, 202, 165, 0.45);
-  color: #5DCAA5;
+  color: var(--accent-color);
   background: rgba(93, 202, 165, 0.06);
 }
 .resetBtn:hover {
-  border-color: rgba(255, 255, 255, 0.25);
-  color: rgba(255, 255, 255, 0.82);
-  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  background: var(--row-bg);
 }
-

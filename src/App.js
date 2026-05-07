@@ -31,6 +31,7 @@ export default function App() {
   const [arpFxEnabled,      setArpFxEnabledState]   = useState(false);
   const [isArpTerminalOpen, setIsArpTerminalOpen]   = useState(false);
   const [arpSpeedSnap,      setArpSpeedSnapState]   = useState(true);
+  const [isDarkMode,        setIsDarkMode]          = useState(true);
   const [showControls,      setShowControls]        = useState(true);
   const [showAnalytics,  setShowAnalytics]        = useState(true);
   const [showMidiModal,        setShowMidiModal]        = useState(false);
@@ -94,10 +95,7 @@ export default function App() {
   }, [panicAllNotes, disengage, stopAudio, dispose]);
 
   return (
-    <div className="app">
-      <button className="leftToggleBtn" onClick={() => setShowControls(v => !v)}>
-        {showControls ? '‹' : '›'}
-      </button>
+    <div className="app" data-theme={isDarkMode ? undefined : 'light'}>
       <button className="rightToggleBtn" onClick={() => setShowAnalytics(v => !v)}>
         {showAnalytics ? '›' : '‹'}
       </button>
@@ -125,6 +123,9 @@ export default function App() {
         isRecording={isRecording}
         isLooping={isLooping}
         onGestureSettingsOpen={() => setShowGestureSettings(true)}
+        isDarkMode={isDarkMode}
+        onThemeToggle={() => setIsDarkMode(v => !v)}
+        onCollapseToggle={() => setShowControls(v => !v)}
       />
 
       <div className="stage">

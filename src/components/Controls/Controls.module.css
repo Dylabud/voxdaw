@@ -5,8 +5,8 @@
   top: 0;
   width: 200px;
   height: 100vh;
-  background: #111114;
-  border-right: 1px solid #2a2a2e;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border-mid);
   display: flex;
   flex-direction: column;
   z-index: 10;
@@ -26,10 +26,10 @@
   top: 50%;
   transform: translateY(-50%);
   appearance: none;
-  background: #111114;
-  border: 1px solid #2a2a2e;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
   border-left: none;
-  color: rgba(93, 202, 165, 0.5);
+  color: var(--form-text-dim);
   font-family: inherit;
   font-size: 13px;
   line-height: 1;
@@ -46,18 +46,29 @@
 
 /* ── Header ──────────────────────────────────────────────────── */
 .header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 14px 16px 12px;
-  border-bottom: 1px solid #2a2a2e;
+  border-bottom: 1px solid var(--border-mid);
   font-size: 10px;
   letter-spacing: 0.35em;
   text-transform: uppercase;
-  color: #5DCAA5;
-
-  /* Add these 3 lines to push the text to the right */
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
+  color: var(--accent-color);
 }
+
+.themeBtn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dimmer);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+.themeBtn:hover { color: var(--accent-color); }
 
 /* ── Section blocks ──────────────────────────────────────────── */
 .section {
@@ -65,15 +76,15 @@
   flex-direction: column;
   gap: 10px;
   padding: 12px 16px;
-  border-bottom: 1px solid #1e1e22;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .sectionTitle {
   font-size: 7px;
   letter-spacing: 0.3em;
   text-transform: uppercase;
-  color: rgba(200, 200, 204, 0.55);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-subtle);
   padding-bottom: 4px;
   margin-bottom: 2px;
 }
@@ -89,7 +100,7 @@
   font-size: 9px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: rgba(200, 200, 204, 0.45);
+  color: var(--text-dimmer);
 }
 
 /* ── Select dropdown ─────────────────────────────────────────── */
@@ -97,12 +108,12 @@
   appearance: none;
   -webkit-appearance: none;
   width: 100%;
-  background-color: #0e0e10;
+  background-color: var(--bg-base);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235DCAA5' fill-opacity='0.7'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 8px center;
   border: 1px solid rgba(93, 202, 165, 0.3);
-  color: rgba(93, 202, 165, 0.8);
+  color: var(--form-text);
   font-family: inherit;
   font-size: 11px;
   letter-spacing: 0.12em;
@@ -116,13 +127,13 @@
 
 .select:hover,
 .select:focus {
-  border-color: rgba(93, 202, 165, 0.7);
-  color: #5DCAA5;
+  border-color: var(--form-text-mid);
+  color: var(--accent-color);
 }
 
 .select option {
-  background: #16161c;
-  color: #c8c8cc;
+  background: var(--input-bg);
+  color: var(--text-primary);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -132,9 +143,9 @@
   appearance: textfield;
   -webkit-appearance: textfield;
   width: 100%;
-  background-color: #0e0e10;
+  background-color: var(--bg-base);
   border: 1px solid rgba(93, 202, 165, 0.3);
-  color: rgba(93, 202, 165, 0.8);
+  color: var(--form-text);
   font-family: inherit;
   font-size: 11px;
   letter-spacing: 0.12em;
@@ -150,8 +161,8 @@
 
 .bpmInput:hover,
 .bpmInput:focus {
-  border-color: rgba(93, 202, 165, 0.7);
-  color: #5DCAA5;
+  border-color: var(--form-text-mid);
+  color: var(--accent-color);
 }
 
 /* ── Octave cluster ──────────────────────────────────────────── */
@@ -163,9 +174,9 @@
 
 .octaveBtn {
   appearance: none;
-  background: #0e0e10;
+  background: var(--bg-base);
   border: 1px solid rgba(93, 202, 165, 0.3);
-  color: rgba(93, 202, 165, 0.8);
+  color: var(--form-text);
   font-family: inherit;
   font-size: 13px;
   line-height: 1;
@@ -181,8 +192,8 @@
 }
 
 .octaveBtn:hover {
-  border-color: rgba(93, 202, 165, 0.7);
-  color: #5DCAA5;
+  border-color: var(--form-text-mid);
+  color: var(--accent-color);
 }
 
 .octaveValue {
@@ -190,7 +201,7 @@
   font-size: 11px;
   font-family: inherit;
   letter-spacing: 0.08em;
-  color: rgba(93, 202, 165, 0.8);
+  color: var(--form-text);
   text-align: center;
 }
 
@@ -200,7 +211,7 @@
   width: 100%;
   background: transparent;
   border: 1px solid rgba(93, 202, 165, 0.3);
-  color: rgba(93, 202, 165, 0.5);
+  color: var(--form-text-dim);
   font-family: inherit;
   font-size: 10px;
   letter-spacing: 0.25em;
@@ -214,7 +225,7 @@
 
 .toggleBtn:hover {
   border-color: rgba(93, 202, 165, 0.6);
-  color: rgba(93, 202, 165, 0.8);
+  color: var(--form-text);
 }
 
 .toggleBtnActive {
@@ -222,7 +233,7 @@
   width: 100%;
   background: rgba(93, 202, 165, 0.06);
   border: 1px solid rgba(93, 202, 165, 0.75);
-  color: #5DCAA5;
+  color: var(--accent-color);
   font-family: inherit;
   font-size: 10px;
   letter-spacing: 0.25em;
@@ -240,7 +251,7 @@
   width: 100%;
   background: transparent;
   border: 1px solid rgba(93, 202, 165, 0.4);
-  color: rgba(93, 202, 165, 0.7);
+  color: var(--form-text-mid);
   font-family: inherit;
   font-size: 10px;
   letter-spacing: 0.25em;
@@ -253,8 +264,8 @@
 }
 
 .recordBtn:hover:not(:disabled) {
-  border-color: rgba(93, 202, 165, 0.8);
-  color: #5DCAA5;
+  border-color: var(--form-text);
+  color: var(--accent-color);
 }
 
 .recordBtn:disabled { cursor: default; }
@@ -269,4 +280,3 @@
   color: #e05555 !important;
   animation: pulse 800ms ease-in-out infinite;
 }
-

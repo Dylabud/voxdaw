@@ -19,6 +19,8 @@ export default function Controls({
   isArpTerminalOpen, onArpTerminalToggle,
   onRecord, isRecording, isLooping,
   onGestureSettingsOpen,
+  isDarkMode, onThemeToggle,
+  onCollapseToggle,
 }) {
   const [instrument, setInstrumentState] = useState('analog');
   const [oscType, setOscType]            = useState('sine');
@@ -49,8 +51,25 @@ export default function Controls({
   return (
     <div className={`${styles.controls}${collapsed ? ` ${styles.collapsed}` : ''}`}>
 
+      <button
+        className={styles.collapseTab}
+        onClick={onCollapseToggle}
+        title={collapsed ? 'Expand panel' : 'Collapse panel'}
+      >
+        {collapsed ? '›' : '‹'}
+      </button>
+
       {/* ── Header ── */}
-      <div className={styles.header}>·· voxdaw</div>
+      <div className={styles.header}>
+        <button
+          className={styles.themeBtn}
+          onClick={onThemeToggle}
+          title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+        >
+          {isDarkMode ? '◑' : '○'}
+        </button>
+        ·· voxdaw
+      </div>
 
       {/* ── Group 1: Master Engine ── */}
       <div className={styles.section}>

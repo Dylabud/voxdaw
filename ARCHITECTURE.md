@@ -47,8 +47,8 @@ getUserMedia → <video> → HandLandmarker.detectForVideo()
 ## 4. Audio Graph
 
 ```
-[analogVoices × 4]  ─┐
-[stringsVoices × 4] ─┤→ Filter → Vibrato → Reverb → Volume → Destination
+[analogVoices × 6]  ─┐
+[stringsVoices × 6] ─┤→ Filter → Vibrato → Reverb → Volume → Destination
 [arpVoice × 1]      ─┘
   arpVoice → arpVol → arpDelay → arpBypassGain → Destination  (default path)
                                → arpFxGain     → Filter       (fx path, toggled by setArpFx)
@@ -60,8 +60,8 @@ All chord voice sets connect to the same `filter` node input; Tone.js sums them.
 
 | Ref | Purpose |
 |-----|---------|
-| `analogVoicesRef` | 4× `Tone.Synth` — [root, 3rd, 5th, 7th] |
-| `stringsVoicesRef` | 4× `Tone.FMSynth` — [root, 3rd, 5th, 7th] |
+| `analogVoicesRef` | 6× `Tone.Synth` — [root, 3rd, 5th, 7th, oct, oct+3rd] |
+| `stringsVoicesRef` | 6× `Tone.FMSynth` — [root, 3rd, 5th, 7th, oct, oct+3rd] |
 | `activeVoicesRef` | Points to whichever voice set is currently audible |
 | `arpPatternRef` | `Tone.Pattern` — always created in `startAudio`, muted when arp off |
 | `currentRootRef` | Last computed root frequency in Hz — consumed by the arp |
@@ -109,13 +109,13 @@ Four refs (`appliedArpModeRef`, `appliedArpRateRef`, `appliedArpRootRef`, `appli
 Eight metrics (PITCH, ARP, ARP VOL, CHORD, FILTER, REVERB, VIBRATO, VELOCITY) updated via DOM refs in the rAF loop. `position: absolute; right: 24px; top: 50%; transform: translateY(-50%)` — floats over the layout, vertically centered. Collapses via `transform: translateX(120%) translateY(-50%); opacity: 0` with 0.3s ease transition. Height: `clamp(180px, calc(65vw * (9/16)), 450px)` to track camera feed height.
 
 ### Controls sidebar
-`position: absolute; left: 0; top: 0; height: 100vh; width: 200px; z-index: 10`. Four labeled sections: **Master Engine** (tempo, octave, scale), **Synth Voice** (instrument, oscillator), **Arpeggiator** (arp +1 oct, arp thru fx, arp controls), **Output** (MIDI toggle, Vocoder toggle, conditional record). Collapses via `transform: translateX(-100%); opacity: 0` with 0.3s ease. Controlled by `showControls` state in `App.js`.
+`position: absolute; left: 0; top: 0; height: 100vh; width: 200px; z-index: 10`. Header contains the `◑`/`○` light/dark theme toggle button and the "·· voxdaw" title in a flex row. A `.collapseTab` button (`position: absolute; left: 100%`) protrudes from the sidebar's right edge — it follows `translateX` so it remains reachable at the left viewport edge when collapsed. Four labeled sections: **Master Engine** (tempo, octave, scale), **Synth Voice** (instrument, oscillator), **Arpeggiator** (arp +1 oct, arp thru fx, arp controls), **Output** (MIDI toggle, Vocoder toggle, conditional record). Collapses via `transform: translateX(-100%); opacity: 0` with 0.3s ease. Controlled by `showControls` state in `App.js`.
 
 ### ArpTerminal
 `position: absolute; bottom: 12px; right: 56px; z-index: 50` inside `.viewport`. Draggable via same ref-based architecture as `VocoderTerminal`. No canvas visualizer. Two vertical DAW faders: `dly` (5-stop: 0/'1/4'/'1/8'/'1/16'/'1/32' — controls `arpDelayRef.delayTime`) and `wet` (FeedbackDelay mix 0–1 via `wet.rampTo`). `[ speed snap ]` toggle at bottom controls `arpSpeedSnapRef` in the audio engine. Mounted/unmounted via `[ arp controls ]` toggle in the Controls Arpeggiator section; fader state resets to defaults on remount while audio node params persist independently.
 
 ### Toggle buttons
-Two `position: absolute; z-index: 50` buttons in `App.js` (`.leftToggleBtn` at `top: 16px; left: 16px`, `.rightToggleBtn` at `top: 16px; right: 16px`). Placed outside the panels so they are never affected by the panels' `opacity: 0` collapse state.
+One `position: absolute; z-index: 50` button in `App.js` (`.rightToggleBtn` at `top: 16px; right: 16px`) collapses the TelemetryHUD. The Controls sidebar collapses via its own `.collapseTab` (see Controls sidebar above).
 
 ### Viewport
 `width: 65vw; max-width: 1000px; aspect-ratio: 16/9`. Hosts the mirrored `<video>` feed, the MediaPipe skeleton `<canvas>` overlay, the PianoRoll overlay, the LoopProgress bar, the `VocoderTerminal` overlay, and the `ArpTerminal` overlay. Both video and canvas use `transform: scaleX(-1)` to mirror for natural interaction.
@@ -126,12 +126,13 @@ Two `position: absolute; z-index: 50` buttons in `App.js` (`.leftToggleBtn` at `
 
 ```
 .app  (position: relative; display: flex; justify-content: center; align-items: center)
+  │     data-theme="light" attribute set here when light mode active
   ├── Controls         (position: absolute; left: 0)    ← floats left, out of flow
+  │     └── .collapseTab (position: absolute; left: 100%) ← protrudes from right edge
   ├── .stage           (flex column; z-index: 1)        ← permanently centered by flex
   │     ├── Viewport
   │     └── Engage/Disengage button
   ├── TelemetryHUD     (position: absolute; right: 24px) ← floats right, out of flow
-  ├── .leftToggleBtn   (position: absolute; z-index: 50)
   └── .rightToggleBtn  (position: absolute; z-index: 50)
 ```
 
@@ -196,23 +197,48 @@ All gesture routing constants and defaults live in a single module. Two independ
 6 gesture sources (`right_hand_size`, `right_pinch_norm`, `left_pinch_dist`, `left_wrist_y`, `left_wrist_tilt`, `left_arp_spread`) → 5 audio destinations (`filter_cutoff`, `reverb_wet`, `vibrato_depth`, `volume`, `arp_volume`). Each mapping row: `{ id, source, destination, invert }`. The `invert` flag flips the 0–1 range. Mappings are stored in `mappings` React state in `App.js`; a `mappingsRef` (inline-synced) passes the live value into the rAF loop without re-renders. `updateParams` extracts all signals into a plain `signals{}` object inside each hand block, then iterates `mappingsRef.current` and calls `.rampTo` on the appropriate audio node.
 
 ### Gates (trigger routing)
-15 discrete trigger sources in three groups:
-- **Right hand** (6): `right_no_fingers`, `right_middle`, `right_middle_ring`, `right_pinky`, `right_middle_pinky`, `right_middle_ring_pinky` — selected from `isFingerExtended` middle/ring/pinky combo each frame.
-- **Left hand** (6): `left_no_fingers`, `left_pinky`, `left_middle`, `left_middle_ring`, `left_middle_ring_pinky`, `left_middle_pinky` — selected from `getArpFingerStates` middle/ring/pinky combo each frame.
+17 discrete trigger sources in three groups:
+- **Right hand** (7): `right_no_fingers`, `right_middle`, `right_middle_ring`, `right_pinky`, `right_ring_pinky`, `right_middle_pinky`, `right_middle_ring_pinky` — strict 8-state enumeration of middle/ring/pinky `isFingerExtended` combos each frame.
+- **Left hand** (7): `left_no_fingers`, `left_pinky`, `left_ring_pinky`, `left_middle`, `left_middle_ring`, `left_middle_ring_pinky`, `left_middle_pinky` — strict 8-state enumeration of `getArpFingerStates` middle/ring/pinky combos each frame.
 - **Tilt bands** (3): `left_tilt_low` (< 20°), `left_tilt_mid` (20–60°), `left_tilt_high` (> 60°) — selected from `getWristTiltDeg` each frame.
 
-15 action destinations in three groups: 6 chord types (`chord_root` → `chord_major_7`), 6 arp modes (`arp_off` → `arp_simple_random`), 3 arp rates (`arp_rate_4n/8n/16n`).
+27 action destinations in four groups: 7 chord types (`chord_root` → `chord_major_7` + `chord_root_maj7`), 11 complex chords (sus4, dim, maj/min +oct, maj/min sub-bass, root −2 oct, poly maj/min, maj9, min9), 6 arp modes, 3 arp rates.
 
-**Hot path:** `triggerMap` is a `Map<trigger, destination>` built once per frame from `triggerMappingsRef.current`. Active combo ID → `triggerMap.get(id)` → lookup in `CHORD_DEST_LABELS` / `ARP_DEST_TO_MODE` / `ARP_DEST_TO_RATE`. `resolveChord(dest)` is a pure module-scope function mapping chord destination IDs to `{ voice13, voice7, thirdST, seventhST }`.
+**Hot path:** `updateParams` runs in three phases: **(1) Gather** — each hand block independently produces `activeTriggers[]` and `signals{}`; **(2) Resolve** — iterate `triggerMappingsRef.current`, use `dest in CHORD_DEST_LABELS` / `ARP_DEST_TO_MODE` / `ARP_DEST_TO_RATE` membership to bucket into `targetChord`/`targetArpMode`/`targetArpRate` (cross-hand routing is possible); **(3) Execute** — chord logic calls `resolveChord(targetChord)` returning `{ intervals: number[], thirdST }` — a `for (let i = 0; i < 6; i++)` loop activates voices up to `intervals.length` and mutes the rest.
 
-`DEFAULT_TRIGGER_MAPPINGS` replicates all prior hardcoded chord/arp logic exactly, so behavior is unchanged on first load.
+`DEFAULT_TRIGGER_MAPPINGS` (17 rows) replicates all prior hardcoded behavior exactly.
 
 ### GestureSettings modal (`src/components/GestureSettings/`)
-`position: fixed; z-index: 200` overlay matching viewport dimensions (`width: 65vw; max-width: 1000px; aspect-ratio: 16/9`). Two tabs: **signals** (source → destination → invert toggle, `.row` grid) and **gates** (`<optgroup>`-grouped dropdowns, `.rowNarrow` grid, no invert column). Both tabs have scrollable `.rowList` (`flex: 1; min-height: 0; overflow-y: auto`) and a footer with Add and Restore Defaults actions. Opened via `[ configure routing ]` button in Controls.
+`position: fixed; z-index: 200` overlay matching viewport dimensions (`width: 65vw; max-width: 1000px; aspect-ratio: 16/9`). Two tabs: **signals** (source → destination → invert toggle, `.row` grid) and **gates** (`<optgroup>`-grouped dropdowns, `.rowNarrow` grid, no invert column). Both tabs have scrollable `.rowList` (`flex: 1; min-height: 0; overflow-y: auto`) and a footer with Add and Restore Defaults actions. **Collision detection:** frequency maps computed per-render for all four select types; selects with count > 1 receive a `.warningSelect` class (amber border + glow, uses `var(--warning-color)` for light-mode legibility). Opened via `[ configure routing ]` button in Controls.
 
 ---
 
-## 12. MediaPipe Landmark Index Quick Reference
+## 12. Light / Dark Mode Theming
+
+### Mechanism
+`data-theme="light"` attribute is set on the root `.app` div in `App.js` (controlled by `isDarkMode` React state, default `true`). When absent, all components use `:root` variable values — identical to the previous hardcoded dark palette. No localStorage persistence; theme resets to dark on each page load.
+
+### CSS Variable Layers (`src/index.css`)
+| Category | Variables |
+|----------|-----------|
+| Backgrounds | `--bg-base`, `--bg-panel`, `--bg-elevated`, `--bg-surface`, `--bg-frosted` |
+| Borders | `--border-subtle`, `--border-faint`, `--border-mid`, `--border-strong` |
+| Text | `--text-primary`, `--text-muted`, `--text-dimmer`, `--text-dimmest` |
+| Overlays | `--overlay-bg`, `--input-bg`, `--row-bg`, `--row-border` |
+| Accent/form | `--accent-color`, `--form-text`, `--form-text-mid`, `--form-text-dim`, `--warning-color` |
+| Viewport/piano | `--bg-camera`, `--piano-key-white`, `--piano-key-white-bdr`, `--piano-key-black`, `--piano-key-black-bdr` |
+
+### What adapts vs stays dark
+- **Adapts:** Controls sidebar, TelemetryHUD, GestureSettings modal, MidiModal, Viewport camera bg + idle label, PianoRoll key colors.
+- **Always dark (camera overlays):** ArpTerminal, VocoderTerminal, LoopProgress — they sit on top of the live camera feed and require constant high contrast.
+- **Always accent-colored (unchanged):** `#5DCAA5` borders on focused elements, mint fill on active/engage buttons, recording red, arp flash gold.
+
+### Toggle button
+`◑` / `○` button in the Controls sidebar header (flex row alongside "·· voxdaw" title). `isDarkMode` state lives in `App.js`; passed as `isDarkMode` + `onThemeToggle` props to Controls.
+
+---
+
+## 13. MediaPipe Landmark Index Quick Reference
 
 | Index | Landmark |
 |-------|----------|

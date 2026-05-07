@@ -49,6 +49,21 @@ export default function GestureSettings({
     nextTriggerIdRef.current = DEFAULT_TRIGGER_MAPPINGS.length + 1;
   };
 
+  // Collision detection — count occurrences of each source/destination per tab
+  const sigSourceCounts = {};
+  const sigDestCounts   = {};
+  for (const m of mappings) {
+    sigSourceCounts[m.source]    = (sigSourceCounts[m.source]    || 0) + 1;
+    sigDestCounts[m.destination] = (sigDestCounts[m.destination] || 0) + 1;
+  }
+
+  const triggerCounts  = {};
+  const gateDestCounts = {};
+  for (const m of triggerMappings) {
+    triggerCounts[m.trigger]      = (triggerCounts[m.trigger]      || 0) + 1;
+    gateDestCounts[m.destination] = (gateDestCounts[m.destination] || 0) + 1;
+  }
+
   return (
     <div className={styles.overlay} onMouseDown={onClose}>
       <div className={styles.panel} onMouseDown={e => e.stopPropagation()}>
@@ -88,14 +103,14 @@ export default function GestureSettings({
               )}
               {mappings.map(m => (
                 <div key={m.id} className={styles.row}>
-                  <select className={styles.select} value={m.source}
+                  <select className={`${styles.select} ${sigSourceCounts[m.source] > 1 ? styles.warningSelect : ''}`} value={m.source}
                     onChange={e => handleSignalChange(m.id, 'source', e.target.value)}>
                     {GESTURE_SOURCES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
                   </select>
 
                   <span className={styles.arrow}>→</span>
 
-                  <select className={styles.select} value={m.destination}
+                  <select className={`${styles.select} ${sigDestCounts[m.destination] > 1 ? styles.warningSelect : ''}`} value={m.destination}
                     onChange={e => handleSignalChange(m.id, 'destination', e.target.value)}>
                     {AUDIO_DESTINATIONS.map(d => <option key={d.id} value={d.id}>{d.label}</option>)}
                   </select>
@@ -140,7 +155,7 @@ export default function GestureSettings({
               )}
               {triggerMappings.map(m => (
                 <div key={m.id} className={styles.rowNarrow}>
-                  <select className={styles.select} value={m.trigger}
+                  <select className={`${styles.select} ${triggerCounts[m.trigger] > 1 ? styles.warningSelect : ''}`} value={m.trigger}
                     onChange={e => handleTriggerChange(m.id, 'trigger', e.target.value)}>
                     {TRIGGER_SOURCE_GROUPS.map(g => (
                       <optgroup key={g.group} label={g.label}>
@@ -151,7 +166,7 @@ export default function GestureSettings({
 
                   <span className={styles.arrow}>→</span>
 
-                  <select className={styles.select} value={m.destination}
+                  <select className={`${styles.select} ${gateDestCounts[m.destination] > 1 ? styles.warningSelect : ''}`} value={m.destination}
                     onChange={e => handleTriggerChange(m.id, 'destination', e.target.value)}>
                     {TRIGGER_DESTINATION_GROUPS.map(g => (
                       <optgroup key={g.group} label={g.label}>

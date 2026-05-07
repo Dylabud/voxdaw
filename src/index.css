@@ -4,10 +4,75 @@
   padding: 0;
 }
 
+/* ── Theme variables ─────────────────────────────────────────── */
+:root {
+  --bg-base:        #0e0e10;
+  --bg-panel:       #111114;
+  --bg-elevated:    #16161c;
+  --bg-surface:     #1a1a20;
+  --bg-frosted:     rgba(14, 14, 16, 0.85);
+  --border-subtle:  rgba(255, 255, 255, 0.06);
+  --border-faint:   rgba(255, 255, 255, 0.04);
+  --border-mid:     rgba(255, 255, 255, 0.10);
+  --border-strong:  rgba(255, 255, 255, 0.18);
+  --text-primary:   rgba(200, 200, 204, 0.90);
+  --text-muted:     rgba(200, 200, 204, 0.55);
+  --text-dimmer:    rgba(200, 200, 204, 0.35);
+  --text-dimmest:   rgba(200, 200, 204, 0.25);
+  --overlay-bg:     rgba(10, 10, 12, 0.72);
+  --input-bg:       #16161c;
+  --row-bg:         rgba(255, 255, 255, 0.025);
+  --row-border:     rgba(255, 255, 255, 0.05);
+  /* accent & form-element text — dark values match existing hardcoded colors exactly */
+  --accent-color:   #5DCAA5;
+  --form-text:      rgba(93, 202, 165, 0.80);
+  --form-text-mid:  rgba(93, 202, 165, 0.70);
+  --form-text-dim:  rgba(93, 202, 165, 0.50);
+  --warning-color:  rgba(238, 210, 2, 0.85);
+  /* viewport & piano roll */
+  --bg-camera:            transparent;
+  --piano-key-white:      #1a1a20;
+  --piano-key-white-bdr:  #2a2a2e;
+  --piano-key-black:      #0e0e10;
+  --piano-key-black-bdr:  #1a1a20;
+}
+
+[data-theme="light"] {
+  --bg-base:        #f0ede8;
+  --bg-panel:       #e8e4de;
+  --bg-elevated:    #ddd9d2;
+  --bg-surface:     #f5f2ed;
+  --bg-frosted:     rgba(240, 237, 232, 0.85);
+  --border-subtle:  rgba(0, 0, 0, 0.07);
+  --border-faint:   rgba(0, 0, 0, 0.04);
+  --border-mid:     rgba(0, 0, 0, 0.14);
+  --border-strong:  rgba(0, 0, 0, 0.22);
+  --text-primary:   rgba(30, 28, 25, 0.90);
+  --text-muted:     rgba(30, 28, 25, 0.60);
+  --text-dimmer:    rgba(30, 28, 25, 0.40);
+  --text-dimmest:   rgba(30, 28, 25, 0.25);
+  --overlay-bg:     rgba(240, 237, 232, 0.85);
+  --input-bg:       #ddd9d2;
+  --row-bg:         rgba(0, 0, 0, 0.025);
+  --row-border:     rgba(0, 0, 0, 0.07);
+  /* accent & form-element text — light-mode overrides for legibility */
+  --accent-color:   #1a6b55;
+  --form-text:      rgba(30, 28, 25, 0.85);
+  --form-text-mid:  rgba(30, 28, 25, 0.65);
+  --form-text-dim:  rgba(30, 28, 25, 0.45);
+  --warning-color:  rgba(155, 85, 0, 0.90);
+  /* viewport & piano roll */
+  --bg-camera:            #dedad3;
+  --piano-key-white:      #f5f2ed;
+  --piano-key-white-bdr:  rgba(0, 0, 0, 0.12);
+  --piano-key-black:      #52525c;
+  --piano-key-black-bdr:  #3e3e48;
+}
+
 html, body, #root {
   height: 100%;
-  background: #0e0e10;
-  color: #c8c8cc;
+  background: var(--bg-base);
+  color: var(--text-primary);
   font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace;
   -webkit-font-smoothing: antialiased;
 }

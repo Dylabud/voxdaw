@@ -19,8 +19,8 @@
 .whiteKey {
   flex: 1;
   position: relative;
-  background: #1a1a20;
-  border-bottom: 1px solid #2a2a2e;
+  background: var(--piano-key-white);
+  border-bottom: 1px solid var(--piano-key-white-bdr);
   border-radius: 0 2px 2px 0;
   transition: background 0.04s ease;
 }
@@ -50,9 +50,9 @@
   position: absolute;
   left: 0;
   width: 62%;
-  background: #0e0e10;
+  background: var(--piano-key-black);
   border-radius: 0 2px 2px 0;
-  border-bottom: 1px solid #1a1a20;
+  border-bottom: 1px solid var(--piano-key-black-bdr);
   z-index: 1;
   transition: background 0.04s ease;
 }

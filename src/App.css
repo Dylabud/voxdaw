@@ -5,7 +5,7 @@
   align-items: center;
   width: 100vw;
   height: 100vh;
-  background: #0e0e10;
+  background: var(--bg-base);
   overflow: hidden;
 }
 
@@ -17,14 +17,14 @@
   z-index: 1;
 }
 
-/* ── Panel toggle buttons (independent, always on top) ──────── */
-.leftToggleBtn,
+/* ── Right analytics panel toggle (always on top) ───────────── */
 .rightToggleBtn {
   position: absolute;
   top: 16px;
+  right: 16px;
   z-index: 50;
   appearance: none;
-  background: rgba(14, 14, 16, 0.85);
+  background: var(--bg-frosted);
   border: 1px solid rgba(93, 202, 165, 0.3);
   color: rgba(93, 202, 165, 0.6);
   font-family: inherit;
@@ -40,14 +40,10 @@
   transition: border-color 0.2s, color 0.2s;
 }
 
-.leftToggleBtn:hover,
 .rightToggleBtn:hover {
   border-color: rgba(93, 202, 165, 0.7);
-  color: #5DCAA5;
+  color: var(--accent-color);
 }
-
-.leftToggleBtn  { left:  16px; }
-.rightToggleBtn { right: 16px; }
 
 /* ── Engage / Disengage ──────────────────────────────────────── */
 .engageBtn {

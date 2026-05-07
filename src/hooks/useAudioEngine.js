@@ -10,6 +10,8 @@ import { SCALES, NOTE_GRID } from '../utils/scales';
 // Semitone intervals — explicit counts eliminate ratio approximation ambiguity
 const ST_MIN3 = 3;
 const ST_MAJ3 = 4;
+const ST_P4   = 5;
+const ST_DIM5 = 6;
 const ST_P5   = 7;
 const ST_MIN7 = 10;
 const ST_MAJ7 = 11;
@@ -21,6 +23,8 @@ const INIT_FREQS = [
   Tone.Frequency(440).transpose(ST_MAJ3).toFrequency(),
   Tone.Frequency(440).transpose(ST_P5).toFrequency(),
   Tone.Frequency(440).transpose(ST_MIN7).toFrequency(),
+  Tone.Frequency(440).transpose(12).toFrequency(),
+  Tone.Frequency(440).transpose(12 + ST_MAJ3).toFrequency(),
 ];
 
 // ── Arp constants ──────────────────────────────────────────────────────────────
@@ -64,12 +68,24 @@ function buildArpNotes(rootHz, mode, thirdST) {
 // ── Trigger routing ────────────────────────────────────────────────────────────
 
 const CHORD_DEST_LABELS = {
-  chord_root:    'ROOT',
-  chord_minor:   'MIN',
-  chord_major:   'MAJ',
-  chord_root_7:  'ROOT+7',
-  chord_minor_7: 'MIN 7',
-  chord_major_7: 'MAJ 7',
+  chord_root:      'ROOT',
+  chord_minor:     'MIN',
+  chord_major:     'MAJ',
+  chord_root_7:    'ROOT+7',
+  chord_root_maj7: 'ROOT+M7',
+  chord_minor_7:   'MIN 7',
+  chord_major_7:   'MAJ 7',
+  chord_sus4:      'SUS 4',
+  chord_dim:       'DIM',
+  chord_maj_oct:   'MAJ +8va',
+  chord_min_oct:   'MIN +8va',
+  chord_maj_sub:   'MAJ -8va',
+  chord_min_sub:   'MIN -8va',
+  chord_root_sub2: 'ROOT -2oct',
+  chord_poly_maj:  'POLY MAJ',
+  chord_poly_min:  'POLY MIN',
+  chord_maj_9:     'MAJ 9',
+  chord_min_9:     'MIN 9',
 };
 
 const ARP_DEST_TO_MODE = {
@@ -87,17 +103,29 @@ const ARP_DEST_TO_RATE = {
   arp_rate_16n: '16n',
 };
 
-// Resolves a chord destination ID to voice-activation flags and interval semitones.
-// voice13 gates the 3rd + 5th voices; voice7 gates the 7th voice.
+// Resolves a chord destination ID to an interval array (semitone offsets from root,
+// may be negative for sub-octave) and thirdST (arp quality mirror).
 function resolveChord(dest) {
   switch (dest) {
-    case 'chord_root':    return { voice13: false, voice7: false, thirdST: ST_MAJ3, seventhST: ST_MIN7 };
-    case 'chord_minor':   return { voice13: true,  voice7: false, thirdST: ST_MIN3, seventhST: ST_MIN7 };
-    case 'chord_major':   return { voice13: true,  voice7: false, thirdST: ST_MAJ3, seventhST: ST_MAJ7 };
-    case 'chord_root_7':  return { voice13: false, voice7: true,  thirdST: ST_MIN3, seventhST: ST_MIN7 };
-    case 'chord_minor_7': return { voice13: true,  voice7: true,  thirdST: ST_MIN3, seventhST: ST_MIN7 };
-    case 'chord_major_7': return { voice13: true,  voice7: true,  thirdST: ST_MAJ3, seventhST: ST_MAJ7 };
-    default:              return { voice13: false, voice7: false, thirdST: ST_MAJ3, seventhST: ST_MIN7 };
+    case 'chord_root':      return { intervals: [0],                                             thirdST: ST_MAJ3 };
+    case 'chord_minor':     return { intervals: [0, ST_MIN3, ST_P5],                            thirdST: ST_MIN3 };
+    case 'chord_major':     return { intervals: [0, ST_MAJ3, ST_P5],                            thirdST: ST_MAJ3 };
+    case 'chord_root_7':    return { intervals: [0, ST_MIN7],                                   thirdST: ST_MIN3 };
+    case 'chord_root_maj7': return { intervals: [0, ST_MAJ7],                                   thirdST: ST_MAJ3 };
+    case 'chord_minor_7':   return { intervals: [0, ST_MIN3, ST_P5, ST_MIN7],                   thirdST: ST_MIN3 };
+    case 'chord_major_7':   return { intervals: [0, ST_MAJ3, ST_P5, ST_MAJ7],                   thirdST: ST_MAJ3 };
+    case 'chord_sus4':      return { intervals: [0, ST_P4, ST_P5],                              thirdST: ST_MAJ3 };
+    case 'chord_dim':       return { intervals: [0, ST_MIN3, ST_DIM5],                          thirdST: ST_MIN3 };
+    case 'chord_maj_oct':   return { intervals: [0, ST_MAJ3, ST_P5, 12],                        thirdST: ST_MAJ3 };
+    case 'chord_min_oct':   return { intervals: [0, ST_MIN3, ST_P5, 12],                        thirdST: ST_MIN3 };
+    case 'chord_maj_sub':   return { intervals: [-12, 0, ST_MAJ3, ST_P5],                       thirdST: ST_MAJ3 };
+    case 'chord_min_sub':   return { intervals: [-12, 0, ST_MIN3, ST_P5],                       thirdST: ST_MIN3 };
+    case 'chord_root_sub2': return { intervals: [-24, 0],                                       thirdST: ST_MAJ3 };
+    case 'chord_poly_maj':  return { intervals: [0, ST_MAJ3, ST_P5, 12, 12+ST_MAJ3, 12+ST_P5],  thirdST: ST_MAJ3 };
+    case 'chord_poly_min':  return { intervals: [0, ST_MIN3, ST_P5, 12, 12+ST_MIN3, 12+ST_P5],  thirdST: ST_MIN3 };
+    case 'chord_maj_9':     return { intervals: [0, ST_MAJ3, ST_P5, ST_MAJ7, 14],               thirdST: ST_MAJ3 };
+    case 'chord_min_9':     return { intervals: [0, ST_MIN3, ST_P5, ST_MIN7, 14],               thirdST: ST_MIN3 };
+    default:                return { intervals: [0],                                              thirdST: ST_MAJ3 };
   }
 }
 
@@ -195,16 +223,20 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       const filter = new Tone.Filter({ frequency: 5000, type: 'lowpass', rolloff: -24 });
       filter.connect(vibrato);
 
-      // Analog chord voices
+      // Analog chord voices (6 for complex chord support; voice 0 audible, rest muted)
       const analogVoices = [
         makeAnalogVoice(oscTypeRef.current),
         makeAnalogVoice(oscTypeRef.current, VOICE_MUTE),
         makeAnalogVoice(oscTypeRef.current, VOICE_MUTE),
         makeAnalogVoice(oscTypeRef.current, VOICE_MUTE),
+        makeAnalogVoice(oscTypeRef.current, VOICE_MUTE),
+        makeAnalogVoice(oscTypeRef.current, VOICE_MUTE),
       ];
 
-      // Strings chord voices
+      // Strings chord voices (all muted until instrument switch)
       const stringsVoices = [
+        makeStringsVoice(VOICE_MUTE),
+        makeStringsVoice(VOICE_MUTE),
         makeStringsVoice(VOICE_MUTE),
         makeStringsVoice(VOICE_MUTE),
         makeStringsVoice(VOICE_MUTE),
@@ -289,7 +321,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
     } else {
       // Re-engage: voices still alive (dispose timer was cleared)
       const allVoices = [...analogVoicesRef.current, ...stringsVoicesRef.current];
-      allVoices.forEach((v, i) => v.triggerAttack(INIT_FREQS[i % 4]));
+      allVoices.forEach((v, i) => v.triggerAttack(INIT_FREQS[i]));
       activeVoicesRef.current[0].volume.value = VOICE_DB;
 
       // Restore arp routing state
@@ -371,15 +403,23 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
     const hud    = hudRefsRef.current;
     const voices = activeVoicesRef.current;
 
-    // Gesture signals extracted this frame (0–1 normalized). Only populated when
-    // the relevant hand is visible — mapping loop skips absent sources automatically.
-    const signals = {};
-
     // Build trigger lookup once per frame (source → destination).
     const triggerMap = new Map((triggerMappingsRef?.current ?? []).map(m => [m.trigger, m.destination]));
 
+    // ── Phase 1: Gather ──────────────────────────────────────────────────────────
+    // Loop both hands. Collect active trigger IDs and continuous signals.
+    // No Tone.js calls here — pure data extraction.
+    const signals        = {};
+    const activeTriggers = [];
+
     let pitchHandFound = false;
     let arpHandFound   = false;
+
+    // Hoisted right-hand values consumed in the execution phase
+    let root = 440, chordVel = 64;
+
+    // Hoisted left-hand values consumed in the execution phase
+    let arpHand = null, arpFingerStates = null, arpHandSize = 0, tilt = 0;
 
     for (let i = 0; i < landmarks.length; i++) {
       const hand = landmarks[i];
@@ -391,7 +431,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       const label = handednesses[i][0].categoryName;
 
       if (label === 'Left') {
-        // ── RIGHT HAND: pitch + chord voicing + signal extraction ───────
+        // ── RIGHT HAND: pitch root + right-hand combo ───────────────────
         pitchHandFound = true;
 
         const SAFE_TOP    = 0.15;
@@ -399,191 +439,182 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
         const safeY    = Math.max(0, Math.min(1, (wrist.y - SAFE_TOP) / (SAFE_BOTTOM - SAFE_TOP)));
         const gridIdx  = Math.min(Math.floor(safeY * NOTE_GRID.length), NOTE_GRID.length - 1);
         const rawPitch = Tone.Frequency(NOTE_GRID[gridIdx].note).transpose(globalOctaveRef.current * 12).toFrequency();
-        const root     = snapToNearest(rawPitch, scaleRef.current);
+        root           = snapToNearest(rawPitch, scaleRef.current);
         currentRootRef.current = root;
 
         const midMCP          = hand[9];
         const handSize        = calculateDistance2D(wrist, midMCP);
         const normalizedPinch = calculateDistance2D(thumbTip, indexTip) / handSize;
-        const chordVel        = Math.max(1, Math.min(127, Math.round(mapRange(normalizedPinch, 0.2, 1.2, 0, 127))));
+        chordVel = Math.max(1, Math.min(127, Math.round(mapRange(normalizedPinch, 0.2, 1.2, 0, 127))));
 
-        // Extract continuous signals (0–1 clamped) for the mapping loop
         signals.right_hand_size  = Math.max(0, Math.min(1, mapRange(handSize, 0.08, 0.35, 0, 1)));
         signals.right_pinch_norm = Math.max(0, Math.min(1, mapRange(normalizedPinch, 0.2, 1.2, 0, 1)));
 
-        // ── Chord voicing via trigger routing ───────────────────────────
         const middleUp = isFingerExtended(hand, 12, 9);
         const ringUp   = isFingerExtended(hand, 16, 13);
         const pinkyUp  = isFingerExtended(hand, 20, 17);
 
-        // Map current finger state to the active right-hand combo ID
         let activeRightCombo;
-        if      (!middleUp && !pinkyUp)            activeRightCombo = 'right_no_fingers';
+        if      (!middleUp && !ringUp && !pinkyUp) activeRightCombo = 'right_no_fingers';
         else if ( middleUp && !ringUp && !pinkyUp) activeRightCombo = 'right_middle';
         else if ( middleUp &&  ringUp && !pinkyUp) activeRightCombo = 'right_middle_ring';
-        else if (!middleUp &&  pinkyUp)            activeRightCombo = 'right_pinky';
+        else if (!middleUp && !ringUp &&  pinkyUp) activeRightCombo = 'right_pinky';
+        else if (!middleUp &&  ringUp &&  pinkyUp) activeRightCombo = 'right_ring_pinky';
         else if ( middleUp && !ringUp &&  pinkyUp) activeRightCombo = 'right_middle_pinky';
-        else                                       activeRightCombo = 'right_middle_ring_pinky';
+        else if ( middleUp &&  ringUp &&  pinkyUp) activeRightCombo = 'right_middle_ring_pinky';
+        else                                       activeRightCombo = 'right_no_fingers';
 
-        const chordDest = triggerMap.get(activeRightCombo) ?? 'chord_root';
-        const { voice13, voice7, thirdST, seventhST } = resolveChord(chordDest);
-        arpThirdSTRef.current = thirdST;
-
-        const thirdFreq   = Tone.Frequency(root).transpose(thirdST).toFrequency();
-        const fifthFreq   = Tone.Frequency(root).transpose(ST_P5).toFrequency();
-        const seventhFreq = Tone.Frequency(root).transpose(seventhST).toFrequency();
-
-        voices[0].frequency.rampTo(root, 0.05);
-
-        if (voice13) {
-          voices[1].frequency.rampTo(thirdFreq, 0.05);
-          voices[2].frequency.rampTo(fifthFreq, 0.05);
-          voices[1].volume.rampTo(VOICE_DB, 0.05);
-          voices[2].volume.rampTo(VOICE_DB, 0.05);
-        } else {
-          voices[1].volume.rampTo(VOICE_MUTE, 0.05);
-          voices[2].volume.rampTo(VOICE_MUTE, 0.05);
-        }
-
-        voices[3].frequency.rampTo(seventhFreq, 0.05);
-        voices[3].volume.rampTo(voice7 ? VOICE_DB : VOICE_MUTE, 0.05);
-
-        if (hud?.chord?.current)
-          hud.chord.current.textContent = CHORD_DEST_LABELS[chordDest] ?? 'ROOT';
-
-        const activeNoteNames = [normalizeNote(Tone.Frequency(root).toNote())];
-        if (voice13) {
-          activeNoteNames.push(normalizeNote(Tone.Frequency(root).transpose(thirdST).toNote()));
-          activeNoteNames.push(normalizeNote(Tone.Frequency(root).transpose(ST_P5).toNote()));
-        }
-        if (voice7) {
-          activeNoteNames.push(normalizeNote(Tone.Frequency(root).transpose(seventhST).toNote()));
-        }
-        hud?.pianoRoll?.current?.setNotes(activeNoteNames);
-
-        // Feed active chord + live arp frequencies to the vocoder carrier
-        const vocoderFreqs = [root];
-        if (voice13) { vocoderFreqs.push(thirdFreq, fifthFreq); }
-        if (voice7)  { vocoderFreqs.push(seventhFreq); }
-        if (arpModeRef.current !== 'off' && currentArpFreqRef.current !== null) {
-          vocoderFreqs.push(currentArpFreqRef.current);
-        }
-        updateVocoderRef.current?.(vocoderFreqs);
-
-        // ── Chord MIDI diff ─────────────────────────────────────────────
-        const newMidiSet = new Set();
-        newMidiSet.add(Math.round(Tone.Frequency(root).toMidi()));
-        if (voice13) {
-          newMidiSet.add(Math.round(Tone.Frequency(root).transpose(thirdST).toMidi()));
-          newMidiSet.add(Math.round(Tone.Frequency(root).transpose(ST_P5).toMidi()));
-        }
-        if (voice7) {
-          newMidiSet.add(Math.round(Tone.Frequency(root).transpose(seventhST).toMidi()));
-        }
-        const smChord = sendMidiRef.current;
-        if (smChord) {
-          chordMidiRef.current.forEach(n => { if (!newMidiSet.has(n)) smChord('noteoff', n); });
-          newMidiSet.forEach(n => { if (!chordMidiRef.current.has(n)) smChord('noteon', n, chordVel); });
-        }
-        chordMidiRef.current = newMidiSet;
-
-        if (hud?.pitch?.current)
-          hud.pitch.current.textContent = `${Math.round(root)} Hz`;
+        activeTriggers.push(activeRightCombo);
 
       } else {
-        // ── LEFT HAND: arp control + signal extraction ──────────────────
-        arpHandFound = true;
-
-        // Hand size on the arp hand — normalizes spread against camera distance
-        const arpHandSize = calculateDistance2D(wrist, hand[9]);
-
-        // Arp mode via trigger routing (rotation-robust finger detection)
-        const { middleOut, ringOut, pinkyOut } = getArpFingerStates(hand);
+        // ── LEFT HAND: arp hand data + left-hand combos + tilt band ─────
+        arpHandFound   = true;
+        arpHand        = hand;
+        arpHandSize    = calculateDistance2D(wrist, hand[9]);
+        arpFingerStates = getArpFingerStates(hand);
+        const { middleOut, ringOut, pinkyOut } = arpFingerStates;
 
         let activeLeftCombo;
-        if      (!middleOut && !pinkyOut)             activeLeftCombo = 'left_no_fingers';
-        else if (!middleOut &&  pinkyOut)             activeLeftCombo = 'left_pinky';
+        if      (!middleOut && !ringOut && !pinkyOut) activeLeftCombo = 'left_no_fingers';
+        else if (!middleOut && !ringOut &&  pinkyOut) activeLeftCombo = 'left_pinky';
+        else if (!middleOut &&  ringOut &&  pinkyOut) activeLeftCombo = 'left_ring_pinky';
         else if ( middleOut && !ringOut && !pinkyOut) activeLeftCombo = 'left_middle';
         else if ( middleOut &&  ringOut && !pinkyOut) activeLeftCombo = 'left_middle_ring';
         else if ( middleOut &&  ringOut &&  pinkyOut) activeLeftCombo = 'left_middle_ring_pinky';
-        else                                          activeLeftCombo = 'left_middle_pinky';
+        else if ( middleOut && !ringOut &&  pinkyOut) activeLeftCombo = 'left_middle_pinky';
+        else                                          activeLeftCombo = 'left_no_fingers';
 
-        const arpModeDest = triggerMap.get(activeLeftCombo) ?? 'arp_off';
-        const mode = ARP_DEST_TO_MODE[arpModeDest] ?? 'off';
+        activeTriggers.push(activeLeftCombo);
 
-        // Arp rate via trigger routing (tilt bands)
-        const tilt = getWristTiltDeg(hand);
+        tilt = getWristTiltDeg(hand);
         let activeTiltBand;
         if      (tilt < 20) activeTiltBand = 'left_tilt_low';
         else if (tilt < 60) activeTiltBand = 'left_tilt_mid';
         else                activeTiltBand = 'left_tilt_high';
 
-        const rateDest = triggerMap.get(activeTiltBand) ?? 'arp_rate_8n';
-        const rate = ARP_DEST_TO_RATE[rateDest] ?? '8n';
+        activeTriggers.push(activeTiltBand);
 
-        arpRateRef.current = rate;
-
-        const pat = arpPatternRef.current;
-        let spreadDb = 3;
-        if (mode !== 'off') {
-          spreadDb = getArpSpreadDb(hand, { middleOut, ringOut, pinkyOut }, arpHandSize);
-          // Map spreadDb [-12, 3] → MIDI velocity [1, 127] (monotonic, same gesture)
-          arpVelocityRef.current = Math.max(1, Math.min(127, Math.round(mapRange(spreadDb, -12, 3, 1, 127))));
-
-          // Rewrite values/pattern only when structural params change (rate excluded)
-          const rootNow          = currentRootRef.current;
-          const effectiveArpRoot = arpOctaveShiftRef.current
-            ? Tone.Frequency(rootNow).transpose(12).toFrequency()
-            : rootNow;
-          const thirdNow = arpThirdSTRef.current;
-          if (
-            mode             !== appliedArpModeRef.current  ||
-            effectiveArpRoot !== appliedArpRootRef.current  ||
-            thirdNow         !== appliedArpThirdRef.current
-          ) {
-            if (pat) {
-              pat.values  = buildArpNotes(effectiveArpRoot, mode, thirdNow);
-              pat.pattern = ARP_PATTERN_TYPE[mode];
-            }
-            appliedArpModeRef.current  = mode;
-            appliedArpRootRef.current  = effectiveArpRoot;
-            appliedArpThirdRef.current = thirdNow;
-          }
-
-          // Interval: discrete snap or fluid continuous
-          if (arpSpeedSnapRef.current) {
-            if (rate !== appliedArpRateRef.current) {
-              if (pat) pat.interval = rate;
-              appliedArpRateRef.current = rate;
-            }
-          } else {
-            // Fluid: lerp toward target (8%/frame) — decoupled from the scheduler;
-            // the pattern callback reads this ref and applies it at note-fire time
-            const targetInterval = mapRange(tilt, 0, 90, 0.5, 0.05);
-            smoothedFluidIntervalRef.current +=
-              (targetInterval - smoothedFluidIntervalRef.current) * 0.08;
-            appliedArpRateRef.current = null; // ensure snap re-applies when toggled back
-          }
-
-          signals.left_arp_spread = Math.max(0, Math.min(1, mapRange(spreadDb, -12, 3, 0, 1)));
-        }
-        arpModeRef.current = mode;
-
-        // Extract continuous signals for the mapping loop
         signals.left_pinch_dist = Math.max(0, Math.min(1, mapRange(dist, 0.03, 0.20, 0, 1)));
         signals.left_wrist_y    = wrist.y;
         signals.left_wrist_tilt = Math.max(0, Math.min(1, mapRange(tilt, 0, 90, 0, 1)));
-
-        if (hud?.arp?.current)
-          hud.arp.current.textContent = mode === 'off'
-            ? 'OFF'
-            : `${ARP_MODE_LABEL[mode]} ${rate}`;
-        if (hud?.arpVol?.current)
-          hud.arpVol.current.textContent = mode === 'off' ? '--' : `${Math.round(spreadDb)} dB`;
       }
     }
 
-    // ── Apply gesture mappings to audio parameters ───────────────────────────
+    // ── Phase 2: Resolve ─────────────────────────────────────────────────────────
+    // Each active trigger ID is looked up in triggerMap. Destinations are bucketed
+    // by type — any trigger from either hand can now route to any destination category.
+    let targetChord   = 'chord_root';
+    let targetArpMode = 'arp_off';
+    let targetArpRate = 'arp_rate_8n';
+
+    for (const triggerId of activeTriggers) {
+      const dest = triggerMap.get(triggerId);
+      if (!dest) continue;
+      if (dest in CHORD_DEST_LABELS)     targetChord   = dest;
+      else if (dest in ARP_DEST_TO_RATE) targetArpRate = dest;
+      else if (dest in ARP_DEST_TO_MODE) targetArpMode = dest;
+    }
+
+    // ── Phase 3: Execute ─────────────────────────────────────────────────────────
+
+    // Chord execution — only when the pitch hand is visible
+    if (pitchHandFound) {
+      const { intervals, thirdST } = resolveChord(targetChord);
+      arpThirdSTRef.current = thirdST;
+
+      const activeNoteNames = [];
+      const vocoderFreqs    = [];
+      const newMidiSet      = new Set();
+
+      for (let i = 0; i < 6; i++) {
+        if (i < intervals.length) {
+          const freq = Tone.Frequency(root).transpose(intervals[i]).toFrequency();
+          voices[i].frequency.rampTo(freq, 0.05);
+          voices[i].volume.rampTo(VOICE_DB, 0.05);
+          activeNoteNames.push(normalizeNote(Tone.Frequency(freq).toNote()));
+          vocoderFreqs.push(freq);
+          newMidiSet.add(Math.round(Tone.Frequency(freq).toMidi()));
+        } else {
+          voices[i].volume.rampTo(VOICE_MUTE, 0.05);
+        }
+      }
+
+      if (arpModeRef.current !== 'off' && currentArpFreqRef.current !== null) {
+        vocoderFreqs.push(currentArpFreqRef.current);
+      }
+
+      hud?.pianoRoll?.current?.setNotes(activeNoteNames);
+      updateVocoderRef.current?.(vocoderFreqs);
+
+      if (hud?.chord?.current)
+        hud.chord.current.textContent = CHORD_DEST_LABELS[targetChord] ?? 'ROOT';
+      if (hud?.pitch?.current)
+        hud.pitch.current.textContent = `${Math.round(root)} Hz`;
+
+      const smChord = sendMidiRef.current;
+      if (smChord) {
+        chordMidiRef.current.forEach(n => { if (!newMidiSet.has(n)) smChord('noteoff', n); });
+        newMidiSet.forEach(n => { if (!chordMidiRef.current.has(n)) smChord('noteon', n, chordVel); });
+      }
+      chordMidiRef.current = newMidiSet;
+    }
+
+    // Arp execution — only when the arp hand is visible
+    if (arpHandFound) {
+      const mode = ARP_DEST_TO_MODE[targetArpMode] ?? 'off';
+      const rate = ARP_DEST_TO_RATE[targetArpRate] ?? '8n';
+      arpRateRef.current = rate;
+
+      const pat = arpPatternRef.current;
+      let spreadDb = 3;
+      if (mode !== 'off') {
+        spreadDb = getArpSpreadDb(arpHand, arpFingerStates, arpHandSize);
+        arpVelocityRef.current = Math.max(1, Math.min(127, Math.round(mapRange(spreadDb, -12, 3, 1, 127))));
+
+        const rootNow          = currentRootRef.current;
+        const effectiveArpRoot = arpOctaveShiftRef.current
+          ? Tone.Frequency(rootNow).transpose(12).toFrequency()
+          : rootNow;
+        const thirdNow = arpThirdSTRef.current;
+        if (
+          mode             !== appliedArpModeRef.current  ||
+          effectiveArpRoot !== appliedArpRootRef.current  ||
+          thirdNow         !== appliedArpThirdRef.current
+        ) {
+          if (pat) {
+            pat.values  = buildArpNotes(effectiveArpRoot, mode, thirdNow);
+            pat.pattern = ARP_PATTERN_TYPE[mode];
+          }
+          appliedArpModeRef.current  = mode;
+          appliedArpRootRef.current  = effectiveArpRoot;
+          appliedArpThirdRef.current = thirdNow;
+        }
+
+        if (arpSpeedSnapRef.current) {
+          if (rate !== appliedArpRateRef.current) {
+            if (pat) pat.interval = rate;
+            appliedArpRateRef.current = rate;
+          }
+        } else {
+          const targetInterval = mapRange(tilt, 0, 90, 0.5, 0.05);
+          smoothedFluidIntervalRef.current +=
+            (targetInterval - smoothedFluidIntervalRef.current) * 0.08;
+          appliedArpRateRef.current = null;
+        }
+
+        signals.left_arp_spread = Math.max(0, Math.min(1, mapRange(spreadDb, -12, 3, 0, 1)));
+      }
+      arpModeRef.current = mode;
+
+      if (hud?.arp?.current)
+        hud.arp.current.textContent = mode === 'off'
+          ? 'OFF'
+          : `${ARP_MODE_LABEL[mode]} ${rate}`;
+      if (hud?.arpVol?.current)
+        hud.arpVol.current.textContent = mode === 'off' ? '--' : `${Math.round(spreadDb)} dB`;
+    }
+
+    // ── Phase 4: Apply continuous signal mappings ────────────────────────────────
     // Each mapping reads a 0–1 signal, optionally inverts it, then ramps the
     // destination audio node. HUD updates happen here so they always reflect
     // whatever is actually mapped (not just the default layout).
@@ -679,10 +710,12 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
     newVoices[0].volume.rampTo(VOICE_DB, 0.1);
 
     const root = currentRootRef.current;
-    newVoices[0].frequency.rampTo(root, 0.05);
-    newVoices[1].frequency.rampTo(Tone.Frequency(root).transpose(ST_MAJ3).toFrequency(), 0.05);
-    newVoices[2].frequency.rampTo(Tone.Frequency(root).transpose(ST_P5).toFrequency(), 0.05);
-    newVoices[3].frequency.rampTo(Tone.Frequency(root).transpose(ST_MIN7).toFrequency(), 0.05);
+    const semitones = [0, ST_MAJ3, ST_P5, ST_MIN7, 12, 12 + ST_MAJ3];
+    for (let i = 0; i < newVoices.length; i++) {
+      newVoices[i].frequency.rampTo(
+        Tone.Frequency(root).transpose(semitones[i]).toFrequency(), 0.05
+      );
+    }
 
     activeVoicesRef.current = newVoices;
   }, []);

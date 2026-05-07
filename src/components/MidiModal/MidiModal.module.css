@@ -1,7 +1,7 @@
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.8);
+  background: var(--overlay-bg);
   backdrop-filter: blur(4px);
   z-index: 100;
   display: flex;
@@ -10,7 +10,7 @@
 }
 
 .box {
-  background: #111114;
+  background: var(--bg-panel);
   border: 1px solid rgba(93, 202, 165, 0.3);
   border-radius: 8px;
   padding: 32px;
@@ -26,27 +26,27 @@
   font-size: 1.1rem;
   font-weight: 600;
   letter-spacing: 0.06em;
-  color: #5DCAA5;
+  color: var(--accent-color);
 }
 
 .body {
   margin: 0;
   font-size: 0.82rem;
   line-height: 1.6;
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--text-muted);
 }
 
 .code {
   font-family: monospace;
   background: rgba(93, 202, 165, 0.1);
-  color: #5DCAA5;
+  color: var(--accent-color);
   padding: 1px 5px;
   border-radius: 3px;
   font-size: 0.8em;
 }
 
 .link {
-  color: #5DCAA5;
+  color: var(--accent-color);
   text-decoration: none;
 }
 
@@ -70,9 +70,9 @@
 .ghostBtn {
   padding: 12px 24px;
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid var(--border-mid);
   border-radius: 4px;
-  color: #ffffff;
+  color: var(--text-primary);
   font-family: inherit;
   font-size: 0.8rem;
   letter-spacing: 0.05em;
@@ -82,16 +82,16 @@
 
 .ghostBtn:hover {
   border-color: rgba(93, 202, 165, 0.8);
-  color: #5DCAA5;
+  color: var(--accent-color);
 }
 
 .primaryBtn {
   flex: 1;
   padding: 8px 16px;
   background: rgba(93, 202, 165, 0.15);
-  border: 2px solid #5DCAA5;
+  border: 2px solid var(--accent-color);
   border-radius: 4px;
-  color: #5DCAA5;
+  color: var(--accent-color);
   font-family: inherit;
   font-size: 0.8rem;
   letter-spacing: 0.05em;
@@ -109,9 +109,9 @@
 .closeBtn {
   padding: 8px 16px;
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid var(--border-mid);
   border-radius: 4px;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--text-muted);
   font-family: inherit;
   font-size: 0.8rem;
   letter-spacing: 0.05em;
@@ -120,6 +120,6 @@
 }
 
 .closeBtn:hover {
-  border-color: rgba(255, 255, 255, 0.35);
-  color: rgba(255, 255, 255, 0.8);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
 }
