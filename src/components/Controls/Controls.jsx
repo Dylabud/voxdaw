@@ -18,6 +18,7 @@ export default function Controls({
   arpFxEnabled, onArpFxToggle,
   isArpTerminalOpen, onArpTerminalToggle,
   onRecord, isRecording, isLooping,
+  onGestureSettingsOpen,
 }) {
   const [instrument, setInstrumentState] = useState('analog');
   const [oscType, setOscType]            = useState('sine');
@@ -145,7 +146,15 @@ export default function Controls({
         </button>
       </div>
 
-      {/* ── Group 4: Output ── */}
+      {/* ── Group 4: Gesture Routing ── */}
+      <div className={styles.section}>
+        <div className={styles.sectionTitle}>gesture routing</div>
+        <button className={styles.toggleBtn} onClick={onGestureSettingsOpen}>
+          [ configure routing ]
+        </button>
+      </div>
+
+      {/* ── Group 5: Output ── */}
       <div className={styles.section}>
         <div className={styles.sectionTitle}>output</div>
 

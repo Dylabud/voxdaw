@@ -1,0 +1,273 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 10, 12, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.panel {
+  background: #111114;
+  border: 1px dashed rgba(93, 202, 165, 0.75);
+  border-radius: 4px;
+  width: 65vw;
+  max-width: 1000px;
+  aspect-ratio: 16 / 9;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  box-shadow: 0 0 48px rgba(93, 202, 165, 0.12), inset 0 0 60px rgba(93, 202, 165, 0.05);
+  overflow: hidden;
+}
+
+/* ── Header ─────────────────────────────────────────────── */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.title {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #5DCAA5;
+}
+
+.closeBtn {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  transition: color 0.15s;
+}
+.closeBtn:hover { color: #fff; }
+
+/* ── Tab nav ─────────────────────────────────────────────── */
+
+.tabNav {
+  display: flex;
+  gap: 2px;
+  padding: 10px 20px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.tab,
+.tabActive {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 5px 10px 8px;
+  font-family: 'Courier New', monospace;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  transition: all 0.15s;
+  color: rgba(255, 255, 255, 0.3);
+  margin-bottom: -1px;
+}
+.tab:hover { color: rgba(255, 255, 255, 0.6); }
+
+.tabActive {
+  color: #5DCAA5;
+  border-bottom-color: #5DCAA5;
+}
+
+/* ── Subheader ───────────────────────────────────────────── */
+
+.subheader {
+  padding: 8px 20px 10px;
+  font-family: 'Courier New', monospace;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.35);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+/* ── Column labels ───────────────────────────────────────── */
+
+.columnLabels {
+  display: grid;
+  grid-template-columns: 1fr 20px 1fr 36px 28px;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 20px 4px;
+  font-family: 'Courier New', monospace;
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.25);
+}
+
+/* ── Row list ────────────────────────────────────────────── */
+
+.rowList {
+  padding: 6px 20px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(93, 202, 165, 0.2) transparent;
+}
+.rowList::-webkit-scrollbar { width: 4px; }
+.rowList::-webkit-scrollbar-track { background: transparent; }
+.rowList::-webkit-scrollbar-thumb { background: rgba(93, 202, 165, 0.2); border-radius: 2px; }
+
+.emptyState {
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.2);
+  text-align: center;
+  padding: 20px 0;
+  letter-spacing: 0.06em;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 20px 1fr 36px 28px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transition: border-color 0.15s;
+}
+.row:hover { border-color: rgba(93, 202, 165, 0.15); }
+
+.rowNarrow {
+  display: grid;
+  grid-template-columns: 1fr 20px 1fr 28px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  transition: border-color 0.15s;
+}
+.rowNarrow:hover { border-color: rgba(93, 202, 165, 0.15); }
+
+/* ── Select ──────────────────────────────────────────────── */
+
+.select {
+  appearance: none;
+  background: #16161c url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%235DCAA5'/%3E%3C/svg%3E") no-repeat right 8px center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.82);
+  font-family: 'Courier New', monospace;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  padding: 5px 22px 5px 8px;
+  width: 100%;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.select:hover { border-color: rgba(93, 202, 165, 0.4); }
+.select:focus { outline: none; border-color: rgba(93, 202, 165, 0.6); }
+.select option { background: #16161c; color: #fff; }
+
+/* ── Arrow glyph ─────────────────────────────────────────── */
+
+.arrow {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: rgba(93, 202, 165, 0.5);
+  text-align: center;
+}
+
+/* ── Invert button ───────────────────────────────────────── */
+
+.invertBtn,
+.invertBtnActive {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 0;
+  width: 100%;
+  cursor: pointer;
+  transition: all 0.15s;
+  color: rgba(255, 255, 255, 0.3);
+}
+.invertBtn:hover { border-color: rgba(93, 202, 165, 0.3); color: rgba(93, 202, 165, 0.6); }
+
+.invertBtnActive {
+  border-color: rgba(93, 202, 165, 0.5);
+  color: #5DCAA5;
+  background: rgba(93, 202, 165, 0.08);
+}
+.invertBtnActive:hover { background: rgba(93, 202, 165, 0.15); }
+
+/* ── Delete button ───────────────────────────────────────── */
+
+.deleteBtn {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.25);
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 0;
+  width: 100%;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.deleteBtn:hover {
+  border-color: rgba(224, 112, 112, 0.4);
+  color: rgba(224, 112, 112, 0.8);
+  background: rgba(224, 112, 112, 0.06);
+}
+
+/* ── Footer ──────────────────────────────────────────────── */
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  gap: 10px;
+}
+
+.addBtn,
+.resetBtn {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.55);
+  font-family: 'Courier New', monospace;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.addBtn:hover {
+  border-color: rgba(93, 202, 165, 0.45);
+  color: #5DCAA5;
+  background: rgba(93, 202, 165, 0.06);
+}
+.resetBtn:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+  color: rgba(255, 255, 255, 0.82);
+  background: rgba(255, 255, 255, 0.04);
+}
+

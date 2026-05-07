@@ -188,7 +188,31 @@ A `position: absolute; bottom: 12px; left: 56px; z-index: 50` overlay inside `.v
 
 ---
 
-## 11. MediaPipe Landmark Index Quick Reference
+## 11. Gesture Routing System (`src/utils/gestureMappings.js`)
+
+All gesture routing constants and defaults live in a single module. Two independent routing layers:
+
+### Signals (continuous modulation matrix)
+6 gesture sources (`right_hand_size`, `right_pinch_norm`, `left_pinch_dist`, `left_wrist_y`, `left_wrist_tilt`, `left_arp_spread`) → 5 audio destinations (`filter_cutoff`, `reverb_wet`, `vibrato_depth`, `volume`, `arp_volume`). Each mapping row: `{ id, source, destination, invert }`. The `invert` flag flips the 0–1 range. Mappings are stored in `mappings` React state in `App.js`; a `mappingsRef` (inline-synced) passes the live value into the rAF loop without re-renders. `updateParams` extracts all signals into a plain `signals{}` object inside each hand block, then iterates `mappingsRef.current` and calls `.rampTo` on the appropriate audio node.
+
+### Gates (trigger routing)
+15 discrete trigger sources in three groups:
+- **Right hand** (6): `right_no_fingers`, `right_middle`, `right_middle_ring`, `right_pinky`, `right_middle_pinky`, `right_middle_ring_pinky` — selected from `isFingerExtended` middle/ring/pinky combo each frame.
+- **Left hand** (6): `left_no_fingers`, `left_pinky`, `left_middle`, `left_middle_ring`, `left_middle_ring_pinky`, `left_middle_pinky` — selected from `getArpFingerStates` middle/ring/pinky combo each frame.
+- **Tilt bands** (3): `left_tilt_low` (< 20°), `left_tilt_mid` (20–60°), `left_tilt_high` (> 60°) — selected from `getWristTiltDeg` each frame.
+
+15 action destinations in three groups: 6 chord types (`chord_root` → `chord_major_7`), 6 arp modes (`arp_off` → `arp_simple_random`), 3 arp rates (`arp_rate_4n/8n/16n`).
+
+**Hot path:** `triggerMap` is a `Map<trigger, destination>` built once per frame from `triggerMappingsRef.current`. Active combo ID → `triggerMap.get(id)` → lookup in `CHORD_DEST_LABELS` / `ARP_DEST_TO_MODE` / `ARP_DEST_TO_RATE`. `resolveChord(dest)` is a pure module-scope function mapping chord destination IDs to `{ voice13, voice7, thirdST, seventhST }`.
+
+`DEFAULT_TRIGGER_MAPPINGS` replicates all prior hardcoded chord/arp logic exactly, so behavior is unchanged on first load.
+
+### GestureSettings modal (`src/components/GestureSettings/`)
+`position: fixed; z-index: 200` overlay matching viewport dimensions (`width: 65vw; max-width: 1000px; aspect-ratio: 16/9`). Two tabs: **signals** (source → destination → invert toggle, `.row` grid) and **gates** (`<optgroup>`-grouped dropdowns, `.rowNarrow` grid, no invert column). Both tabs have scrollable `.rowList` (`flex: 1; min-height: 0; overflow-y: auto`) and a footer with Add and Restore Defaults actions. Opened via `[ configure routing ]` button in Controls.
+
+---
+
+## 12. MediaPipe Landmark Index Quick Reference
 
 | Index | Landmark |
 |-------|----------|

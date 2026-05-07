@@ -10,6 +10,8 @@ import Viewport from './components/Viewport/Viewport';
 import TelemetryHUD from './components/TelemetryHUD/TelemetryHUD';
 import Controls from './components/Controls/Controls';
 import MidiModal from './components/MidiModal/MidiModal';
+import GestureSettings from './components/GestureSettings/GestureSettings';
+import { DEFAULT_MAPPINGS, DEFAULT_TRIGGER_MAPPINGS } from './utils/gestureMappings';
 
 export default function App() {
   const pitchRef     = useRef(null);
@@ -31,11 +33,22 @@ export default function App() {
   const [arpSpeedSnap,      setArpSpeedSnapState]   = useState(true);
   const [showControls,      setShowControls]        = useState(true);
   const [showAnalytics,  setShowAnalytics]        = useState(true);
-  const [showMidiModal,  setShowMidiModal]        = useState(false);
+  const [showMidiModal,        setShowMidiModal]        = useState(false);
+  const [showGestureSettings,  setShowGestureSettings]  = useState(false);
+  const [mappings,             setMappings]             = useState(DEFAULT_MAPPINGS);
+
+  // Keep mappingsRef in sync with state — same pattern as hudRefsRef in useAudioEngine.
+  // The rAF loop reads mappingsRef.current so it always sees the latest without re-render.
+  const mappingsRef = useRef(mappings);
+  mappingsRef.current = mappings;
+
+  const [triggerMappings, setTriggerMappings] = useState(DEFAULT_TRIGGER_MAPPINGS);
+  const triggerMappingsRef = useRef(triggerMappings);
+  triggerMappingsRef.current = triggerMappings;
 
   const { isMidiEnabled, toggleMidi, sendMidi, panicAllNotes } = useMidi(() => setShowMidiModal(true));
   const { startVocoder, stopVocoder, updateNotes: updateVocoderNotes, updateVocoderParams, getAnalyserData, isVocoderActive } = useVocoder();
-  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, volumeRef } = useAudioEngine(hudRefs, sendMidi, updateVocoderNotes);
+  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, volumeRef } = useAudioEngine(hudRefs, sendMidi, updateVocoderNotes, mappingsRef, triggerMappingsRef);
 
   const handleToggleVocoder = useCallback(async () => {
     if (isVocoderActive) {
@@ -111,6 +124,7 @@ export default function App() {
         onRecord={startRecording}
         isRecording={isRecording}
         isLooping={isLooping}
+        onGestureSettingsOpen={() => setShowGestureSettings(true)}
       />
 
       <div className="stage">
@@ -153,6 +167,16 @@ export default function App() {
       />
 
       {showMidiModal && <MidiModal onClose={() => setShowMidiModal(false)} />}
+
+      {showGestureSettings && (
+        <GestureSettings
+          mappings={mappings}
+          setMappings={setMappings}
+          triggerMappings={triggerMappings}
+          setTriggerMappings={setTriggerMappings}
+          onClose={() => setShowGestureSettings(false)}
+        />
+      )}
     </div>
   );
 }

@@ -45,17 +45,6 @@ const ARP_MODE_LABEL = {
 // Maps interval → held note duration (half the step for clean articulation)
 const HOLD_MAP = { '4n': '8n', '8n': '16n', '16n': '32n' };
 
-// middle | ring | pinky → mode string
-function getArpMode(middleOut, ringOut, pinkyOut) {
-  if (!middleOut && !pinkyOut) return 'off';
-  if (!middleOut &&  pinkyOut) return 'octave';
-  if ( middleOut && !ringOut && !pinkyOut) return 'simple';
-  if ( middleOut &&  ringOut && !pinkyOut) return 'complex';
-  if ( middleOut &&  ringOut &&  pinkyOut) return 'complexRandom';
-  if ( middleOut && !ringOut &&  pinkyOut) return 'simpleRandom';
-  return 'off';
-}
-
 // Builds a Tone.js note-string array relative to rootHz.
 // thirdST is ST_MAJ3 (4) or ST_MIN3 (3) — mirrors the live chord quality from the pitch hand.
 function buildArpNotes(rootHz, mode, thirdST) {
@@ -72,11 +61,44 @@ function buildArpNotes(rootHz, mode, thirdST) {
   }
 }
 
-// Maps absolute wrist tilt (degrees from vertical) → Tone.js interval string
-function getArpRate(tiltDeg) {
-  if (tiltDeg < 20) return '4n';
-  if (tiltDeg < 60) return '8n';
-  return '16n';
+// ── Trigger routing ────────────────────────────────────────────────────────────
+
+const CHORD_DEST_LABELS = {
+  chord_root:    'ROOT',
+  chord_minor:   'MIN',
+  chord_major:   'MAJ',
+  chord_root_7:  'ROOT+7',
+  chord_minor_7: 'MIN 7',
+  chord_major_7: 'MAJ 7',
+};
+
+const ARP_DEST_TO_MODE = {
+  arp_off:            'off',
+  arp_octave:         'octave',
+  arp_simple:         'simple',
+  arp_complex:        'complex',
+  arp_complex_random: 'complexRandom',
+  arp_simple_random:  'simpleRandom',
+};
+
+const ARP_DEST_TO_RATE = {
+  arp_rate_4n:  '4n',
+  arp_rate_8n:  '8n',
+  arp_rate_16n: '16n',
+};
+
+// Resolves a chord destination ID to voice-activation flags and interval semitones.
+// voice13 gates the 3rd + 5th voices; voice7 gates the 7th voice.
+function resolveChord(dest) {
+  switch (dest) {
+    case 'chord_root':    return { voice13: false, voice7: false, thirdST: ST_MAJ3, seventhST: ST_MIN7 };
+    case 'chord_minor':   return { voice13: true,  voice7: false, thirdST: ST_MIN3, seventhST: ST_MIN7 };
+    case 'chord_major':   return { voice13: true,  voice7: false, thirdST: ST_MAJ3, seventhST: ST_MAJ7 };
+    case 'chord_root_7':  return { voice13: false, voice7: true,  thirdST: ST_MIN3, seventhST: ST_MIN7 };
+    case 'chord_minor_7': return { voice13: true,  voice7: true,  thirdST: ST_MIN3, seventhST: ST_MIN7 };
+    case 'chord_major_7': return { voice13: true,  voice7: true,  thirdST: ST_MAJ3, seventhST: ST_MAJ7 };
+    default:              return { voice13: false, voice7: false, thirdST: ST_MAJ3, seventhST: ST_MIN7 };
+  }
 }
 
 // ── Voice factories ────────────────────────────────────────────────────────────
@@ -103,7 +125,7 @@ function makeStringsVoice(initDb = VOICE_DB) {
 
 // ── Hook ───────────────────────────────────────────────────────────────────────
 
-export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
+export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mappingsRef, triggerMappingsRef) {
   const hudRefsRef       = useRef(hudRefs);       hudRefsRef.current       = hudRefs;
   const sendMidiRef      = useRef(sendMidi);      sendMidiRef.current      = sendMidi;
   const updateVocoderRef = useRef(updateVocoder); updateVocoderRef.current = updateVocoder;
@@ -349,6 +371,13 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
     const hud    = hudRefsRef.current;
     const voices = activeVoicesRef.current;
 
+    // Gesture signals extracted this frame (0–1 normalized). Only populated when
+    // the relevant hand is visible — mapping loop skips absent sources automatically.
+    const signals = {};
+
+    // Build trigger lookup once per frame (source → destination).
+    const triggerMap = new Map((triggerMappingsRef?.current ?? []).map(m => [m.trigger, m.destination]));
+
     let pitchHandFound = false;
     let arpHandFound   = false;
 
@@ -362,7 +391,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       const label = handednesses[i][0].categoryName;
 
       if (label === 'Left') {
-        // ── RIGHT HAND: pitch + chord voicing + Z-filter + volume ──────
+        // ── RIGHT HAND: pitch + chord voicing + signal extraction ───────
         pitchHandFound = true;
 
         const SAFE_TOP    = 0.15;
@@ -373,26 +402,32 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
         const root     = snapToNearest(rawPitch, scaleRef.current);
         currentRootRef.current = root;
 
-        const midMCP   = hand[9];
-        const handSize = calculateDistance2D(wrist, midMCP);
-        const cutoff   = mapRange(handSize, 0.08, 0.35, 400, 10000);
-        filterRef.current.frequency.rampTo(cutoff, 0.05);
-
+        const midMCP          = hand[9];
+        const handSize        = calculateDistance2D(wrist, midMCP);
         const normalizedPinch = calculateDistance2D(thumbTip, indexTip) / handSize;
-        const db = mapRange(normalizedPinch, 0.2, 1.2, -40, 0);
-        volumeRef.current.volume.rampTo(db, 0.05);
-        const chordVel = Math.max(1, Math.min(127, Math.round(mapRange(normalizedPinch, 0.2, 1.2, 0, 127))));
+        const chordVel        = Math.max(1, Math.min(127, Math.round(mapRange(normalizedPinch, 0.2, 1.2, 0, 127))));
 
-        const arpActive = arpModeRef.current !== 'off';
+        // Extract continuous signals (0–1 clamped) for the mapping loop
+        signals.right_hand_size  = Math.max(0, Math.min(1, mapRange(handSize, 0.08, 0.35, 0, 1)));
+        signals.right_pinch_norm = Math.max(0, Math.min(1, mapRange(normalizedPinch, 0.2, 1.2, 0, 1)));
 
-        // ── Chord gate logic (always runs — arp layers on top) ──────────
+        // ── Chord voicing via trigger routing ───────────────────────────
         const middleUp = isFingerExtended(hand, 12, 9);
         const ringUp   = isFingerExtended(hand, 16, 13);
         const pinkyUp  = isFingerExtended(hand, 20, 17);
 
-        const thirdST   = ringUp ? ST_MAJ3 : ST_MIN3;
+        // Map current finger state to the active right-hand combo ID
+        let activeRightCombo;
+        if      (!middleUp && !pinkyUp)            activeRightCombo = 'right_no_fingers';
+        else if ( middleUp && !ringUp && !pinkyUp) activeRightCombo = 'right_middle';
+        else if ( middleUp &&  ringUp && !pinkyUp) activeRightCombo = 'right_middle_ring';
+        else if (!middleUp &&  pinkyUp)            activeRightCombo = 'right_pinky';
+        else if ( middleUp && !ringUp &&  pinkyUp) activeRightCombo = 'right_middle_pinky';
+        else                                       activeRightCombo = 'right_middle_ring_pinky';
+
+        const chordDest = triggerMap.get(activeRightCombo) ?? 'chord_root';
+        const { voice13, voice7, thirdST, seventhST } = resolveChord(chordDest);
         arpThirdSTRef.current = thirdST;
-        const seventhST = ringUp ? ST_MAJ7 : ST_MIN7;
 
         const thirdFreq   = Tone.Frequency(root).transpose(thirdST).toFrequency();
         const fifthFreq   = Tone.Frequency(root).transpose(ST_P5).toFrequency();
@@ -400,7 +435,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
 
         voices[0].frequency.rampTo(root, 0.05);
 
-        if (middleUp) {
+        if (voice13) {
           voices[1].frequency.rampTo(thirdFreq, 0.05);
           voices[2].frequency.rampTo(fifthFreq, 0.05);
           voices[1].volume.rampTo(VOICE_DB, 0.05);
@@ -411,33 +446,25 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
         }
 
         voices[3].frequency.rampTo(seventhFreq, 0.05);
-        voices[3].volume.rampTo(pinkyUp ? VOICE_DB : VOICE_MUTE, 0.05);
-
-        let chordName;
-        if      (!middleUp && !pinkyUp)             chordName = 'ROOT';
-        else if (!middleUp &&  pinkyUp)             chordName = 'ROOT+7';
-        else if ( middleUp && !ringUp  && !pinkyUp) chordName = 'MIN';
-        else if ( middleUp &&  ringUp  && !pinkyUp) chordName = 'MAJ';
-        else if ( middleUp && !ringUp  &&  pinkyUp) chordName = 'MIN 7';
-        else                                        chordName = 'MAJ 7';
+        voices[3].volume.rampTo(voice7 ? VOICE_DB : VOICE_MUTE, 0.05);
 
         if (hud?.chord?.current)
-          hud.chord.current.textContent = chordName;
+          hud.chord.current.textContent = CHORD_DEST_LABELS[chordDest] ?? 'ROOT';
 
         const activeNoteNames = [normalizeNote(Tone.Frequency(root).toNote())];
-        if (middleUp) {
+        if (voice13) {
           activeNoteNames.push(normalizeNote(Tone.Frequency(root).transpose(thirdST).toNote()));
           activeNoteNames.push(normalizeNote(Tone.Frequency(root).transpose(ST_P5).toNote()));
         }
-        if (pinkyUp) {
+        if (voice7) {
           activeNoteNames.push(normalizeNote(Tone.Frequency(root).transpose(seventhST).toNote()));
         }
         hud?.pianoRoll?.current?.setNotes(activeNoteNames);
 
         // Feed active chord + live arp frequencies to the vocoder carrier
         const vocoderFreqs = [root];
-        if (middleUp) { vocoderFreqs.push(thirdFreq, fifthFreq); }
-        if (pinkyUp)  { vocoderFreqs.push(seventhFreq); }
+        if (voice13) { vocoderFreqs.push(thirdFreq, fifthFreq); }
+        if (voice7)  { vocoderFreqs.push(seventhFreq); }
         if (arpModeRef.current !== 'off' && currentArpFreqRef.current !== null) {
           vocoderFreqs.push(currentArpFreqRef.current);
         }
@@ -446,11 +473,11 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
         // ── Chord MIDI diff ─────────────────────────────────────────────
         const newMidiSet = new Set();
         newMidiSet.add(Math.round(Tone.Frequency(root).toMidi()));
-        if (middleUp) {
+        if (voice13) {
           newMidiSet.add(Math.round(Tone.Frequency(root).transpose(thirdST).toMidi()));
           newMidiSet.add(Math.round(Tone.Frequency(root).transpose(ST_P5).toMidi()));
         }
-        if (pinkyUp) {
+        if (voice7) {
           newMidiSet.add(Math.round(Tone.Frequency(root).transpose(seventhST).toMidi()));
         }
         const smChord = sendMidiRef.current;
@@ -462,28 +489,37 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
 
         if (hud?.pitch?.current)
           hud.pitch.current.textContent = `${Math.round(root)} Hz`;
-        if (hud?.filter?.current)
-          hud.filter.current.textContent = `${Math.round(cutoff)} Hz`;
-        if (hud?.velocity?.current)
-          hud.velocity.current.textContent = `${Math.round(mapRange(normalizedPinch, 0.2, 1.2, 0, 100))}%`;
 
       } else {
-        // ── LEFT HAND: reverb + vibrato + arp control ───────────────────
+        // ── LEFT HAND: arp control + signal extraction ──────────────────
         arpHandFound = true;
-
-        const wet   = mapRange(dist, 0.03, 0.20, 0, 1);
-        const depth = mapRange(wrist.y, 0, 1, 0.8, 0);
-        reverbRef.current.wet.rampTo(wet, 0.05);
-        vibratoRef.current.depth.rampTo(depth, 0.05);
 
         // Hand size on the arp hand — normalizes spread against camera distance
         const arpHandSize = calculateDistance2D(wrist, hand[9]);
 
-        // Arp mode (rotation-robust finger detection)
+        // Arp mode via trigger routing (rotation-robust finger detection)
         const { middleOut, ringOut, pinkyOut } = getArpFingerStates(hand);
-        const mode = getArpMode(middleOut, ringOut, pinkyOut);
+
+        let activeLeftCombo;
+        if      (!middleOut && !pinkyOut)             activeLeftCombo = 'left_no_fingers';
+        else if (!middleOut &&  pinkyOut)             activeLeftCombo = 'left_pinky';
+        else if ( middleOut && !ringOut && !pinkyOut) activeLeftCombo = 'left_middle';
+        else if ( middleOut &&  ringOut && !pinkyOut) activeLeftCombo = 'left_middle_ring';
+        else if ( middleOut &&  ringOut &&  pinkyOut) activeLeftCombo = 'left_middle_ring_pinky';
+        else                                          activeLeftCombo = 'left_middle_pinky';
+
+        const arpModeDest = triggerMap.get(activeLeftCombo) ?? 'arp_off';
+        const mode = ARP_DEST_TO_MODE[arpModeDest] ?? 'off';
+
+        // Arp rate via trigger routing (tilt bands)
         const tilt = getWristTiltDeg(hand);
-        const rate = getArpRate(tilt);
+        let activeTiltBand;
+        if      (tilt < 20) activeTiltBand = 'left_tilt_low';
+        else if (tilt < 60) activeTiltBand = 'left_tilt_mid';
+        else                activeTiltBand = 'left_tilt_high';
+
+        const rateDest = triggerMap.get(activeTiltBand) ?? 'arp_rate_8n';
+        const rate = ARP_DEST_TO_RATE[rateDest] ?? '8n';
 
         arpRateRef.current = rate;
 
@@ -491,8 +527,6 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
         let spreadDb = 3;
         if (mode !== 'off') {
           spreadDb = getArpSpreadDb(hand, { middleOut, ringOut, pinkyOut }, arpHandSize);
-          // Volume ramps every frame — it's a continuous gesture parameter
-          arpVolRef.current?.volume.rampTo(spreadDb, 0.05);
           // Map spreadDb [-12, 3] → MIDI velocity [1, 127] (monotonic, same gesture)
           arpVelocityRef.current = Math.max(1, Math.min(127, Math.round(mapRange(spreadDb, -12, 3, 1, 127))));
 
@@ -530,21 +564,68 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
               (targetInterval - smoothedFluidIntervalRef.current) * 0.08;
             appliedArpRateRef.current = null; // ensure snap re-applies when toggled back
           }
+
+          signals.left_arp_spread = Math.max(0, Math.min(1, mapRange(spreadDb, -12, 3, 0, 1)));
         }
         arpModeRef.current = mode;
 
-        if (hud?.reverb?.current)
-          hud.reverb.current.textContent = `${Math.round(wet * 100)}%`;
-        if (hud?.vibrato?.current)
-          hud.vibrato.current.textContent = `${Math.round(depth * 100)}%`;
+        // Extract continuous signals for the mapping loop
+        signals.left_pinch_dist = Math.max(0, Math.min(1, mapRange(dist, 0.03, 0.20, 0, 1)));
+        signals.left_wrist_y    = wrist.y;
+        signals.left_wrist_tilt = Math.max(0, Math.min(1, mapRange(tilt, 0, 90, 0, 1)));
+
         if (hud?.arp?.current)
           hud.arp.current.textContent = mode === 'off'
             ? 'OFF'
             : `${ARP_MODE_LABEL[mode]} ${rate}`;
         if (hud?.arpVol?.current)
-          hud.arpVol.current.textContent = mode === 'off'
-            ? '--'
-            : `${Math.round(spreadDb)} dB`;
+          hud.arpVol.current.textContent = mode === 'off' ? '--' : `${Math.round(spreadDb)} dB`;
+      }
+    }
+
+    // ── Apply gesture mappings to audio parameters ───────────────────────────
+    // Each mapping reads a 0–1 signal, optionally inverts it, then ramps the
+    // destination audio node. HUD updates happen here so they always reflect
+    // whatever is actually mapped (not just the default layout).
+    for (const mapping of (mappingsRef?.current ?? [])) {
+      if (!(mapping.source in signals)) continue;
+      const raw = signals[mapping.source];
+      const s   = mapping.invert ? 1 - raw : raw;
+
+      switch (mapping.destination) {
+        case 'filter_cutoff': {
+          const hz = mapRange(s, 0, 1, 400, 10000);
+          filterRef.current?.frequency.rampTo(hz, 0.05);
+          if (hud?.filter?.current)
+            hud.filter.current.textContent = `${Math.round(hz)} Hz`;
+          break;
+        }
+        case 'reverb_wet': {
+          reverbRef.current?.wet.rampTo(s, 0.05);
+          if (hud?.reverb?.current)
+            hud.reverb.current.textContent = `${Math.round(s * 100)}%`;
+          break;
+        }
+        case 'vibrato_depth': {
+          const depth = mapRange(s, 0, 1, 0, 0.8);
+          vibratoRef.current?.depth.rampTo(depth, 0.05);
+          if (hud?.vibrato?.current)
+            hud.vibrato.current.textContent = `${Math.round(depth * 100)}%`;
+          break;
+        }
+        case 'volume': {
+          const db = mapRange(s, 0, 1, -40, 0);
+          volumeRef.current?.volume.rampTo(db, 0.05);
+          if (hud?.velocity?.current)
+            hud.velocity.current.textContent = `${Math.round(s * 100)}%`;
+          break;
+        }
+        case 'arp_volume': {
+          const db = mapRange(s, 0, 1, -12, 3);
+          arpVolRef.current?.volume.rampTo(db, 0.05);
+          break;
+        }
+        default: break;
       }
     }
 
@@ -568,6 +649,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder) {
       if (hud?.arp?.current)    hud.arp.current.textContent    = 'OFF';
       if (hud?.arpVol?.current) hud.arpVol.current.textContent = '--';
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const setTempo = useCallback((bpm) => {
