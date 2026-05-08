@@ -30,20 +30,30 @@ const INIT_FREQS = [
 // ── Arp constants ──────────────────────────────────────────────────────────────
 
 const ARP_PATTERN_TYPE = {
-  simple:        'upDown',
-  complex:       'upDown',
-  complexRandom: 'randomWalk',
-  simpleRandom:  'random',
-  octave:        'upDown',
+  simple:          'upDown',
+  complex:         'upDown',
+  complexRandom:   'randomWalk',
+  simpleRandom:    'random',
+  octave:          'upDown',
+  simpleUp:        'up',
+  simpleDown:      'down',
+  complexUp:       'up',
+  complexDown:     'down',
+  complexDownUp:   'downUp',
 };
 
 const ARP_MODE_LABEL = {
-  off:           'OFF',
-  simple:        'SIMPLE',
-  complex:       'COMPLEX',
-  complexRandom: 'CMPLX RND',
-  simpleRandom:  'SMP RND',
-  octave:        'OCTAVE',
+  off:            'OFF',
+  simple:         'SIMPLE',
+  complex:        'COMPLEX',
+  complexRandom:  'CMPLX RND',
+  simpleRandom:   'SMP RND',
+  octave:         'OCTAVE',
+  simpleUp:       'SMP UP',
+  simpleDown:     'SMP DN',
+  complexUp:      'CMPLX UP',
+  complexDown:    'CMPLX DN',
+  complexDownUp:  'CMPLX DN↑',
 };
 
 // Maps interval → held note duration (half the step for clean articulation)
@@ -56,10 +66,15 @@ function buildArpNotes(rootHz, mode, thirdST) {
   const t = (n, st) => Tone.Frequency(n).transpose(st).toNote();
   const th = thirdST ?? ST_MAJ3;
   switch (mode) {
-    case 'simple':        return [root, t(root, th), t(root, 7)];
-    case 'complex':       return [root, t(root, th), t(root, 7), t(root, 12), t(root, 12 + th), t(root, 19)];
-    case 'complexRandom': return [root, t(root, th), t(root, 7), t(root, 12), t(root, 12 + th), t(root, 19)];
+    case 'simple':
+    case 'simpleUp':
+    case 'simpleDown':
     case 'simpleRandom':  return [root, t(root, th), t(root, 7)];
+    case 'complex':
+    case 'complexUp':
+    case 'complexDown':
+    case 'complexDownUp':
+    case 'complexRandom': return [root, t(root, th), t(root, 7), t(root, 12), t(root, 12 + th), t(root, 19)];
     case 'octave':        return [root, t(root, 12)];
     default:              return [root];
   }
@@ -89,12 +104,17 @@ const CHORD_DEST_LABELS = {
 };
 
 const ARP_DEST_TO_MODE = {
-  arp_off:            'off',
-  arp_octave:         'octave',
-  arp_simple:         'simple',
-  arp_complex:        'complex',
-  arp_complex_random: 'complexRandom',
-  arp_simple_random:  'simpleRandom',
+  arp_off:              'off',
+  arp_octave:           'octave',
+  arp_simple:           'simple',
+  arp_complex:          'complex',
+  arp_complex_random:   'complexRandom',
+  arp_simple_random:    'simpleRandom',
+  arp_simple_up:        'simpleUp',
+  arp_simple_down:      'simpleDown',
+  arp_complex_up:       'complexUp',
+  arp_complex_down:     'complexDown',
+  arp_complex_down_up:  'complexDownUp',
 };
 
 const ARP_DEST_TO_RATE = {

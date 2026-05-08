@@ -80,9 +80,15 @@ export const TRIGGER_DESTINATIONS = [
   { id: 'arp_complex_random',  label: 'Cmplx Rnd',    group: 'arp_mode' },
   { id: 'arp_simple_random',   label: 'Simple Rnd',   group: 'arp_mode' },
   // group: 'arp_rate'
-  { id: 'arp_rate_4n',         label: '1/4 note',     group: 'arp_rate' },
-  { id: 'arp_rate_8n',         label: '1/8 note',     group: 'arp_rate' },
-  { id: 'arp_rate_16n',        label: '1/16 note',    group: 'arp_rate' },
+  { id: 'arp_rate_4n',         label: '1/4 note',        group: 'arp_rate'    },
+  { id: 'arp_rate_8n',         label: '1/8 note',        group: 'arp_rate'    },
+  { id: 'arp_rate_16n',        label: '1/16 note',       group: 'arp_rate'    },
+  // group: 'arp_pattern'
+  { id: 'arp_simple_up',       label: 'Simple Up',       group: 'arp_pattern' },
+  { id: 'arp_simple_down',     label: 'Simple Down',     group: 'arp_pattern' },
+  { id: 'arp_complex_up',      label: 'Complex Up',      group: 'arp_pattern' },
+  { id: 'arp_complex_down',    label: 'Complex Down',    group: 'arp_pattern' },
+  { id: 'arp_complex_down_up', label: 'Complex Down/Up', group: 'arp_pattern' },
 ];
 
 const TRIGGER_GROUP_LABELS = {
@@ -93,6 +99,7 @@ const TRIGGER_GROUP_LABELS = {
   complex_chord: 'Complex Chord',
   arp_mode:      'Arp Mode',
   arp_rate:      'Arp Rate',
+  arp_pattern:   'Arp Pattern',
 };
 
 export function groupedTriggerSources() {
