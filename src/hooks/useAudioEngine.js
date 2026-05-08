@@ -204,6 +204,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
   const arpDecayRef          = useRef(0.12);
   const arpVoiceRef        = useRef(null);
   const arpVolRef          = useRef(null);
+  const arpBaseVolRef      = useRef(null);
   const arpBypassGainRef   = useRef(null); // dry path → Destination
   const arpFxGainRef       = useRef(null); // wet path → filter chain
   const arpFxEnabledRef    = useRef(false);
@@ -274,11 +275,15 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       const arpFxGain     = new Tone.Gain(0);                 // default: fx path silent
       arpFxGain.connect(filter);
 
-      // FeedbackDelay sits between arpVol and the bypass/fx split; wet=0 at init (transparent)
+      // arpBaseVol is the static slider-controlled gain; sits between gesture vol and delay
+      const arpBaseVol = new Tone.Volume(0);
+      arpVol.connect(arpBaseVol);
+
+      // FeedbackDelay sits between arpBaseVol and the bypass/fx split; wet=0 at init (transparent)
       const arpDelay = new Tone.FeedbackDelay({ delayTime: '8n', feedback: 0.3, wet: 0 });
       arpDelay.connect(arpBypassGain);
       arpDelay.connect(arpFxGain);
-      arpVol.connect(arpDelay);
+      arpBaseVol.connect(arpDelay);
 
       const arpVoice = makeArpVoice(arpInstrumentNameRef.current);
       applyArpDecay(arpVoice, arpDecayRef.current);
@@ -319,6 +324,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       stringsVoicesRef.current = stringsVoices;
       arpVoiceRef.current      = arpVoice;
       arpVolRef.current        = arpVol;
+      arpBaseVolRef.current    = arpBaseVol;
       arpDelayRef.current      = arpDelay;
       arpBypassGainRef.current = arpBypassGain;
       arpFxGainRef.current     = arpFxGain;
@@ -389,6 +395,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       arpPatternRef.current?.dispose();
       arpVoiceRef.current?.dispose();
       arpVolRef.current?.dispose();
+      arpBaseVolRef.current?.dispose();
       arpDelayRef.current?.dispose();
       arpBypassGainRef.current?.dispose();
       arpFxGainRef.current?.dispose();
@@ -403,6 +410,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       arpPatternRef.current    = null;
       arpVoiceRef.current      = null;
       arpVolRef.current        = null;
+      arpBaseVolRef.current    = null;
       arpDelayRef.current      = null;
       arpBypassGainRef.current = null;
       arpFxGainRef.current     = null;
@@ -784,5 +792,9 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
     applyArpDecay(arpVoiceRef.current, value);
   }, []);
 
-  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, volumeRef };
+  const setArpBaseVolume = useCallback((db) => {
+    if (arpBaseVolRef.current) arpBaseVolRef.current.volume.rampTo(db, 0.1);
+  }, []);
+
+  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, setArpBaseVolume, volumeRef };
 }

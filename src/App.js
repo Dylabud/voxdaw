@@ -52,7 +52,7 @@ export default function App() {
 
   const { isMidiEnabled, toggleMidi, sendMidi, panicAllNotes } = useMidi(() => setShowMidiModal(true));
   const { startVocoder, stopVocoder, updateNotes: updateVocoderNotes, updateVocoderParams, getAnalyserData, isVocoderActive } = useVocoder();
-  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, volumeRef } = useAudioEngine(hudRefs, sendMidi, updateVocoderNotes, mappingsRef, triggerMappingsRef);
+  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, setArpBaseVolume, volumeRef } = useAudioEngine(hudRefs, sendMidi, updateVocoderNotes, mappingsRef, triggerMappingsRef);
 
   const handleToggleVocoder = useCallback(async () => {
     if (isVocoderActive) {
@@ -159,6 +159,7 @@ export default function App() {
           arpInstrument={arpInstrument}
           onArpInstrumentChange={handleArpInstrumentChange}
           onArpDecayChange={setArpDecay}
+          onArpVolumeChange={setArpBaseVolume}
         />
         <button
           className={isActive ? 'disengageBtn' : 'engageBtn'}

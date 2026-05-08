@@ -30,9 +30,15 @@ const FADERS = [
     min: 0.1, max: 2.0, step: 0.01, init: 0.12,
     fmt: v => `${parseFloat(v).toFixed(2)}s`,
   },
+  {
+    key: 'vol',
+    label: 'vol',
+    min: -36, max: 6, step: 1, init: 0,
+    fmt: v => `${v > 0 ? '+' : ''}${v}dB`,
+  },
 ];
 
-export default function ArpTerminal({ updateArpDelayTime, updateArpDelayMix, speedSnap, onSpeedSnapToggle, arpInstrument, onArpInstrumentChange, onArpDecayChange }) {
+export default function ArpTerminal({ updateArpDelayTime, updateArpDelayMix, speedSnap, onSpeedSnapToggle, arpInstrument, onArpInstrumentChange, onArpDecayChange, onArpVolumeChange }) {
   const [pos, setPos]   = useState({ x: 0, y: 0 });
   const isDragging      = useRef(false);
   const dragOffset      = useRef({ x: 0, y: 0 });
@@ -71,7 +77,8 @@ export default function ArpTerminal({ updateArpDelayTime, updateArpDelayMix, spe
     if (key === 'delayIdx') updateArpDelayTime?.(DELAY_STOPS[Math.round(value)]);
     if (key === 'mix')      updateArpDelayMix?.(value);
     if (key === 'decay')    onArpDecayChange?.(value);
-  }, [updateArpDelayTime, updateArpDelayMix, onArpDecayChange]);
+    if (key === 'vol')      onArpVolumeChange?.(value);
+  }, [updateArpDelayTime, updateArpDelayMix, onArpDecayChange, onArpVolumeChange]);
 
   return (
     <div
