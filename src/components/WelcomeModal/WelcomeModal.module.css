@@ -1,0 +1,75 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-bg);
+  backdrop-filter: blur(4px);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.box {
+  background: var(--bg-panel);
+  border: 1px solid rgba(93, 202, 165, 0.3);
+  border-radius: 8px;
+  padding: 36px;
+  max-width: 500px;
+  width: 90%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.heading {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--accent-color);
+}
+
+.body {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.65;
+  color: var(--text-primary);
+}
+
+.privacyBlock {
+  background: rgba(93, 202, 165, 0.06);
+  border-left: 2px solid var(--accent-color);
+  border-radius: 0 4px 4px 0;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.privacyLabel {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  color: var(--accent-color);
+  text-transform: uppercase;
+}
+
+.enterBtn {
+  width: 100%;
+  margin-top: 4px;
+  padding: 12px 24px;
+  background: rgba(93, 202, 165, 0.15);
+  border: 2px solid var(--accent-color);
+  border-radius: 4px;
+  color: var(--accent-color);
+  font-family: inherit;
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.enterBtn:hover {
+  background: rgba(93, 202, 165, 0.82);
+  color: #111114;
+}

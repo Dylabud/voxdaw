@@ -11,6 +11,7 @@ import TelemetryHUD from './components/TelemetryHUD/TelemetryHUD';
 import Controls from './components/Controls/Controls';
 import MidiModal from './components/MidiModal/MidiModal';
 import GestureSettings from './components/GestureSettings/GestureSettings';
+import WelcomeModal from './components/WelcomeModal/WelcomeModal';
 import { DEFAULT_MAPPINGS, DEFAULT_TRIGGER_MAPPINGS } from './utils/gestureMappings';
 
 export default function App() {
@@ -34,6 +35,7 @@ export default function App() {
   const [isDarkMode,        setIsDarkMode]          = useState(true);
   const [showControls,      setShowControls]        = useState(true);
   const [showAnalytics,  setShowAnalytics]        = useState(true);
+  const [showWelcome,          setShowWelcome]          = useState(true);
   const [showMidiModal,        setShowMidiModal]        = useState(false);
   const [showGestureSettings,  setShowGestureSettings]  = useState(false);
   const [mappings,             setMappings]             = useState(DEFAULT_MAPPINGS);
@@ -96,6 +98,8 @@ export default function App() {
 
   return (
     <div className="app" data-theme={isDarkMode ? undefined : 'light'}>
+      {showWelcome && <WelcomeModal onEnter={() => setShowWelcome(false)} />}
+
       <button className="rightToggleBtn" onClick={() => setShowAnalytics(v => !v)}>
         {showAnalytics ? '›' : '‹'}
       </button>

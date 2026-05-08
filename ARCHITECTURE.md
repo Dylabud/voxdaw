@@ -114,6 +114,9 @@ Eight metrics (PITCH, ARP, ARP VOL, CHORD, FILTER, REVERB, VIBRATO, VELOCITY) up
 ### ArpTerminal
 `position: absolute; bottom: 12px; right: 56px; z-index: 50` inside `.viewport`. Draggable via same ref-based architecture as `VocoderTerminal`. No canvas visualizer. Two vertical DAW faders: `dly` (5-stop: 0/'1/4'/'1/8'/'1/16'/'1/32' — controls `arpDelayRef.delayTime`) and `wet` (FeedbackDelay mix 0–1 via `wet.rampTo`). `[ speed snap ]` toggle at bottom controls `arpSpeedSnapRef` in the audio engine. Mounted/unmounted via `[ arp controls ]` toggle in the Controls Arpeggiator section; fader state resets to defaults on remount while audio node params persist independently.
 
+### WelcomeModal
+`position: fixed; inset: 0; z-index: 300` — renders on every page load/reload, blocking all DAW interaction until dismissed. Controlled by `showWelcome` state in `App.js` (`useState(true)`; no localStorage). No backdrop-click dismissal — user must explicitly click `[ ENTER STUDIO ]`. Adapts to light/dark theme via CSS vars (`--bg-panel`, `--text-primary`, `--overlay-bg`, `--accent-color`). Always dark is not enforced here because it is not a camera overlay.
+
 ### Toggle buttons
 One `position: absolute; z-index: 50` button in `App.js` (`.rightToggleBtn` at `top: 16px; right: 16px`) collapses the TelemetryHUD. The Controls sidebar collapses via its own `.collapseTab` (see Controls sidebar above).
 
