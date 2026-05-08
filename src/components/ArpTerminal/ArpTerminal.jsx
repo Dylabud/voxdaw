@@ -4,6 +4,13 @@ import styles from './ArpTerminal.module.css';
 const DELAY_STOPS       = ['0', '4n', '8n', '16n', '32n'];
 const DELAY_STOP_LABELS = ['0', '1/4', '1/8', '1/16', '1/32'];
 
+const ARP_INSTRUMENTS = [
+  { value: 'analog', label: 'analog' },
+  { value: 'fm',     label: 'fm synth' },
+  { value: 'am',     label: 'am synth' },
+  { value: 'pluck',  label: 'pluck' },
+];
+
 const FADERS = [
   {
     key: 'delayIdx',
@@ -17,9 +24,15 @@ const FADERS = [
     min: 0, max: 1, step: 0.01, init: 0,
     fmt: v => `${Math.round(v * 100)}%`,
   },
+  {
+    key: 'decay',
+    label: 'dcay',
+    min: 0.1, max: 2.0, step: 0.01, init: 0.12,
+    fmt: v => `${parseFloat(v).toFixed(2)}s`,
+  },
 ];
 
-export default function ArpTerminal({ updateArpDelayTime, updateArpDelayMix, speedSnap, onSpeedSnapToggle }) {
+export default function ArpTerminal({ updateArpDelayTime, updateArpDelayMix, speedSnap, onSpeedSnapToggle, arpInstrument, onArpInstrumentChange, onArpDecayChange }) {
   const [pos, setPos]   = useState({ x: 0, y: 0 });
   const isDragging      = useRef(false);
   const dragOffset      = useRef({ x: 0, y: 0 });
@@ -57,7 +70,8 @@ export default function ArpTerminal({ updateArpDelayTime, updateArpDelayMix, spe
     setParams(prev => ({ ...prev, [key]: value }));
     if (key === 'delayIdx') updateArpDelayTime?.(DELAY_STOPS[Math.round(value)]);
     if (key === 'mix')      updateArpDelayMix?.(value);
-  }, [updateArpDelayTime, updateArpDelayMix]);
+    if (key === 'decay')    onArpDecayChange?.(value);
+  }, [updateArpDelayTime, updateArpDelayMix, onArpDecayChange]);
 
   return (
     <div
@@ -67,6 +81,16 @@ export default function ArpTerminal({ updateArpDelayTime, updateArpDelayMix, spe
       <div className={styles.terminalHeader} onMouseDown={handleMouseDown}>
         ·· arp controls
       </div>
+
+      <select
+        className={styles.instrumentSelect}
+        value={arpInstrument}
+        onChange={e => onArpInstrumentChange?.(e.target.value)}
+      >
+        {ARP_INSTRUMENTS.map(({ value, label }) => (
+          <option key={value} value={value}>{label}</option>
+        ))}
+      </select>
 
       <div className={styles.sliders}>
         {FADERS.map(({ key, label, min, max, step, fmt }) => (

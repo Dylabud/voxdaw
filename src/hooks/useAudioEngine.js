@@ -131,6 +131,25 @@ function resolveChord(dest) {
 
 // ── Voice factories ────────────────────────────────────────────────────────────
 
+function makeArpVoice(name) {
+  switch (name) {
+    case 'fm':    return new Tone.FMSynth({ harmonicity: 3, modulationIndex: 10, envelope: { attack: 0.005, decay: 0.15, sustain: 0.1, release: 0.3  }, volume: 0 });
+    case 'am':    return new Tone.AMSynth({ harmonicity: 2,                      envelope: { attack: 0.005, decay: 0.2,  sustain: 0.1, release: 0.3  }, volume: 0 });
+    case 'pluck': return new Tone.PluckSynth({ attackNoise: 1, dampening: 4000, resonance: 0.7 });
+    default:      return new Tone.Synth({ oscillator: { type: 'triangle' }, envelope: { attack: 0.005, decay: 0.12, sustain: 0.3, release: 0.25 }, volume: 0 });
+  }
+}
+
+function applyArpDecay(voice, value) {
+  if (!voice) return;
+  if (voice instanceof Tone.PluckSynth) {
+    voice.resonance = Math.min(0.98, value * 0.49);
+  } else {
+    voice.envelope.decay   = value;
+    voice.envelope.release = Math.min(3.0, value * 1.5);
+  }
+}
+
 function makeAnalogVoice(oscType, initDb = VOICE_DB) {
   return new Tone.Synth({
     oscillator: { type: oscType },
@@ -181,6 +200,8 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
   const arpVelocityRef = useRef(100);       // live arp velocity from spread gesture
 
   // Arp refs
+  const arpInstrumentNameRef = useRef('analog');
+  const arpDecayRef          = useRef(0.12);
   const arpVoiceRef        = useRef(null);
   const arpVolRef          = useRef(null);
   const arpBypassGainRef   = useRef(null); // dry path → Destination
@@ -259,11 +280,8 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       arpDelay.connect(arpFxGain);
       arpVol.connect(arpDelay);
 
-      const arpVoice = new Tone.Synth({
-        oscillator: { type: 'triangle' },
-        envelope:   { attack: 0.005, decay: 0.12, sustain: 0.3, release: 0.25 },
-        volume:     0,
-      });
+      const arpVoice = makeArpVoice(arpInstrumentNameRef.current);
+      applyArpDecay(arpVoice, arpDecayRef.current);
       arpVoice.connect(arpVol);
 
       // Pattern always runs on the transport; gated by arpModeRef inside the callback.
@@ -749,5 +767,22 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
     arpFxGainRef.current.gain.rampTo(enabled ? 1 : 0, 0.05);
   }, []);
 
-  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, volumeRef };
+  const setArpInstrument = useCallback((name) => {
+    arpInstrumentNameRef.current = name;
+    if (!isStartedRef.current || !arpVolRef.current) return;
+    const oldVoice = arpVoiceRef.current;
+    const newVoice = makeArpVoice(name);
+    applyArpDecay(newVoice, arpDecayRef.current);
+    newVoice.connect(arpVolRef.current);
+    arpVoiceRef.current = newVoice;
+    oldVoice?.disconnect();
+    oldVoice?.dispose();
+  }, []);
+
+  const setArpDecay = useCallback((value) => {
+    arpDecayRef.current = value;
+    applyArpDecay(arpVoiceRef.current, value);
+  }, []);
+
+  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, volumeRef };
 }

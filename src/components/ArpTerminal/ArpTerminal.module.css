@@ -3,7 +3,7 @@
   bottom: 12px;
   right: 56px;
   z-index: 50;
-  width: 160px;
+  width: 190px;
   background: rgba(14, 14, 16, 0.92);
   border: 1px solid rgba(93, 202, 165, 0.3);
   border-radius: 4px;
@@ -147,6 +147,33 @@
   height: 3px;
   border-radius: 2px;
   background: rgba(93, 202, 165, 0.10);
+}
+
+/* ── Instrument dropdown ──────────────────────────────────────────── */
+.instrumentSelect {
+  width: 100%;
+  background: rgba(14, 14, 16, 0.8);
+  border: 1px solid rgba(93, 202, 165, 0.25);
+  border-radius: 3px;
+  color: #5DCAA5;
+  font-family: inherit;
+  font-size: 8px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: 4px 6px;
+  appearance: none;
+  cursor: pointer;
+  outline: none;
+}
+
+.instrumentSelect:focus {
+  border-color: rgba(93, 202, 165, 0.6);
+}
+
+.instrumentSelect option {
+  background: #111416;
+  color: #c8c8cc;
+  text-transform: uppercase;
 }
 
 /* ── Speed Snap toggle ────────────────────────────────────────────── */

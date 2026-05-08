@@ -32,6 +32,7 @@ export default function App() {
   const [arpFxEnabled,      setArpFxEnabledState]   = useState(false);
   const [isArpTerminalOpen, setIsArpTerminalOpen]   = useState(false);
   const [arpSpeedSnap,      setArpSpeedSnapState]   = useState(true);
+  const [arpInstrument,     setArpInstrumentState]  = useState('analog');
   const [isDarkMode,        setIsDarkMode]          = useState(true);
   const [showControls,      setShowControls]        = useState(true);
   const [showAnalytics,  setShowAnalytics]        = useState(true);
@@ -51,7 +52,7 @@ export default function App() {
 
   const { isMidiEnabled, toggleMidi, sendMidi, panicAllNotes } = useMidi(() => setShowMidiModal(true));
   const { startVocoder, stopVocoder, updateNotes: updateVocoderNotes, updateVocoderParams, getAnalyserData, isVocoderActive } = useVocoder();
-  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, volumeRef } = useAudioEngine(hudRefs, sendMidi, updateVocoderNotes, mappingsRef, triggerMappingsRef);
+  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, volumeRef } = useAudioEngine(hudRefs, sendMidi, updateVocoderNotes, mappingsRef, triggerMappingsRef);
 
   const handleToggleVocoder = useCallback(async () => {
     if (isVocoderActive) {
@@ -80,6 +81,11 @@ export default function App() {
     setArpSpeedSnapState(bool);
     setArpSpeedSnap(bool);
   }, [setArpSpeedSnap]);
+
+  const handleArpInstrumentChange = useCallback((name) => {
+    setArpInstrumentState(name);
+    setArpInstrument(name);
+  }, [setArpInstrument]);
 
   const { isRecording, isLooping, startRecording, dispose, progressRef } = useLoopStation(volumeRef);
   const canvasRef = useHandTracking(videoRef, isActive, updateParams);
@@ -150,6 +156,9 @@ export default function App() {
           updateArpDelayMix={setArpDelayMix}
           arpSpeedSnap={arpSpeedSnap}
           onArpSpeedSnapToggle={handleArpSpeedSnap}
+          arpInstrument={arpInstrument}
+          onArpInstrumentChange={handleArpInstrumentChange}
+          onArpDecayChange={setArpDecay}
         />
         <button
           className={isActive ? 'disengageBtn' : 'engageBtn'}
