@@ -229,8 +229,11 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
   const arpFxGainRef       = useRef(null); // wet path → filter chain
   const arpFxEnabledRef    = useRef(false);
   const arpDelayRef        = useRef(null);
+  const arpReverbRef       = useRef(null);
+  const arpReverbWetRef    = useRef(0);
   const arpSpeedSnapRef      = useRef(true);
   const smoothedFluidIntervalRef = useRef(0.5);
+  const fluidUpdateReadyRef      = useRef(false);
   const arpPatternRef        = useRef(null);
   const arpModeRef         = useRef('off');
   const arpRateRef         = useRef('8n');
@@ -299,10 +302,14 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       const arpBaseVol = new Tone.Volume(0);
       arpVol.connect(arpBaseVol);
 
-      // FeedbackDelay sits between arpBaseVol and the bypass/fx split; wet=0 at init (transparent)
+      // FeedbackDelay sits between arpBaseVol and the reverb; wet=0 at init (transparent)
       const arpDelay = new Tone.FeedbackDelay({ delayTime: '8n', feedback: 0.3, wet: 0 });
-      arpDelay.connect(arpBypassGain);
-      arpDelay.connect(arpFxGain);
+      // Freeverb (synchronous init) sits between delay and the bypass/fx split
+      const arpReverb = new Tone.Freeverb({ roomSize: 0.84, dampening: 3000 });
+      arpReverb.wet.value = arpReverbWetRef.current;
+      arpDelay.connect(arpReverb);
+      arpReverb.connect(arpBypassGain);
+      arpReverb.connect(arpFxGain);
       arpBaseVol.connect(arpDelay);
 
       const arpVoice = makeArpVoice(arpInstrumentNameRef.current);
@@ -316,10 +323,9 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
         if (arpSpeedSnapRef.current) {
           gateLength = HOLD_MAP[arpRateRef.current] ?? '16n';
         } else {
-          // Apply the lerp-smoothed interval at note-fire time — safe inside the scheduler
           const fluidTime = smoothedFluidIntervalRef.current;
-          arpPattern.interval = fluidTime;
           gateLength = fluidTime * 0.5;
+          fluidUpdateReadyRef.current = true;
         }
         arpVoiceRef.current?.triggerAttackRelease(note, gateLength, time);
         hudRefsRef.current?.pianoRoll?.current?.flashNote(normalizeNote(note), 180);
@@ -346,6 +352,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       arpVolRef.current        = arpVol;
       arpBaseVolRef.current    = arpBaseVol;
       arpDelayRef.current      = arpDelay;
+      arpReverbRef.current     = arpReverb;
       arpBypassGainRef.current = arpBypassGain;
       arpFxGainRef.current     = arpFxGain;
       arpPatternRef.current    = arpPattern;
@@ -405,6 +412,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
     appliedArpRootRef.current  = null;
     appliedArpThirdRef.current = null;
     smoothedFluidIntervalRef.current = 0.5;
+    fluidUpdateReadyRef.current = false;
     Tone.Transport.stop();
 
     hudRefsRef.current?.pianoRoll?.current?.setNotes([]);
@@ -417,6 +425,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       arpVolRef.current?.dispose();
       arpBaseVolRef.current?.dispose();
       arpDelayRef.current?.dispose();
+      arpReverbRef.current?.dispose();
       arpBypassGainRef.current?.dispose();
       arpFxGainRef.current?.dispose();
       filterRef.current?.dispose();
@@ -432,6 +441,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       arpVolRef.current        = null;
       arpBaseVolRef.current    = null;
       arpDelayRef.current      = null;
+      arpReverbRef.current     = null;
       arpBypassGainRef.current = null;
       arpFxGainRef.current     = null;
       filterRef.current        = null;
@@ -645,6 +655,10 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
           const targetInterval = mapRange(tilt, 0, 90, 0.5, 0.05);
           smoothedFluidIntervalRef.current +=
             (targetInterval - smoothedFluidIntervalRef.current) * 0.08;
+          if (pat && fluidUpdateReadyRef.current) {
+            pat.interval = smoothedFluidIntervalRef.current;
+            fluidUpdateReadyRef.current = false;
+          }
           appliedArpRateRef.current = null;
         }
 
@@ -816,5 +830,10 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
     if (arpBaseVolRef.current) arpBaseVolRef.current.volume.rampTo(db, 0.1);
   }, []);
 
-  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, setArpBaseVolume, volumeRef };
+  const setArpReverb = useCallback((value) => {
+    arpReverbWetRef.current = value;
+    if (arpReverbRef.current) arpReverbRef.current.wet.rampTo(value, 0.1);
+  }, []);
+
+  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, setArpBaseVolume, setArpReverb, volumeRef };
 }

@@ -25,6 +25,12 @@ const FADERS = [
     fmt: v => `${Math.round(v * 100)}%`,
   },
   {
+    key: 'reverb',
+    label: 'rvrb',
+    min: 0, max: 1, step: 0.01, init: 0,
+    fmt: v => `${Math.round(v * 100)}%`,
+  },
+  {
     key: 'decay',
     label: 'dcay',
     min: 0.1, max: 2.0, step: 0.01, init: 0.12,
@@ -38,7 +44,7 @@ const FADERS = [
   },
 ];
 
-export default function ArpTerminal({ updateArpDelayTime, updateArpDelayMix, speedSnap, onSpeedSnapToggle, arpInstrument, onArpInstrumentChange, onArpDecayChange, onArpVolumeChange }) {
+export default function ArpTerminal({ updateArpDelayTime, updateArpDelayMix, speedSnap, onSpeedSnapToggle, arpInstrument, onArpInstrumentChange, onArpDecayChange, onArpVolumeChange, onArpReverbChange }) {
   const [pos, setPos]   = useState({ x: 0, y: 0 });
   const isDragging      = useRef(false);
   const dragOffset      = useRef({ x: 0, y: 0 });
@@ -76,9 +82,10 @@ export default function ArpTerminal({ updateArpDelayTime, updateArpDelayMix, spe
     setParams(prev => ({ ...prev, [key]: value }));
     if (key === 'delayIdx') updateArpDelayTime?.(DELAY_STOPS[Math.round(value)]);
     if (key === 'mix')      updateArpDelayMix?.(value);
+    if (key === 'reverb')   onArpReverbChange?.(value);
     if (key === 'decay')    onArpDecayChange?.(value);
     if (key === 'vol')      onArpVolumeChange?.(value);
-  }, [updateArpDelayTime, updateArpDelayMix, onArpDecayChange, onArpVolumeChange]);
+  }, [updateArpDelayTime, updateArpDelayMix, onArpReverbChange, onArpDecayChange, onArpVolumeChange]);
 
   return (
     <div

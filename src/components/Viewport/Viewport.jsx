@@ -9,7 +9,7 @@ export default function Viewport({
   progressRef, isRecording, isLooping, pianoRollRef,
   isVocoderActive, getAnalyserData, updateVocoderParams,
   isArpTerminalOpen, updateArpDelayTime, updateArpDelayMix, arpSpeedSnap, onArpSpeedSnapToggle,
-  arpInstrument, onArpInstrumentChange, onArpDecayChange, onArpVolumeChange,
+  arpInstrument, onArpInstrumentChange, onArpDecayChange, onArpVolumeChange, onArpReverbChange,
 }) {
   return (
     <div className={styles.viewport}>
@@ -46,6 +46,7 @@ export default function Viewport({
           onArpInstrumentChange={onArpInstrumentChange}
           onArpDecayChange={onArpDecayChange}
           onArpVolumeChange={onArpVolumeChange}
+          onArpReverbChange={onArpReverbChange}
         />
       )}
     </div>
