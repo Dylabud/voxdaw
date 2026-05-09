@@ -13,11 +13,12 @@ export default function Controls({
   onOscTypeChange, onScaleChange, onInstrumentChange, onTempoChange,
   isMidiEnabled, onToggleMidi,
   isVocoderActive, onToggleVocoder,
+  isAutotuneActive, onToggleAutotune,
   globalOctave, onGlobalOctaveChange,
   arpOctaveShift, onArpOctaveShiftToggle,
   arpFxEnabled, onArpFxToggle,
   isArpTerminalOpen, onArpTerminalToggle,
-  onRecord, isRecording, isLooping,
+  onOpenRecordModal, isRecording,
   onGestureSettingsOpen,
   isDarkMode, onThemeToggle,
   onCollapseToggle,
@@ -191,13 +192,19 @@ export default function Controls({
           {isVocoderActive ? '● vocoder' : '[ vocoder ]'}
         </button>
 
+        <button
+          className={isAutotuneActive ? styles.toggleBtnActive : styles.toggleBtn}
+          onClick={onToggleAutotune}
+        >
+          {isAutotuneActive ? '● autotune' : '[ autotune ]'}
+        </button>
+
         {isActive && (
           <button
             className={`${styles.recordBtn} ${isRecording ? styles.recordActive : ''}`}
-            onClick={onRecord}
-            disabled={isRecording}
+            onClick={onOpenRecordModal}
           >
-            {isRecording ? '● rec' : isLooping ? '[ re-record ]' : '[ record ]'}
+            {isRecording ? '● rec' : '[ record ]'}
           </button>
         )}
       </div>

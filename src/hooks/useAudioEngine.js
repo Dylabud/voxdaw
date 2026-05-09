@@ -192,7 +192,7 @@ function makeStringsVoice(initDb = VOICE_DB) {
 
 // ── Hook ───────────────────────────────────────────────────────────────────────
 
-export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mappingsRef, triggerMappingsRef) {
+export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mappingsRef, triggerMappingsRef, masterMixRef) {
   const hudRefsRef       = useRef(hudRefs);       hudRefsRef.current       = hudRefs;
   const sendMidiRef      = useRef(sendMidi);      sendMidiRef.current      = sendMidi;
   const updateVocoderRef = useRef(updateVocoder); updateVocoderRef.current = updateVocoder;
@@ -255,8 +255,11 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
     await Tone.start();
 
     if (!analogVoicesRef.current) {
-      // Shared effects chain
-      const vol = new Tone.Volume(-6).toDestination();
+      // Shared effects chain — all paths funnel through masterMix before Destination
+      const masterMix = new Tone.Gain(1).toDestination();
+      masterMixRef.current = masterMix;
+      const vol = new Tone.Volume(-6);
+      vol.connect(masterMix);
 
       const reverb = new Tone.Reverb({ decay: 3, wet: 0 });
       await reverb.generate();
@@ -294,7 +297,8 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       // fx path enters the filter chain. Toggle between them via setArpFx().
       const arpVol = new Tone.Volume(-12); // gesture-controlled; sits upstream of both paths
 
-      const arpBypassGain = new Tone.Gain(1).toDestination(); // default: bypass active
+      const arpBypassGain = new Tone.Gain(1); // default: bypass active
+      arpBypassGain.connect(masterMix);
       const arpFxGain     = new Tone.Gain(0);                 // default: fx path silent
       arpFxGain.connect(filter);
 
@@ -432,6 +436,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       vibratoRef.current?.dispose();
       reverbRef.current?.dispose();
       volumeRef.current?.dispose();
+      masterMixRef.current?.dispose();
 
       analogVoicesRef.current  = null;
       stringsVoicesRef.current = null;
@@ -448,6 +453,7 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
       vibratoRef.current       = null;
       reverbRef.current        = null;
       volumeRef.current        = null;
+      masterMixRef.current     = null;
       disposeTimerRef.current  = null;
     }, 1600);
   }, []);
@@ -835,5 +841,5 @@ export default function useAudioEngine(hudRefs, sendMidi, updateVocoder, mapping
     if (arpReverbRef.current) arpReverbRef.current.wet.rampTo(value, 0.1);
   }, []);
 
-  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, setArpBaseVolume, setArpReverb, volumeRef };
+  return { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, setArpBaseVolume, setArpReverb, volumeRef, currentRootRef };
 }

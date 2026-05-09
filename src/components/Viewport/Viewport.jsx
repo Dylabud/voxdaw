@@ -1,19 +1,21 @@
 import styles from './Viewport.module.css';
-import LoopProgress from '../LoopProgress/LoopProgress';
 import PianoRoll from '../PianoRoll/PianoRoll';
 import VocoderTerminal from '../VocoderTerminal/VocoderTerminal';
 import ArpTerminal from '../ArpTerminal/ArpTerminal';
+import AutotuneTerminal from '../AutotuneTerminal/AutotuneTerminal';
+import RecordModal from '../RecordModal/RecordModal';
 
 export default function Viewport({
   videoRef, canvasRef, isActive, error,
-  progressRef, isRecording, isLooping, pianoRollRef,
+  pianoRollRef,
   isVocoderActive, getAnalyserData, updateVocoderParams,
   isArpTerminalOpen, updateArpDelayTime, updateArpDelayMix, arpSpeedSnap, onArpSpeedSnapToggle,
   arpInstrument, onArpInstrumentChange, onArpDecayChange, onArpVolumeChange, onArpReverbChange,
+  isAutotuneActive, setAutotuneWet, setAutotuneGlide, detectedNoteRef, correctedNoteRef, toggleTuneMode,
+  isRecordTerminalOpen, onRecordTerminalClose, isRecording, recordedBlob, audioBuffer, startRecording, stopRecording, clearRecording,
 }) {
   return (
     <div className={styles.viewport}>
-      <LoopProgress progressRef={progressRef} isRecording={isRecording} isLooping={isLooping} />
       <PianoRoll ref={pianoRollRef} />
       <video
         ref={videoRef}
@@ -47,6 +49,26 @@ export default function Viewport({
           onArpDecayChange={onArpDecayChange}
           onArpVolumeChange={onArpVolumeChange}
           onArpReverbChange={onArpReverbChange}
+        />
+      )}
+      {isAutotuneActive && (
+        <AutotuneTerminal
+          setAutotuneWet={setAutotuneWet}
+          setAutotuneGlide={setAutotuneGlide}
+          detectedNoteRef={detectedNoteRef}
+          correctedNoteRef={correctedNoteRef}
+          toggleTuneMode={toggleTuneMode}
+        />
+      )}
+      {isRecordTerminalOpen && (
+        <RecordModal
+          onClose={onRecordTerminalClose}
+          isRecording={isRecording}
+          recordedBlob={recordedBlob}
+          audioBuffer={audioBuffer}
+          startRecording={startRecording}
+          stopRecording={stopRecording}
+          clearRecording={clearRecording}
         />
       )}
     </div>

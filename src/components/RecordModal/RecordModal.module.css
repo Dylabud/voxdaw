@@ -1,0 +1,185 @@
+.terminal {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  z-index: 50;
+  width: 220px;
+  background: rgba(14, 14, 16, 0.92);
+  border: 1px solid rgba(93, 202, 165, 0.3);
+  border-radius: 4px;
+  padding: 10px 12px 12px;
+  backdrop-filter: blur(6px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.terminalHeader {
+  font-size: 9px;
+  letter-spacing: 0.35em;
+  text-transform: uppercase;
+  color: #5DCAA5;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(93, 202, 165, 0.15);
+  cursor: grab;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.terminalHeader:active {
+  cursor: grabbing;
+}
+
+.closeBtn {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: rgba(200, 200, 204, 0.35);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+  transition: color 0.15s;
+}
+
+.closeBtn:hover {
+  color: rgba(200, 200, 204, 0.7);
+}
+
+/* ── Idle view ── */
+.startBtn {
+  width: 100%;
+  padding: 12px 0;
+  background: transparent;
+  border: 1px solid rgba(93, 202, 165, 0.3);
+  border-radius: 3px;
+  color: rgba(200, 200, 204, 0.7);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.startBtn:hover {
+  border-color: rgba(93, 202, 165, 0.65);
+  color: #5DCAA5;
+}
+
+/* ── Recording view ── */
+.recordingRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stopBtn {
+  flex: 1;
+  padding: 12px 0;
+  background: rgba(93, 202, 165, 0.06);
+  border: 1px solid rgba(93, 202, 165, 0.5);
+  border-radius: 3px;
+  color: #5DCAA5;
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.stopBtn:hover {
+  background: rgba(93, 202, 165, 0.12);
+}
+
+.timer {
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  color: #5DCAA5;
+  font-variant-numeric: tabular-nums;
+  min-width: 40px;
+  text-align: right;
+}
+
+.pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e05555;
+  flex-shrink: 0;
+  animation: blink 1s step-start infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.1; }
+}
+
+/* ── Review view ── */
+.audioPreview {
+  width: 100%;
+  accent-color: #5DCAA5;
+}
+
+.exportRow {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.formatSelect {
+  appearance: none;
+  background: rgba(93, 202, 165, 0.05);
+  border: 1px solid rgba(93, 202, 165, 0.25);
+  border-radius: 3px;
+  color: rgba(200, 200, 204, 0.7);
+  font-family: inherit;
+  font-size: 8px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.exportBtn {
+  flex: 1;
+  padding: 7px 0;
+  background: rgba(93, 202, 165, 0.08);
+  border: 1px solid rgba(93, 202, 165, 0.45);
+  border-radius: 3px;
+  color: #5DCAA5;
+  font-family: inherit;
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.exportBtn:hover {
+  background: rgba(93, 202, 165, 0.18);
+}
+
+.discardBtn {
+  width: 100%;
+  padding: 7px 0;
+  background: transparent;
+  border: 1px solid rgba(200, 200, 204, 0.12);
+  border-radius: 3px;
+  color: rgba(200, 200, 204, 0.35);
+  font-family: inherit;
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.discardBtn:hover {
+  border-color: rgba(200, 200, 204, 0.3);
+  color: rgba(200, 200, 204, 0.6);
+}

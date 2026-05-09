@@ -3,9 +3,10 @@ import './App.css';
 import useCameraStream from './hooks/useCameraStream';
 import useHandTracking from './hooks/useHandTracking';
 import useAudioEngine from './hooks/useAudioEngine';
-import useLoopStation from './hooks/useLoopStation';
+import useRecorder from './hooks/useRecorder';
 import useMidi from './hooks/useMidi';
 import useVocoder from './hooks/useVocoder';
+import useAutotune from './hooks/useAutotune';
 import Viewport from './components/Viewport/Viewport';
 import TelemetryHUD from './components/TelemetryHUD/TelemetryHUD';
 import Controls from './components/Controls/Controls';
@@ -38,6 +39,7 @@ export default function App() {
   const [showAnalytics,  setShowAnalytics]        = useState(true);
   const [showWelcome,          setShowWelcome]          = useState(true);
   const [showMidiModal,        setShowMidiModal]        = useState(false);
+  const [isRecordTerminalOpen, setIsRecordTerminalOpen] = useState(false);
   const [showGestureSettings,  setShowGestureSettings]  = useState(false);
   const [mappings,             setMappings]             = useState(DEFAULT_MAPPINGS);
 
@@ -50,9 +52,12 @@ export default function App() {
   const triggerMappingsRef = useRef(triggerMappings);
   triggerMappingsRef.current = triggerMappings;
 
+  const masterMixRef = useRef(null); // populated by useAudioEngine.startAudio(); read by vocoder, autotune, recorder
+
   const { isMidiEnabled, toggleMidi, sendMidi, panicAllNotes } = useMidi(() => setShowMidiModal(true));
-  const { startVocoder, stopVocoder, updateNotes: updateVocoderNotes, updateVocoderParams, getAnalyserData, isVocoderActive } = useVocoder();
-  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, setArpBaseVolume, setArpReverb, volumeRef } = useAudioEngine(hudRefs, sendMidi, updateVocoderNotes, mappingsRef, triggerMappingsRef);
+  const { startVocoder, stopVocoder, updateNotes: updateVocoderNotes, updateVocoderParams, getAnalyserData, isVocoderActive } = useVocoder(masterMixRef);
+  const { startAudio, stopAudio, updateParams, setOscType, setScale, setInstrument, setTempo, setGlobalOctave, setArpOctaveShift, setArpFx, setArpDelayTime, setArpDelayMix, setArpSpeedSnap, setArpInstrument, setArpDecay, setArpBaseVolume, setArpReverb, volumeRef, currentRootRef } = useAudioEngine(hudRefs, sendMidi, updateVocoderNotes, mappingsRef, triggerMappingsRef, masterMixRef);
+  const { startAutotune, stopAutotune, isAutotuneActive, setAutotuneScale, setAutotuneWet, setAutotuneGlide, toggleTuneMode, detectedNoteRef, correctedNoteRef } = useAutotune(currentRootRef, masterMixRef);
 
   const handleToggleVocoder = useCallback(async () => {
     if (isVocoderActive) {
@@ -61,6 +66,19 @@ export default function App() {
       await startVocoder();
     }
   }, [isVocoderActive, startVocoder, stopVocoder]);
+
+  const handleToggleAutotune = useCallback(async () => {
+    if (isAutotuneActive) {
+      stopAutotune();
+    } else {
+      await startAutotune();
+    }
+  }, [isAutotuneActive, startAutotune, stopAutotune]);
+
+  const handleScaleChange = useCallback((key) => {
+    setScale(key);
+    setAutotuneScale(key);
+  }, [setScale, setAutotuneScale]);
 
   const handleGlobalOctave = useCallback((val) => {
     setGlobalOctaveState(val);
@@ -87,7 +105,7 @@ export default function App() {
     setArpInstrument(name);
   }, [setArpInstrument]);
 
-  const { isRecording, isLooping, startRecording, dispose, progressRef } = useLoopStation(volumeRef);
+  const { isRecording, recordedBlob, audioBuffer, startRecording, stopRecording, clearRecording, dispose } = useRecorder(masterMixRef);
   const canvasRef = useHandTracking(videoRef, isActive, updateParams);
 
   const handleEngage = useCallback(async () => {
@@ -114,13 +132,15 @@ export default function App() {
         collapsed={!showControls}
         isActive={isActive}
         onOscTypeChange={setOscType}
-        onScaleChange={setScale}
+        onScaleChange={handleScaleChange}
         onInstrumentChange={setInstrument}
         onTempoChange={setTempo}
         isMidiEnabled={isMidiEnabled}
         onToggleMidi={toggleMidi}
         isVocoderActive={isVocoderActive}
         onToggleVocoder={handleToggleVocoder}
+        isAutotuneActive={isAutotuneActive}
+        onToggleAutotune={handleToggleAutotune}
         globalOctave={globalOctave}
         onGlobalOctaveChange={handleGlobalOctave}
         arpOctaveShift={arpOctaveShift}
@@ -129,9 +149,8 @@ export default function App() {
         onArpFxToggle={handleArpFx}
         isArpTerminalOpen={isArpTerminalOpen}
         onArpTerminalToggle={setIsArpTerminalOpen}
-        onRecord={startRecording}
+        onOpenRecordModal={() => setIsRecordTerminalOpen(v => !v)}
         isRecording={isRecording}
-        isLooping={isLooping}
         onGestureSettingsOpen={() => setShowGestureSettings(true)}
         isDarkMode={isDarkMode}
         onThemeToggle={() => setIsDarkMode(v => !v)}
@@ -144,9 +163,6 @@ export default function App() {
           canvasRef={canvasRef}
           isActive={isActive}
           error={error}
-          progressRef={progressRef}
-          isRecording={isRecording}
-          isLooping={isLooping}
           pianoRollRef={pianoRollRef}
           isVocoderActive={isVocoderActive}
           getAnalyserData={getAnalyserData}
@@ -161,6 +177,20 @@ export default function App() {
           onArpDecayChange={setArpDecay}
           onArpVolumeChange={setArpBaseVolume}
           onArpReverbChange={setArpReverb}
+          isAutotuneActive={isAutotuneActive}
+          setAutotuneWet={setAutotuneWet}
+          detectedNoteRef={detectedNoteRef}
+          correctedNoteRef={correctedNoteRef}
+          toggleTuneMode={toggleTuneMode}
+          setAutotuneGlide={setAutotuneGlide}
+          isRecordTerminalOpen={isRecordTerminalOpen}
+          onRecordTerminalClose={() => setIsRecordTerminalOpen(false)}
+          isRecording={isRecording}
+          recordedBlob={recordedBlob}
+          audioBuffer={audioBuffer}
+          startRecording={startRecording}
+          stopRecording={stopRecording}
+          clearRecording={clearRecording}
         />
         <button
           className={isActive ? 'disengageBtn' : 'engageBtn'}

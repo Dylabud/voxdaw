@@ -34,9 +34,11 @@ getUserMedia → <video> → MediaPipe HandLandmarker.detectForVideo()
   → result.landmarks[]  (21 × {x,y,z} normalized 0–1, Y-down)
   → result.handednesses[]
   → updateParams(landmarks, handednesses)   ← called inside rAF tick
-      ├─ Right hand (MediaPipe "Left") → pitch / chord / filter / volume / arp
-      └─ Left hand  (MediaPipe "Right") → reverb wet / vibrato depth
+      ├─ Right hand (MediaPipe "Left") → pitch / chord / velocity / arp
+      └─ Left hand  (MediaPipe "Right") → arp vol / wrist tilt / finger combos
 ```
+
+Continuous signal routing (filter cutoff, reverb wet, vibrato depth, volume, arp volume) is fully user-configurable via `mappingsRef` — see `src/utils/gestureMappings.js`. Discrete gesture triggers (chord type, arp mode, arp rate) are routed via `triggerMappingsRef`. Both refs are synced inline in `App.js` each render so the rAF loop always reads current values without touching React state.
 
 **MediaPipe handedness inversion:** The display canvas is CSS-mirrored (`scaleX(-1)`), but MediaPipe reads the raw un-mirrored frame. The user's physical right hand appears on the left side of the raw frame, so MediaPipe labels it `"Left"`. In `updateParams`, `label === 'Left'` is the pitch/chord/arp hand.
 
@@ -46,23 +48,41 @@ getUserMedia → <video> → MediaPipe HandLandmarker.detectForVideo()
 - DOM elements via `.textContent` using refs collected in the `hudRefs` object
 - Imperative component handles (e.g., `pianoRollRef.current.setNotes()`)
 
+The same rule applies to `useVocoder` and `useAutotune` rAF loops — their detection/visualizer loops also write only to canvas APIs and DOM refs.
+
 ### Audio Graph
 ```
-[analogVoices × 4]  ─┐
-[stringsVoices × 4] ─┤→ Filter → Vibrato → Reverb → Volume → Destination
-[arpVoice × 1]      ─┘   (lowpass −24 dB/oct)
+[analogVoices × 6]  ─┐
+[stringsVoices × 6] ─┤→ Filter → Vibrato → Reverb → Volume → Destination
+                      │  (lowpass −24 dB/oct)
+[arpVoice × 1] → arpVol → arpBaseVol → arpDelay → arpReverb ─┬─ arpBypassGain → Destination
+                                                               └─ arpFxGain    → Filter (above)
+
+[Tone.UserMedia mic] → AnalyserNode (tap) → Tone.PitchShift → Destination  ← useAutotune (independent path)
+
+[mic getUserMedia] → 16-band vocoder → Destination  ← useVocoder (own AudioContext)
 ```
-All voice sets connect to the same `filter` node input; Tone.js sums them automatically. The active instrument set is tracked by `activeVoicesRef`; the inactive set is muted to `VOICE_MUTE = −80 dB`. The arp voice has a dedicated `Tone.Volume` before the filter so its gain is independent of the pinch-velocity volume on the main chain.
+
+- Active chord instrument tracked by `activeVoicesRef`; inactive set muted to `VOICE_MUTE = −80 dB`.
+- Arp bypass/fx split toggled via `setArpFx(bool)` — cross-fades between paths so the switch is click-free.
+- Autotune and vocoder are **independent of each other and of Tone.js** in terms of AudioContext: autotune runs in Tone.js's context; vocoder creates its own `new AudioContext()`.
 
 ### Key Refs in `useAudioEngine`
 | Ref | Purpose |
 |-----|---------|
-| `analogVoicesRef` | 4× `Tone.Synth` — [root, 3rd, 5th, 7th] |
-| `stringsVoicesRef` | 4× `Tone.FMSynth` — [root, 3rd, 5th, 7th] |
+| `analogVoicesRef` | 6× `Tone.Synth` — [root, 3rd, 5th, 7th, oct, oct+3rd] |
+| `stringsVoicesRef` | 6× `Tone.FMSynth` — same intervals |
 | `activeVoicesRef` | Points to whichever voice set is currently audible |
 | `currentRootRef` | Last computed root frequency in Hz — consumed by the arp |
 | `scaleRef` | `Float32Array` of sorted Hz values for `snapToNearest()` binary search |
-| `filterRef / vibratoRef / reverbRef / volumeRef` | Shared effects chain nodes |
+| `globalOctaveRef` | Integer −2 to +2; applied via `.transpose(n * 12)` to raw pitch |
+| `arpVolRef` | `Tone.Volume` — gesture-driven arp gain (written by `updateParams`) |
+| `arpBaseVolRef` | `Tone.Volume` — static base-level node written only by the vol slider; sits between `arpVolRef` and `arpDelayRef` so the two writers never conflict |
+| `arpDelayRef` | `Tone.FeedbackDelay` — on arp path between `arpBaseVol` and bypass/fx split |
+| `arpReverbRef` | `Tone.Freeverb` — on arp path between `arpDelayRef` and bypass/fx split |
+| `arpBypassGainRef / arpFxGainRef` | Parallel output routing for arp |
+| `filterRef / vibratoRef / reverbRef / volumeRef` | Shared chord effects chain nodes |
+| `appliedArpModeRef / appliedArpRateRef / appliedArpRootRef / appliedArpThirdRef` | Delta-check refs — pattern is only rebuilt when one of these changes; all reset to `null`/`0.5` in `stopAudio` |
 
 ### `dsp.js` Utility Reference
 | Function | Notes |
@@ -73,13 +93,28 @@ All voice sets connect to the same `filter` node input; Tone.js sums them automa
 | `isFingerExtended(hand, tipIdx, pipIdx)` | Y-comparison — reliable only on non-rotated hands |
 | `snapToNearest(hz, sortedFloat32Array)` | O(log n) binary search for scale quantization |
 | `normalizeNote(note)` | Tone.js flat names → sharp names (for PianoRoll key lookup) |
+| `getArpFingerStates(hand)` | Rotation-robust wrist-to-tip / wrist-to-PIP ratio, 1.1× threshold |
+| `getWristTiltDeg(hand)` | atan2 of wrist→midMCP vector; absolute deviation for bidirectional tilt |
+| `getArpSpreadDb(hand, states, handSize)` | Outermost extended-tip distance → −12 to +3 dB |
+
+### Gesture Routing System (`src/utils/gestureMappings.js`)
+Two independent routing layers, both user-configurable via the GestureSettings modal:
+
+- **Signals** (continuous): 6 gesture sources → 5 audio destinations. Each mapping row: `{ id, source, destination, invert }`. Stored in `mappings` React state; `mappingsRef` (inline-synced) passes the live value into the rAF loop.
+- **Gates** (discrete triggers): 17 trigger sources (strict 8-state finger-combo enumerations for each hand + 3 wrist-tilt bands) → 27 action destinations (chord types, arp modes, arp rates). Stored in `triggerMappings` state; `triggerMappingsRef` inline-synced.
+
+`updateParams` runs in three phases: **(1) Gather** signals + active triggers from each hand block; **(2) Resolve** trigger IDs to `targetChord / targetArpMode / targetArpRate`; **(3) Execute** chord and arp logic.
+
+### Vocoder Hook (`src/hooks/useVocoder.js`)
+Standalone 16-band phase vocoder built entirely on native Web Audio API — **completely independent of Tone.js** (creates its own `new AudioContext()`). Carrier: 5 sawtooth oscillators (4 chord voices + 1 arp voice) updated via `updateNotes(freqs[])` every rAF frame using `setTargetAtTime(τ=10ms)` — zero node churn. Exposed API: `startVocoder / stopVocoder / updateNotes / updateVocoderParams / getAnalyserData / isVocoderActive`.
+
+### Autotune Hook (`src/hooks/useAutotune.js`)
+Hard-tune pitch correction using `pitchfinder.YIN` on a 2048-sample native `AnalyserNode` tapping the raw mic signal **before** `Tone.PitchShift`. Runs in Tone.js's AudioContext (not a separate one). Detection loop gated to ~30 fps (every 2nd rAF frame) to cap YIN's O(n²) cost. Semitone shift: `12 * Math.log2(targetHz / detectedHz)` assigned directly to `pitchShift.pitch` (no ramp = hard snap). Scale is updated externally via `setAutotuneScale(key)` — App.js calls this alongside `setScale` whenever the scale dropdown changes. Exposed API: `startAutotune / stopAutotune / isAutotuneActive / setAutotuneScale / setAutotuneWet / detectedNoteRef / correctedNoteRef`.
 
 ### PianoRoll Component
 `PianoRoll` is a `forwardRef` component exposing two imperative methods:
 - `ref.current.setNotes(noteNames[])` — diff-based class toggling via an internal `Set`; frames with no chord change produce zero DOM writes.
-- `ref.current.flashNote(noteName, durationMs)` — adds a `.flash` CSS animation (gold inset `box-shadow`) to a single key for `durationMs` ms. `flashTimersRef` (Map) allows rapid re-fires on the same key to cancel the previous timer and restart the animation cleanly via forced reflow (`void el.offsetWidth`). Called directly from the `Tone.Pattern` callback (not via `Tone.Draw`) — the Pattern callback runs in the main thread and DOM calls are safe there.
-
-**Arp pattern delta-check:** Three refs — `appliedArpModeRef`, `appliedArpRateRef`, `appliedArpRootRef` — track the last values written to `arpPatternRef`. `pat.values / .pattern / .interval` are only reassigned when one of these changes, preventing Tone.Pattern from restarting its step counter every frame. All three are reset to `null` in `stopAudio` so re-engage always seeds the fresh pattern.
+- `ref.current.flashNote(noteName, durationMs)` — adds a `.flash` CSS animation (gold inset `box-shadow`) to a single key for `durationMs` ms. `flashTimersRef` (Map) allows rapid re-fires on the same key to cancel the previous timer and restart the animation cleanly via forced reflow (`void el.offsetWidth`). Called directly from the `Tone.Pattern` callback — safe because Pattern callbacks run on the main thread.
 
 ### Loop Station
 `useLoopStation(volumeRef)` taps a `Tone.Recorder` after `volumeRef`. Records 8 s (4 bars @ 120 BPM), decodes via `rawContext.decodeAudioData`, then plays back through a `Tone.Player(loop:true)` directly to `Destination` — bypassing the effects chain. Does **not** use `Tone.Transport`.
@@ -99,7 +134,7 @@ All voice sets connect to the same `filter` node input; Tone.js sums them automa
 ## The Team & Roles
 * **User (Dylan):** Project Owner and Lead Developer. Ensure explanations are clear and educational.
 * **You (Claude):** Senior Executive Software Engineer. Write production-ready, highly efficient, mathematically correct code. Prioritize performance and low latency above all else.
-* **Gemini:** Technical Project Manager & Systems Architect. Defines high-level strategy, maintains the project roadmap, and drafts foundational documentation before handing precise execution blueprints to Claude.
+* **Gemini:** Technical Project Manager & Systems Architect. Defines high-level strategy, maintains the project roadmap, and drafts foundational documentation before handing precise execution blueprints to Claude. **Be critical of Gemini's plans** — verify signal flow correctness, check for existing utilities before proposing new ones, and reject approaches that violate the Zero-Re-render Rule or the established hook modularity pattern.
 
 ---
 
@@ -113,6 +148,8 @@ All voice sets connect to the same `filter` node input; Tone.js sums them automa
 
 1. **Zero-Latency Tolerance:** Use `requestAnimationFrame` for visual updates and Tone.js ramp methods for audio. Never block the rAF loop.
 2. **Mathematical Precision:** All DSP and gesture-mapping calculations must be mathematically sound. Avoid unoptimized loops in the render cycle.
-3. **Strict Aesthetic — Option A (Deep Space & Mint):** Background `#0e0e10`, Accent `#5DCAA5`. All UI must feel like a high-end professional audio tool.
-4. **Code Quality:** Small, modular components. Optimize state to prevent unnecessary re-renders. The rAF loop must touch zero React state.
-5. **Communication:** Briefly explain *why* a solution is the most efficient/correct approach before providing code.
+3. **Strict Aesthetic — Option A (Deep Space & Mint):** Background `#0e0e10`, Accent `#5DCAA5`. All UI must feel like a high-end professional audio tool. Overlay terminals (VocoderTerminal, AutotuneTerminal, ArpTerminal) are **always dark** regardless of light/dark theme — they sit on the live camera feed and require constant high contrast.
+4. **Hook Modularity:** Each major audio subsystem lives in its own hook (`useAudioEngine`, `useVocoder`, `useAutotune`, `useLoopStation`, `useMidi`). Do not add new audio subsystems to `useAudioEngine` — create a peer hook and wire it through `App.js`.
+5. **Single Writer Per Node:** Every audio node ref has exactly one writer. Never write to a ref that is already owned by the rAF loop (e.g., `arpVolRef` is owned by `updateParams` — the ArpTerminal vol slider uses the separate `arpBaseVolRef`).
+6. **Code Quality:** Small, modular components. Optimize state to prevent unnecessary re-renders. The rAF loop must touch zero React state.
+7. **Communication:** Briefly explain *why* a solution is the most efficient/correct approach before providing code.

@@ -1,4 +1,5 @@
 import { useRef, useCallback, useState } from 'react';
+import * as Tone from 'tone';
 
 const NUM_BANDS      = 16;
 const BAND_MIN_HZ    = 100;
@@ -32,7 +33,7 @@ const RECTIFIER_CURVE = (() => {
   return curve;
 })();
 
-export default function useVocoder() {
+export default function useVocoder(masterMixRef) {
   const [isVocoderActive, setIsVocoderActive] = useState(false);
 
   const ctxRef         = useRef(null);
@@ -126,8 +127,8 @@ export default function useVocoder() {
       return;
     }
 
-    const ctx = new AudioContext();
-    if (ctx.state === 'suspended') await ctx.resume();
+    await Tone.start();
+    const ctx = Tone.getContext().rawContext;
     ctxRef.current = ctx;
     micStreamRef.current = stream;
 
@@ -135,7 +136,11 @@ export default function useVocoder() {
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 512;
     analyser.smoothingTimeConstant = 0.8;
-    analyser.connect(ctx.destination);
+    if (masterMixRef?.current) {
+      analyser.connect(masterMixRef.current.input);
+    } else {
+      analyser.connect(ctx.destination);
+    }
     analyserRef.current = analyser;
 
     // ── Wet / Dry crossfade ───────────────────────────────────────
@@ -280,8 +285,7 @@ export default function useVocoder() {
     dryGainRef.current?.disconnect();      dryGainRef.current     = null;
     analyserRef.current?.disconnect();     analyserRef.current    = null;
 
-    ctxRef.current?.close();
-    ctxRef.current = null;
+    ctxRef.current = null; // Tone's rawContext — do NOT close it
 
     isActiveRef.current = false;
     setIsVocoderActive(false);
