@@ -35,7 +35,7 @@
 
 .title {
   font-family: 'Courier New', monospace;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.18em;
   text-transform: uppercase;
@@ -70,7 +70,7 @@
   border-bottom: 2px solid transparent;
   padding: 5px 10px 8px;
   font-family: 'Courier New', monospace;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   cursor: pointer;
   transition: all 0.15s;
@@ -89,7 +89,7 @@
 .subheader {
   padding: 8px 20px 10px;
   font-family: 'Courier New', monospace;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.06em;
   color: var(--text-dimmer);
   border-bottom: 1px solid var(--border-faint);
@@ -104,7 +104,7 @@
   align-items: center;
   padding: 8px 20px 4px;
   font-family: 'Courier New', monospace;
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--text-dimmest);
@@ -171,7 +171,7 @@
   border-radius: 3px;
   color: var(--text-primary);
   font-family: 'Courier New', monospace;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.04em;
   padding: 5px 22px 5px 8px;
   width: 100%;
@@ -260,7 +260,7 @@
   border-radius: 3px;
   color: var(--text-muted);
   font-family: 'Courier New', monospace;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   padding: 7px 12px;
   cursor: pointer;

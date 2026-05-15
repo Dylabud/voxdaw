@@ -12,10 +12,9 @@ import TelemetryHUD from './components/TelemetryHUD/TelemetryHUD';
 import Controls from './components/Controls/Controls';
 import MidiModal from './components/MidiModal/MidiModal';
 import GestureSettings from './components/GestureSettings/GestureSettings';
-import WelcomeModal from './components/WelcomeModal/WelcomeModal';
 import { DEFAULT_MAPPINGS, DEFAULT_TRIGGER_MAPPINGS } from './utils/gestureMappings';
 
-export default function App() {
+export default function App({ onNavigateHome, isDarkMode, onThemeToggle }) {
   const pitchRef     = useRef(null);
   const reverbRef    = useRef(null);
   const velocityRef  = useRef(null);
@@ -34,10 +33,8 @@ export default function App() {
   const [isArpTerminalOpen, setIsArpTerminalOpen]   = useState(false);
   const [arpSpeedSnap,      setArpSpeedSnapState]   = useState(true);
   const [arpInstrument,     setArpInstrumentState]  = useState('analog');
-  const [isDarkMode,        setIsDarkMode]          = useState(true);
   const [showControls,      setShowControls]        = useState(true);
   const [showAnalytics,  setShowAnalytics]        = useState(true);
-  const [showWelcome,          setShowWelcome]          = useState(true);
   const [showMidiModal,        setShowMidiModal]        = useState(false);
   const [isRecordTerminalOpen, setIsRecordTerminalOpen] = useState(false);
   const [showGestureSettings,  setShowGestureSettings]  = useState(false);
@@ -121,9 +118,7 @@ export default function App() {
   }, [panicAllNotes, disengage, stopAudio, dispose]);
 
   return (
-    <div className="app" data-theme={isDarkMode ? undefined : 'light'}>
-      {showWelcome && <WelcomeModal onEnter={() => setShowWelcome(false)} />}
-
+    <div className="app">
       <button className="rightToggleBtn" onClick={() => setShowAnalytics(v => !v)}>
         {showAnalytics ? '›' : '‹'}
       </button>
@@ -153,8 +148,9 @@ export default function App() {
         isRecording={isRecording}
         onGestureSettingsOpen={() => setShowGestureSettings(true)}
         isDarkMode={isDarkMode}
-        onThemeToggle={() => setIsDarkMode(v => !v)}
+        onThemeToggle={onThemeToggle}
         onCollapseToggle={() => setShowControls(v => !v)}
+        onNavigateHome={onNavigateHome}
       />
 
       <div className="stage">

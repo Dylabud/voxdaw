@@ -1,0 +1,78 @@
+.page {
+  width: 100vw;
+  height: 100vh;
+  background: var(--bg-base);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.label {
+  font-size: 28px;
+  font-weight: 300;
+  letter-spacing: 0.3em;
+  color: var(--accent-color);
+  text-transform: uppercase;
+  margin: 0;
+}
+
+.sub {
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin: 0 0 16px;
+}
+
+.backBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  padding: 8px 20px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+
+.backBtn:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.btnRow {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.continueBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--accent-color);
+  color: var(--accent-color);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  padding: 8px 20px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.continueBtn:hover {
+  background: var(--accent-color);
+  color: var(--bg-panel);
+}

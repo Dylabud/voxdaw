@@ -2,6 +2,13 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input, textarea, select {
+  -webkit-user-select: auto;
+  user-select: auto;
 }
 
 /* ── Theme variables ─────────────────────────────────────────── */
@@ -35,6 +42,9 @@
   --piano-key-white-bdr:  #2a2a2e;
   --piano-key-black:      #0e0e10;
   --piano-key-black-bdr:  #1a1a20;
+  /* piano-roll row shading — invert direction per theme */
+  --pr-shade-natural:     rgba(255, 255, 255, 0.04);
+  --pr-shade-accidental:  transparent;
 }
 
 [data-theme="light"] {
@@ -67,6 +77,9 @@
   --piano-key-white-bdr:  rgba(0, 0, 0, 0.12);
   --piano-key-black:      #52525c;
   --piano-key-black-bdr:  #3e3e48;
+  /* piano-roll row shading — light theme darkens accidentals instead */
+  --pr-shade-natural:     transparent;
+  --pr-shade-accidental:  rgba(0, 0, 0, 0.06);
 }
 
 html, body, #root {

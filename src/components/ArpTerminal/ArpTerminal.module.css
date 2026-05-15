@@ -15,7 +15,7 @@
 }
 
 .terminalHeader {
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.35em;
   text-transform: uppercase;
   color: #5DCAA5;
@@ -54,14 +54,14 @@
 }
 
 .sliderLabel {
-  font-size: 7px;
+  font-size: 8px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: rgba(200, 200, 204, 0.5);
 }
 
 .sliderValue {
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.1em;
   color: #5DCAA5;
   font-variant-numeric: tabular-nums;
@@ -157,7 +157,7 @@
   border-radius: 3px;
   color: #5DCAA5;
   font-family: inherit;
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.15em;
   text-transform: uppercase;
   padding: 4px 6px;
@@ -184,7 +184,7 @@
   border: 1px solid rgba(93, 202, 165, 0.25);
   border-radius: 3px;
   color: rgba(200, 200, 204, 0.6);
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.15em;
   text-transform: uppercase;
   cursor: pointer;
@@ -204,7 +204,7 @@
   border: 1px solid rgba(93, 202, 165, 0.5);
   border-radius: 3px;
   color: #5DCAA5;
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.15em;
   text-transform: uppercase;
   cursor: pointer;

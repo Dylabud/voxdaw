@@ -1,0 +1,528 @@
+/* ── Shell container ────────────────────────────────────── */
+.shell {
+  width: 100vw;
+  height: 100vh;
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--text-primary);
+}
+
+/* ── Transport bar ──────────────────────────────────────── */
+.transport {
+  flex: 0 0 56px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-mid);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  gap: 16px;
+}
+
+.transportLeft,
+.transportRight {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 1;
+}
+
+.transportRight { justify-content: flex-end; }
+
+.transportCenter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.themeBtn {
+  appearance: none;
+  background: none;
+  border: none;
+  color: var(--text-dimmer);
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.themeBtn:hover { color: var(--accent-color); }
+
+.homeBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  color: var(--form-text-mid);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  padding: 6px 14px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+}
+
+.homeBtn:hover {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+  background: var(--row-bg);
+}
+
+.transportBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  color: var(--form-text-mid);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  width: 34px;
+  height: 30px;
+  border-radius: 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.transportBtn:hover {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+  background: var(--row-bg);
+}
+
+.transportBtnActive {
+  appearance: none;
+  background: var(--accent-color);
+  border: 1px solid var(--accent-color);
+  color: var(--bg-panel);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  width: 34px;
+  height: 30px;
+  border-radius: 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.metaLabel {
+  font-size: 8px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.metaValue {
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  color: var(--accent-color);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Arrangement view ───────────────────────────────────── */
+.arrangement {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.arrangementShrunk {
+  flex: 1 1 auto;
+  min-height: 100px;        /* never collapse fully even if user resizes editor very tall */
+}
+
+/* ── Editor panel divider ─────────────────────────────────── */
+.divider {
+  flex-shrink: 0;
+  height: 6px;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-mid);
+  border-bottom: 1px solid var(--border-mid);
+  cursor: row-resize;
+  transition: background 0.15s;
+}
+.divider:hover {
+  background: color-mix(in srgb, var(--accent-color) 35%, var(--bg-panel));
+}
+
+/* ── Editor wrap (height controlled by inline style) ─────── */
+.editorWrap {
+  flex-shrink: 0;
+  width: 100%;
+  display: flex;
+  min-height: 0;
+}
+
+/* Track header column (left) */
+.trackHeaders {
+  flex: 0 0 220px;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border-mid);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.trackRow {
+  height: 72px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.trackTopRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* ── Tracks-column header (aligns with timeline ruler) ─── */
+.tracksHeader {
+  height: 24px;
+  flex-shrink: 0;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border-mid);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.trackNameBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.trackName {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent-color);
+}
+
+.trackInstrument {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 8px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.trackInstrument:hover {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+.trackToggles {
+  display: flex;
+  gap: 4px;
+}
+
+.trackBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  width: 22px;
+  height: 20px;
+  border-radius: 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.trackBtn:hover {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+.trackBtnActive {
+  appearance: none;
+  background: var(--accent-color);
+  border: 1px solid var(--accent-color);
+  color: var(--bg-panel);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  width: 22px;
+  height: 20px;
+  border-radius: 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+
+/* ── Track lanes (timeline body) ─────────────────────────── */
+.trackLane {
+  position: relative;
+  height: 72px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* ── Regions (clips) ─────────────────────────────────────── */
+.region {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  background: color-mix(in srgb, var(--accent-color) 25%, transparent);
+  border: 1px solid var(--accent-color);
+  border-radius: 3px;
+  cursor: grab;
+  z-index: 1;
+}
+
+.region:active { cursor: grabbing; }
+
+/* Resize handles on left/right edges */
+.resizeLeft,
+.resizeRight {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  z-index: 3;
+}
+.resizeLeft  { left: 0; }
+.resizeRight { right: 0; }
+
+/* ── Ghost region (hover preview, ref-driven) ────────────── */
+.ghost {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 0;
+  width: 100px;
+  background: color-mix(in srgb, var(--accent-color) 18%, transparent);
+  border: 1px dashed var(--accent-color);
+  border-radius: 3px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 0;
+  transition: opacity 80ms linear;
+}
+
+/* ── Edit button (revealed on region hover) ──────────────── */
+.editBtn {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  appearance: none;
+  background: var(--bg-panel);
+  border: 1px solid var(--accent-color);
+  color: var(--accent-color);
+  font-family: inherit;
+  font-size: 8px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 2px;
+  cursor: pointer;
+  opacity: 0;
+  z-index: 4;
+  transition: opacity 80ms linear, background 0.15s, color 0.15s;
+}
+.region:hover .editBtn { opacity: 1; }
+.editBtn:hover {
+  background: var(--accent-color);
+  color: var(--bg-panel);
+}
+
+/* ── Add-track buttons ───────────────────────────────────── */
+.addTrackPrimary {
+  appearance: none;
+  margin-top: 8px;
+  background: transparent;
+  border: 1px solid var(--accent-color);
+  color: var(--accent-color);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  padding: 8px 16px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.addTrackPrimary:hover {
+  background: var(--accent-color);
+  color: var(--bg-panel);
+}
+
+.addTrackGhost {
+  appearance: none;
+  width: 100%;
+  background: transparent;
+  border: 1px dashed var(--border-mid);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 10px 12px;
+  margin: 8px 0;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.addTrackGhost:hover {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+  background: var(--row-bg);
+}
+
+/* Fake slider — pure visual, no input */
+.fakeSlider {
+  position: relative;
+  height: 3px;
+  width: 100%;
+  background: var(--border-subtle);
+  border-radius: 2px;
+}
+
+.fakeSliderThumb {
+  position: absolute;
+  left: 35%;
+  top: 50%;
+  width: 8px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--bg-base);
+  border: 1px solid var(--accent-color);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.3);
+}
+
+/* Timeline grid (right) */
+.timeline {
+  flex: 1;
+  overflow: auto;
+  background: var(--bg-base);
+  position: relative;
+}
+
+.timelineInner {
+  position: relative;
+  min-width: 2400px;
+  min-height: 100%;
+  background-image:
+    /* vertical bar lines every 100px (1 measure) */
+    repeating-linear-gradient(
+      to right,
+      var(--border-faint) 0,
+      var(--border-faint) 1px,
+      transparent 1px,
+      transparent 100px
+    );
+  cursor: pointer;
+}
+
+/* ── Timeline ruler ───────────────────────────────────────── */
+.ruler {
+  position: sticky;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 24px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-mid);
+  z-index: 5;
+  cursor: ew-resize;
+}
+
+.rulerLabel {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  padding-left: 4px;
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--accent-color);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* ── Playhead (visual only; drag is initiated from the ruler) ── */
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: var(--accent-color);
+  box-shadow: 0 0 6px var(--accent-color);
+  opacity: 0.85;
+  z-index: 6;
+  pointer-events: none;
+}
+
+/* ── Empty state ─────────────────────────────────────────── */
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 24px;
+  gap: 6px;
+  text-align: center;
+}
+
+.emptyTitle {
+  font-size: 11px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  color: var(--accent-color);
+  margin: 0;
+}
+
+.emptyHint {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0;
+}

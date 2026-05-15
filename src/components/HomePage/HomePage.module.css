@@ -1,0 +1,112 @@
+.page {
+  width: 100vw;
+  height: 100vh;
+  background: var(--bg-base);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+}
+
+/* ── Wordmark ── */
+.wordmark {
+  font-size: 52px;
+  font-weight: 300;
+  letter-spacing: 0.18em;
+  color: var(--accent-color);
+  text-transform: uppercase;
+  line-height: 1;
+}
+
+.dots {
+  opacity: 0.5;
+  margin-right: 4px;
+}
+
+.tagline {
+  font-size: 11px;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: -20px 0 0;
+}
+
+/* ── Alpha disclaimer ── */
+.alphaBlock {
+  border: 1px solid var(--border-mid);
+  background: var(--row-bg);
+  border-radius: 2px;
+  padding: 14px 20px;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.alphaLabel {
+  font-size: 9px;
+  letter-spacing: 0.3em;
+  color: var(--accent-color);
+  text-transform: uppercase;
+}
+
+.alphaBody {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+/* ── Navigation buttons ── */
+.nav {
+  display: flex;
+  gap: 16px;
+  margin-top: 4px;
+}
+
+.primaryBtn {
+  appearance: none;
+  background: transparent;
+  border: 2px solid var(--accent-color);
+  color: var(--accent-color);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  padding: 12px 36px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.primaryBtn:hover {
+  background: var(--accent-color);
+  color: var(--bg-panel);
+}
+
+.ghostBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  padding: 12px 36px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+
+.ghostBtn:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}

@@ -51,7 +51,7 @@
   gap: 8px;
   padding: 14px 16px 12px;
   border-bottom: 1px solid var(--border-mid);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.35em;
   text-transform: uppercase;
   color: var(--accent-color);
@@ -70,6 +70,20 @@
 }
 .themeBtn:hover { color: var(--accent-color); }
 
+.homeBtn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dimmer);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  margin-left: auto;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+.homeBtn:hover { color: var(--accent-color); }
+
 /* ── Section blocks ──────────────────────────────────────────── */
 .section {
   display: flex;
@@ -80,7 +94,7 @@
 }
 
 .sectionTitle {
-  font-size: 7px;
+  font-size: 9px;
   letter-spacing: 0.3em;
   text-transform: uppercase;
   color: var(--text-muted);
@@ -97,7 +111,7 @@
 }
 
 .label {
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--text-dimmer);
@@ -213,7 +227,7 @@
   border: 1px solid rgba(93, 202, 165, 0.3);
   color: var(--form-text-dim);
   font-family: inherit;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.25em;
   text-transform: uppercase;
   padding: 6px 12px;
@@ -235,7 +249,7 @@
   border: 1px solid rgba(93, 202, 165, 0.75);
   color: var(--accent-color);
   font-family: inherit;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.25em;
   text-transform: uppercase;
   padding: 6px 12px;
@@ -253,7 +267,7 @@
   border: 1px solid rgba(93, 202, 165, 0.4);
   color: var(--form-text-mid);
   font-family: inherit;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.25em;
   text-transform: uppercase;
   padding: 6px 12px;

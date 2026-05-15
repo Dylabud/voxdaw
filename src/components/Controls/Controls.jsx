@@ -22,6 +22,7 @@ export default function Controls({
   onGestureSettingsOpen,
   isDarkMode, onThemeToggle,
   onCollapseToggle,
+  onNavigateHome,
 }) {
   const [instrument, setInstrumentState] = useState('analog');
   const [oscType, setOscType]            = useState('sine');
@@ -70,6 +71,13 @@ export default function Controls({
           {isDarkMode ? '◑' : '○'}
         </button>
         ·· voxdaw
+        <button
+          className={styles.homeBtn}
+          onClick={onNavigateHome}
+          title="Back to home"
+        >
+          ⌂
+        </button>
       </div>
 
       {/* ── Group 1: Master Engine ── */}

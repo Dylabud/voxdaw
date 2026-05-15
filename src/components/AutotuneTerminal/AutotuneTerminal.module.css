@@ -15,7 +15,7 @@
 }
 
 .terminalHeader {
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.35em;
   text-transform: uppercase;
   color: #5DCAA5;
@@ -51,7 +51,7 @@
 }
 
 .readoutLabel {
-  font-size: 7px;
+  font-size: 8px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: rgba(200, 200, 204, 0.5);
@@ -94,14 +94,14 @@
 }
 
 .sliderLabel {
-  font-size: 7px;
+  font-size: 8px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: rgba(200, 200, 204, 0.5);
 }
 
 .sliderValue {
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.1em;
   color: #5DCAA5;
   font-variant-numeric: tabular-nums;
@@ -192,7 +192,7 @@
 .modeBtn {
   width: 100%;
   padding: 5px 0;
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
   background: transparent;
