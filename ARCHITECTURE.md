@@ -240,7 +240,7 @@ All gesture routing constants and defaults live in a single module. Two independ
 - **Always accent-colored (unchanged):** `#5DCAA5` borders on focused elements, mint fill on active/engage buttons, recording red, arp flash gold.
 
 ### Toggle button
-`◑` / `○` button in the Controls sidebar header (flex row alongside "·· voxdaw" title). `isDarkMode` state lives in `App.js`; passed as `isDarkMode` + `onThemeToggle` props to Controls.
+`◑` / `○` button. Both the Controls sidebar header (VoxTool) and the Workstation transport bar render the toggle. `isDarkMode` state lives in `src/Root.js`; passed as `isDarkMode` + `onThemeToggle` props down to `App`, `Workstation`, and through to `Controls` / `WorkstationShell`. State survives navigation between pages.
 
 ---
 
@@ -254,3 +254,111 @@ All gesture routing constants and defaults live in a single module. Two independ
 | 6, 10, 14, 18 | Index / Middle / Ring / Pinky PIP |
 | 8, 12, 16, 20 | Index / Middle / Ring / Pinky Tip |
 | 9 | Middle MCP — also used as hand-size reference point |
+
+---
+
+## 14. Page Routing (`src/Root.js`)
+
+The app shell is a thin state-router, not React Router. `Root.js` owns:
+- `page` state — `'home' | 'voxtool' | 'workstation'`
+- `isDarkMode` state — persists across page navigation
+
+It applies `data-theme={isDarkMode ? undefined : 'light'}` on a top-level wrapper div (descendants inherit the theme tokens) and renders one of three pages based on `page`. Each page receives `onNavigateHome` plus the theme props. **No `react-router-dom` dependency** — for a 3-page app where two are visually distinct workstations, simple state is cheaper and avoids unmount/remount cascades on the VoxTool hooks (camera permission, MediaPipe model, AudioContext, WebSocket all stay warm only as long as the relevant page is mounted).
+
+```
+index.js → <Root>
+  page='home'        → <HomePage onNavigate={setPage} />
+  page='voxtool'     → <App        onNavigateHome={…} isDarkMode={…} onThemeToggle={…} />
+  page='workstation' → <Workstation onNavigateHome={…} isDarkMode={…} onThemeToggle={…} />
+```
+
+`HomePage` is the single entry gate (the old `WelcomeModal` was folded into it and removed). `Workstation` is itself a 2-view container: a "under construction" warning page with `[ ← back ]` and `[ continue → ]`, gating entry into `<WorkstationShell />`.
+
+---
+
+## 15. Workstation Architecture
+
+### Component tree
+```
+Workstation.jsx                 — view container: warning ↔ shell
+└── WorkstationShell.jsx        — transport bar, tracks, regions, ruler, editor host
+    └── RegionEditor/           — bottom-docked panel (mounted when editingRegion ≠ null)
+        ├── RegionEditor.jsx    — inspector + piano roll shell
+        └── RegionEditor.module.css
+```
+
+### State in `WorkstationShell`
+| State / Ref | Purpose |
+|-------------|---------|
+| `isPlaying` (state) | drives play-button active class; gates the rAF loop |
+| `tracks` (state) | `[{ id, name, instrument, isMuted, isSolo }]` — dynamic, populated via `handleAddTrack` |
+| `regions` (state) | `[{ id, trackId, startMeasure, durationMeasures }]` |
+| `editingRegion` (state) | non-null = bottom editor panel visible |
+| `editorHeight` (state) | resizable bottom panel height in px (default 320, clamped `[150, vh-200]`) |
+| `nextIdRef` / `nextRegionIdRef` | monotonic counters → stable names across hypothetical delete/add |
+| `playheadRef` / `timeRef` | DOM nodes written every frame by the rAF loop |
+| `timelineRef` | scroll container — needed for `getBoundingClientRect()` + `scrollLeft` |
+| `rulerRef` | drag (scrub) is only initiated when `mousedown.target ∈ ruler` |
+| `ghostRefs` (map) | `{ trackId → ghost DOM element }` — direct DOM mutation during hover |
+| `hoverRef` | `{ trackId, measure }` — read by click handler to commit a region |
+| `dragRef` | active region drag: `{ regionId, mode, startX, initStart, initDuration, el, pendingStart, pendingDuration }` |
+| `isDraggingRef` | ruler drag-scrub flag (suppresses ghost during scrub) |
+| `editorWrapRef` | direct DOM mutation during editor-panel resize |
+
+### Key constants
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `PIXELS_PER_BEAT` | `25` | 100px per 4/4 bar — matches CSS bar-line gradient |
+| `BPM` | `120` | hardcoded for v1; future BPM control replaces this |
+| `MEASURES` | `24` | number of ruler labels (1..24) |
+| `PX_PER_SEC` | `50` (at 120 BPM) | derived; playhead crosses one bar line per 2s |
+
+### Tone.Transport coordination
+`Tone.Transport` is a global singleton shared with `useAudioEngine`. Workstation and VoxTool both call `.start()` / `.pause()` / `.stop()` independently. Acceptable for now because the user is on one page at a time. **Open work:** a `useTransport` hook owning Transport state + position events will be the coordination layer when global timeline math comes online.
+
+### Interaction model
+| Surface | Single click | Drag |
+|---------|--------------|------|
+| Ruler | seek to position | scrub (window-level mousemove) |
+| Lane body | commit ghost-region | n/a |
+| Lane (with regions) | nothing (ghost suppressed) | n/a |
+| Region body | n/a (stopPropagation) | move (1-measure snap) |
+| Region left edge | n/a | resize-left (start clamps ≥ 0, ≤ right-edge − 1) |
+| Region right edge | n/a | resize-right (duration ≥ 1) |
+| Region `[ edit ]` btn | open editor panel | n/a |
+| Editor divider | n/a | resize panel height `[150, vh-200]` |
+| **Spacebar** | toggle play/pause (input-focus-guarded) | n/a |
+
+All drag operations write directly to `element.style` during the drag; React state commits exactly once on `mouseup`. Matches the established Zero-Re-render Rule pattern (playhead, ghost, etc).
+
+### Region clip rendering
+Regions render absolutely inside their lane:
+- `top: 4px; bottom: 4px` insets give breathing room
+- `background: color-mix(in srgb, var(--accent-color) 25%, transparent)` — auto-flips with theme
+- `border: 1px solid var(--accent-color)`
+- Resize handles on left/right edges (6px wide, `cursor: ew-resize`) at `z-index: 3`
+- Edit button at top-right (`z-index: 4`) revealed via pure-CSS `.region:hover .editBtn` — no React hover state
+
+### Piano roll shell (`RegionEditor`)
+Generated via `buildKeys(loOct, hiOct)`:
+- Currently `buildKeys(1, 6)` → 72 chromatic keys, 18px each = 1296px tall column
+- White / black row backgrounds via `--piano-key-white` / `--piano-key-black` (directionally correct in both themes — unlike `--bg-panel` / `--bg-base` whose contrast direction flips between themes)
+- Labels only at every C (C1, C2, ..., C6); other keys unlabeled to reduce clutter
+- `.keyOctave` class on every C row adds a stronger top border for visual octave markers
+
+Grid backgrounds (six layered `repeating-linear-gradient`s on `.grid`, top → bottom):
+1. Bar lines — `var(--border-mid)` every 200px (1 bar = 4 beats × 50px)
+2. Sub-beat lines — `var(--border-faint)` every 50px
+3. Octave lines — `var(--border-mid)` every 216px (12 × 18px)
+4. Semitone rows — `var(--border-subtle)` every 18px
+5. **Accidental-row shading** — `var(--pr-shade-accidental)` (5 black-key rows per octave)
+6. **Natural-row shading** — `var(--pr-shade-natural)` (7 white-key rows per octave)
+
+Theme-aware shading inverts direction per theme:
+- **Dark theme:** `--pr-shade-natural = rgba(255,255,255,0.04)` (brighten naturals), `--pr-shade-accidental = transparent`
+- **Light theme:** `--pr-shade-natural = transparent`, `--pr-shade-accidental = rgba(0,0,0,0.06)` (darken accidentals)
+
+Both achieve the same visual semantic ("accidentals look darker than naturals") via opposite mechanics fitted to each theme's contrast budget.
+
+**Grid alignment gotcha:** explicit `minHeight: KEYS.length * KEY_H` (= 1296px) is set on both keys column and grid via inline style. `align-items: stretch` inside an `overflow: auto` flex container is bounded by the visible cross-size, not the line's natural maximum — so flex stretch alone leaves the grid background blank below the viewport on scroll. The explicit pixel min-height is the reliable fix.
+
