@@ -88,6 +88,7 @@ export default function RegionEditor({
   scrollMemoryRef,
 }) {
   const [instrument, setInstrument] = useState(track?.instrument ?? 'fm pluck');
+  const [activeTab, setActiveTab] = useState('notes');
   const previewSynthRef = useRef(null);
   const activeKeyElRef  = useRef(null);
 
@@ -154,10 +155,20 @@ export default function RegionEditor({
 
   return (
     <div className={styles.editor} style={{ '--track-color': track?.color }}>
-      <div className={styles.editorBar} />
+      <div className={styles.editorBar}>
+        {['notes', 'instrument', 'effects'].map(tab => (
+          <button
+            key={tab}
+            className={`${styles.tabBtn}${activeTab === tab ? ` ${styles.tabActive}` : ''}`}
+            onClick={() => setActiveTab(tab)}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
       <div className={styles.editorBody}>
 
-      {/* Inspector */}
+      {/* Inspector — always visible */}
       <div className={styles.inspector}>
         <div className={styles.header}>
           <span className={styles.trackLabel}>{track?.name ?? 'track'}</span>
@@ -183,10 +194,10 @@ export default function RegionEditor({
       {/* Left-column resizer handle (shared drag handler from shell) */}
       <div className={styles.colResizer} onMouseDown={onLeftColResize} />
 
-      {/* Piano roll */}
+      {/* Piano roll — hidden (not unmounted) on non-notes tabs */}
       <div
         ref={pianoScrollRef}
-        className={styles.pianoRoll}
+        className={`${styles.pianoRoll}${activeTab !== 'notes' ? ` ${styles.hidden}` : ''}`}
         onScroll={onGridScroll}
       >
         {/* Keys column (sticky) */}
@@ -256,6 +267,17 @@ export default function RegionEditor({
           <div ref={pianoRollPlayheadRef} className={styles.playhead} />
         </div>
       </div>
+
+      {activeTab === 'instrument' && (
+        <div className={styles.placeholder}>
+          <span className={styles.placeholderText}>instrument — coming soon</span>
+        </div>
+      )}
+      {activeTab === 'effects' && (
+        <div className={styles.placeholder}>
+          <span className={styles.placeholderText}>effects — coming soon</span>
+        </div>
+      )}
 
       </div>
     </div>

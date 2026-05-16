@@ -295,6 +295,7 @@ Workstation.jsx                 — view container: warning ↔ shell
 | `editingBpm` / `tempBpm` (state) | in-place BPM editor toggle + draft string value |
 | `tracks` (state) | `[{ id, name, instrument, color, isMuted, isSolo }]` — `color` is a hex string from `TRACK_COLORS` |
 | `regions` (state) | `[{ id, trackId, startMeasure, durationMeasures }]` |
+| `notes` (state) | `[{ id, trackId, note, startBeat, durationBeats, regionId }]` — filtered by `trackId` for the active editor |
 | `editingTrackId` (state) | non-null = bottom editor panel visible |
 | `editorHeight` (state) | resizable bottom panel height in px (default 320, clamped `[150, vh-200]`) |
 | `nextIdRef` / `nextRegionIdRef` | monotonic counters → stable names across hypothetical delete/add |
@@ -356,11 +357,20 @@ Regions render absolutely inside their lane. Both `trackRow` (left header column
 ### Track color system
 `TRACK_COLORS` is a 7-color module-level array of mid-saturation hex values chosen for visibility on `#0e0e10`. Color assigned in `handleAddTrack` via `TRACK_COLORS[(n - 1) % TRACK_COLORS.length]` using the stable `nextIdRef` counter. Stored as `track.color` (hex string). Applied via the `--track-color` CSS custom property which cascades to `.trackName`, `.trackRowActive`, `.region`, `.noteBlock`, `.regionHighlight`. A 7px color dot (`<span className={styles.trackColorDot}>`) sits inside a `.trackNameRow` flex wrapper next to the track name in the header.
 
+### Note shape
+```
+{ id, trackId, note, startBeat, durationBeats, regionId }
+```
+`regionId` links each note to its parent region (foreign key). `handleNoteAdd` in `WorkstationShell` auto-creates a region when a note lands in an empty measure (reads `regionsRef.current` — the inline-synced ref — to avoid stale closures). Beat-to-region math: region at `startMeasure, durationMeasures` covers beats `[startMeasure * 4, (startMeasure + durationMeasures) * 4)`. The drag `onUp` handler updates notes when a region moves: `startBeat += measureDelta * 4` and `trackId = pendingTrackId` (cross-track).
+
 ### Piano roll shell (`RegionEditor`)
+
+**Tab navigation:** The 48px `editorBar` strip above the piano roll body contains three tabs: **notes** | **instrument** | **effects**. Local `activeTab` state (no prop threading). The inspector column and column resizer are always visible. Only the `.pianoRoll` scroll container is hidden via `display: none` (`.hidden` class) when not on the notes tab — the DOM node stays mounted, preserving `scrollTop` natively. Instrument and Effects tabs render a centered placeholder in the piano roll's flex slot.
+
 Generated via `buildKeys(loOct, hiOct)`:
 - `buildKeys(-2, 8)` → 132 chromatic keys (C-2 to B8), 18px each = 2376px tall column
 - C4 is at key index 59 (inner loop runs B→C per octave); default `scrollTop = 59 * 18 - clientHeight + 18` shows C4 at the bottom of the viewport on first open
-- Scroll position persists via `scrollMemoryRef` prop (a `useRef` from WorkstationShell); null = use C4 default
+- Scroll position persists via `scrollMemoryRef` prop (a `useRef` from WorkstationShell); null = use C4 default; tab switches never re-trigger the C4 useEffect (dep: `track?.id`)
 - White / black row backgrounds via `--piano-key-white` / `--piano-key-black` (directionally correct in both themes)
 - Labels only at every C; `.keyOctave` class adds a stronger top border for visual octave markers
 - Note blocks and region highlights use `var(--track-color, var(--accent-color))` — injected on the editor root div via `style={{ '--track-color': track?.color }}`

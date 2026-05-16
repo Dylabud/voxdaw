@@ -104,7 +104,28 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   // ── Note CRUD ───────────────────────────────────────────────
   const handleNoteAdd = useCallback((noteData) => {
-    setNotes(prev => [...prev, { id: `note_${nextNoteIdRef.current++}`, ...noteData }]);
+    const { trackId, startBeat } = noteData;
+    const measure = Math.floor(startBeat / 4);
+
+    const existingRegion = regionsRef.current.find(r =>
+      r.trackId === trackId &&
+      startBeat >= r.startMeasure * 4 &&
+      startBeat < (r.startMeasure + r.durationMeasures) * 4
+    );
+
+    if (existingRegion) {
+      setNotes(prev => [...prev, {
+        id: `note_${nextNoteIdRef.current++}`, ...noteData, regionId: existingRegion.id,
+      }]);
+    } else {
+      const newRegionId = `region_${nextRegionIdRef.current++}`;
+      setRegions(prev => [...prev, {
+        id: newRegionId, trackId, startMeasure: measure, durationMeasures: 1,
+      }]);
+      setNotes(prev => [...prev, {
+        id: `note_${nextNoteIdRef.current++}`, ...noteData, regionId: newRegionId,
+      }]);
+    }
   }, []);
   const handleNoteRemove = useCallback((noteId) => {
     setNotes(prev => prev.filter(n => n.id !== noteId));
@@ -231,11 +252,20 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const d = dragRef.current;
       if (!d) return;
       if (d.el) { d.el.style.transform = ''; d.el.style.zIndex = ''; }
-      const { regionId, pendingStart, pendingDuration, pendingTrackId } = d;
+      const { regionId, pendingStart, pendingDuration, pendingTrackId, initStart, trackId: origTrackId } = d;
       setRegions(prev => prev.map(r =>
         r.id === regionId
           ? { ...r, startMeasure: pendingStart, durationMeasures: pendingDuration, trackId: pendingTrackId }
           : r));
+      const beatDelta = (pendingStart - initStart) * 4;
+      const trackChanged = pendingTrackId !== origTrackId;
+      if (beatDelta !== 0 || trackChanged) {
+        setNotes(prev => prev.map(n =>
+          n.regionId === regionId
+            ? { ...n, startBeat: n.startBeat + beatDelta, trackId: pendingTrackId }
+            : n
+        ));
+      }
       dragRef.current = null;
       document.body.style.cursor = '';
     };
