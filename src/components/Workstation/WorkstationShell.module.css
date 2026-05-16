@@ -141,11 +141,28 @@
   flex: 1;
   display: flex;
   min-height: 0;
+  position: relative;
 }
 
 .arrangementShrunk {
   flex: 1 1 auto;
   min-height: 100px;        /* never collapse fully even if user resizes editor very tall */
+}
+
+/* ── Left-column resizer ─────────────────────────────────── */
+.colResizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--left-col-width, 316px) - 2px);
+  width: 4px;
+  cursor: col-resize;
+  z-index: 10;
+  background: transparent;
+  transition: background 0.15s;
+}
+.colResizer:hover {
+  background: color-mix(in srgb, var(--accent-color) 50%, transparent);
 }
 
 /* ── Editor panel divider ─────────────────────────────────── */
@@ -172,13 +189,17 @@
 
 /* Track header column (left) */
 .trackHeaders {
-  flex: 0 0 220px;
+  flex: 0 0 var(--left-col-width, 316px); /* inspector(260) + keys(56) — keeps both grids X-aligned */
   background: var(--bg-panel);
   border-right: 1px solid var(--border-mid);
   overflow-y: auto;
+  overscroll-behavior: none;
   display: flex;
   flex-direction: column;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
+.trackHeaders::-webkit-scrollbar { display: none; }
 
 .trackRow {
   height: 72px;
@@ -198,11 +219,15 @@
 
 /* ── Tracks-column header (aligns with timeline ruler) ─── */
 .tracksHeader {
+  position: sticky;
+  top: 0;
+  z-index: 5;
   height: 24px;
   flex-shrink: 0;
   padding: 0 14px;
   display: flex;
   align-items: center;
+  background: var(--bg-panel);
   border-bottom: 1px solid var(--border-mid);
   font-family: inherit;
   font-size: 9px;
@@ -326,13 +351,19 @@
 .resizeLeft  { left: 0; }
 .resizeRight { right: 0; }
 
+/* ── Active track row (piano roll open) ──────────────────── */
+.trackRowActive {
+  background: color-mix(in srgb, var(--accent-color) 8%, transparent);
+  box-shadow: inset 2px 0 0 0 var(--accent-color);
+}
+
 /* ── Ghost region (hover preview, ref-driven) ────────────── */
 .ghost {
   position: absolute;
   top: 4px;
   bottom: 4px;
   left: 0;
-  width: 100px;
+  width: 100px; /* overridden via inline style when zoomed */
   background: color-mix(in srgb, var(--accent-color) 18%, transparent);
   border: 1px dashed var(--accent-color);
   border-radius: 3px;
@@ -441,22 +472,14 @@
   overflow: auto;
   background: var(--bg-base);
   position: relative;
+  overscroll-behavior: none;
 }
 
 .timelineInner {
   position: relative;
-  min-width: 2400px;
   min-height: 100%;
-  background-image:
-    /* vertical bar lines every 100px (1 measure) */
-    repeating-linear-gradient(
-      to right,
-      var(--border-faint) 0,
-      var(--border-faint) 1px,
-      transparent 1px,
-      transparent 100px
-    );
   cursor: pointer;
+  padding-bottom: 50px; /* matches addTrackGhost button height so scroll ranges stay in sync */
 }
 
 /* ── Timeline ruler ───────────────────────────────────────── */

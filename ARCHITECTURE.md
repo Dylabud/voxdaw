@@ -301,9 +301,11 @@ Workstation.jsx                 — view container: warning ↔ shell
 | `rulerRef` | drag (scrub) is only initiated when `mousedown.target ∈ ruler` |
 | `ghostRefs` (map) | `{ trackId → ghost DOM element }` — direct DOM mutation during hover |
 | `hoverRef` | `{ trackId, measure }` — read by click handler to commit a region |
-| `dragRef` | active region drag: `{ regionId, mode, startX, initStart, initDuration, el, pendingStart, pendingDuration }` |
+| `dragRef` | active region drag: `{ regionId, trackId, origTrackIndex, pendingTrackId, pendingTrackIndex, mode, startX, initStart, initDuration, el, pendingStart, pendingDuration }` — cross-track fields track the candidate lane during move drags |
 | `isDraggingRef` | ruler drag-scrub flag (suppresses ghost during scrub) |
 | `editorWrapRef` | direct DOM mutation during editor-panel resize |
+| `regionsRef` | inline-synced mirror of `regions` state — lets drag `useEffect` closures read current regions without stale-closure bugs |
+| `tracksRef` | inline-synced mirror of `tracks` state — lets drag `useEffect` closures resolve candidate track IDs during cross-track moves |
 
 ### Key constants
 | Constant | Value | Meaning |
@@ -312,24 +314,29 @@ Workstation.jsx                 — view container: warning ↔ shell
 | `BPM` | `120` | hardcoded for v1; future BPM control replaces this |
 | `MEASURES` | `24` | number of ruler labels (1..24) |
 | `PX_PER_SEC` | `50` (at 120 BPM) | derived; playhead crosses one bar line per 2s |
+| `TRACK_H` | `72` | matches `.trackLane` height in CSS — used for cross-track Y snapping |
+| `RULER_HEIGHT` | `24` | matches `.ruler` height in CSS — offset applied before flooring `clientY` to track index |
 
 ### Tone.Transport coordination
 `Tone.Transport` is a global singleton shared with `useAudioEngine`. Workstation and VoxTool both call `.start()` / `.pause()` / `.stop()` independently. Acceptable for now because the user is on one page at a time. **Open work:** a `useTransport` hook owning Transport state + position events will be the coordination layer when global timeline math comes online.
 
 ### Interaction model
-| Surface | Single click | Drag |
-|---------|--------------|------|
-| Ruler | seek to position | scrub (window-level mousemove) |
-| Lane body | commit ghost-region | n/a |
-| Lane (with regions) | nothing (ghost suppressed) | n/a |
-| Region body | n/a (stopPropagation) | move (1-measure snap) |
-| Region left edge | n/a | resize-left (start clamps ≥ 0, ≤ right-edge − 1) |
-| Region right edge | n/a | resize-right (duration ≥ 1) |
-| Region `[ edit ]` btn | open editor panel | n/a |
-| Editor divider | n/a | resize panel height `[150, vh-200]` |
-| **Spacebar** | toggle play/pause (input-focus-guarded) | n/a |
+| Surface | Single click | Double-click | Drag |
+|---------|--------------|--------------|------|
+| Ruler | seek to position | n/a | scrub (window-level mousemove) |
+| Empty lane | commit ghost-region | open editor | n/a |
+| Lane (with regions) | nothing (ghost suppressed) | create region at hover measure (if unoccupied) + open editor | n/a |
+| Region body | n/a (stopPropagation) | open editor | move — X: 1-measure snap; Y: cross-track snap by `TRACK_H` |
+| Region left edge | n/a | n/a | resize-left (start clamps ≥ 0, ≤ right-edge − 1) |
+| Region right edge | n/a | n/a | resize-right (duration ≥ 1) |
+| Region `[ edit ]` btn | open editor panel | n/a | n/a |
+| Track header | n/a | toggle editor panel | n/a |
+| Editor divider | n/a | n/a | resize panel height `[150, vh-200]` |
+| **Spacebar** | toggle play/pause (input-focus-guarded) | n/a | n/a |
 
 All drag operations write directly to `element.style` during the drag; React state commits exactly once on `mouseup`. Matches the established Zero-Re-render Rule pattern (playhead, ghost, etc).
+
+**Cross-track move collision:** `noOverlap(candTrackId, candStart, candDur)` is evaluated against the candidate track on every `mousemove`. The region snaps `translateY` to `(pendingTrackIndex - origTrackIndex) * TRACK_H` and floats at `zIndex: 10`. On `mouseup`, transform and zIndex are cleared synchronously before `setRegions` commits the new `trackId` — preventing a flash of the region in its original lane.
 
 ### Region clip rendering
 Regions render absolutely inside their lane:

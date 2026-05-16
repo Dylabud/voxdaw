@@ -1,16 +1,32 @@
-/* ── Editor panel container — fills its parent wrapper ─── */
+/* ── Editor panel container ─────────────────────────────── */
 .editor {
   flex: 1;
   width: 100%;
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   background: var(--bg-panel);
   min-height: 0;
 }
 
+/* Thin separator bar between the divider and the editor content */
+.editorBar {
+  flex: 0 0 48px;
+  border-bottom: 1px solid var(--border-mid);
+  background: var(--bg-panel);
+}
+
+/* Row containing inspector + piano roll */
+.editorBody {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+  position: relative;
+}
+
 /* ── Inspector (left column) ────────────────────────────── */
 .inspector {
-  flex: 0 0 260px;
+  flex: 0 0 calc(var(--left-col-width, 316px) - 56px);
   border-right: 1px solid var(--border-mid);
   padding: 12px 16px;
   display: flex;
@@ -26,7 +42,7 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.regionLabel {
+.trackLabel {
   font-size: 11px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
@@ -53,11 +69,6 @@
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--text-muted);
-}
-
-.dot {
-  margin: 0 4px;
-  opacity: 0.5;
 }
 
 .field {
@@ -104,12 +115,20 @@
   text-transform: uppercase;
 }
 
-.hint {
-  margin: auto 0 0;
-  font-size: 8px;
-  letter-spacing: 0.25em;
-  text-transform: uppercase;
-  color: var(--text-dimmer);
+/* ── Left-column resizer ─────────────────────────────────── */
+.colResizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--left-col-width, 316px) - 2px);
+  width: 4px;
+  cursor: col-resize;
+  z-index: 10;
+  background: transparent;
+  transition: background 0.15s;
+}
+.colResizer:hover {
+  background: color-mix(in srgb, var(--accent-color) 50%, transparent);
 }
 
 /* ── Piano roll (right area) ────────────────────────────── */
@@ -121,14 +140,18 @@
   overflow: auto;
   background: var(--bg-base);
   min-width: 0;
+  overscroll-behavior: none;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
+.pianoRoll::-webkit-scrollbar { display: none; }
 
 /* Keys column */
 .keys {
   flex: 0 0 56px;
   position: sticky;
   left: 0;
-  z-index: 2;
+  z-index: 3;
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
@@ -146,62 +169,40 @@
   font-size: 8px;
   letter-spacing: 0.1em;
   color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
 }
+.keyWhite { background: var(--piano-key-white); color: var(--text-primary); }
+.keyBlack { background: var(--piano-key-black); color: var(--text-dimmer); }
 
-.keyWhite {
-  background: var(--piano-key-white);
-  color: var(--text-primary);
-}
-.keyBlack {
-  background: var(--piano-key-black);
-  color: var(--text-dimmer);
-}
-
-/* stronger top border at every C → marks octave boundaries */
+/* stronger top border at every C */
 .keyOctave { border-top: 1px solid var(--border-mid); }
 
-.keyLabel {
-  font-variant-numeric: tabular-nums;
+.keyLabel { font-variant-numeric: tabular-nums; }
+
+.keyWhite.keyActive {
+  background: color-mix(in srgb, var(--accent-color) 35%, var(--piano-key-white));
+}
+.keyBlack.keyActive {
+  background: color-mix(in srgb, var(--accent-color) 60%, var(--piano-key-black));
 }
 
-/* Grid (notes would render here later) */
+/* ── Note grid ───────────────────────────────────────────── */
 .grid {
   flex: 1;
-  min-width: 1600px;        /* horizontal scroll room: 8 bars × 200px */
-  align-self: stretch;       /* match the keys column's natural height */
+  position: relative;
+  align-self: stretch;
+  cursor: crosshair;
+}
+
+/* Row shading overlay — keeps theme-aware accidental/natural shading decoupled from
+   the inline vertical-line backgroundImage so they don't fight each other. */
+.gridShading {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
   background-image:
-    /* downbeat lines every 200px (1 bar) — top layer */
-    repeating-linear-gradient(
-      to right,
-      var(--border-mid) 0,
-      var(--border-mid) 1px,
-      transparent 1px,
-      transparent 200px
-    ),
-    /* sub-beat lines every 50px */
-    repeating-linear-gradient(
-      to right,
-      transparent 0,
-      transparent 49px,
-      var(--border-faint) 49px,
-      var(--border-faint) 50px
-    ),
-    /* octave boundary lines every 216px (12 × 18px) */
-    repeating-linear-gradient(
-      to bottom,
-      var(--border-mid) 0,
-      var(--border-mid) 1px,
-      transparent 1px,
-      transparent 216px
-    ),
-    /* semitone row lines every 18px */
-    repeating-linear-gradient(
-      to bottom,
-      transparent 0,
-      transparent 17px,
-      var(--border-subtle) 17px,
-      var(--border-subtle) 18px
-    ),
     /* accidental-row shading (active in light theme) */
     repeating-linear-gradient(
       to bottom,
@@ -218,7 +219,7 @@
       var(--pr-shade-accidental) 180px, var(--pr-shade-accidental) 198px, /* C# */
       transparent 198px, transparent 216px
     ),
-    /* natural-row shading (active in dark theme — brightens C/D/E/F/G/A/B rows) */
+    /* natural-row shading (active in dark theme) */
     repeating-linear-gradient(
       to bottom,
       var(--pr-shade-natural) 0,    var(--pr-shade-natural) 18px,   /* B  */
@@ -227,10 +228,57 @@
       transparent             54px, transparent             72px,   /* G# */
       var(--pr-shade-natural) 72px, var(--pr-shade-natural) 90px,   /* G  */
       transparent             90px, transparent             108px,  /* F# */
-      var(--pr-shade-natural) 108px, var(--pr-shade-natural) 144px, /* F + E (adjacent) */
+      var(--pr-shade-natural) 108px, var(--pr-shade-natural) 144px, /* F + E */
       transparent             144px, transparent             162px, /* D# */
       var(--pr-shade-natural) 162px, var(--pr-shade-natural) 180px, /* D  */
       transparent             180px, transparent             198px, /* C# */
       var(--pr-shade-natural) 198px, var(--pr-shade-natural) 216px  /* C  */
+    ),
+    /* semitone row lines every 18px */
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 17px,
+      var(--border-subtle) 17px,
+      var(--border-subtle) 18px
     );
+}
+
+/* ── Region highlights (clip boundary markers) ───────────── */
+.regionHighlight {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background-color: var(--accent-color);
+  opacity: 0.08;
+  pointer-events: none;
+  z-index: 1; /* above gridShading(0), below noteBlocks(2) */
+}
+
+/* ── Note blocks ─────────────────────────────────────────── */
+.noteBlock {
+  position: absolute;
+  background: var(--accent-color);
+  border-radius: 2px;
+  cursor: pointer;
+  pointer-events: all;
+  z-index: 2;
+}
+.noteBlock:hover {
+  opacity: 1;
+  box-shadow: 0 0 4px var(--accent-color);
+}
+
+/* ── Playhead ────────────────────────────────────────────── */
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: var(--accent-color);
+  box-shadow: 0 0 6px var(--accent-color);
+  opacity: 0.85;
+  z-index: 2; /* below keys(3), above grid shading(0); renders atop notes(2) via DOM order */
+  pointer-events: none;
 }

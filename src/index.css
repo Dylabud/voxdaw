@@ -84,6 +84,8 @@ input, textarea, select {
 
 html, body, #root {
   height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
   background: var(--bg-base);
   color: var(--text-primary);
   font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace;
