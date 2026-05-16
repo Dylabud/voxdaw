@@ -5,8 +5,17 @@ import RegionEditor from './RegionEditor/RegionEditor';
 
 const PIXELS_PER_BEAT    = 25;
 const PIXELS_PER_MEASURE = PIXELS_PER_BEAT * 4;  // 100px at zoom 1
-const BPM                = 120;
+// BPM is state inside the component
 const MEASURES           = 24;
+const TRACK_COLORS = [
+  '#5DCAA5', // teal (brand accent)
+  '#5A9FD4', // blue
+  '#D4845A', // coral
+  '#A57BD4', // purple
+  '#D4C45A', // amber
+  '#D45A7B', // rose
+  '#7BD45A', // lime
+];
 const TRACK_H            = 72;  // matches .trackLane height in CSS
 const RULER_HEIGHT       = 24;  // matches .ruler height in CSS
 
@@ -38,10 +47,13 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [editingTrackId, setEditingTrackId] = useState(null);
   const [editorHeight,   setEditorHeight]   = useState(320);
   const [leftColWidth,   setLeftColWidth]   = useState(316);
+  const [bpm,            setBpm]            = useState(120);
+  const [editingBpm,     setEditingBpm]     = useState(false);
+  const [tempBpm,        setTempBpm]        = useState('120');
 
   // Derived zoom values
   const pixelsPerMeasure = PIXELS_PER_MEASURE * zoomLevel;
-  const pxPerSec         = PIXELS_PER_BEAT * (BPM / 60) * zoomLevel;
+  const pxPerSec         = PIXELS_PER_BEAT * (bpm / 60) * zoomLevel;
 
   const editorWrapRef        = useRef(null);
   const nextIdRef            = useRef(1);
@@ -67,6 +79,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const leftColWidthRef       = useRef(316);
   const regionsRef            = useRef([]);
   const tracksRef             = useRef([]);
+  const lastPianoScrollTopRef = useRef(null); // null = no user scroll yet → default to C4
 
   // ── Derived editor state ───────────────────────────────────
   const editingTrack      = editingTrackId ? tracks.find(t => t.id === editingTrackId) : null;
@@ -78,6 +91,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       id: `t${n}`,
       name: `track ${n}`,
       instrument: 'fm pluck',
+      color: TRACK_COLORS[(n - 1) % TRACK_COLORS.length],
       isMuted: false,
       isSolo: false,
     }]);
@@ -301,7 +315,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   const handlePlayPause = useCallback(async () => {
     await Tone.start();
-    Tone.Transport.bpm.value = BPM;
+    Tone.Transport.bpm.value = bpm;
     if (Tone.Transport.state === 'started') {
       Tone.Transport.pause();
       setIsPlaying(false);
@@ -319,6 +333,24 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (pianoRollPlayheadRef.current) pianoRollPlayheadRef.current.style.transform = 'translateX(0px)';
     if (timeRef.current)              timeRef.current.textContent                  = '00:00:00';
   }, []);
+
+  // ── BPM editing ──────────────────────────────────────────
+  function handleBpmCommit() {
+    let n = parseInt(tempBpm, 10);
+    if (isNaN(n)) n = bpm;
+    n = Math.max(20, Math.min(300, n));
+
+    if (n !== bpm) {
+      // Preserve musical position: scale Transport.seconds by BPM ratio before
+      // changing tempo, so the playhead stays anchored at the same bar:beat.
+      Tone.Transport.seconds = Tone.Transport.seconds * (bpm / n);
+      Tone.Transport.bpm.value = n;
+    }
+
+    setBpm(n);
+    setTempBpm(String(n));
+    setEditingBpm(false);
+  }
 
   // ── Seek ─────────────────────────────────────────────────────
   const seekToClientX = useCallback((clientX) => {
@@ -429,6 +461,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     syncingScrollRef.current = true;
     if (timelineRef.current) timelineRef.current.scrollLeft = e.target.scrollLeft;
     syncingScrollRef.current = false;
+    lastPianoScrollTopRef.current = e.target.scrollTop;
   }, []);
 
   const handleTrackHeadersScroll = useCallback((e) => {
@@ -473,7 +506,28 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         <div className={styles.transportRight}>
           <div className={styles.meta}>
             <span className={styles.metaLabel}>BPM</span>
-            <span className={styles.metaValue}>120</span>
+            {editingBpm ? (
+              <input
+                autoFocus
+                type="number"
+                className={styles.bpmInput}
+                value={tempBpm}
+                onChange={(e) => setTempBpm(e.target.value)}
+                onBlur={handleBpmCommit}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleBpmCommit();
+                  if (e.key === 'Escape') { setTempBpm(String(bpm)); setEditingBpm(false); }
+                }}
+              />
+            ) : (
+              <span
+                className={styles.metaValue}
+                style={{ cursor: 'text' }}
+                onClick={() => { setTempBpm(String(bpm)); setEditingBpm(true); }}
+              >
+                {bpm}
+              </span>
+            )}
           </div>
           <div className={styles.meta}>
             <span className={styles.metaLabel}>TIME</span>
@@ -498,10 +552,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             <>
               {tracks.map((t) => (
                 <div key={t.id} className={`${styles.trackRow}${editingTrackId === t.id ? ` ${styles.trackRowActive}` : ''}`}
+                  style={{ '--track-color': t.color }}
                   onDoubleClick={() => setEditingTrackId(prev => prev === t.id ? null : t.id)}>
                   <div className={styles.trackTopRow}>
                     <div className={styles.trackNameBlock}>
-                      <span className={styles.trackName}>{t.name}</span>
+                      <div className={styles.trackNameRow}>
+                        <span className={styles.trackColorDot} style={{ background: t.color }} />
+                        <span className={styles.trackName}>{t.name}</span>
+                      </div>
                       <button className={styles.trackInstrument} title="Change instrument">{t.instrument}</button>
                     </div>
                     <div className={styles.trackToggles}>
@@ -558,6 +616,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             {tracks.map((t) => {
               return (
                 <div key={t.id} className={styles.trackLane}
+                  style={{ '--track-color': t.color }}
                   onMouseMove={(e) => handleLaneMouseMove(e, t.id)}
                   onMouseLeave={() => handleLaneMouseLeave(t.id)}
                   onMouseDown={stopMouseDown}
@@ -617,6 +676,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onGridScroll={handlePianoRollScroll}
               onLeftColResize={startLeftColDrag}
               onClose={() => setEditingTrackId(null)}
+              scrollMemoryRef={lastPianoScrollTopRef}
             />
           </div>
         </>

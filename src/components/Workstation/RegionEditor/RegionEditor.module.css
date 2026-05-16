@@ -249,7 +249,7 @@
   position: absolute;
   top: 0;
   height: 100%;
-  background-color: var(--accent-color);
+  background-color: var(--track-color, var(--accent-color));
   opacity: 0.08;
   pointer-events: none;
   z-index: 1; /* above gridShading(0), below noteBlocks(2) */
@@ -258,7 +258,7 @@
 /* ── Note blocks ─────────────────────────────────────────── */
 .noteBlock {
   position: absolute;
-  background: var(--accent-color);
+  background: var(--track-color, var(--accent-color));
   border-radius: 2px;
   cursor: pointer;
   pointer-events: all;
@@ -266,7 +266,7 @@
 }
 .noteBlock:hover {
   opacity: 1;
-  box-shadow: 0 0 4px var(--accent-color);
+  box-shadow: 0 0 4px var(--track-color, var(--accent-color));
 }
 
 /* ── Playhead ────────────────────────────────────────────── */

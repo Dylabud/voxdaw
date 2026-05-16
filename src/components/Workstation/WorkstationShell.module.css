@@ -136,6 +136,26 @@
   font-variant-numeric: tabular-nums;
 }
 
+.bpmInput {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--accent-color);
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  font-variant-numeric: tabular-nums;
+  width: 3ch;
+  text-align: right;
+  -moz-appearance: textfield;
+  padding: 0;
+}
+.bpmInput::-webkit-outer-spin-button,
+.bpmInput::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 /* ── Arrangement view ───────────────────────────────────── */
 .arrangement {
   flex: 1;
@@ -244,11 +264,24 @@
   min-width: 0;
 }
 
+.trackNameRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.trackColorDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
 .trackName {
   font-size: 11px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--accent-color);
+  color: var(--track-color, var(--accent-color));
 }
 
 .trackInstrument {
@@ -329,8 +362,8 @@
   position: absolute;
   top: 4px;
   bottom: 4px;
-  background: color-mix(in srgb, var(--accent-color) 25%, transparent);
-  border: 1px solid var(--accent-color);
+  background: color-mix(in srgb, var(--track-color, var(--accent-color)) 25%, transparent);
+  border: 1px solid var(--track-color, var(--accent-color));
   border-radius: 3px;
   cursor: grab;
   z-index: 1;
@@ -353,8 +386,8 @@
 
 /* ── Active track row (piano roll open) ──────────────────── */
 .trackRowActive {
-  background: color-mix(in srgb, var(--accent-color) 8%, transparent);
-  box-shadow: inset 2px 0 0 0 var(--accent-color);
+  background: color-mix(in srgb, var(--track-color, var(--accent-color)) 8%, transparent);
+  box-shadow: inset 2px 0 0 0 var(--track-color, var(--accent-color));
 }
 
 /* ── Ghost region (hover preview, ref-driven) ────────────── */

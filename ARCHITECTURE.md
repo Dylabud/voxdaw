@@ -291,9 +291,11 @@ Workstation.jsx                 — view container: warning ↔ shell
 | State / Ref | Purpose |
 |-------------|---------|
 | `isPlaying` (state) | drives play-button active class; gates the rAF loop |
-| `tracks` (state) | `[{ id, name, instrument, isMuted, isSolo }]` — dynamic, populated via `handleAddTrack` |
+| `bpm` (state) | current tempo (default 120); replaces former `BPM` constant — drives `pxPerSec` and `Tone.Transport` |
+| `editingBpm` / `tempBpm` (state) | in-place BPM editor toggle + draft string value |
+| `tracks` (state) | `[{ id, name, instrument, color, isMuted, isSolo }]` — `color` is a hex string from `TRACK_COLORS` |
 | `regions` (state) | `[{ id, trackId, startMeasure, durationMeasures }]` |
-| `editingRegion` (state) | non-null = bottom editor panel visible |
+| `editingTrackId` (state) | non-null = bottom editor panel visible |
 | `editorHeight` (state) | resizable bottom panel height in px (default 320, clamped `[150, vh-200]`) |
 | `nextIdRef` / `nextRegionIdRef` | monotonic counters → stable names across hypothetical delete/add |
 | `playheadRef` / `timeRef` | DOM nodes written every frame by the rAF loop |
@@ -306,16 +308,21 @@ Workstation.jsx                 — view container: warning ↔ shell
 | `editorWrapRef` | direct DOM mutation during editor-panel resize |
 | `regionsRef` | inline-synced mirror of `regions` state — lets drag `useEffect` closures read current regions without stale-closure bugs |
 | `tracksRef` | inline-synced mirror of `tracks` state — lets drag `useEffect` closures resolve candidate track IDs during cross-track moves |
+| `lastPianoScrollTopRef` | persists piano roll vertical scroll position across track switches and editor close/reopen; `null` = no user scroll yet → C4 default |
+| `pianoScrollRef` | RegionEditor scroll container — also used by `handlePianoRollScroll` for scroll sync and `lastPianoScrollTopRef` save |
 
 ### Key constants
 | Constant | Value | Meaning |
 |----------|-------|---------|
 | `PIXELS_PER_BEAT` | `25` | 100px per 4/4 bar — matches CSS bar-line gradient |
-| `BPM` | `120` | hardcoded for v1; future BPM control replaces this |
 | `MEASURES` | `24` | number of ruler labels (1..24) |
-| `PX_PER_SEC` | `50` (at 120 BPM) | derived; playhead crosses one bar line per 2s |
 | `TRACK_H` | `72` | matches `.trackLane` height in CSS — used for cross-track Y snapping |
 | `RULER_HEIGHT` | `24` | matches `.ruler` height in CSS — offset applied before flooring `clientY` to track index |
+| `TRACK_COLORS` | 7-color array | mid-saturation hex colors for per-track differentiation; cycles via `(n-1) % len` |
+| `pxPerSec` (derived) | `PIXELS_PER_BEAT * (bpm / 60) * zoomLevel` | pixels per second; recalculates on BPM or zoom change; drives playhead and seek math |
+
+### BPM Editing
+The transport bar BPM display is click-to-edit: clicking the value renders an `<input type="number">` in-place (same CSS as the static span — transparent bg, no spinners). `handleBpmCommit` validates, clamps (20–300), and applies the change. **Playhead anchoring on BPM change:** `Tone.Transport.seconds` is scaled by `bpm / newBpm` before applying `Tone.Transport.bpm.value = newBpm` — this preserves the musical bar:beat position so the playhead does not jump. Uses `.value =` (instant) rather than `.rampTo()` because this is a discrete user action and a ramp would create ordering ambiguity with the simultaneous `seconds` adjustment. The `setBpm(n)` re-render then recalculates `pxPerSec`, triggering the `useEffect [pxPerSec, updatePlayhead]` which repositions the playhead DOM element — net result: no visual jump.
 
 ### Tone.Transport coordination
 `Tone.Transport` is a global singleton shared with `useAudioEngine`. Workstation and VoxTool both call `.start()` / `.pause()` / `.stop()` independently. Acceptable for now because the user is on one page at a time. **Open work:** a `useTransport` hook owning Transport state + position events will be the coordination layer when global timeline math comes online.
@@ -339,19 +346,25 @@ All drag operations write directly to `element.style` during the drag; React sta
 **Cross-track move collision:** `noOverlap(candTrackId, candStart, candDur)` is evaluated against the candidate track on every `mousemove`. The region snaps `translateY` to `(pendingTrackIndex - origTrackIndex) * TRACK_H` and floats at `zIndex: 10`. On `mouseup`, transform and zIndex are cleared synchronously before `setRegions` commits the new `trackId` — preventing a flash of the region in its original lane.
 
 ### Region clip rendering
-Regions render absolutely inside their lane:
+Regions render absolutely inside their lane. Both `trackRow` (left header column) and `trackLane` (right timeline column) receive `style={{ '--track-color': t.color }}` — the two divs are in separate DOM subtrees so the variable must be set on both:
 - `top: 4px; bottom: 4px` insets give breathing room
-- `background: color-mix(in srgb, var(--accent-color) 25%, transparent)` — auto-flips with theme
-- `border: 1px solid var(--accent-color)`
+- `background: color-mix(in srgb, var(--track-color, var(--accent-color)) 25%, transparent)`
+- `border: 1px solid var(--track-color, var(--accent-color))`
 - Resize handles on left/right edges (6px wide, `cursor: ew-resize`) at `z-index: 3`
 - Edit button at top-right (`z-index: 4`) revealed via pure-CSS `.region:hover .editBtn` — no React hover state
 
+### Track color system
+`TRACK_COLORS` is a 7-color module-level array of mid-saturation hex values chosen for visibility on `#0e0e10`. Color assigned in `handleAddTrack` via `TRACK_COLORS[(n - 1) % TRACK_COLORS.length]` using the stable `nextIdRef` counter. Stored as `track.color` (hex string). Applied via the `--track-color` CSS custom property which cascades to `.trackName`, `.trackRowActive`, `.region`, `.noteBlock`, `.regionHighlight`. A 7px color dot (`<span className={styles.trackColorDot}>`) sits inside a `.trackNameRow` flex wrapper next to the track name in the header.
+
 ### Piano roll shell (`RegionEditor`)
 Generated via `buildKeys(loOct, hiOct)`:
-- Currently `buildKeys(1, 6)` → 72 chromatic keys, 18px each = 1296px tall column
-- White / black row backgrounds via `--piano-key-white` / `--piano-key-black` (directionally correct in both themes — unlike `--bg-panel` / `--bg-base` whose contrast direction flips between themes)
-- Labels only at every C (C1, C2, ..., C6); other keys unlabeled to reduce clutter
-- `.keyOctave` class on every C row adds a stronger top border for visual octave markers
+- `buildKeys(-2, 8)` → 132 chromatic keys (C-2 to B8), 18px each = 2376px tall column
+- C4 is at key index 59 (inner loop runs B→C per octave); default `scrollTop = 59 * 18 - clientHeight + 18` shows C4 at the bottom of the viewport on first open
+- Scroll position persists via `scrollMemoryRef` prop (a `useRef` from WorkstationShell); null = use C4 default
+- White / black row backgrounds via `--piano-key-white` / `--piano-key-black` (directionally correct in both themes)
+- Labels only at every C; `.keyOctave` class adds a stronger top border for visual octave markers
+- Note blocks and region highlights use `var(--track-color, var(--accent-color))` — injected on the editor root div via `style={{ '--track-color': track?.color }}`
+- Grid click (`handleGridClick`): `x = (clientX - rect.left) + scrollLeft - keysW`, `y = (clientY - rect.top) + scrollTop` — both axes compensate for scroll position
 
 Grid backgrounds (six layered `repeating-linear-gradient`s on `.grid`, top → bottom):
 1. Bar lines — `var(--border-mid)` every 200px (1 bar = 4 beats × 50px)

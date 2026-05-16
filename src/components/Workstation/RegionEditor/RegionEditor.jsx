@@ -85,6 +85,7 @@ export default function RegionEditor({
   onGridScroll,
   onLeftColResize,
   onClose,
+  scrollMemoryRef,
 }) {
   const [instrument, setInstrument] = useState(track?.instrument ?? 'fm pluck');
   const previewSynthRef = useRef(null);
@@ -96,6 +97,19 @@ export default function RegionEditor({
     previewSynthRef.current = s;
     return () => s.dispose();
   }, [instrument]);
+
+  // Restore saved scroll position, or default to C4 at bottom on first open
+  useEffect(() => {
+    const container = pianoScrollRef.current;
+    if (!container) return;
+    if (scrollMemoryRef?.current !== null) {
+      container.scrollTop = scrollMemoryRef.current;
+      return;
+    }
+    const c4Index = KEYS.findIndex(k => k.name === 'C4');
+    if (c4Index < 0) return;
+    container.scrollTop = c4Index * KEY_H - container.clientHeight + KEY_H;
+  }, [track?.id]); // fires on mount + whenever track changes (no remount on track switch)
 
   // ── Key preview handlers ──────────────────────────────────
   function handleMouseDown(note, e) {
@@ -125,7 +139,7 @@ export default function RegionEditor({
     const scrollRect = scroll.getBoundingClientRect();
     const keysW = 56;
     const x = (e.clientX - scrollRect.left) + scroll.scrollLeft - keysW;
-    const y = (e.clientY - scrollRect.top);
+    const y = (e.clientY - scrollRect.top) + scroll.scrollTop;
     if (x < 0) return;
     const ppb   = pixelsPerMeasure / 4;
     const beat  = Math.floor(x / ppb);
@@ -139,7 +153,7 @@ export default function RegionEditor({
   const gridMinWidth = MEASURES * pixelsPerMeasure;
 
   return (
-    <div className={styles.editor}>
+    <div className={styles.editor} style={{ '--track-color': track?.color }}>
       <div className={styles.editorBar} />
       <div className={styles.editorBody}>
 
