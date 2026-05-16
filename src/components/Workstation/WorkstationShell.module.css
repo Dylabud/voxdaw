@@ -31,12 +31,6 @@
 
 .transportRight { justify-content: flex-end; }
 
-.transportCenter {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
 .themeBtn {
   appearance: none;
   background: none;
@@ -154,6 +148,17 @@
 .bpmInput::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
+}
+
+/* ── Bottom transport bar ───────────────────────────────── */
+.bottomTransport {
+  flex: 0 0 48px;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-mid);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 
 /* ── Arrangement view ───────────────────────────────────── */
@@ -370,6 +375,11 @@
 }
 
 .region:active { cursor: grabbing; }
+
+.regionSelected { filter: brightness(0.7); }
+
+/* Suppress hover/edit-button on all regions while any drag is active */
+:global(body.is-dragging) .region { pointer-events: none; }
 
 /* Resize handles on left/right edges */
 .resizeLeft,

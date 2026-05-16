@@ -281,11 +281,26 @@ index.js → <Root>
 ### Component tree
 ```
 Workstation.jsx                 — view container: warning ↔ shell
-└── WorkstationShell.jsx        — transport bar, tracks, regions, ruler, editor host
+└── WorkstationShell.jsx        — top transport bar, tracks/regions/ruler, editor host, bottom transport bar
     └── RegionEditor/           — bottom-docked panel (mounted when editingRegion ≠ null)
         ├── RegionEditor.jsx    — inspector + piano roll shell
         └── RegionEditor.module.css
 ```
+
+### Layout (flex column, `100vw × 100vh`)
+```
+┌─ .transport (56px) ─────────────────────────────────┐  ← BPM, zoom, home, theme toggle
+├─ .arrangement (flex: 1) ────────────────────────────┤  ← shrinks when editor panel is open
+│   ├─ .colResizer                                     │
+│   ├─ left: track headers + instrument selector       │
+│   └─ right: timeline, ruler, regions                 │
+├─ .divider (6px, row-resize) ────────────────────────┤  ← only when editor open
+├─ .editorWrap (height controlled by inline style) ───┤  ← only when editor open
+│   └─ <RegionEditor>                                  │
+└─ .bottomTransport (48px) ───────────────────────────┘  ← play/pause, stop, record buttons
+```
+
+Play/pause and stop buttons live in `.bottomTransport` (border-top panel, `justify-content: center`). The top transport bar retains BPM, zoom, home, and theme controls only.
 
 ### State in `WorkstationShell`
 | State / Ref | Purpose |
@@ -297,6 +312,7 @@ Workstation.jsx                 — view container: warning ↔ shell
 | `regions` (state) | `[{ id, trackId, startMeasure, durationMeasures }]` |
 | `notes` (state) | `[{ id, trackId, note, startBeat, durationBeats, regionId }]` — filtered by `trackId` for the active editor |
 | `editingTrackId` (state) | non-null = bottom editor panel visible |
+| `selectedRegionId` (state) | ID of the currently selected region (set on drag start, cleared on drag end or lane click); drives `.regionSelected` CSS class which applies `filter: brightness(0.7)` |
 | `editorHeight` (state) | resizable bottom panel height in px (default 320, clamped `[150, vh-200]`) |
 | `nextIdRef` / `nextRegionIdRef` | monotonic counters → stable names across hypothetical delete/add |
 | `playheadRef` / `timeRef` | DOM nodes written every frame by the rAF loop |
@@ -344,7 +360,13 @@ The transport bar BPM display is click-to-edit: clicking the value renders an `<
 
 All drag operations write directly to `element.style` during the drag; React state commits exactly once on `mouseup`. Matches the established Zero-Re-render Rule pattern (playhead, ghost, etc).
 
+**Drag body class:** `document.body.classList.add('is-dragging')` is set at the start of every drag (region move, resize, and ruler scrub) and removed on `mouseup`. CSS rule `:global(body.is-dragging) .region { pointer-events: none }` suppresses all region hover effects and edit-button reveals during a drag. The `handleLaneMouseMove` ghost-preview handler also early-returns when `dragRef.current` is truthy — preventing ghost animation from interfering with active drags.
+
 **Cross-track move collision:** `noOverlap(candTrackId, candStart, candDur)` is evaluated against the candidate track on every `mousemove`. The region snaps `translateY` to `(pendingTrackIndex - origTrackIndex) * TRACK_H` and floats at `zIndex: 10`. On `mouseup`, transform and zIndex are cleared synchronously before `setRegions` commits the new `trackId` — preventing a flash of the region in its original lane.
+
+**Live color during cross-track drag:** When the candidate track changes (`candTrackId !== prevTrackId`), `d.el.style.setProperty('--track-color', color)` immediately overrides the inherited CSS variable on the dragged DOM element, providing live color feedback. The override is removed via `d.el.style.removeProperty('--track-color')` in `onUp` before `setRegions` commits, so the element re-inherits the correct lane color.
+
+**Region selection:** `setSelectedRegionId(region.id)` is called at the start of `startRegionDrag`; `setSelectedRegionId(null)` is called unconditionally at the end of `onUp` (covering both move and resize drags) and also in `handleLaneClick`. This ensures selection always clears on drop regardless of drag type or distance traveled.
 
 ### Region clip rendering
 Regions render absolutely inside their lane. Both `trackRow` (left header column) and `trackLane` (right timeline column) receive `style={{ '--track-color': t.color }}` — the two divs are in separate DOM subtrees so the variable must be set on both:
@@ -353,6 +375,7 @@ Regions render absolutely inside their lane. Both `trackRow` (left header column
 - `border: 1px solid var(--track-color, var(--accent-color))`
 - Resize handles on left/right edges (6px wide, `cursor: ew-resize`) at `z-index: 3`
 - Edit button at top-right (`z-index: 4`) revealed via pure-CSS `.region:hover .editBtn` — no React hover state
+- Selected region receives `.regionSelected` class → `filter: brightness(0.7)`; works with any dynamic color without hex math
 
 ### Track color system
 `TRACK_COLORS` is a 7-color module-level array of mid-saturation hex values chosen for visibility on `#0e0e10`. Color assigned in `handleAddTrack` via `TRACK_COLORS[(n - 1) % TRACK_COLORS.length]` using the stable `nextIdRef` counter. Stored as `track.color` (hex string). Applied via the `--track-color` CSS custom property which cascades to `.trackName`, `.trackRowActive`, `.region`, `.noteBlock`, `.regionHighlight`. A 7px color dot (`<span className={styles.trackColorDot}>`) sits inside a `.trackNameRow` flex wrapper next to the track name in the header.
@@ -365,7 +388,7 @@ Regions render absolutely inside their lane. Both `trackRow` (left header column
 
 ### Piano roll shell (`RegionEditor`)
 
-**Tab navigation:** The 48px `editorBar` strip above the piano roll body contains three tabs: **notes** | **instrument** | **effects**. Local `activeTab` state (no prop threading). The inspector column and column resizer are always visible. Only the `.pianoRoll` scroll container is hidden via `display: none` (`.hidden` class) when not on the notes tab — the DOM node stays mounted, preserving `scrollTop` natively. Instrument and Effects tabs render a centered placeholder in the piano roll's flex slot.
+**Tab navigation:** The 48px `editorBar` strip above the piano roll body contains three tabs: **notes** | **instrument** | **effects**. Local `activeTab` state (no prop threading). The inspector column and column resizer are always rendered regardless of the active tab — they are unconditional siblings of the `.pianoRoll` scroll container. The `.pianoRoll` scroll container itself is always mounted (preserving `scrollTop` natively), and always contains the piano keys column. Only the right-hand content area inside `.pianoRoll` is conditional: a ternary renders the `.grid` div on the notes tab, or a centered `.placeholder` span on instrument/effects tabs. This ensures the keys column scrolls in sync with the grid whenever the piano roll is visible, and scroll position is never lost across tab switches.
 
 Generated via `buildKeys(loOct, hiOct)`:
 - `buildKeys(-2, 8)` → 132 chromatic keys (C-2 to B8), 18px each = 2376px tall column

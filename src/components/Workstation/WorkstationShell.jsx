@@ -50,6 +50,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [bpm,            setBpm]            = useState(120);
   const [editingBpm,     setEditingBpm]     = useState(false);
   const [tempBpm,        setTempBpm]        = useState('120');
+  const [selectedRegionId, setSelectedRegionId] = useState(null);
 
   // Derived zoom values
   const pixelsPerMeasure = PIXELS_PER_MEASURE * zoomLevel;
@@ -141,7 +142,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     );
 
   const handleLaneMouseMove = (e, trackId) => {
-    if (isDraggingRef.current) return;
+    if (isDraggingRef.current || dragRef.current) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const measure = Math.max(0, Math.floor(x / pixelsPerMeasure));
@@ -168,6 +169,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const handleLaneClick = (e, trackId) => {
     e.stopPropagation();
     if (isDraggingRef.current) return;
+    setSelectedRegionId(null);
     if (hoverRef.current.trackId !== trackId) return;
     if (regions.some(r => r.trackId === trackId)) return;
     const measure = hoverRef.current.measure;
@@ -182,6 +184,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const startRegionDrag = (e, region, mode) => {
     e.stopPropagation();
     e.preventDefault();
+    setSelectedRegionId(region.id);
+    document.body.classList.add('is-dragging');
     const regionEl       = e.currentTarget.closest(`.${styles.region}`);
     const origTrackIndex = tracksRef.current.findIndex(t => t.id === region.trackId);
     dragRef.current = {
@@ -224,9 +228,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         const candIdx    = Math.max(0, Math.min(tracksRef.current.length - 1, Math.floor(relContent / TRACK_H)));
         const candTrackId = tracksRef.current[candIdx]?.id ?? d.pendingTrackId;
         if (noOverlap(candTrackId, candStart, d.initDuration)) {
-          newStart              = candStart;
-          d.pendingTrackId      = candTrackId;
-          d.pendingTrackIndex   = candIdx;
+          newStart = candStart;
+          const prevTrackId   = d.pendingTrackId;
+          d.pendingTrackId    = candTrackId;
+          d.pendingTrackIndex = candIdx;
+          if (d.el && candTrackId !== prevTrackId) {
+            const color = tracksRef.current.find(t => t.id === candTrackId)?.color;
+            if (color) d.el.style.setProperty('--track-color', color);
+          }
         }
       } else if (d.mode === 'resize-right') {
         const candidate = Math.max(1, d.initDuration + delta);
@@ -251,7 +260,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     const onUp = () => {
       const d = dragRef.current;
       if (!d) return;
-      if (d.el) { d.el.style.transform = ''; d.el.style.zIndex = ''; }
+      if (d.el) { d.el.style.transform = ''; d.el.style.zIndex = ''; d.el.style.removeProperty('--track-color'); }
       const { regionId, pendingStart, pendingDuration, pendingTrackId, initStart, trackId: origTrackId } = d;
       setRegions(prev => prev.map(r =>
         r.id === regionId
@@ -259,7 +268,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           : r));
       const beatDelta = (pendingStart - initStart) * 4;
       const trackChanged = pendingTrackId !== origTrackId;
-      if (beatDelta !== 0 || trackChanged) {
+      if (d.mode === 'move' && (beatDelta !== 0 || trackChanged)) {
         setNotes(prev => prev.map(n =>
           n.regionId === regionId
             ? { ...n, startBeat: n.startBeat + beatDelta, trackId: pendingTrackId }
@@ -267,6 +276,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         ));
       }
       dragRef.current = null;
+      setSelectedRegionId(null);
+      document.body.classList.remove('is-dragging');
       document.body.style.cursor = '';
     };
     window.addEventListener('mousemove', onMove);
@@ -396,12 +407,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const handleMouseDown = (e) => {
     e.preventDefault();
     seekToClientX(e.clientX);
-    if (rulerRef.current?.contains(e.target)) isDraggingRef.current = true;
+    if (rulerRef.current?.contains(e.target)) {
+      isDraggingRef.current = true;
+      document.body.classList.add('is-dragging');
+    }
   };
 
   useEffect(() => {
     const onMove = (e) => { if (!isDraggingRef.current) return; seekToClientX(e.clientX); };
-    const onUp   = ()  => { isDraggingRef.current = false; };
+    const onUp   = ()  => { isDraggingRef.current = false; document.body.classList.remove('is-dragging'); };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup',   onUp);
     return () => {
@@ -525,13 +539,6 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             {isDarkMode ? '◑' : '○'}
           </button>
           <button className={styles.homeBtn} onClick={onNavigateHome}>[ ⌂ home ]</button>
-        </div>
-        <div className={styles.transportCenter}>
-          <button
-            className={isPlaying ? styles.transportBtnActive : styles.transportBtn}
-            onClick={handlePlayPause} title="Play / Pause (Space)">▶</button>
-          <button className={styles.transportBtn} onClick={handleStop} title="Stop">■</button>
-          <button className={styles.transportBtn} title="Record">●</button>
         </div>
         <div className={styles.transportRight}>
           <div className={styles.meta}>
@@ -662,7 +669,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                   }}>
                   <div ref={(el) => { ghostRefs.current[t.id] = el; }} className={styles.ghost} />
                   {regions.filter(r => r.trackId === t.id).map(r => (
-                    <div key={r.id} className={styles.region}
+                    <div key={r.id} className={`${styles.region}${selectedRegionId === r.id ? ` ${styles.regionSelected}` : ''}`}
                       style={{
                         left:  `${r.startMeasure    * pixelsPerMeasure}px`,
                         width: `${r.durationMeasures * pixelsPerMeasure}px`,
@@ -711,6 +718,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           </div>
         </>
       )}
+      {/* ── Bottom transport bar ────────────────────────────── */}
+      <div className={styles.bottomTransport}>
+        <button
+          className={isPlaying ? styles.transportBtnActive : styles.transportBtn}
+          onClick={handlePlayPause} title="Play / Pause (Space)">▶</button>
+        <button className={styles.transportBtn} onClick={handleStop} title="Stop">■</button>
+        <button className={styles.transportBtn} title="Record">●</button>
+      </div>
     </div>
   );
 }

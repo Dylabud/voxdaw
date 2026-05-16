@@ -162,7 +162,7 @@ export default function RegionEditor({
             className={`${styles.tabBtn}${activeTab === tab ? ` ${styles.tabActive}` : ''}`}
             onClick={() => setActiveTab(tab)}
           >
-            {tab}
+            {tab === 'notes' ? 'piano roll' : tab}
           </button>
         ))}
       </div>
@@ -194,13 +194,13 @@ export default function RegionEditor({
       {/* Left-column resizer handle (shared drag handler from shell) */}
       <div className={styles.colResizer} onMouseDown={onLeftColResize} />
 
-      {/* Piano roll — hidden (not unmounted) on non-notes tabs */}
+      {/* Piano roll scroll container — always mounted (preserves scrollTop natively) */}
       <div
         ref={pianoScrollRef}
-        className={`${styles.pianoRoll}${activeTab !== 'notes' ? ` ${styles.hidden}` : ''}`}
+        className={styles.pianoRoll}
         onScroll={onGridScroll}
       >
-        {/* Keys column (sticky) */}
+        {/* Keys column — always visible across all tabs */}
         <div
           className={styles.keys}
           style={{ minHeight: PIANO_ROLL_H }}
@@ -219,65 +219,62 @@ export default function RegionEditor({
           ))}
         </div>
 
-        {/* Note grid */}
-        <div
-          className={styles.grid}
-          style={{
-            minWidth: gridMinWidth,
-            minHeight: PIANO_ROLL_H,
-            backgroundImage: computeGridBg(pixelsPerMeasure, zoomLevel),
-          }}
-          onClick={handleGridClick}
-        >
-          {/* Row shading overlay (accidental/natural, theme-aware) */}
-          <div className={styles.gridShading} style={{ minHeight: PIANO_ROLL_H }} />
+        {/* Note grid (notes tab) or placeholder (instrument/effects tabs) */}
+        {activeTab === 'notes' ? (
+          <div
+            className={styles.grid}
+            style={{
+              minWidth: gridMinWidth,
+              minHeight: PIANO_ROLL_H,
+              backgroundImage: computeGridBg(pixelsPerMeasure, zoomLevel),
+            }}
+            onClick={handleGridClick}
+          >
+            {/* Row shading overlay (accidental/natural, theme-aware) */}
+            <div className={styles.gridShading} style={{ minHeight: PIANO_ROLL_H }} />
 
-          {/* Region highlights — clip boundary markers behind MIDI notes */}
-          {regions?.map(r => (
-            <div
-              key={r.id}
-              className={styles.regionHighlight}
-              style={{
-                left:  r.startMeasure     * pixelsPerMeasure,
-                width: r.durationMeasures * pixelsPerMeasure,
-              }}
-            />
-          ))}
-
-          {/* Note blocks */}
-          {notes.map(n => {
-            const keyIndex = KEYS.findIndex(k => k.name === n.note);
-            if (keyIndex < 0) return null;
-            return (
+            {/* Region highlights — clip boundary markers behind MIDI notes */}
+            {regions?.map(r => (
               <div
-                key={n.id}
-                className={styles.noteBlock}
+                key={r.id}
+                className={styles.regionHighlight}
                 style={{
-                  top:    keyIndex * KEY_H,
-                  left:   n.startBeat * ppb,
-                  width:  Math.max(n.durationBeats * ppb - 1, 2),
-                  height: KEY_H - 1,
+                  left:  r.startMeasure     * pixelsPerMeasure,
+                  width: r.durationMeasures * pixelsPerMeasure,
                 }}
-                onClick={(e) => { e.stopPropagation(); onNoteRemove(n.id); }}
               />
-            );
-          })}
+            ))}
 
-          {/* Playhead */}
-          <div ref={pianoRollPlayheadRef} className={styles.playhead} />
-        </div>
+            {/* Note blocks */}
+            {notes.map(n => {
+              const keyIndex = KEYS.findIndex(k => k.name === n.note);
+              if (keyIndex < 0) return null;
+              return (
+                <div
+                  key={n.id}
+                  className={styles.noteBlock}
+                  style={{
+                    top:    keyIndex * KEY_H,
+                    left:   n.startBeat * ppb,
+                    width:  Math.max(n.durationBeats * ppb - 1, 2),
+                    height: KEY_H - 1,
+                  }}
+                  onClick={(e) => { e.stopPropagation(); onNoteRemove(n.id); }}
+                />
+              );
+            })}
+
+            {/* Playhead */}
+            <div ref={pianoRollPlayheadRef} className={styles.playhead} />
+          </div>
+        ) : (
+          <div className={styles.placeholder}>
+            <span className={styles.placeholderText}>
+              {activeTab === 'instrument' ? 'instrument — coming soon' : 'effects — coming soon'}
+            </span>
+          </div>
+        )}
       </div>
-
-      {activeTab === 'instrument' && (
-        <div className={styles.placeholder}>
-          <span className={styles.placeholderText}>instrument — coming soon</span>
-        </div>
-      )}
-      {activeTab === 'effects' && (
-        <div className={styles.placeholder}>
-          <span className={styles.placeholderText}>effects — coming soon</span>
-        </div>
-      )}
 
       </div>
     </div>
