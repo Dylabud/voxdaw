@@ -374,9 +374,9 @@
   z-index: 1;
 }
 
-.region:active { cursor: grabbing; }
+.region:active { cursor: grabbing; filter: brightness(0.6); }
 
-.regionSelected { filter: brightness(0.7); }
+.regionSelected { filter: brightness(0.8); }
 
 /* Suppress hover/edit-button on all regions while any drag is active */
 :global(body.is-dragging) .region { pointer-events: none; }

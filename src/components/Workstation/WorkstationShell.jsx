@@ -80,6 +80,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const leftColWidthRef       = useRef(316);
   const regionsRef            = useRef([]);
   const tracksRef             = useRef([]);
+  const selectedRegionIdRef   = useRef(null);
   const lastPianoScrollTopRef = useRef(null); // null = no user scroll yet → default to C4
 
   // ── Derived editor state ───────────────────────────────────
@@ -185,7 +186,6 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     e.stopPropagation();
     e.preventDefault();
     setSelectedRegionId(region.id);
-    document.body.classList.add('is-dragging');
     const regionEl       = e.currentTarget.closest(`.${styles.region}`);
     const origTrackIndex = tracksRef.current.findIndex(t => t.id === region.trackId);
     dragRef.current = {
@@ -196,19 +196,27 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       pendingTrackIndex: origTrackIndex,
       mode,
       startX: e.clientX,
+      startY: e.clientY,
       initStart: region.startMeasure,
       initDuration: region.durationMeasures,
       el: regionEl,
       pendingStart: region.startMeasure,
       pendingDuration: region.durationMeasures,
+      dragStarted: false,
     };
-    document.body.style.cursor = mode === 'move' ? 'grabbing' : 'ew-resize';
   };
 
   useEffect(() => {
     const onMove = (e) => {
       const d = dragRef.current;
       if (!d) return;
+      if (!d.dragStarted) {
+        if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 4) return;
+        d.dragStarted = true;
+        document.body.classList.add('is-dragging');
+        document.body.style.cursor = d.mode === 'move' ? 'grabbing' : 'ew-resize';
+        if (d.el) d.el.style.filter = 'brightness(0.6)';
+      }
       const delta = Math.round((e.clientX - d.startX) / pixelsPerMeasure);
       let newStart    = d.pendingStart;
       let newDuration = d.pendingDuration;
@@ -260,25 +268,28 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     const onUp = () => {
       const d = dragRef.current;
       if (!d) return;
-      if (d.el) { d.el.style.transform = ''; d.el.style.zIndex = ''; d.el.style.removeProperty('--track-color'); }
-      const { regionId, pendingStart, pendingDuration, pendingTrackId, initStart, trackId: origTrackId } = d;
-      setRegions(prev => prev.map(r =>
-        r.id === regionId
-          ? { ...r, startMeasure: pendingStart, durationMeasures: pendingDuration, trackId: pendingTrackId }
-          : r));
-      const beatDelta = (pendingStart - initStart) * 4;
-      const trackChanged = pendingTrackId !== origTrackId;
-      if (d.mode === 'move' && (beatDelta !== 0 || trackChanged)) {
-        setNotes(prev => prev.map(n =>
-          n.regionId === regionId
-            ? { ...n, startBeat: n.startBeat + beatDelta, trackId: pendingTrackId }
-            : n
-        ));
+      if (d.dragStarted) {
+        if (d.el) { d.el.style.transform = ''; d.el.style.zIndex = ''; d.el.style.filter = ''; d.el.style.removeProperty('--track-color'); }
+        const { regionId, pendingStart, pendingDuration, pendingTrackId, initStart, trackId: origTrackId } = d;
+        setRegions(prev => prev.map(r =>
+          r.id === regionId
+            ? { ...r, startMeasure: pendingStart, durationMeasures: pendingDuration, trackId: pendingTrackId }
+            : r));
+        const beatDelta = (pendingStart - initStart) * 4;
+        const trackChanged = pendingTrackId !== origTrackId;
+        if (d.mode === 'move' && (beatDelta !== 0 || trackChanged)) {
+          setNotes(prev => prev.map(n =>
+            n.regionId === regionId
+              ? { ...n, startBeat: n.startBeat + beatDelta, trackId: pendingTrackId }
+              : n
+          ));
+        }
+        document.body.classList.remove('is-dragging');
+        document.body.style.cursor = '';
+        setSelectedRegionId(null); // clear selection after a completed drag
       }
       dragRef.current = null;
-      setSelectedRegionId(null);
-      document.body.classList.remove('is-dragging');
-      document.body.style.cursor = '';
+      // Pure clicks leave selectedRegionId intact so Delete/Backspace has a target
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -289,9 +300,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   }, [pixelsPerMeasure]);
 
   // Keep refs in sync so drag closures always read current values without stale closures
-  leftColWidthRef.current = leftColWidth;
-  regionsRef.current      = regions;
-  tracksRef.current       = tracks;
+  leftColWidthRef.current       = leftColWidth;
+  regionsRef.current            = regions;
+  tracksRef.current             = tracks;
+  selectedRegionIdRef.current   = selectedRegionId;
 
   // ── Left-column resizer drag ───────────────────────────────
   const startLeftColDrag = useCallback((e) => {
@@ -528,6 +540,23 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     return () => window.removeEventListener('keydown', onKey);
   }, [handlePlayPause]);
 
+  // ── Delete / Backspace — remove selected region + its notes ──
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+      const el = document.activeElement;
+      if (el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.isContentEditable) return;
+      const id = selectedRegionIdRef.current;
+      if (!id) return;
+      e.preventDefault();
+      setRegions(prev => prev.filter(r => r.id !== id));
+      setNotes(prev => prev.filter(n => n.regionId !== id));
+      setSelectedRegionId(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   return (
     <div ref={shellRef} className={styles.shell} style={{ '--left-col-width': `${leftColWidth}px` }}>
 
@@ -660,6 +689,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                   onClick={(e) => handleLaneClick(e, t.id)}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
+                    if (e.target.closest(`.${styles.region}`)) return;
                     const { trackId: hTrackId, measure } = hoverRef.current;
                     if (hTrackId === t.id && regions.some(r => r.trackId === t.id) && !isPositionOccupied(t.id, measure)) {
                       const n = nextRegionIdRef.current++;

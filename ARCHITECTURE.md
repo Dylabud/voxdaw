@@ -312,7 +312,7 @@ Play/pause and stop buttons live in `.bottomTransport` (border-top panel, `justi
 | `regions` (state) | `[{ id, trackId, startMeasure, durationMeasures }]` |
 | `notes` (state) | `[{ id, trackId, note, startBeat, durationBeats, regionId }]` — filtered by `trackId` for the active editor |
 | `editingTrackId` (state) | non-null = bottom editor panel visible |
-| `selectedRegionId` (state) | ID of the currently selected region (set on drag start, cleared on drag end or lane click); drives `.regionSelected` CSS class which applies `filter: brightness(0.7)` |
+| `selectedRegionId` (state) | ID of the currently selected region (set on mousedown; cleared on completed drag or lane click — **persists after a pure click** so Delete/Backspace has a target); drives `.regionSelected` CSS class (`filter: brightness(0.8)`) |
 | `editorHeight` (state) | resizable bottom panel height in px (default 320, clamped `[150, vh-200]`) |
 | `nextIdRef` / `nextRegionIdRef` | monotonic counters → stable names across hypothetical delete/add |
 | `playheadRef` / `timeRef` | DOM nodes written every frame by the rAF loop |
@@ -320,11 +320,12 @@ Play/pause and stop buttons live in `.bottomTransport` (border-top panel, `justi
 | `rulerRef` | drag (scrub) is only initiated when `mousedown.target ∈ ruler` |
 | `ghostRefs` (map) | `{ trackId → ghost DOM element }` — direct DOM mutation during hover |
 | `hoverRef` | `{ trackId, measure }` — read by click handler to commit a region |
-| `dragRef` | active region drag: `{ regionId, trackId, origTrackIndex, pendingTrackId, pendingTrackIndex, mode, startX, initStart, initDuration, el, pendingStart, pendingDuration }` — cross-track fields track the candidate lane during move drags |
+| `dragRef` | active region drag: `{ regionId, trackId, origTrackIndex, pendingTrackId, pendingTrackIndex, mode, startX, startY, initStart, initDuration, el, pendingStart, pendingDuration, dragStarted }` — `dragStarted` gates `is-dragging` + cursor + inline filter to the first `mousemove` that crosses a 4px 2D threshold (`Math.hypot(dx, dy) < 4`), preventing spurious drag activation on clicks |
 | `isDraggingRef` | ruler drag-scrub flag (suppresses ghost during scrub) |
 | `editorWrapRef` | direct DOM mutation during editor-panel resize |
 | `regionsRef` | inline-synced mirror of `regions` state — lets drag `useEffect` closures read current regions without stale-closure bugs |
 | `tracksRef` | inline-synced mirror of `tracks` state — lets drag `useEffect` closures resolve candidate track IDs during cross-track moves |
+| `selectedRegionIdRef` | inline-synced mirror of `selectedRegionId` state — read by the Delete/Backspace `useEffect` (dep: `[]`) so it never re-registers on selection changes |
 | `lastPianoScrollTopRef` | persists piano roll vertical scroll position across track switches and editor close/reopen; `null` = no user scroll yet → C4 default |
 | `pianoScrollRef` | RegionEditor scroll container — also used by `handlePianoRollScroll` for scroll sync and `lastPianoScrollTopRef` save |
 
@@ -357,16 +358,17 @@ The transport bar BPM display is click-to-edit: clicking the value renders an `<
 | Track header | n/a | toggle editor panel | n/a |
 | Editor divider | n/a | n/a | resize panel height `[150, vh-200]` |
 | **Spacebar** | toggle play/pause (input-focus-guarded) | n/a | n/a |
+| **Delete / Backspace** | delete selected region + all its notes (input-focus-guarded) | n/a | n/a |
 
 All drag operations write directly to `element.style` during the drag; React state commits exactly once on `mouseup`. Matches the established Zero-Re-render Rule pattern (playhead, ghost, etc).
 
-**Drag body class:** `document.body.classList.add('is-dragging')` is set at the start of every drag (region move, resize, and ruler scrub) and removed on `mouseup`. CSS rule `:global(body.is-dragging) .region { pointer-events: none }` suppresses all region hover effects and edit-button reveals during a drag. The `handleLaneMouseMove` ghost-preview handler also early-returns when `dragRef.current` is truthy — preventing ghost animation from interfering with active drags.
+**Drag body class:** `document.body.classList.add('is-dragging')` is deferred to the first `onMove` event that crosses the 4px threshold (`dragStarted = true`), **not** on `mousedown`. This prevents the `pointer-events: none` CSS rule from applying to regions during a plain click, which was causing `dblclick` events to mis-target the lane and create spurious regions. CSS rule `:global(body.is-dragging) .region { pointer-events: none }` suppresses all region hover effects and edit-button reveals during a drag. The `handleLaneMouseMove` ghost-preview handler also early-returns when `dragRef.current` is truthy — preventing ghost animation from interfering with active drags.
 
 **Cross-track move collision:** `noOverlap(candTrackId, candStart, candDur)` is evaluated against the candidate track on every `mousemove`. The region snaps `translateY` to `(pendingTrackIndex - origTrackIndex) * TRACK_H` and floats at `zIndex: 10`. On `mouseup`, transform and zIndex are cleared synchronously before `setRegions` commits the new `trackId` — preventing a flash of the region in its original lane.
 
 **Live color during cross-track drag:** When the candidate track changes (`candTrackId !== prevTrackId`), `d.el.style.setProperty('--track-color', color)` immediately overrides the inherited CSS variable on the dragged DOM element, providing live color feedback. The override is removed via `d.el.style.removeProperty('--track-color')` in `onUp` before `setRegions` commits, so the element re-inherits the correct lane color.
 
-**Region selection:** `setSelectedRegionId(region.id)` is called at the start of `startRegionDrag`; `setSelectedRegionId(null)` is called unconditionally at the end of `onUp` (covering both move and resize drags) and also in `handleLaneClick`. This ensures selection always clears on drop regardless of drag type or distance traveled.
+**Region selection:** `setSelectedRegionId(region.id)` is called at the start of `startRegionDrag`. `setSelectedRegionId(null)` is called inside the `if (d.dragStarted)` block in `onUp` (clears after a completed drag) and in `handleLaneClick` (clears on empty lane click). **Pure clicks (no drag movement) leave selection intact** — this is intentional so the user can click a region and then press Delete/Backspace to remove it. Three-tier brightness: `.region:active` → `brightness(0.6)` (mousedown held); `.regionSelected` → `brightness(0.8)` (selected, mouse released); base → `1.0` (not selected). An inline `d.el.style.filter = 'brightness(0.6)'` is applied at drag threshold crossing to persist the active-dark state after the browser drops `:active` mid-drag; cleared alongside `transform`/`zIndex` in `onUp`.
 
 ### Region clip rendering
 Regions render absolutely inside their lane. Both `trackRow` (left header column) and `trackLane` (right timeline column) receive `style={{ '--track-color': t.color }}` — the two divs are in separate DOM subtrees so the variable must be set on both:
@@ -375,7 +377,7 @@ Regions render absolutely inside their lane. Both `trackRow` (left header column
 - `border: 1px solid var(--track-color, var(--accent-color))`
 - Resize handles on left/right edges (6px wide, `cursor: ew-resize`) at `z-index: 3`
 - Edit button at top-right (`z-index: 4`) revealed via pure-CSS `.region:hover .editBtn` — no React hover state
-- Selected region receives `.regionSelected` class → `filter: brightness(0.7)`; works with any dynamic color without hex math
+- Selected region receives `.regionSelected` class → `filter: brightness(0.8)`; active/dragging → `brightness(0.6)`; works with any dynamic color without hex math
 
 ### Track color system
 `TRACK_COLORS` is a 7-color module-level array of mid-saturation hex values chosen for visibility on `#0e0e10`. Color assigned in `handleAddTrack` via `TRACK_COLORS[(n - 1) % TRACK_COLORS.length]` using the stable `nextIdRef` counter. Stored as `track.color` (hex string). Applied via the `--track-color` CSS custom property which cascades to `.trackName`, `.trackRowActive`, `.region`, `.noteBlock`, `.regionHighlight`. A 7px color dot (`<span className={styles.trackColorDot}>`) sits inside a `.trackNameRow` flex wrapper next to the track name in the header.
