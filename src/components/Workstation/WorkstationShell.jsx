@@ -128,16 +128,21 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     );
 
     if (existingRegion) {
+      const bottleOriginBeat = (existingRegion.startMeasure - (existingRegion.clipOffset ?? 0)) * 4;
       setNotes(prev => [...prev, {
-        id: `note_${nextNoteIdRef.current++}`, ...noteData, regionId: existingRegion.id,
+        id: `note_${nextNoteIdRef.current++}`, ...noteData,
+        startBeat: startBeat - bottleOriginBeat,
+        regionId: existingRegion.id,
       }]);
     } else {
       const newRegionId = `region_${nextRegionIdRef.current++}`;
       setRegions(prev => [...prev, {
-        id: newRegionId, trackId, startMeasure: measure, durationMeasures: 1,
+        id: newRegionId, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0,
       }]);
       setNotes(prev => [...prev, {
-        id: `note_${nextNoteIdRef.current++}`, ...noteData, regionId: newRegionId,
+        id: `note_${nextNoteIdRef.current++}`, ...noteData,
+        startBeat: startBeat - measure * 4,
+        regionId: newRegionId,
       }]);
     }
   }, []);
@@ -195,54 +200,73 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (isPositionOccupied(trackId, measure)) return;
     const n = nextRegionIdRef.current++;
     pasteAnchorTrackIndexRef.current = tracksRef.current.findIndex(t => t.id === trackId);
-    setRegions(prev => [...prev, { id: `r${n}`, trackId, startMeasure: measure, durationMeasures: 1 }]);
+    setRegions(prev => [...prev, { id: `r${n}`, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0 }]);
     if (measure + 1 > totalMeasures - 16) setTotalMeasures(prev => prev + 64);
   };
 
   const stopMouseDown = (e) => e.stopPropagation();
 
   // ── Destructive edit — trim/split overlapping regions on the same track ──
+  // Bottle/Window model: the region is a viewport over a hidden container of notes.
+  // Resizing only changes the visible window via startMeasure/durationMeasures/clipOffset.
+  // Notes are stored bottle-local and are never deleted by trim/split, only by total eclipse
+  // (Case A — the region itself is destroyed).
   const applyDestructiveEdit = useCallback((regions, notes, incoming) => {
     const newStart  = incoming.startMeasure;
     const newEnd    = newStart + incoming.durationMeasures;
-    const newBStart = newStart * 4;
-    const newBEnd   = newEnd   * 4;
 
     const nextRegions = [];
     let   nextNotes   = notes;
 
     for (const r of regions) {
       if (r.id === incoming.id || r.trackId !== incoming.trackId) { nextRegions.push(r); continue; }
-      const oldStart = r.startMeasure;
-      const oldEnd   = oldStart + r.durationMeasures;
+      const oldStart  = r.startMeasure;
+      const oldEnd    = oldStart + r.durationMeasures;
+      const oldOffset = r.clipOffset ?? 0;
       if (oldEnd <= newStart || oldStart >= newEnd) { nextRegions.push(r); continue; }
 
-      // Case A: total eclipse — incoming fully covers old region
+      // Case A: total eclipse — incoming fully covers old region (region + bottle destroyed)
       if (newStart <= oldStart && newEnd >= oldEnd) {
         nextNotes = nextNotes.filter(n => n.regionId !== r.id);
         continue;
       }
-      // Case B: right trim — incoming overlaps only the right portion of old
+      // Case B: right trim — bottle preserved, only window shrinks from the right
       if (newStart > oldStart && newEnd >= oldEnd) {
         nextRegions.push({ ...r, durationMeasures: newStart - oldStart });
-        nextNotes = nextNotes.filter(n => n.regionId !== r.id || n.startBeat < newBStart);
         continue;
       }
-      // Case C: left trim — incoming overlaps only the left portion of old
+      // Case C: left trim — bottle preserved; window starts later & advances clipOffset
       if (newStart <= oldStart && newEnd < oldEnd) {
-        nextRegions.push({ ...r, startMeasure: newEnd, durationMeasures: oldEnd - newEnd });
-        nextNotes = nextNotes.filter(n => n.regionId !== r.id || n.startBeat >= newBEnd);
+        const shift = newEnd - oldStart;
+        nextRegions.push({
+          ...r,
+          startMeasure: newEnd,
+          durationMeasures: oldEnd - newEnd,
+          clipOffset: oldOffset + shift,
+        });
         continue;
       }
-      // Case D: middle split — incoming is fully inside old region
+      // Case D: middle split — both halves get an independent copy of the full bottle
       const rightId = `r${nextRegionIdRef.current++}`;
+      const rightShift = newEnd - oldStart;
       nextRegions.push(
         { ...r, durationMeasures: newStart - oldStart },
-        { ...r, id: rightId, startMeasure: newEnd, durationMeasures: oldEnd - newEnd },
+        {
+          ...r,
+          id: rightId,
+          startMeasure: newEnd,
+          durationMeasures: oldEnd - newEnd,
+          clipOffset: oldOffset + rightShift,
+        },
       );
-      nextNotes = nextNotes
-        .filter(n => n.regionId !== r.id || n.startBeat < newBStart || n.startBeat >= newBEnd)
-        .map(n => n.regionId === r.id && n.startBeat >= newBEnd ? { ...n, regionId: rightId } : n);
+      // Deep-clone every note belonging to r → new note IDs linked to rightId.
+      const clones = [];
+      for (const n of nextNotes) {
+        if (n.regionId === r.id) {
+          clones.push({ ...n, id: `note_${nextNoteIdRef.current++}`, regionId: rightId });
+        }
+      }
+      if (clones.length) nextNotes = [...nextNotes, ...clones];
     }
 
     return { regions: nextRegions, notes: nextNotes };
@@ -268,17 +292,19 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             if (!r) return [];
             const tIdx = tracksRef.current.findIndex(t => t.id === r.trackId);
             const el   = timelineRef.current?.querySelector(`[data-region-id="${cId}"]`) ?? null;
+            const co   = r.clipOffset ?? 0;
             return [{
               regionId: cId, trackId: r.trackId, origTrackIndex: tIdx,
               pendingTrackId: r.trackId, pendingTrackIndex: tIdx,
-              initStart: r.startMeasure, initDuration: r.durationMeasures,
-              pendingStart: r.startMeasure, pendingDuration: r.durationMeasures,
+              initStart: r.startMeasure, initDuration: r.durationMeasures, initClipOffset: co,
+              pendingStart: r.startMeasure, pendingDuration: r.durationMeasures, pendingClipOffset: co,
               el,
             }];
           })
       : [];
 
     const regionEl = e.currentTarget.closest('[data-region-id]');
+    const co = region.clipOffset ?? 0;
     dragRef.current = {
       regionId:          region.id,
       trackId:           region.trackId,
@@ -290,9 +316,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       startY: e.clientY,
       initStart: region.startMeasure,
       initDuration: region.durationMeasures,
+      initClipOffset: co,
       el: regionEl,
       pendingStart: region.startMeasure,
       pendingDuration: region.durationMeasures,
+      pendingClipOffset: co,
       dragStarted: false,
       companions,
     };
@@ -363,15 +391,21 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           if (c.el) { c.el.style.width = `${c.pendingDuration * pixelsPerMeasure}px`; c.el.style.zIndex = '10'; }
         }
       } else if (d.mode === 'resize-left') {
+        // Bottle/Window: keep bottle origin (initStart - initClipOffset) fixed.
+        // clipOffset = initClipOffset + (newStart - initStart) and is allowed to go negative —
+        // the window extends past the bottle origin into empty padding (notes stay locked).
+        // Constraints: newStart >= 0 (timeline bound), newStart <= initStart + initDuration - 1 (duration >= 1).
         const wanted    = d.initStart + delta;
         const candStart = Math.max(0, Math.min(wanted, d.initStart + d.initDuration - 1));
-        newStart    = candStart;
-        newDuration = d.initDuration + (d.initStart - candStart);
+        newStart            = candStart;
+        newDuration         = d.initDuration + (d.initStart - candStart);
+        d.pendingClipOffset = d.initClipOffset + (candStart - d.initStart);
         for (const c of d.companions) {
           const cWanted   = c.initStart + delta;
           const cStart    = Math.max(0, Math.min(cWanted, c.initStart + c.initDuration - 1));
-          c.pendingStart    = cStart;
-          c.pendingDuration = c.initDuration + (c.initStart - cStart);
+          c.pendingStart       = cStart;
+          c.pendingDuration    = c.initDuration + (c.initStart - cStart);
+          c.pendingClipOffset  = c.initClipOffset + (cStart - c.initStart);
           if (c.el) {
             c.el.style.left  = `${c.pendingStart    * pixelsPerMeasure}px`;
             c.el.style.width = `${c.pendingDuration * pixelsPerMeasure}px`;
@@ -402,26 +436,40 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           resetEl(d.el);
           for (const c of d.companions) resetEl(c.el);
 
-          const { regionId, pendingStart, pendingDuration, pendingTrackId, initStart } = d;
+          const { regionId, pendingStart, pendingDuration, pendingTrackId, pendingClipOffset } = d;
           const clusterIds = new Set([regionId, ...d.companions.map(c => c.regionId)]);
 
           const movedRegion = {
             ...regionsRef.current.find(r => r.id === regionId),
             startMeasure: pendingStart, durationMeasures: pendingDuration, trackId: pendingTrackId,
+            clipOffset: pendingClipOffset,
           };
           const cluster = [
             movedRegion,
             ...d.companions.map(c => ({
               ...regionsRef.current.find(r => r.id === c.regionId),
               startMeasure: c.pendingStart, durationMeasures: c.pendingDuration, trackId: c.pendingTrackId,
+              clipOffset: c.pendingClipOffset,
             })),
           ];
 
-          // Sort: leftmost-on-track first so the rightmost (anchor) is processed last and wins
+          // Pre-drag startMeasure sidecar — keeps the intrusion-direction signal alive
+          // through wall-clamping (when multiple cluster members get pinned to pendingStart=0,
+          // the post-clamp startMeasure can't disambiguate who was originally to the right).
+          const initStartById = new Map();
+          initStartById.set(regionId, d.initStart);
+          for (const c of d.companions) initStartById.set(c.regionId, c.initStart);
+
+          // Directional sort: the region whose moving edge intrudes into a neighbor must be
+          // processed LAST so it wins. For resize-right that's the leftmost (its right edge
+          // pushes right) → descending. For resize-left it's the rightmost (its left edge
+          // pushes left) → ascending. move doesn't conflict internally; keep ascending.
+          const secondaryAsc = d.mode === 'resize-right' ? -1 : 1;
           cluster.sort((a, b) => {
             const ai = tracksRef.current.findIndex(t => t.id === a.trackId);
             const bi = tracksRef.current.findIndex(t => t.id === b.trackId);
-            return ai !== bi ? ai - bi : a.startMeasure - b.startMeasure;
+            if (ai !== bi) return ai - bi;
+            return (initStartById.get(a.id) - initStartById.get(b.id)) * secondaryAsc;
           });
 
           // Step 1: Internal cluster resolution — cluster members on the same track trim each other
@@ -442,20 +490,64 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           }
 
           if (d.mode === 'move') {
+            // Bottle-local notes don't shift when the window slides — only trackId may change.
             cleanNotes = cleanNotes.map(n => {
               if (n.regionId === regionId) {
-                return { ...n, startBeat: n.startBeat + (pendingStart - initStart) * 4, trackId: pendingTrackId };
+                return { ...n, trackId: pendingTrackId };
               }
               const comp = d.companions.find(c => c.regionId === n.regionId);
               if (comp) {
-                return { ...n, startBeat: n.startBeat + (comp.pendingStart - comp.initStart) * 4, trackId: comp.pendingTrackId };
+                return { ...n, trackId: comp.pendingTrackId };
               }
               return n;
             });
           }
 
-          setRegions([...cleanRegions, ...resolvedCluster]);
-          setNotes(cleanNotes);
+          // Defensive cull: drop any region with non-positive duration and orphaned notes.
+          // No current path produces this, but cheap insurance against future regressions.
+          const mergedRegions = [...cleanRegions, ...resolvedCluster].filter(r => r.durationMeasures > 0);
+          const survivingRegionIds = new Set(mergedRegions.map(r => r.id));
+          const finalNotes = cleanNotes.filter(n => survivingRegionIds.has(n.regionId));
+
+          setRegions(mergedRegions);
+          setNotes(finalNotes);
+
+          // Dev-only invariant check: log any same-track region overlap after commit,
+          // plus DOM<->state sync check that repairs any reconciler-missed inline styles.
+          const dragMode = d.mode;
+          queueMicrotask(() => {
+            // 1. State overlap check.
+            const byTrack = new Map();
+            for (const r of regionsRef.current) {
+              const arr = byTrack.get(r.trackId);
+              if (arr) arr.push(r); else byTrack.set(r.trackId, [r]);
+            }
+            for (const [, list] of byTrack) {
+              list.sort((a, b) => a.startMeasure - b.startMeasure);
+              for (let i = 1; i < list.length; i++) {
+                const prev = list[i - 1];
+                const cur  = list[i];
+                if (prev.startMeasure + prev.durationMeasures > cur.startMeasure) {
+                  // eslint-disable-next-line no-console
+                  console.warn('[region-overlap]', { prev, cur, mode: dragMode });
+                }
+              }
+            }
+            // 2. DOM<->state sync — intentional React reconciler bailout workaround.
+            // When a region's commit-time value equals its pre-drag value (e.g. a companion
+            // trimmed back to its original 1-measure width by cluster resolution), React's
+            // reconciler diffs its own memo (old value) against the new JSX (same value),
+            // sees no change, and skips emitting a DOM write — but the DOM was mutated to a
+            // different value during drag. We resync explicitly. Silent on purpose.
+            for (const r of regionsRef.current) {
+              const el = timelineRef.current?.querySelector(`[data-region-id="${r.id}"]`);
+              if (!el) continue;
+              const expectedLeft  = `${r.startMeasure    * pixelsPerMeasure}px`;
+              const expectedWidth = `${r.durationMeasures * pixelsPerMeasure}px`;
+              if (el.style.left  !== expectedLeft)  el.style.left  = expectedLeft;
+              if (el.style.width !== expectedWidth) el.style.width = expectedWidth;
+            }
+          });
 
           const rightEdge = Math.max(...resolvedCluster.map(r => r.startMeasure + r.durationMeasures));
           if (rightEdge > totalMeasuresRef.current - 16) setTotalMeasures(prev => Math.max(prev + 64, rightEdge + 16));
@@ -531,6 +623,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           );
         }
         lastDragEndTimeRef.current = Date.now();
+      } else {
+        // Pure click in the void below all tracks — clear selection.
+        // Lane clicks bypass this path via stopPropagation; ruler clicks route through
+        // isDraggingRef and never set marqueeDragRef.
+        setSelectedRegionIds(new Set());
       }
       const el = marqueeElRef.current;
       if (el) { el.style.width = '0'; el.style.height = '0'; el.style.opacity = '0'; }
@@ -880,11 +977,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             trackId: tracksRef.current[anchorTrackIndex + trackOffset]?.id ?? r.trackId,
           };
         });
+        // Notes are bottle-local — startBeat unchanged on paste. Only IDs and trackId update.
         const newNotes = srcNotes.map(n => ({
           ...n,
           id: `note_${nextNoteIdRef.current++}`,
           regionId: idMap[n.regionId],
-          startBeat: n.startBeat + (targetMeasure - leftmostMeasure) * 4,
           trackId: newRegions.find(r => r.id === idMap[n.regionId])?.trackId ?? n.trackId,
         }));
         let cleanRegions = regionsRef.current;
@@ -1060,7 +1157,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                     const measure = Math.max(0, Math.floor((e.clientX - rect.left) / pixelsPerMeasure));
                     if (regions.some(r => r.trackId === t.id) && !isPositionOccupied(t.id, measure)) {
                       const n = nextRegionIdRef.current++;
-                      setRegions(prev => [...prev, { id: `r${n}`, trackId: t.id, startMeasure: measure, durationMeasures: 1 }]);
+                      setRegions(prev => [...prev, { id: `r${n}`, trackId: t.id, startMeasure: measure, durationMeasures: 1, clipOffset: 0 }]);
                       if (measure + 1 > totalMeasures - 16) setTotalMeasures(prev => prev + 64);
                     }
                     setEditingTrackId(t.id);

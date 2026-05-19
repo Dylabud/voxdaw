@@ -245,17 +245,26 @@ export default function RegionEditor({
               />
             ))}
 
-            {/* Note blocks */}
+            {/* Note blocks — bottle-local startBeat converted to global pixels via region origin.
+                Notes outside their region's visible window (clipOffset .. clipOffset+duration) are hidden. */}
             {notes.map(n => {
               const keyIndex = KEYS.findIndex(k => k.name === n.note);
               if (keyIndex < 0) return null;
+              const r = regions?.find(rg => rg.id === n.regionId);
+              if (!r) return null;
+              const clipOffset       = r.clipOffset ?? 0;
+              const windowStartBeat  = clipOffset * 4;
+              const windowEndBeat    = (clipOffset + r.durationMeasures) * 4;
+              if (n.startBeat < windowStartBeat || n.startBeat >= windowEndBeat) return null;
+              const bottleOriginBeat = (r.startMeasure - clipOffset) * 4;
+              const globalLeftBeat   = bottleOriginBeat + n.startBeat;
               return (
                 <div
                   key={n.id}
                   className={styles.noteBlock}
                   style={{
                     top:    keyIndex * KEY_H,
-                    left:   n.startBeat * ppb,
+                    left:   globalLeftBeat * ppb,
                     width:  Math.max(n.durationBeats * ppb - 1, 2),
                     height: KEY_H - 1,
                   }}

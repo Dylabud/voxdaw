@@ -309,8 +309,8 @@ Play/pause and stop buttons live in `.bottomTransport` (border-top panel, `justi
 | `bpm` (state) | current tempo (default 120); replaces former `BPM` constant — drives `pxPerSec` and `Tone.Transport` |
 | `editingBpm` / `tempBpm` (state) | in-place BPM editor toggle + draft string value |
 | `tracks` (state) | `[{ id, name, instrument, color, isMuted, isSolo }]` — `color` is a hex string from `TRACK_COLORS` |
-| `regions` (state) | `[{ id, trackId, startMeasure, durationMeasures }]` |
-| `notes` (state) | `[{ id, trackId, note, startBeat, durationBeats, regionId }]` — filtered by `trackId` for the active editor |
+| `regions` (state) | `[{ id, trackId, startMeasure, durationMeasures, clipOffset }]` — `clipOffset` is in measures, can be negative (left padding), and tracks the visible window's offset into the underlying note bottle |
+| `notes` (state) | `[{ id, trackId, note, startBeat, durationBeats, regionId }]` — `startBeat` is **bottle-local** (offset from the region's bottle origin = `startMeasure − clipOffset` measures), filtered by `trackId` for the active editor |
 | `editingTrackId` (state) | non-null = bottom editor panel visible |
 | `selectedRegionId` (state) | ID of the currently selected region (set on mousedown; cleared on completed drag or lane click — **persists after a pure click** so Delete/Backspace has a target); drives `.regionSelected` CSS class (`filter: brightness(0.8)`) |
 | `editorHeight` (state) | resizable bottom panel height in px (default 320, clamped `[150, vh-200]`) |
@@ -320,7 +320,7 @@ Play/pause and stop buttons live in `.bottomTransport` (border-top panel, `justi
 | `rulerRef` | drag (scrub) is only initiated when `mousedown.target ∈ ruler` |
 | `ghostRefs` (map) | `{ trackId → ghost DOM element }` — direct DOM mutation during hover |
 | `hoverRef` | `{ trackId, measure }` — read by click handler to commit a region |
-| `dragRef` | active region drag: `{ regionId, trackId, origTrackIndex, pendingTrackId, pendingTrackIndex, mode, startX, startY, initStart, initDuration, el, pendingStart, pendingDuration, dragStarted }` — `dragStarted` gates `is-dragging` + cursor + inline filter to the first `mousemove` that crosses a 4px 2D threshold (`Math.hypot(dx, dy) < 4`), preventing spurious drag activation on clicks |
+| `dragRef` | active region drag: `{ regionId, trackId, origTrackIndex, pendingTrackId, pendingTrackIndex, mode, startX, startY, initStart, initDuration, initClipOffset, el, pendingStart, pendingDuration, pendingClipOffset, dragStarted, companions }` — `dragStarted` gates `is-dragging` + cursor + inline filter to the first `mousemove` that crosses a 4px 2D threshold (`Math.hypot(dx, dy) < 4`), preventing spurious drag activation on clicks. `initClipOffset`/`pendingClipOffset` track the bottle/window invariant during resize-left (clipOffset = initClipOffset + (newStart − initStart), allowed to go negative for left-padding) |
 | `isDraggingRef` | ruler drag-scrub flag (suppresses ghost during scrub) |
 | `editorWrapRef` | direct DOM mutation during editor-panel resize |
 | `regionsRef` | inline-synced mirror of `regions` state — lets drag `useEffect` closures read current regions without stale-closure bugs |
@@ -382,11 +382,32 @@ Regions render absolutely inside their lane. Both `trackRow` (left header column
 ### Track color system
 `TRACK_COLORS` is a 7-color module-level array of mid-saturation hex values chosen for visibility on `#0e0e10`. Color assigned in `handleAddTrack` via `TRACK_COLORS[(n - 1) % TRACK_COLORS.length]` using the stable `nextIdRef` counter. Stored as `track.color` (hex string). Applied via the `--track-color` CSS custom property which cascades to `.trackName`, `.trackRowActive`, `.region`, `.noteBlock`, `.regionHighlight`. A 7px color dot (`<span className={styles.trackColorDot}>`) sits inside a `.trackNameRow` flex wrapper next to the track name in the header.
 
-### Note shape
+### Note shape (Bottle/Window model)
 ```
 { id, trackId, note, startBeat, durationBeats, regionId }
 ```
-`regionId` links each note to its parent region (foreign key). `handleNoteAdd` in `WorkstationShell` auto-creates a region when a note lands in an empty measure (reads `regionsRef.current` — the inline-synced ref — to avoid stale closures). Beat-to-region math: region at `startMeasure, durationMeasures` covers beats `[startMeasure * 4, (startMeasure + durationMeasures) * 4)`. The drag `onUp` handler updates notes when a region moves: `startBeat += measureDelta * 4` and `trackId = pendingTrackId` (cross-track).
+`regionId` links each note to its parent region (foreign key). Notes are stored in **bottle-local beats**: `startBeat` is offset from the region's bottle origin, which sits at the absolute timeline measure `region.startMeasure − region.clipOffset`. A region's visible window covers bottle beats `[clipOffset * 4, (clipOffset + durationMeasures) * 4)`; notes outside the window are hidden but never destroyed (they reappear when the window grows back). Render math: `globalLeftBeat = (region.startMeasure − region.clipOffset) * 4 + note.startBeat`. `handleNoteAdd` converts incoming global `startBeat` to bottle-local before storage. `handleNoteAdd` also auto-creates a region with `clipOffset: 0` when a note lands in an empty measure. **Move semantics**: sliding a region's window does NOT shift its notes' `startBeat` — only `region.startMeasure` changes; notes stay locked to the bottle.
+
+### Destructive edit (`applyDestructiveEdit`)
+Trim/split overlapping regions on the same track. Four cases preserve the bottle except in total eclipse:
+- **A (total eclipse)**: incoming fully covers old → old region destroyed, its notes deleted.
+- **B (right trim)**: only `durationMeasures` shrinks. Bottle preserved; right-side notes hidden by the window.
+- **C (left trim)**: `startMeasure` advances, `durationMeasures` shrinks, `clipOffset` increases by the same shift so the bottle origin stays fixed. Bottle preserved; left-side notes hidden.
+- **D (middle split)**: left piece keeps the original region+notes (`durationMeasures` trimmed); right piece is a fresh region with a new `id` and deep-cloned notes (new note IDs, same bottle contents), `clipOffset` advanced to align with the cut. Each half independently holds the full bottle and can be expanded outward to reveal hidden notes.
+
+### Cluster resize (multi-region drag)
+When multiple regions are selected and resized together, `onUp` resolves internal cluster collisions before resolving against background regions. The cluster is sorted with **`(trackIndex ascending, initStart × secondaryAsc)`** where `secondaryAsc = -1` for `resize-right`, `+1` for `resize-left`/`move`. Using **`initStart` (pre-drag startMeasure)** as the secondary key — kept in a sidecar `initStartById` Map — preserves the intrusion-direction signal through wall-clamping: if multiple members get pinned to `pendingStart=0`, `pendingStart` ties but `initStart` still disambiguates so the originally-rightmost member sorts last (resize-left) or originally-leftmost sorts last (resize-right), letting that member's expansion win via Case A eclipse instead of being clipped by Case C from a wall-mate. The cluster loop's "last incoming wins" semantic combined with this sort yields the expected DAW behavior in all clamp scenarios.
+
+### Region overlap telemetry + DOM sync (post-commit microtask)
+After `setRegions/setNotes` in `onUp`, a `queueMicrotask` performs two passes against `regionsRef.current`:
+1. **Overlap assertion**: groups by `trackId`, sorts each by `startMeasure`, and `console.warn`s `[region-overlap]` on any adjacent pair where `prev.startMeasure + prev.durationMeasures > cur.startMeasure`. Catches any state-level bug introduced by future changes to `applyDestructiveEdit` or the cluster loop.
+2. **DOM/state resync (silent)**: walks each region's DOM node via `[data-region-id]` and writes `style.left`/`style.width` to match state if they differ. This is an intentional workaround for React's reconciler bailing on `style` props whose value matches the previous render's memo even though the DOM was direct-mutated during drag (e.g., a companion trimmed back to its original duration by Case C — React sees same-value and skips the DOM write, leaving the drag-time stretched DOM stale).
+
+### Void-click deselection
+Clicking the empty area below all track lanes clears region selection. Implemented in the marquee `useEffect`'s `onUp` `else` branch (when `d.active` is false — mousedown armed marquee but no drag past 4px). Lane clicks bypass via `stopPropagation` on `.trackLane`; ruler clicks route through `isDraggingRef` and never set `marqueeDragRef`.
+
+### Beat-to-region containment
+A region at `(startMeasure, durationMeasures)` occupies global beats `[startMeasure * 4, (startMeasure + durationMeasures) * 4)`. A note `n` is *in* its region iff its bottle-local `startBeat` ∈ `[clipOffset * 4, (clipOffset + durationMeasures) * 4)`.
 
 ### Piano roll shell (`RegionEditor`)
 
