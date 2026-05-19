@@ -27,12 +27,14 @@ const formatTime = (t) => {
 
 // Used for both arrangement and piano roll grids — returns inline backgroundImage string.
 export function computeGridBg(ppm, zoomLevel) {
-  const ppb = ppm / 4;
-  const pp8 = ppm / 8;
+  const labelStep    = Math.max(1, Math.ceil(50 / ppm));
+  const effectivePpm = ppm * labelStep;
+  const ppb = effectivePpm / 4;
+  const pp8 = effectivePpm / 8;
   const layers = [
-    `repeating-linear-gradient(to right, var(--border-mid) 0, var(--border-mid) 1px, transparent 1px, transparent ${ppm}px)`,
-    ...(zoomLevel >= 1.5 ? [`repeating-linear-gradient(to right, var(--border-faint) 0, var(--border-faint) 1px, transparent 1px, transparent ${ppb}px)`] : []),
-    ...(zoomLevel >= 3.0 ? [`repeating-linear-gradient(to right, var(--border-subtle) 0, var(--border-subtle) 1px, transparent 1px, transparent ${pp8}px)`] : []),
+    `repeating-linear-gradient(to right, var(--border-mid) 0, var(--border-mid) 1px, transparent 1px, transparent ${effectivePpm}px)`,
+    ...(labelStep === 1 && zoomLevel >= 1.5 ? [`repeating-linear-gradient(to right, var(--border-faint) 0, var(--border-faint) 1px, transparent 1px, transparent ${ppb}px)`] : []),
+    ...(labelStep === 1 && zoomLevel >= 3.0 ? [`repeating-linear-gradient(to right, var(--border-subtle) 0, var(--border-subtle) 1px, transparent 1px, transparent ${pp8}px)`] : []),
   ];
   return layers.join(', ');
 }
@@ -49,8 +51,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [bpm,            setBpm]            = useState(120);
   const [editingBpm,     setEditingBpm]     = useState(false);
   const [tempBpm,        setTempBpm]        = useState('120');
-  const [selectedRegionId, setSelectedRegionId] = useState(null);
+  const [selectedRegionIds, setSelectedRegionIds] = useState(new Set());
   const [totalMeasures,    setTotalMeasures]    = useState(200);
+  const [toastMessage,     setToastMessage]     = useState(null);
+  const [activeTrackId,    setActiveTrackId]    = useState(null);
 
   // Derived zoom values
   const pixelsPerMeasure = PIXELS_PER_MEASURE * zoomLevel;
@@ -80,11 +84,16 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const leftColWidthRef       = useRef(316);
   const regionsRef            = useRef([]);
   const tracksRef             = useRef([]);
-  const selectedRegionIdRef   = useRef(null);
-  const lastPianoScrollTopRef = useRef(null); // null = no user scroll yet → default to C4
+  const selectedRegionIdsRef     = useRef(new Set());
+  const lastPianoScrollTopRef    = useRef(null); // null = no user scroll yet → default to C4
   const lastDragEndTimeRef       = useRef(0);
   const capturedRegionStartRef   = useRef(null);
   const totalMeasuresRef         = useRef(200);
+  const clipboardRef             = useRef(null);
+  const notesRef                 = useRef([]);
+  const marqueeDragRef           = useRef(null);
+  const marqueeElRef             = useRef(null);
+  const pasteAnchorTrackIndexRef = useRef(null);
 
   // ── Derived editor state ───────────────────────────────────
   const editingTrack      = editingTrackId ? tracks.find(t => t.id === editingTrackId) : null;
@@ -173,25 +182,103 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const handleLaneClick = (e, trackId) => {
     e.stopPropagation();
     if (isDraggingRef.current) return;
-    setSelectedRegionId(null);
-    if (regions.some(r => r.trackId === trackId)) return;
-    const rect = e.currentTarget.getBoundingClientRect();
+    if (Date.now() - lastDragEndTimeRef.current < 300) return;
+    setSelectedRegionIds(new Set());
+    setActiveTrackId(trackId);
+    const rect    = e.currentTarget.getBoundingClientRect();
     const measure = Math.max(0, Math.floor((e.clientX - rect.left) / pixelsPerMeasure));
+    if (regions.some(r => r.trackId === trackId)) {
+      seekToClientX(e.clientX);
+      pasteAnchorTrackIndexRef.current = tracksRef.current.findIndex(t => t.id === trackId);
+      return;
+    }
     if (isPositionOccupied(trackId, measure)) return;
     const n = nextRegionIdRef.current++;
+    pasteAnchorTrackIndexRef.current = tracksRef.current.findIndex(t => t.id === trackId);
     setRegions(prev => [...prev, { id: `r${n}`, trackId, startMeasure: measure, durationMeasures: 1 }]);
     if (measure + 1 > totalMeasures - 16) setTotalMeasures(prev => prev + 64);
   };
 
   const stopMouseDown = (e) => e.stopPropagation();
 
+  // ── Destructive edit — trim/split overlapping regions on the same track ──
+  const applyDestructiveEdit = useCallback((regions, notes, incoming) => {
+    const newStart  = incoming.startMeasure;
+    const newEnd    = newStart + incoming.durationMeasures;
+    const newBStart = newStart * 4;
+    const newBEnd   = newEnd   * 4;
+
+    const nextRegions = [];
+    let   nextNotes   = notes;
+
+    for (const r of regions) {
+      if (r.id === incoming.id || r.trackId !== incoming.trackId) { nextRegions.push(r); continue; }
+      const oldStart = r.startMeasure;
+      const oldEnd   = oldStart + r.durationMeasures;
+      if (oldEnd <= newStart || oldStart >= newEnd) { nextRegions.push(r); continue; }
+
+      // Case A: total eclipse — incoming fully covers old region
+      if (newStart <= oldStart && newEnd >= oldEnd) {
+        nextNotes = nextNotes.filter(n => n.regionId !== r.id);
+        continue;
+      }
+      // Case B: right trim — incoming overlaps only the right portion of old
+      if (newStart > oldStart && newEnd >= oldEnd) {
+        nextRegions.push({ ...r, durationMeasures: newStart - oldStart });
+        nextNotes = nextNotes.filter(n => n.regionId !== r.id || n.startBeat < newBStart);
+        continue;
+      }
+      // Case C: left trim — incoming overlaps only the left portion of old
+      if (newStart <= oldStart && newEnd < oldEnd) {
+        nextRegions.push({ ...r, startMeasure: newEnd, durationMeasures: oldEnd - newEnd });
+        nextNotes = nextNotes.filter(n => n.regionId !== r.id || n.startBeat >= newBEnd);
+        continue;
+      }
+      // Case D: middle split — incoming is fully inside old region
+      const rightId = `r${nextRegionIdRef.current++}`;
+      nextRegions.push(
+        { ...r, durationMeasures: newStart - oldStart },
+        { ...r, id: rightId, startMeasure: newEnd, durationMeasures: oldEnd - newEnd },
+      );
+      nextNotes = nextNotes
+        .filter(n => n.regionId !== r.id || n.startBeat < newBStart || n.startBeat >= newBEnd)
+        .map(n => n.regionId === r.id && n.startBeat >= newBEnd ? { ...n, regionId: rightId } : n);
+    }
+
+    return { regions: nextRegions, notes: nextNotes };
+  }, []);
+
   // ── Region drag ──────────────────────────────────────────────
   const startRegionDrag = (e, region, mode) => {
     e.stopPropagation();
     e.preventDefault();
-    setSelectedRegionId(region.id);
-    const regionEl       = e.currentTarget.closest(`.${styles.region}`);
     const origTrackIndex = tracksRef.current.findIndex(t => t.id === region.trackId);
+    const isMultiDrag = selectedRegionIdsRef.current.has(region.id) && selectedRegionIdsRef.current.size > 1;
+
+    if (!isMultiDrag) {
+      setSelectedRegionIds(new Set([region.id]));
+      pasteAnchorTrackIndexRef.current = origTrackIndex;
+    }
+
+    const companions = isMultiDrag
+      ? [...selectedRegionIdsRef.current]
+          .filter(id => id !== region.id)
+          .flatMap(cId => {
+            const r = regionsRef.current.find(x => x.id === cId);
+            if (!r) return [];
+            const tIdx = tracksRef.current.findIndex(t => t.id === r.trackId);
+            const el   = timelineRef.current?.querySelector(`[data-region-id="${cId}"]`) ?? null;
+            return [{
+              regionId: cId, trackId: r.trackId, origTrackIndex: tIdx,
+              pendingTrackId: r.trackId, pendingTrackIndex: tIdx,
+              initStart: r.startMeasure, initDuration: r.durationMeasures,
+              pendingStart: r.startMeasure, pendingDuration: r.durationMeasures,
+              el,
+            }];
+          })
+      : [];
+
+    const regionEl = e.currentTarget.closest('[data-region-id]');
     dragRef.current = {
       regionId:          region.id,
       trackId:           region.trackId,
@@ -207,6 +294,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       pendingStart: region.startMeasure,
       pendingDuration: region.durationMeasures,
       dragStarted: false,
+      companions,
     };
   };
 
@@ -220,43 +308,76 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         document.body.classList.add('is-dragging');
         document.body.style.cursor = d.mode === 'move' ? 'grabbing' : 'ew-resize';
         if (d.el) d.el.style.filter = 'brightness(0.6)';
+        for (const c of d.companions) { if (c.el) c.el.style.filter = 'brightness(0.6)'; }
       }
       const delta = Math.round((e.clientX - d.startX) / pixelsPerMeasure);
       let newStart    = d.pendingStart;
       let newDuration = d.pendingDuration;
 
-      const noOverlap = (candTrackId, candStart, candDur) =>
-        !regionsRef.current.some(r =>
-          r.id !== d.regionId &&
-          r.trackId === candTrackId &&
-          candStart < r.startMeasure + r.durationMeasures &&
-          candStart + candDur > r.startMeasure
-        );
-
       if (d.mode === 'move') {
-        const candStart = Math.max(0, d.initStart + delta);
+        const allMembers        = [d, ...d.companions];
+        const minInitStart      = Math.min(...allMembers.map(m => m.initStart));
+        const minOrigTrackIndex = Math.min(...allMembers.map(m => m.origTrackIndex));
+        const maxOrigTrackIndex = Math.max(...allMembers.map(m => m.origTrackIndex));
+        const clampedDelta      = Math.max(-minInitStart, delta);
+
         const rect       = timelineRef.current.getBoundingClientRect();
         const relContent = e.clientY - rect.top + timelineRef.current.scrollTop - RULER_HEIGHT;
-        const candIdx    = Math.max(0, Math.min(tracksRef.current.length - 1, Math.floor(relContent / TRACK_H)));
-        const candTrackId = tracksRef.current[candIdx]?.id ?? d.pendingTrackId;
-        if (noOverlap(candTrackId, candStart, d.initDuration)) {
-          newStart = candStart;
-          const prevTrackId   = d.pendingTrackId;
-          d.pendingTrackId    = candTrackId;
-          d.pendingTrackIndex = candIdx;
-          if (d.el && candTrackId !== prevTrackId) {
-            const color = tracksRef.current.find(t => t.id === candTrackId)?.color;
-            if (color) d.el.style.setProperty('--track-color', color);
+        const rawTrackDelta     = Math.floor(relContent / TRACK_H) - d.origTrackIndex;
+        const clampedTrackDelta = Math.max(
+          -minOrigTrackIndex,
+          Math.min(tracksRef.current.length - 1 - maxOrigTrackIndex, rawTrackDelta)
+        );
+        const anchorNewIdx  = d.origTrackIndex + clampedTrackDelta;
+        const candTrackId   = tracksRef.current[anchorNewIdx]?.id ?? d.pendingTrackId;
+        newStart = d.initStart + clampedDelta;
+        const prevTrackId   = d.pendingTrackId;
+        d.pendingTrackId    = candTrackId;
+        d.pendingTrackIndex = anchorNewIdx;
+        if (d.el && candTrackId !== prevTrackId) {
+          const color = tracksRef.current.find(t => t.id === candTrackId)?.color;
+          if (color) d.el.style.setProperty('--track-color', color);
+        }
+        for (const c of d.companions) {
+          const cStart       = c.initStart + clampedDelta;
+          const cIdx         = c.origTrackIndex + clampedTrackDelta;
+          const cTrackId     = tracksRef.current[cIdx]?.id ?? c.pendingTrackId;
+          const prevCTrackId = c.pendingTrackId;
+          c.pendingStart      = cStart;
+          c.pendingTrackId    = cTrackId;
+          c.pendingTrackIndex = cIdx;
+          if (c.el) {
+            c.el.style.left      = `${cStart * pixelsPerMeasure}px`;
+            c.el.style.transform = `translateY(${(cIdx - c.origTrackIndex) * TRACK_H}px)`;
+            c.el.style.zIndex    = '10';
+            if (cTrackId !== prevCTrackId) {
+              const color = tracksRef.current.find(t => t.id === cTrackId)?.color;
+              if (color) c.el.style.setProperty('--track-color', color);
+            }
           }
         }
       } else if (d.mode === 'resize-right') {
-        const candidate = Math.max(1, d.initDuration + delta);
-        if (noOverlap(d.trackId, d.initStart, candidate)) newDuration = candidate;
+        newDuration = Math.max(1, d.initDuration + delta);
+        for (const c of d.companions) {
+          c.pendingDuration = Math.max(1, c.initDuration + delta);
+          if (c.el) { c.el.style.width = `${c.pendingDuration * pixelsPerMeasure}px`; c.el.style.zIndex = '10'; }
+        }
       } else if (d.mode === 'resize-left') {
         const wanted    = d.initStart + delta;
         const candStart = Math.max(0, Math.min(wanted, d.initStart + d.initDuration - 1));
-        const candDur   = d.initDuration + (d.initStart - candStart);
-        if (noOverlap(d.trackId, candStart, candDur)) { newStart = candStart; newDuration = candDur; }
+        newStart    = candStart;
+        newDuration = d.initDuration + (d.initStart - candStart);
+        for (const c of d.companions) {
+          const cWanted   = c.initStart + delta;
+          const cStart    = Math.max(0, Math.min(cWanted, c.initStart + c.initDuration - 1));
+          c.pendingStart    = cStart;
+          c.pendingDuration = c.initDuration + (c.initStart - cStart);
+          if (c.el) {
+            c.el.style.left  = `${c.pendingStart    * pixelsPerMeasure}px`;
+            c.el.style.width = `${c.pendingDuration * pixelsPerMeasure}px`;
+            c.el.style.zIndex = '10';
+          }
+        }
       }
 
       if (d.el) {
@@ -273,32 +394,77 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const d = dragRef.current;
       if (d) {
         if (d.dragStarted) {
-          if (d.el) { d.el.style.transform = ''; d.el.style.zIndex = ''; d.el.style.filter = ''; d.el.style.removeProperty('--track-color'); }
-          const { regionId, pendingStart, pendingDuration, pendingTrackId, initStart, trackId: origTrackId } = d;
-          setRegions(prev => prev.map(r =>
-            r.id === regionId
-              ? { ...r, startMeasure: pendingStart, durationMeasures: pendingDuration, trackId: pendingTrackId }
-              : r));
-          const beatDelta = (pendingStart - initStart) * 4;
-          const trackChanged = pendingTrackId !== origTrackId;
-          if (d.mode === 'move' && (beatDelta !== 0 || trackChanged)) {
-            setNotes(prev => prev.map(n =>
-              n.regionId === regionId
-                ? { ...n, startBeat: n.startBeat + beatDelta, trackId: pendingTrackId }
-                : n
-            ));
+          const resetEl = (el) => {
+            if (!el) return;
+            el.style.transform = ''; el.style.zIndex = ''; el.style.filter = '';
+            el.style.removeProperty('--track-color');
+          };
+          resetEl(d.el);
+          for (const c of d.companions) resetEl(c.el);
+
+          const { regionId, pendingStart, pendingDuration, pendingTrackId, initStart } = d;
+          const clusterIds = new Set([regionId, ...d.companions.map(c => c.regionId)]);
+
+          const movedRegion = {
+            ...regionsRef.current.find(r => r.id === regionId),
+            startMeasure: pendingStart, durationMeasures: pendingDuration, trackId: pendingTrackId,
+          };
+          const cluster = [
+            movedRegion,
+            ...d.companions.map(c => ({
+              ...regionsRef.current.find(r => r.id === c.regionId),
+              startMeasure: c.pendingStart, durationMeasures: c.pendingDuration, trackId: c.pendingTrackId,
+            })),
+          ];
+
+          // Sort: leftmost-on-track first so the rightmost (anchor) is processed last and wins
+          cluster.sort((a, b) => {
+            const ai = tracksRef.current.findIndex(t => t.id === a.trackId);
+            const bi = tracksRef.current.findIndex(t => t.id === b.trackId);
+            return ai !== bi ? ai - bi : a.startMeasure - b.startMeasure;
+          });
+
+          // Step 1: Internal cluster resolution — cluster members on the same track trim each other
+          let resolvedCluster = [];
+          let cleanNotes = notesRef.current;
+          for (const cr of cluster) {
+            const result = applyDestructiveEdit(resolvedCluster, cleanNotes, cr);
+            resolvedCluster = [...result.regions, cr];
+            cleanNotes = result.notes;
           }
-          const rightEdge = pendingStart + pendingDuration;
-          if (rightEdge > totalMeasuresRef.current - 16) {
-            setTotalMeasures(prev => prev + 64);
+
+          // Step 2: External resolution — resolvedCluster vs background
+          let cleanRegions = regionsRef.current.filter(r => !clusterIds.has(r.id));
+          for (const cr of resolvedCluster) {
+            const result = applyDestructiveEdit(cleanRegions, cleanNotes, cr);
+            cleanRegions = result.regions;
+            cleanNotes   = result.notes;
           }
+
+          if (d.mode === 'move') {
+            cleanNotes = cleanNotes.map(n => {
+              if (n.regionId === regionId) {
+                return { ...n, startBeat: n.startBeat + (pendingStart - initStart) * 4, trackId: pendingTrackId };
+              }
+              const comp = d.companions.find(c => c.regionId === n.regionId);
+              if (comp) {
+                return { ...n, startBeat: n.startBeat + (comp.pendingStart - comp.initStart) * 4, trackId: comp.pendingTrackId };
+              }
+              return n;
+            });
+          }
+
+          setRegions([...cleanRegions, ...resolvedCluster]);
+          setNotes(cleanNotes);
+
+          const rightEdge = Math.max(...resolvedCluster.map(r => r.startMeasure + r.durationMeasures));
+          if (rightEdge > totalMeasuresRef.current - 16) setTotalMeasures(prev => Math.max(prev + 64, rightEdge + 16));
           document.body.classList.remove('is-dragging');
           document.body.style.cursor = '';
           lastDragEndTimeRef.current = Date.now();
         }
         dragRef.current = null;
       } else if (capturedRegionStartRef.current) {
-        // editBtn or other region-child drag that bypassed startRegionDrag: stamp cooldown if moved
         const { x, y } = capturedRegionStartRef.current;
         if (Math.hypot(e.clientX - x, e.clientY - y) >= 4) {
           lastDragEndTimeRef.current = Date.now();
@@ -314,12 +480,78 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     };
   }, [pixelsPerMeasure]);
 
+  // ── Marquee selection drag ────────────────────────────────────
+  useEffect(() => {
+    const onMove = (e) => {
+      const d = marqueeDragRef.current;
+      if (!d || e.buttons !== 1) return;
+      const scroller = timelineRef.current;
+      if (!scroller) return;
+      const rect     = scroller.getBoundingClientRect();
+      const currentX = e.clientX - rect.left + scroller.scrollLeft;
+      const currentY = Math.max(0, e.clientY - rect.top + scroller.scrollTop - RULER_HEIGHT);
+      if (!d.active && Math.hypot(currentX - d.startX, currentY - d.startY) < 4) return;
+      d.active   = true;
+      d.currentX = currentX;
+      d.currentY = currentY;
+      const left   = Math.min(d.startX, currentX);
+      const top    = Math.min(d.startY, currentY);
+      const width  = Math.abs(currentX - d.startX);
+      const height = Math.abs(currentY - d.startY);
+      const el = marqueeElRef.current;
+      if (!el) return;
+      el.style.left    = `${left}px`;
+      el.style.top     = `${top + RULER_HEIGHT}px`;
+      el.style.width   = `${width}px`;
+      el.style.height  = `${height}px`;
+      el.style.opacity = '1';
+    };
+
+    const onUp = () => {
+      const d = marqueeDragRef.current;
+      if (!d) return;
+      if (d.active) {
+        const minX = Math.min(d.startX, d.currentX ?? d.startX);
+        const maxX = Math.max(d.startX, d.currentX ?? d.startX);
+        const minY = Math.min(d.startY, d.currentY ?? d.startY);
+        const maxY = Math.max(d.startY, d.currentY ?? d.startY);
+        const ppm  = pixelsPerMeasure;
+        const hit  = regionsRef.current.filter(r => {
+          const tIdx   = tracksRef.current.findIndex(t => t.id === r.trackId);
+          const rLeft  = r.startMeasure * ppm;
+          const rRight = (r.startMeasure + r.durationMeasures) * ppm;
+          const rTop   = tIdx * TRACK_H;
+          const rBot   = (tIdx + 1) * TRACK_H;
+          return rLeft < maxX && rRight > minX && rTop < maxY && rBot > minY;
+        });
+        setSelectedRegionIds(new Set(hit.map(r => r.id)));
+        if (hit.length > 0) {
+          pasteAnchorTrackIndexRef.current = Math.min(
+            ...hit.map(r => tracksRef.current.findIndex(t => t.id === r.trackId))
+          );
+        }
+        lastDragEndTimeRef.current = Date.now();
+      }
+      const el = marqueeElRef.current;
+      if (el) { el.style.width = '0'; el.style.height = '0'; el.style.opacity = '0'; }
+      marqueeDragRef.current = null;
+    };
+
+    window.addEventListener('mousemove', onMove, true);  // capture: fires before region stopPropagation
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove, true);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [pixelsPerMeasure]);
+
   // Keep refs in sync so drag closures always read current values without stale closures
   leftColWidthRef.current       = leftColWidth;
   regionsRef.current            = regions;
   tracksRef.current             = tracks;
+  notesRef.current              = notes;
   totalMeasuresRef.current      = totalMeasures;
-  selectedRegionIdRef.current   = selectedRegionId;
+  selectedRegionIdsRef.current  = selectedRegionIds;
 
   // ── Left-column resizer drag ───────────────────────────────
   const startLeftColDrag = useCallback((e) => {
@@ -435,9 +667,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const handleMouseDown = (e) => {
     e.preventDefault();
     seekToClientX(e.clientX);
+    const scroller = timelineRef.current;
     if (rulerRef.current?.contains(e.target)) {
       isDraggingRef.current = true;
       document.body.classList.add('is-dragging');
+    } else if (scroller) {
+      const rect     = scroller.getBoundingClientRect();
+      const contentX = e.clientX - rect.left + scroller.scrollLeft;
+      const contentY = e.clientY - rect.top  + scroller.scrollTop - RULER_HEIGHT;
+      marqueeDragRef.current = { startX: contentX, startY: contentY, active: false };
     }
   };
 
@@ -575,18 +813,94 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     return () => window.removeEventListener('keydown', onKey);
   }, [handlePlayPause]);
 
-  // ── Delete / Backspace — remove selected region + its notes ──
+  // ── Delete / Backspace / Copy / Paste keyboard handlers ─────
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
       const el = document.activeElement;
-      if (el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.isContentEditable) return;
-      const id = selectedRegionIdRef.current;
-      if (!id) return;
-      e.preventDefault();
-      setRegions(prev => prev.filter(r => r.id !== id));
-      setNotes(prev => prev.filter(n => n.regionId !== id));
-      setSelectedRegionId(null);
+      const inInput = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.isContentEditable;
+
+      // Delete / Backspace — remove all selected regions + their notes
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (inInput) return;
+        const ids = selectedRegionIdsRef.current;
+        if (!ids.size) return;
+        e.preventDefault();
+        setRegions(prev => prev.filter(r => !ids.has(r.id)));
+        setNotes(prev => prev.filter(n => !ids.has(n.regionId)));
+        setSelectedRegionIds(new Set());
+        return;
+      }
+
+      // Copy — Cmd/Ctrl + C
+      if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
+        if (inInput) return;
+        const ids = [...selectedRegionIdsRef.current];
+        if (!ids.length) return;
+        const selectedRegions = regionsRef.current.filter(r => ids.includes(r.id));
+        const selectedNotes   = notesRef.current.filter(n => ids.includes(n.regionId));
+        const leftmostMeasure   = Math.min(...selectedRegions.map(r => r.startMeasure));
+        const topmostTrackIndex = Math.min(...selectedRegions.map(r =>
+          tracksRef.current.findIndex(t => t.id === r.trackId)
+        ));
+        clipboardRef.current = JSON.parse(JSON.stringify({
+          regions: selectedRegions, notes: selectedNotes,
+          leftmostMeasure, topmostTrackIndex,
+        }));
+        return;
+      }
+
+      // Paste — Cmd/Ctrl + V
+      if ((e.metaKey || e.ctrlKey) && e.key === 'v') {
+        if (inInput) return;
+        if (!clipboardRef.current) return;
+        e.preventDefault();
+        const { regions: srcRegions, notes: srcNotes, leftmostMeasure, topmostTrackIndex } = clipboardRef.current;
+        const targetMeasure    = parseInt(Tone.Transport.position.split(':')[0], 10);
+        const anchorTrackIndex = pasteAnchorTrackIndexRef.current ?? topmostTrackIndex;
+        const bottommostTrackIndex = Math.max(...srcRegions.map(r =>
+          tracksRef.current.findIndex(t => t.id === r.trackId)
+        ));
+        const clusterHeight = bottommostTrackIndex - topmostTrackIndex;
+
+        if (anchorTrackIndex + clusterHeight >= tracksRef.current.length) {
+          setToastMessage('Overflow: not enough tracks below to paste cluster');
+          setTimeout(() => setToastMessage(null), 3000);
+          return;
+        }
+
+        const idMap = {};
+        const newRegions = srcRegions.map(r => {
+          const trackOffset = tracksRef.current.findIndex(t => t.id === r.trackId) - topmostTrackIndex;
+          const newId = `r${nextRegionIdRef.current++}`;
+          idMap[r.id] = newId;
+          return {
+            ...r,
+            id: newId,
+            startMeasure: targetMeasure + (r.startMeasure - leftmostMeasure),
+            trackId: tracksRef.current[anchorTrackIndex + trackOffset]?.id ?? r.trackId,
+          };
+        });
+        const newNotes = srcNotes.map(n => ({
+          ...n,
+          id: `note_${nextNoteIdRef.current++}`,
+          regionId: idMap[n.regionId],
+          startBeat: n.startBeat + (targetMeasure - leftmostMeasure) * 4,
+          trackId: newRegions.find(r => r.id === idMap[n.regionId])?.trackId ?? n.trackId,
+        }));
+        let cleanRegions = regionsRef.current;
+        let cleanNotes   = notesRef.current;
+        for (const r of newRegions) {
+          const result = applyDestructiveEdit(cleanRegions, cleanNotes, r);
+          cleanRegions = result.regions;
+          cleanNotes   = result.notes;
+        }
+        setRegions([...cleanRegions, ...newRegions]);
+        setNotes([...cleanNotes, ...newNotes]);
+        setSelectedRegionIds(new Set(Object.values(idMap)));
+        const rightEdge = Math.max(...newRegions.map(r => r.startMeasure + r.durationMeasures));
+        if (rightEdge > totalMeasuresRef.current - 16) setTotalMeasures(prev => prev + 64);
+        return;
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -652,8 +966,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           ) : (
             <>
               {tracks.map((t) => (
-                <div key={t.id} className={`${styles.trackRow}${editingTrackId === t.id ? ` ${styles.trackRowActive}` : ''}`}
+                <div key={t.id} className={`${styles.trackRow}${editingTrackId === t.id ? ` ${styles.trackRowActive}` : activeTrackId === t.id ? ` ${styles.trackRowFocused}` : ''}`}
                   style={{ '--track-color': t.color }}
+                  onClick={() => { setActiveTrackId(t.id); pasteAnchorTrackIndexRef.current = tracksRef.current.findIndex(x => x.id === t.id); }}
                   onDoubleClick={() => setEditingTrackId(prev => prev === t.id ? null : t.id)}>
                   <div className={styles.trackTopRow}>
                     <div className={styles.trackNameBlock}>
@@ -726,7 +1041,16 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                   style={{ '--track-color': t.color }}
                   onMouseMove={(e) => handleLaneMouseMove(e, t.id)}
                   onMouseLeave={() => handleLaneMouseLeave(t.id)}
-                  onMouseDown={stopMouseDown}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    if (dragRef.current) return;
+                    const scroller = timelineRef.current;
+                    if (!scroller) return;
+                    const rect     = scroller.getBoundingClientRect();
+                    const contentX = e.clientX - rect.left + scroller.scrollLeft;
+                    const contentY = e.clientY - rect.top  + scroller.scrollTop - RULER_HEIGHT;
+                    marqueeDragRef.current = { startX: contentX, startY: contentY, active: false };
+                  }}
                   onClick={(e) => handleLaneClick(e, t.id)}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
@@ -743,13 +1067,12 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                   }}>
                   <div ref={(el) => { ghostRefs.current[t.id] = el; }} className={styles.ghost} />
                   {regions.filter(r => r.trackId === t.id).map(r => (
-                    <div key={r.id} className={`${styles.region}${selectedRegionId === r.id ? ` ${styles.regionSelected}` : ''}`}
+                    <div key={r.id} data-region-id={r.id} className={`${styles.region}${selectedRegionIds.has(r.id) ? ` ${styles.regionSelected}` : ''}`}
                       style={{
                         left:  `${r.startMeasure    * pixelsPerMeasure}px`,
                         width: `${r.durationMeasures * pixelsPerMeasure}px`,
                       }}
                       onMouseDownCapture={(e) => { capturedRegionStartRef.current = { x: e.clientX, y: e.clientY }; }}
-                      onMouseMove={(e) => e.stopPropagation()}
                       onMouseDown={(e) => startRegionDrag(e, r, 'move')}
                       onClick={(e) => e.stopPropagation()}
                       onDoubleClick={(e) => { e.stopPropagation(); setEditingTrackId(r.trackId); }}>
@@ -766,9 +1089,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             })}
 
             <div ref={playheadRef} className={styles.playhead} />
+            <div ref={marqueeElRef} className={styles.marquee} />
           </div>
         </div>
       </div>
+      {toastMessage && <div className={styles.toast}>{toastMessage}</div>}
 
       {/* ── Piano roll editor ────────────────────────────── */}
       {editingTrackId && (

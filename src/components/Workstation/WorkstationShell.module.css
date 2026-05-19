@@ -400,6 +400,11 @@
   box-shadow: inset 2px 0 0 0 var(--track-color, var(--accent-color));
 }
 
+/* ── Focused track row (paste target, no piano roll) ─────── */
+.trackRowFocused {
+  box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--track-color, var(--accent-color)) 50%, transparent);
+}
+
 /* ── Ghost region (hover preview, ref-driven) ────────────── */
 .ghost {
   position: absolute;
@@ -591,4 +596,33 @@
   text-transform: uppercase;
   color: var(--text-muted);
   margin: 0;
+}
+
+.marquee {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  background: rgba(93, 202, 165, 0.08);
+  border: 1px solid var(--accent-color);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  color: var(--text-primary);
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  z-index: 200;
+  pointer-events: none;
 }

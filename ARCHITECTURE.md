@@ -401,6 +401,8 @@ Generated via `buildKeys(loOct, hiOct)`:
 - Note blocks and region highlights use `var(--track-color, var(--accent-color))` — injected on the editor root div via `style={{ '--track-color': track?.color }}`
 - Grid click (`handleGridClick`): `x = (clientX - rect.left) + scrollLeft - keysW`, `y = (clientY - rect.top) + scrollTop` — both axes compensate for scroll position
 
+**`computeGridBg(ppm, zoomLevel)`** (exported from `WorkstationShell.jsx`, shared with `RegionEditor`): Builds the CSS `background-image` string for arrangement and piano roll grids. At macro zoom-out, `ppm` can drop to 1–2px, collapsing all gradients into a solid block. Fix: `labelStep = Math.max(1, Math.ceil(50 / ppm))` (identical to the ruler's label-skip formula) scales the effective measure period to `effectivePpm = ppm * labelStep`. Beat and sub-beat layers are suppressed when `labelStep > 1` (they would be sub-pixel at those zoom levels). Grid lines are thus guaranteed to align with visible ruler labels at all zoom levels.
+
 Grid backgrounds (six layered `repeating-linear-gradient`s on `.grid`, top → bottom):
 1. Bar lines — `var(--border-mid)` every 200px (1 bar = 4 beats × 50px)
 2. Sub-beat lines — `var(--border-faint)` every 50px

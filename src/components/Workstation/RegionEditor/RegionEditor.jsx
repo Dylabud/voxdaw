@@ -224,7 +224,7 @@ export default function RegionEditor({
           <div
             className={styles.grid}
             style={{
-              width: gridMinWidth,
+              minWidth: gridMinWidth,
               minHeight: PIANO_ROLL_H,
               backgroundImage: computeGridBg(pixelsPerMeasure, zoomLevel),
             }}
