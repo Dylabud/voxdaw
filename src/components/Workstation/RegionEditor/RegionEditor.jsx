@@ -23,7 +23,6 @@ function buildKeys(loOct, hiOct) {
 const KEYS          = buildKeys(-2, 8); // C-2..C8 → 132 keys
 const KEY_H         = 18;
 const PIANO_ROLL_H  = KEYS.length * KEY_H;
-const MEASURES      = 24;
 
 const INSTRUMENTS = [
   'fm pluck', 'analog', 'strings', 'am', 'pluck',
@@ -80,6 +79,7 @@ export default function RegionEditor({
   onNoteRemove,
   zoomLevel,
   pixelsPerMeasure,
+  totalMeasures,
   pianoRollPlayheadRef,
   pianoScrollRef,
   onGridScroll,
@@ -151,7 +151,7 @@ export default function RegionEditor({
   }
 
   const ppb          = pixelsPerMeasure / 4;
-  const gridMinWidth = MEASURES * pixelsPerMeasure;
+  const gridMinWidth = totalMeasures * pixelsPerMeasure;
 
   return (
     <div className={styles.editor} style={{ '--track-color': track?.color }}>
@@ -224,7 +224,7 @@ export default function RegionEditor({
           <div
             className={styles.grid}
             style={{
-              minWidth: gridMinWidth,
+              width: gridMinWidth,
               minHeight: PIANO_ROLL_H,
               backgroundImage: computeGridBg(pixelsPerMeasure, zoomLevel),
             }}

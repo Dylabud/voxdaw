@@ -407,8 +407,8 @@
   bottom: 4px;
   left: 0;
   width: 100px; /* overridden via inline style when zoomed */
-  background: color-mix(in srgb, var(--accent-color) 18%, transparent);
-  border: 1px dashed var(--accent-color);
+  background: color-mix(in srgb, var(--track-color, var(--accent-color)) 18%, transparent);
+  border: 1px dashed var(--track-color, var(--accent-color));
   border-radius: 3px;
   opacity: 0;
   pointer-events: none;
@@ -423,8 +423,8 @@
   right: 4px;
   appearance: none;
   background: var(--bg-panel);
-  border: 1px solid var(--accent-color);
-  color: var(--accent-color);
+  border: 1px solid var(--track-color, var(--accent-color));
+  color: var(--track-color, var(--accent-color));
   font-family: inherit;
   font-size: 8px;
   letter-spacing: 0.18em;
@@ -438,7 +438,7 @@
 }
 .region:hover .editBtn { opacity: 1; }
 .editBtn:hover {
-  background: var(--accent-color);
+  background: var(--track-color, var(--accent-color));
   color: var(--bg-panel);
 }
 

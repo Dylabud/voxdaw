@@ -5,8 +5,7 @@ import RegionEditor from './RegionEditor/RegionEditor';
 
 const PIXELS_PER_BEAT    = 25;
 const PIXELS_PER_MEASURE = PIXELS_PER_BEAT * 4;  // 100px at zoom 1
-// BPM is state inside the component
-const MEASURES           = 24;
+// BPM and totalMeasures are state inside the component
 const TRACK_COLORS = [
   '#5DCAA5', // teal (brand accent)
   '#5A9FD4', // blue
@@ -51,6 +50,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [editingBpm,     setEditingBpm]     = useState(false);
   const [tempBpm,        setTempBpm]        = useState('120');
   const [selectedRegionId, setSelectedRegionId] = useState(null);
+  const [totalMeasures,    setTotalMeasures]    = useState(200);
 
   // Derived zoom values
   const pixelsPerMeasure = PIXELS_PER_MEASURE * zoomLevel;
@@ -82,6 +82,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const tracksRef             = useRef([]);
   const selectedRegionIdRef   = useRef(null);
   const lastPianoScrollTopRef = useRef(null); // null = no user scroll yet → default to C4
+  const lastDragEndTimeRef       = useRef(0);
+  const capturedRegionStartRef   = useRef(null);
+  const totalMeasuresRef         = useRef(200);
 
   // ── Derived editor state ───────────────────────────────────
   const editingTrack      = editingTrackId ? tracks.find(t => t.id === editingTrackId) : null;
@@ -171,12 +174,13 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     e.stopPropagation();
     if (isDraggingRef.current) return;
     setSelectedRegionId(null);
-    if (hoverRef.current.trackId !== trackId) return;
     if (regions.some(r => r.trackId === trackId)) return;
-    const measure = hoverRef.current.measure;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const measure = Math.max(0, Math.floor((e.clientX - rect.left) / pixelsPerMeasure));
     if (isPositionOccupied(trackId, measure)) return;
     const n = nextRegionIdRef.current++;
     setRegions(prev => [...prev, { id: `r${n}`, trackId, startMeasure: measure, durationMeasures: 1 }]);
+    if (measure + 1 > totalMeasures - 16) setTotalMeasures(prev => prev + 64);
   };
 
   const stopMouseDown = (e) => e.stopPropagation();
@@ -265,31 +269,42 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       d.pendingStart    = newStart;
       d.pendingDuration = newDuration;
     };
-    const onUp = () => {
+    const onUp = (e) => {
       const d = dragRef.current;
-      if (!d) return;
-      if (d.dragStarted) {
-        if (d.el) { d.el.style.transform = ''; d.el.style.zIndex = ''; d.el.style.filter = ''; d.el.style.removeProperty('--track-color'); }
-        const { regionId, pendingStart, pendingDuration, pendingTrackId, initStart, trackId: origTrackId } = d;
-        setRegions(prev => prev.map(r =>
-          r.id === regionId
-            ? { ...r, startMeasure: pendingStart, durationMeasures: pendingDuration, trackId: pendingTrackId }
-            : r));
-        const beatDelta = (pendingStart - initStart) * 4;
-        const trackChanged = pendingTrackId !== origTrackId;
-        if (d.mode === 'move' && (beatDelta !== 0 || trackChanged)) {
-          setNotes(prev => prev.map(n =>
-            n.regionId === regionId
-              ? { ...n, startBeat: n.startBeat + beatDelta, trackId: pendingTrackId }
-              : n
-          ));
+      if (d) {
+        if (d.dragStarted) {
+          if (d.el) { d.el.style.transform = ''; d.el.style.zIndex = ''; d.el.style.filter = ''; d.el.style.removeProperty('--track-color'); }
+          const { regionId, pendingStart, pendingDuration, pendingTrackId, initStart, trackId: origTrackId } = d;
+          setRegions(prev => prev.map(r =>
+            r.id === regionId
+              ? { ...r, startMeasure: pendingStart, durationMeasures: pendingDuration, trackId: pendingTrackId }
+              : r));
+          const beatDelta = (pendingStart - initStart) * 4;
+          const trackChanged = pendingTrackId !== origTrackId;
+          if (d.mode === 'move' && (beatDelta !== 0 || trackChanged)) {
+            setNotes(prev => prev.map(n =>
+              n.regionId === regionId
+                ? { ...n, startBeat: n.startBeat + beatDelta, trackId: pendingTrackId }
+                : n
+            ));
+          }
+          const rightEdge = pendingStart + pendingDuration;
+          if (rightEdge > totalMeasuresRef.current - 16) {
+            setTotalMeasures(prev => prev + 64);
+          }
+          document.body.classList.remove('is-dragging');
+          document.body.style.cursor = '';
+          lastDragEndTimeRef.current = Date.now();
         }
-        document.body.classList.remove('is-dragging');
-        document.body.style.cursor = '';
-        setSelectedRegionId(null); // clear selection after a completed drag
+        dragRef.current = null;
+      } else if (capturedRegionStartRef.current) {
+        // editBtn or other region-child drag that bypassed startRegionDrag: stamp cooldown if moved
+        const { x, y } = capturedRegionStartRef.current;
+        if (Math.hypot(e.clientX - x, e.clientY - y) >= 4) {
+          lastDragEndTimeRef.current = Date.now();
+        }
       }
-      dragRef.current = null;
-      // Pure clicks leave selectedRegionId intact so Delete/Backspace has a target
+      capturedRegionStartRef.current = null;
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -303,6 +318,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   leftColWidthRef.current       = leftColWidth;
   regionsRef.current            = regions;
   tracksRef.current             = tracks;
+  totalMeasuresRef.current      = totalMeasures;
   selectedRegionIdRef.current   = selectedRegionId;
 
   // ── Left-column resizer drag ───────────────────────────────
@@ -447,7 +463,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const absoluteX = mouseX + el.scrollLeft;
       const factor    = e.deltaY > 0 ? 0.9 : 1.1;
       setZoomLevel(prev => {
-        const next = Math.max(0.25, Math.min(8, prev * factor));
+        const minZoom = timelineRef.current
+          ? timelineRef.current.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current)
+          : 0.05;
+        const next = Math.max(minZoom, Math.min(8, prev * factor));
         if (next === prev) return prev;
         pendingScrollRef.current = absoluteX * (next / prev) - mouseX;
         // proportional correction for piano roll (keeps same measure at left edge)
@@ -472,7 +491,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const absoluteX  = Math.max(0, gridMouseX) + el.scrollLeft;
       const factor     = e.deltaY > 0 ? 0.9 : 1.1;
       setZoomLevel(prev => {
-        const next = Math.max(0.25, Math.min(8, prev * factor));
+        const minZoom = timelineRef.current
+          ? timelineRef.current.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current)
+          : 0.05;
+        const next = Math.max(minZoom, Math.min(8, prev * factor));
         if (next === prev) return prev;
         // zoom-to-cursor for piano roll
         pendingPianoScrollRef.current = absoluteX * (next / prev) - Math.max(0, gridMouseX);
@@ -485,6 +507,19 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
   }, [editingTrackId]); // re-attach when editor opens/closes
+
+  // Clamp zoom up if viewport widens past the project boundary
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth <= 0) return;
+      const minZoom = el.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current);
+      setZoomLevel(prev => Math.max(prev, minZoom));
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // Apply zoom-to-cursor scroll corrections after React expands the DOM
   useLayoutEffect(() => {
@@ -664,18 +699,24 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           <div
             className={styles.timelineInner}
             style={{
-              minWidth: `${MEASURES * pixelsPerMeasure}px`,
+              width: `${totalMeasures * pixelsPerMeasure}px`,
               backgroundImage: computeGridBg(pixelsPerMeasure, zoomLevel),
             }}
           >
             {/* Ruler */}
             <div ref={rulerRef} className={styles.ruler}>
-              {Array.from({ length: MEASURES }, (_, i) => (
-                <span key={i} className={styles.rulerLabel}
-                  style={{ left: `${i * pixelsPerMeasure}px` }}>
-                  {i + 1}
-                </span>
-              ))}
+              {(() => {
+                const labelStep = Math.max(1, Math.ceil(50 / pixelsPerMeasure));
+                return Array.from({ length: totalMeasures }, (_, i) => {
+                  if (i % labelStep !== 0) return null;
+                  return (
+                    <span key={i} className={styles.rulerLabel}
+                      style={{ left: `${i * pixelsPerMeasure}px` }}>
+                      {i + 1}
+                    </span>
+                  );
+                });
+              })()}
             </div>
 
             {/* Track lanes */}
@@ -689,11 +730,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                   onClick={(e) => handleLaneClick(e, t.id)}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
+                    if (Date.now() - lastDragEndTimeRef.current < 300) return;
                     if (e.target.closest(`.${styles.region}`)) return;
-                    const { trackId: hTrackId, measure } = hoverRef.current;
-                    if (hTrackId === t.id && regions.some(r => r.trackId === t.id) && !isPositionOccupied(t.id, measure)) {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const measure = Math.max(0, Math.floor((e.clientX - rect.left) / pixelsPerMeasure));
+                    if (regions.some(r => r.trackId === t.id) && !isPositionOccupied(t.id, measure)) {
                       const n = nextRegionIdRef.current++;
                       setRegions(prev => [...prev, { id: `r${n}`, trackId: t.id, startMeasure: measure, durationMeasures: 1 }]);
+                      if (measure + 1 > totalMeasures - 16) setTotalMeasures(prev => prev + 64);
                     }
                     setEditingTrackId(t.id);
                   }}>
@@ -704,6 +748,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                         left:  `${r.startMeasure    * pixelsPerMeasure}px`,
                         width: `${r.durationMeasures * pixelsPerMeasure}px`,
                       }}
+                      onMouseDownCapture={(e) => { capturedRegionStartRef.current = { x: e.clientX, y: e.clientY }; }}
                       onMouseMove={(e) => e.stopPropagation()}
                       onMouseDown={(e) => startRegionDrag(e, r, 'move')}
                       onClick={(e) => e.stopPropagation()}
@@ -738,6 +783,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onNoteRemove={handleNoteRemove}
               zoomLevel={zoomLevel}
               pixelsPerMeasure={pixelsPerMeasure}
+              totalMeasures={totalMeasures}
               pianoRollPlayheadRef={pianoRollPlayheadRef}
               pianoScrollRef={pianoScrollRef}
               onGridScroll={handlePianoRollScroll}
