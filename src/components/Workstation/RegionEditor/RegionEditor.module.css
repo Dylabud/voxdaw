@@ -233,7 +233,7 @@
 
 /* ── Note grid ───────────────────────────────────────────── */
 .grid {
-  flex: 1;
+  flex: 0 0 auto;
   position: relative;
   align-self: stretch;
   cursor: crosshair;

@@ -737,7 +737,12 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         setSelectedRegionIds(new Set());
       }
       const el = marqueeElRef.current;
-      if (el) { el.style.width = '0'; el.style.height = '0'; el.style.opacity = '0'; }
+      if (el) {
+        // Clear left/top too — stale large `left` on an absolutely-positioned child
+        // extends the parent's scrollable area, letting the user scroll past totalMeasures.
+        el.style.left = ''; el.style.top = '';
+        el.style.width = '0'; el.style.height = '0'; el.style.opacity = '0';
+      }
       marqueeDragRef.current = null;
     };
 
@@ -882,6 +887,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (rulerRef.current?.contains(e.target)) {
       isDraggingRef.current = true;
       document.body.classList.add('is-dragging');
+      currentMousePosRef.current = { x: e.clientX, y: e.clientY };
+      startAutoScroll();
     } else if (scroller) {
       const rect     = scroller.getBoundingClientRect();
       const contentX = e.clientX - rect.left + scroller.scrollLeft;
@@ -891,15 +898,24 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   };
 
   useEffect(() => {
-    const onMove = (e) => { if (!isDraggingRef.current) return; seekToClientX(e.clientX); };
-    const onUp   = ()  => { isDraggingRef.current = false; document.body.classList.remove('is-dragging'); };
+    const onMove = (e) => {
+      if (!isDraggingRef.current) return;
+      currentMousePosRef.current = { x: e.clientX, y: e.clientY };
+      seekToClientX(e.clientX);
+    };
+    const onUp   = ()  => {
+      if (!isDraggingRef.current) return;
+      isDraggingRef.current = false;
+      document.body.classList.remove('is-dragging');
+      stopAutoScroll();
+    };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup',   onUp);
     return () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup',   onUp);
     };
-  }, [seekToClientX]);
+  }, [seekToClientX, stopAutoScroll]);
 
   // ── Ctrl+Scroll zoom-to-cursor ────────────────────────────────
   useEffect(() => {
@@ -911,7 +927,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const mouseX    = e.clientX - el.getBoundingClientRect().left;
       const absoluteX = mouseX + el.scrollLeft;
       Object.values(ghostRefs.current).forEach(g => { if (g) g.style.opacity = '0'; });
-      const factor    = e.deltaY > 0 ? 0.95 : 1.05;
+      const factor    = e.deltaY > 0 ? 0.9 : 1.1;
       setZoomLevel(prev => {
         const minZoom = timelineRef.current
           ? timelineRef.current.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current)
@@ -919,9 +935,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         const next = Math.max(minZoom, Math.min(8, prev * factor));
         if (next === prev) return prev;
         pendingScrollRef.current = absoluteX * (next / prev) - mouseX;
-        // proportional correction for piano roll (keeps same measure at left edge)
-        const pianoEl = pianoScrollRef.current;
-        if (pianoEl) pendingPianoScrollRef.current = pianoEl.scrollLeft * (next / prev);
+        // Bugs 3+5: piano roll must land at the SAME cursor-anchored target so the
+        // scroll-sync handlers don't race and clobber one panel's anchor with the other's.
+        if (pianoScrollRef.current) pendingPianoScrollRef.current = pendingScrollRef.current;
         return next;
       });
     };
@@ -940,7 +956,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const gridMouseX = e.clientX - rect.left - 56; // subtract sticky keys column
       const absoluteX  = Math.max(0, gridMouseX) + el.scrollLeft;
       Object.values(ghostRefs.current).forEach(g => { if (g) g.style.opacity = '0'; });
-      const factor     = e.deltaY > 0 ? 0.95 : 1.05;
+      const factor     = e.deltaY > 0 ? 0.9 : 1.1;
       setZoomLevel(prev => {
         const minZoom = timelineRef.current
           ? timelineRef.current.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current)
@@ -949,9 +965,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         if (next === prev) return prev;
         // zoom-to-cursor for piano roll
         pendingPianoScrollRef.current = absoluteX * (next / prev) - Math.max(0, gridMouseX);
-        // proportional correction for arrangement (keeps same measure at left edge)
-        const arrEl = timelineRef.current;
-        if (arrEl) pendingScrollRef.current = arrEl.scrollLeft * (next / prev);
+        // Bugs 3+5: arrangement must land at the SAME target so the sync handlers can't
+        // race-overwrite the piano roll's cursor-anchored value with a divergent one.
+        if (timelineRef.current) pendingScrollRef.current = pendingPianoScrollRef.current;
         return next;
       });
     };
@@ -971,6 +987,17 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
+
+  // Bug 1: when the editor opens, the piano roll mounts at scrollLeft=0. RegionEditor's
+  // mount useEffect then sets scrollTop, which fires a scroll event whose scrollLeft=0
+  // → handlePianoRollScroll syncs that 0 back to the timeline, jumping us to the left.
+  // Prime the piano roll's scrollLeft to match the timeline before that effect runs.
+  // Parent useLayoutEffect fires after child useLayoutEffect but before any useEffect.
+  useLayoutEffect(() => {
+    if (editingTrackId && pianoScrollRef.current && timelineRef.current) {
+      pianoScrollRef.current.scrollLeft = timelineRef.current.scrollLeft;
+    }
+  }, [editingTrackId]);
 
   // Apply zoom-to-cursor scroll corrections after React expands the DOM
   useLayoutEffect(() => {
