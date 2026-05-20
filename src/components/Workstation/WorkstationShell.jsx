@@ -17,6 +17,7 @@ const TRACK_COLORS = [
 ];
 const TRACK_H            = 72;  // matches .trackLane height in CSS
 const RULER_HEIGHT       = 24;  // matches .ruler height in CSS
+const MIN_REGION         = 0.0625; // minimum region width in measures (one 16th note)
 
 const formatTime = (t) => {
   const mins = Math.floor(t / 60);
@@ -25,9 +26,37 @@ const formatTime = (t) => {
   return `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}:${String(cs).padStart(2,'0')}`;
 };
 
+// Returns IDs of regions whose bounding box intersects the marquee rectangle (in timeline-scroll-relative px).
+function getIntersectingRegionIds(minX, maxX, minY, maxY, regions, tracks, ppm) {
+  return regions
+    .filter(r => {
+      const tIdx   = tracks.findIndex(t => t.id === r.trackId);
+      const rLeft  = r.startMeasure * ppm;
+      const rRight = (r.startMeasure + r.durationMeasures) * ppm;
+      const rTop   = tIdx * TRACK_H;
+      const rBot   = (tIdx + 1) * TRACK_H;
+      return rLeft < maxX && rRight > minX && rTop < maxY && rBot > minY;
+    })
+    .map(r => r.id);
+}
+
+// Returns the smallest power-of-2 measure interval that keeps labels at least 80px apart.
+function getMeasureInterval(ppm) {
+  return Math.pow(2, Math.max(0, Math.ceil(Math.log2(80 / ppm))));
+}
+
+// Returns the snap increment (in measures) matching the smallest visible grid line at this zoom.
+// Thresholds mirror computeGridBg exactly: beat lines appear at zoomLevel>=1.5 (ppm>=150),
+// sub-beat lines at zoomLevel>=3.0 (ppm>=300). 16th-note lines are never drawn.
+function getSnapIncrement(ppm) {
+  if (ppm >= 300) return 0.125; // 8th notes
+  if (ppm >= 150) return 0.25;  // quarter notes
+  return 1;                      // full measures
+}
+
 // Used for both arrangement and piano roll grids — returns inline backgroundImage string.
 export function computeGridBg(ppm, zoomLevel) {
-  const labelStep    = Math.max(1, Math.ceil(50 / ppm));
+  const labelStep    = getMeasureInterval(ppm);
   const effectivePpm = ppm * labelStep;
   const ppb = effectivePpm / 4;
   const pp8 = effectivePpm / 8;
@@ -55,6 +84,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [totalMeasures,    setTotalMeasures]    = useState(200);
   const [toastMessage,     setToastMessage]     = useState(null);
   const [activeTrackId,    setActiveTrackId]    = useState(null);
+  const [snapEnabled,      setSnapEnabled]      = useState(true);
 
   // Derived zoom values
   const pixelsPerMeasure = PIXELS_PER_MEASURE * zoomLevel;
@@ -75,8 +105,6 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const rafRef               = useRef(null);
   const isDraggingRef        = useRef(false);
   const pianoScrollRef       = useRef(null);   // RegionEditor scroll container
-  const syncingScrollRef     = useRef(false);  // anti-loop guard (horizontal)
-  const syncingVerticalRef   = useRef(false);  // anti-loop guard (vertical)
   const trackHeadersRef      = useRef(null);
   const pendingScrollRef      = useRef(null);  // arrangement zoom-to-cursor pending scrollLeft
   const pendingPianoScrollRef = useRef(null);  // piano roll pending scrollLeft
@@ -94,10 +122,49 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const marqueeDragRef           = useRef(null);
   const marqueeElRef             = useRef(null);
   const pasteAnchorTrackIndexRef = useRef(null);
+  const autoScrollFrameRef       = useRef(null);
+  const currentMousePosRef       = useRef({ x: 0, y: 0 });
+  const marqueeHoverIdsRef       = useRef(new Set());
+  const snapEnabledRef           = useRef(true);
 
   // ── Derived editor state ───────────────────────────────────
   const editingTrack      = editingTrackId ? tracks.find(t => t.id === editingTrackId) : null;
   const editingTrackNotes = notes.filter(n => n.trackId === editingTrackId);
+
+  // ── Auto-scroll engine ────────────────────────────────────
+  const stopAutoScroll = useCallback(() => {
+    cancelAnimationFrame(autoScrollFrameRef.current);
+    autoScrollFrameRef.current = null;
+  }, []);
+
+  const startAutoScroll = useCallback(() => {
+    if (autoScrollFrameRef.current) return;
+    const THRESHOLD = 80;
+    const MAX_SPEED = 15;
+    const tick = () => {
+      const el = timelineRef.current;
+      if (!el) return;
+      const b  = el.getBoundingClientRect();
+      const { x: mx, y: my } = currentMousePosRef.current;
+      let dx = 0, dy = 0;
+      const dRight = b.right  - mx;  const dLeft = mx - b.left;
+      const dBot   = b.bottom - my;  const dTop  = my - (b.top + RULER_HEIGHT);
+      if (dRight < THRESHOLD) dx =  MAX_SPEED * Math.min(1, 1 - dRight / THRESHOLD);
+      if (dLeft  < THRESHOLD) dx = -MAX_SPEED * Math.min(1, 1 - dLeft  / THRESHOLD);
+      if (dBot   < THRESHOLD) dy =  MAX_SPEED * Math.min(1, 1 - dBot   / THRESHOLD);
+      if (dTop   < THRESHOLD) dy = -MAX_SPEED * Math.min(1, 1 - dTop   / THRESHOLD);
+      if (dx !== 0) el.scrollLeft = Math.max(0, el.scrollLeft + dx);
+      if (dy !== 0) el.scrollTop  = Math.max(0, el.scrollTop  + dy);
+      if (dx !== 0 || dy !== 0) {
+        const { x, y } = currentMousePosRef.current;
+        window.dispatchEvent(new MouseEvent('mousemove', {
+          clientX: x, clientY: y, bubbles: true, buttons: 1, cancelable: true,
+        }));
+      }
+      autoScrollFrameRef.current = requestAnimationFrame(tick);
+    };
+    autoScrollFrameRef.current = requestAnimationFrame(tick);
+  }, []);
 
   const handleAddTrack = useCallback(() => {
     const n = nextIdRef.current++;
@@ -136,14 +203,17 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       }]);
     } else {
       const newRegionId = `region_${nextRegionIdRef.current++}`;
-      setRegions(prev => [...prev, {
-        id: newRegionId, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0,
-      }]);
-      setNotes(prev => [...prev, {
+      const newRegion = { id: newRegionId, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0 };
+      const result = applyDestructiveEdit(regionsRef.current, notesRef.current, newRegion);
+      const merged = [...result.regions, newRegion].filter(r => r.durationMeasures > 0);
+      const surviving = new Set(merged.map(r => r.id));
+      const newNote = {
         id: `note_${nextNoteIdRef.current++}`, ...noteData,
         startBeat: startBeat - measure * 4,
         regionId: newRegionId,
-      }]);
+      };
+      setRegions(merged);
+      setNotes([...result.notes.filter(n => surviving.has(n.regionId)), newNote]);
     }
   }, []);
   const handleNoteRemove = useCallback((noteId) => {
@@ -160,7 +230,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     );
 
   const handleLaneMouseMove = (e, trackId) => {
-    if (isDraggingRef.current || dragRef.current) return;
+    if (isDraggingRef.current || dragRef.current || marqueeDragRef.current) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const measure = Math.max(0, Math.floor(x / pixelsPerMeasure));
@@ -321,6 +391,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       pendingStart: region.startMeasure,
       pendingDuration: region.durationMeasures,
       pendingClipOffset: co,
+      startScrollLeft: timelineRef.current?.scrollLeft ?? 0,
       dragStarted: false,
       companions,
     };
@@ -338,7 +409,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         if (d.el) d.el.style.filter = 'brightness(0.6)';
         for (const c of d.companions) { if (c.el) c.el.style.filter = 'brightness(0.6)'; }
       }
-      const delta = Math.round((e.clientX - d.startX) / pixelsPerMeasure);
+      currentMousePosRef.current = { x: e.clientX, y: e.clientY };
+      startAutoScroll();
+      const snapInc = getSnapIncrement(pixelsPerMeasure);
+      const scrollAdjust = (timelineRef.current?.scrollLeft ?? 0) - d.startScrollLeft;
+      const rawDelta = (e.clientX - d.startX + scrollAdjust) / pixelsPerMeasure;
       let newStart    = d.pendingStart;
       let newDuration = d.pendingDuration;
 
@@ -347,7 +422,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         const minInitStart      = Math.min(...allMembers.map(m => m.initStart));
         const minOrigTrackIndex = Math.min(...allMembers.map(m => m.origTrackIndex));
         const maxOrigTrackIndex = Math.max(...allMembers.map(m => m.origTrackIndex));
-        const clampedDelta      = Math.max(-minInitStart, delta);
+        const rawNewStart  = d.initStart + rawDelta;
+        const actualDelta  = snapEnabledRef.current
+          ? Math.round(rawNewStart / snapInc) * snapInc - d.initStart
+          : rawDelta;
+        const clampedDelta = Math.max(-minInitStart, actualDelta);
 
         const rect       = timelineRef.current.getBoundingClientRect();
         const relContent = e.clientY - rect.top + timelineRef.current.scrollTop - RULER_HEIGHT;
@@ -385,24 +464,33 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           }
         }
       } else if (d.mode === 'resize-right') {
-        newDuration = Math.max(1, d.initDuration + delta);
+        const rawEnd     = d.initStart + d.initDuration + rawDelta;
+        const snappedEnd = snapEnabledRef.current
+          ? Math.round(rawEnd / snapInc) * snapInc
+          : rawEnd;
+        newDuration = Math.max(snapEnabledRef.current ? snapInc : MIN_REGION, snappedEnd - d.initStart);
+        const rightActualDelta = newDuration - d.initDuration;
         for (const c of d.companions) {
-          c.pendingDuration = Math.max(1, c.initDuration + delta);
+          c.pendingDuration = Math.max(snapEnabledRef.current ? snapInc : MIN_REGION, c.initDuration + rightActualDelta);
           if (c.el) { c.el.style.width = `${c.pendingDuration * pixelsPerMeasure}px`; c.el.style.zIndex = '10'; }
         }
       } else if (d.mode === 'resize-left') {
         // Bottle/Window: keep bottle origin (initStart - initClipOffset) fixed.
         // clipOffset = initClipOffset + (newStart - initStart) and is allowed to go negative —
         // the window extends past the bottle origin into empty padding (notes stay locked).
-        // Constraints: newStart >= 0 (timeline bound), newStart <= initStart + initDuration - 1 (duration >= 1).
-        const wanted    = d.initStart + delta;
-        const candStart = Math.max(0, Math.min(wanted, d.initStart + d.initDuration - 1));
+        // Constraints: newStart >= 0 (timeline bound), newStart <= initStart + initDuration - snapInc (duration >= snapInc).
+        const rawLeft     = d.initStart + rawDelta;
+        const snappedLeft = snapEnabledRef.current
+          ? Math.round(rawLeft / snapInc) * snapInc
+          : rawLeft;
+        const preDelta    = snappedLeft - d.initStart;
+        const minDur      = snapEnabledRef.current ? snapInc : MIN_REGION;
+        const candStart   = Math.max(0, Math.min(d.initStart + preDelta, d.initStart + d.initDuration - minDur));
         newStart            = candStart;
         newDuration         = d.initDuration + (d.initStart - candStart);
         d.pendingClipOffset = d.initClipOffset + (candStart - d.initStart);
         for (const c of d.companions) {
-          const cWanted   = c.initStart + delta;
-          const cStart    = Math.max(0, Math.min(cWanted, c.initStart + c.initDuration - 1));
+          const cStart    = Math.max(0, Math.min(c.initStart + preDelta, c.initStart + c.initDuration - minDur));
           c.pendingStart       = cStart;
           c.pendingDuration    = c.initDuration + (c.initStart - cStart);
           c.pendingClipOffset  = c.initClipOffset + (cStart - c.initStart);
@@ -555,6 +643,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           document.body.style.cursor = '';
           lastDragEndTimeRef.current = Date.now();
         }
+        stopAutoScroll();
         dragRef.current = null;
       } else if (capturedRegionStartRef.current) {
         const { x, y } = capturedRegionStartRef.current;
@@ -570,7 +659,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [pixelsPerMeasure]);
+  }, [pixelsPerMeasure, startAutoScroll, stopAutoScroll]);
 
   // ── Marquee selection drag ────────────────────────────────────
   useEffect(() => {
@@ -583,9 +672,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const currentX = e.clientX - rect.left + scroller.scrollLeft;
       const currentY = Math.max(0, e.clientY - rect.top + scroller.scrollTop - RULER_HEIGHT);
       if (!d.active && Math.hypot(currentX - d.startX, currentY - d.startY) < 4) return;
+      if (!d.active) {
+        Object.values(ghostRefs.current).forEach(g => { if (g) g.style.opacity = '0'; });
+      }
       d.active   = true;
       d.currentX = currentX;
       d.currentY = currentY;
+      currentMousePosRef.current = { x: e.clientX, y: e.clientY };
+      startAutoScroll();
       const left   = Math.min(d.startX, currentX);
       const top    = Math.min(d.startY, currentY);
       const width  = Math.abs(currentX - d.startX);
@@ -597,26 +691,39 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       el.style.width   = `${width}px`;
       el.style.height  = `${height}px`;
       el.style.opacity = '1';
+      // live region highlight — clear previous, apply new
+      marqueeHoverIdsRef.current.forEach(id => {
+        document.querySelector(`[data-region-id="${id}"]`)?.style.removeProperty('filter');
+      });
+      const hitIds = getIntersectingRegionIds(
+        Math.min(d.startX, currentX), Math.max(d.startX, currentX),
+        Math.min(d.startY, currentY), Math.max(d.startY, currentY),
+        regionsRef.current, tracksRef.current, pixelsPerMeasure
+      );
+      marqueeHoverIdsRef.current = new Set(hitIds);
+      hitIds.forEach(id => {
+        document.querySelector(`[data-region-id="${id}"]`)?.style.setProperty('filter', 'brightness(0.6)');
+      });
     };
 
     const onUp = () => {
       const d = marqueeDragRef.current;
       if (!d) return;
+      // clear live hover highlights (selected regions re-render via setSelectedRegionIds below)
+      marqueeHoverIdsRef.current.forEach(id => {
+        document.querySelector(`[data-region-id="${id}"]`)?.style.removeProperty('filter');
+      });
+      marqueeHoverIdsRef.current = new Set();
+      stopAutoScroll();
       if (d.active) {
         const minX = Math.min(d.startX, d.currentX ?? d.startX);
         const maxX = Math.max(d.startX, d.currentX ?? d.startX);
         const minY = Math.min(d.startY, d.currentY ?? d.startY);
         const maxY = Math.max(d.startY, d.currentY ?? d.startY);
-        const ppm  = pixelsPerMeasure;
-        const hit  = regionsRef.current.filter(r => {
-          const tIdx   = tracksRef.current.findIndex(t => t.id === r.trackId);
-          const rLeft  = r.startMeasure * ppm;
-          const rRight = (r.startMeasure + r.durationMeasures) * ppm;
-          const rTop   = tIdx * TRACK_H;
-          const rBot   = (tIdx + 1) * TRACK_H;
-          return rLeft < maxX && rRight > minX && rTop < maxY && rBot > minY;
-        });
-        setSelectedRegionIds(new Set(hit.map(r => r.id)));
+        const hitIds = getIntersectingRegionIds(minX, maxX, minY, maxY,
+          regionsRef.current, tracksRef.current, pixelsPerMeasure);
+        const hit = regionsRef.current.filter(r => hitIds.includes(r.id));
+        setSelectedRegionIds(new Set(hitIds));
         if (hit.length > 0) {
           pasteAnchorTrackIndexRef.current = Math.min(
             ...hit.map(r => tracksRef.current.findIndex(t => t.id === r.trackId))
@@ -640,7 +747,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       window.removeEventListener('mousemove', onMove, true);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [pixelsPerMeasure]);
+  }, [pixelsPerMeasure, startAutoScroll, stopAutoScroll]);
 
   // Keep refs in sync so drag closures always read current values without stale closures
   leftColWidthRef.current       = leftColWidth;
@@ -649,6 +756,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   notesRef.current              = notes;
   totalMeasuresRef.current      = totalMeasures;
   selectedRegionIdsRef.current  = selectedRegionIds;
+  snapEnabledRef.current        = snapEnabled;
 
   // ── Left-column resizer drag ───────────────────────────────
   const startLeftColDrag = useCallback((e) => {
@@ -754,12 +862,18 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const seekToClientX = useCallback((clientX) => {
     const scroller = timelineRef.current;
     if (!scroller) return;
-    const rect    = scroller.getBoundingClientRect();
-    const x       = clientX - rect.left + scroller.scrollLeft;
-    const seconds = Math.max(0, x / pxPerSec);
-    Tone.Transport.seconds = seconds;
+    const rect = scroller.getBoundingClientRect();
+    const x    = clientX - rect.left + scroller.scrollLeft;
+    if (snapEnabled) {
+      const snapInc      = getSnapIncrement(pixelsPerMeasure);
+      const rawMeasures  = x / pixelsPerMeasure;
+      const snapMeasures = Math.max(0, Math.round(rawMeasures / snapInc) * snapInc);
+      Tone.Transport.seconds = snapMeasures * 4 * (60 / bpm);
+    } else {
+      Tone.Transport.seconds = Math.max(0, x / pxPerSec);
+    }
     updatePlayhead();
-  }, [pxPerSec, updatePlayhead]);
+  }, [pxPerSec, updatePlayhead, snapEnabled, pixelsPerMeasure, bpm]);
 
   const handleMouseDown = (e) => {
     e.preventDefault();
@@ -796,7 +910,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       e.preventDefault();
       const mouseX    = e.clientX - el.getBoundingClientRect().left;
       const absoluteX = mouseX + el.scrollLeft;
-      const factor    = e.deltaY > 0 ? 0.9 : 1.1;
+      Object.values(ghostRefs.current).forEach(g => { if (g) g.style.opacity = '0'; });
+      const factor    = e.deltaY > 0 ? 0.95 : 1.05;
       setZoomLevel(prev => {
         const minZoom = timelineRef.current
           ? timelineRef.current.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current)
@@ -824,7 +939,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const rect       = el.getBoundingClientRect();
       const gridMouseX = e.clientX - rect.left - 56; // subtract sticky keys column
       const absoluteX  = Math.max(0, gridMouseX) + el.scrollLeft;
-      const factor     = e.deltaY > 0 ? 0.9 : 1.1;
+      Object.values(ghostRefs.current).forEach(g => { if (g) g.style.opacity = '0'; });
+      const factor     = e.deltaY > 0 ? 0.95 : 1.05;
       setZoomLevel(prev => {
         const minZoom = timelineRef.current
           ? timelineRef.current.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current)
@@ -869,32 +985,28 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   }, [zoomLevel]);
 
   // ── Scroll sync ───────────────────────────────────────────────
+  // Value-comparison guards: only write if the position actually differs so the
+  // retaliatory scroll event on the counterpart never fires (same value → no scroll event).
   const handleTimelineScroll = useCallback((e) => {
-    if (!syncingScrollRef.current) {
-      syncingScrollRef.current = true;
-      if (pianoScrollRef.current) pianoScrollRef.current.scrollLeft = e.target.scrollLeft;
-      syncingScrollRef.current = false;
-    }
-    if (!syncingVerticalRef.current) {
-      syncingVerticalRef.current = true;
-      if (trackHeadersRef.current) trackHeadersRef.current.scrollTop = e.target.scrollTop;
-      syncingVerticalRef.current = false;
-    }
+    const sl = e.target.scrollLeft;
+    const st = e.target.scrollTop;
+    if (pianoScrollRef.current && pianoScrollRef.current.scrollLeft !== sl)
+      pianoScrollRef.current.scrollLeft = sl;
+    if (trackHeadersRef.current && trackHeadersRef.current.scrollTop !== st)
+      trackHeadersRef.current.scrollTop = st;
   }, []);
 
   const handlePianoRollScroll = useCallback((e) => {
-    if (syncingScrollRef.current) return;
-    syncingScrollRef.current = true;
-    if (timelineRef.current) timelineRef.current.scrollLeft = e.target.scrollLeft;
-    syncingScrollRef.current = false;
+    const sl = e.target.scrollLeft;
+    if (timelineRef.current && timelineRef.current.scrollLeft !== sl)
+      timelineRef.current.scrollLeft = sl;
     lastPianoScrollTopRef.current = e.target.scrollTop;
   }, []);
 
   const handleTrackHeadersScroll = useCallback((e) => {
-    if (syncingVerticalRef.current) return;
-    syncingVerticalRef.current = true;
-    if (timelineRef.current) timelineRef.current.scrollTop = e.target.scrollTop;
-    syncingVerticalRef.current = false;
+    const st = e.target.scrollTop;
+    if (timelineRef.current && timelineRef.current.scrollTop !== st)
+      timelineRef.current.scrollTop = st;
   }, []);
 
   // ── Spacebar ─────────────────────────────────────────────────
@@ -1014,6 +1126,12 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             {isDarkMode ? '◑' : '○'}
           </button>
           <button className={styles.homeBtn} onClick={onNavigateHome}>[ ⌂ home ]</button>
+          <button
+            className={snapEnabled ? styles.transportBtnActive : styles.transportBtn}
+            onClick={() => setSnapEnabled(v => !v)}
+            title="Snap to grid (magnet)">
+            ⌘
+          </button>
         </div>
         <div className={styles.transportRight}>
           <div className={styles.meta}>
@@ -1118,7 +1236,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             {/* Ruler */}
             <div ref={rulerRef} className={styles.ruler}>
               {(() => {
-                const labelStep = Math.max(1, Math.ceil(50 / pixelsPerMeasure));
+                const labelStep = getMeasureInterval(pixelsPerMeasure);
                 return Array.from({ length: totalMeasures }, (_, i) => {
                   if (i % labelStep !== 0) return null;
                   return (
@@ -1157,7 +1275,12 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                     const measure = Math.max(0, Math.floor((e.clientX - rect.left) / pixelsPerMeasure));
                     if (regions.some(r => r.trackId === t.id) && !isPositionOccupied(t.id, measure)) {
                       const n = nextRegionIdRef.current++;
-                      setRegions(prev => [...prev, { id: `r${n}`, trackId: t.id, startMeasure: measure, durationMeasures: 1, clipOffset: 0 }]);
+                      const newRegion = { id: `r${n}`, trackId: t.id, startMeasure: measure, durationMeasures: 1, clipOffset: 0 };
+                      const result = applyDestructiveEdit(regionsRef.current, notesRef.current, newRegion);
+                      const merged = [...result.regions, newRegion].filter(rg => rg.durationMeasures > 0);
+                      const surviving = new Set(merged.map(rg => rg.id));
+                      setRegions(merged);
+                      setNotes(result.notes.filter(nt => surviving.has(nt.regionId)));
                       if (measure + 1 > totalMeasures - 16) setTotalMeasures(prev => prev + 64);
                     }
                     setEditingTrackId(t.id);
