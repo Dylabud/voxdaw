@@ -189,6 +189,7 @@
 .colResizer:hover {
   background: color-mix(in srgb, var(--accent-color) 50%, transparent);
 }
+:global(body.is-dragging) .colResizer:hover { background: transparent; }
 
 /* ── Editor panel divider ─────────────────────────────────── */
 .divider {
@@ -203,6 +204,7 @@
 .divider:hover {
   background: color-mix(in srgb, var(--accent-color) 35%, var(--bg-panel));
 }
+:global(body.is-dragging) .divider:hover { background: var(--bg-panel); }
 
 /* ── Editor wrap (height controlled by inline style) ─────── */
 .editorWrap {
@@ -360,6 +362,7 @@
   position: relative;
   height: 72px;
   border-bottom: 1px solid var(--border-subtle);
+  overflow-x: clip;
 }
 
 /* ── Regions (clips) ─────────────────────────────────────── */
@@ -372,6 +375,7 @@
   border-radius: 3px;
   cursor: grab;
   z-index: 1;
+  overflow: hidden;
 }
 
 .region:active { cursor: grabbing; filter: brightness(0.6); }
@@ -380,6 +384,34 @@
 
 /* Suppress hover/edit-button on all regions while any drag is active */
 :global(body.is-dragging) .region { pointer-events: none; }
+
+/* ── Fade overlay triangles (lower corners shaded) ─────── */
+.fadeOverlay {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: color-mix(in srgb, var(--bg-base) 55%, transparent);
+  pointer-events: none;
+  z-index: 2;
+}
+.fadeInOverlay  { left: 0;  clip-path: polygon(0 0, 100% 0, 0 100%); }
+.fadeOutOverlay { right: 0; clip-path: polygon(0 0, 100% 0, 100% 100%); }
+
+/* ── Fade drag handles (top corners, revealed on region hover) ── */
+.fadeHandle {
+  position: absolute;
+  top: 0;
+  width: 14px; height: 7px;
+  background: var(--track-color, var(--accent-color));
+  cursor: ew-resize;
+  z-index: 5;
+  opacity: 0;
+  transition: opacity 80ms linear;
+  border-radius: 0 0 14px 14px;
+}
+.region:hover .fadeHandle { opacity: 0.85; }
+.fadeHandleLeft  { transform: translateX(-50%); }
+.fadeHandleRight { transform: translateX(50%); }
+:global(body.is-fade-dragging) .fadeHandle { opacity: 0.85; }
 
 /* Resize handles on left/right edges */
 .resizeLeft,
@@ -424,7 +456,7 @@
 /* ── Edit button (revealed on region hover) ──────────────── */
 .editBtn {
   position: absolute;
-  top: 4px;
+  bottom: 4px;
   right: 4px;
   appearance: none;
   background: var(--bg-panel);

@@ -309,7 +309,7 @@ Play/pause and stop buttons live in `.bottomTransport` (border-top panel, `justi
 | `bpm` (state) | current tempo (default 120); replaces former `BPM` constant — drives `pxPerSec` and `Tone.Transport` |
 | `editingBpm` / `tempBpm` (state) | in-place BPM editor toggle + draft string value |
 | `tracks` (state) | `[{ id, name, instrument, color, isMuted, isSolo }]` — `color` is a hex string from `TRACK_COLORS` |
-| `regions` (state) | `[{ id, trackId, startMeasure, durationMeasures, clipOffset }]` — `clipOffset` is in measures, can be negative (left padding), and tracks the visible window's offset into the underlying note bottle |
+| `regions` (state) | `[{ id, trackId, startMeasure, durationMeasures, clipOffset, fadeIn, fadeOut }]` — `clipOffset` is in measures, can be negative (left padding). `fadeIn`/`fadeOut` are measure-valued visual envelopes (Phase 98), `fadeIn + fadeOut ≤ durationMeasures` enforced by push logic |
 | `notes` (state) | `[{ id, trackId, note, startBeat, durationBeats, regionId }]` — `startBeat` is **bottle-local** (offset from the region's bottle origin = `startMeasure − clipOffset` measures), filtered by `trackId` for the active editor |
 | `editingTrackId` (state) | non-null = bottom editor panel visible |
 | `selectedRegionId` (state) | ID of the currently selected region (set on mousedown; cleared on completed drag or lane click — **persists after a pure click** so Delete/Backspace has a target); drives `.regionSelected` CSS class (`filter: brightness(0.8)`) |
@@ -353,6 +353,9 @@ The transport bar BPM display is click-to-edit: clicking the value renders an `<
 | Lane (with regions) | nothing (ghost suppressed) | create region at hover measure (if unoccupied) + open editor | n/a |
 | Region body | n/a (stopPropagation) | open editor | move — X: 1-measure snap; Y: cross-track snap by `TRACK_H` |
 | Region left edge | n/a | n/a | resize-left (start clamps ≥ 0, ≤ right-edge − 1) |
+| Region top-left corner (half-disc) | n/a | n/a | `fade-left` — drag fade-in width; pushes `fadeOut` if collides |
+| Region top-right corner (half-disc) | n/a | n/a | `fade-right` — drag fade-out width; pushes `fadeIn` if collides |
+| Merged fade joint (handles meet) | center 40%: `fade-both` (joint slides, sum preserved); edges 30%/30%: split back to `fade-left`/`fade-right` | n/a | as above |
 | Region right edge | n/a | n/a | resize-right (duration ≥ 1) |
 | Region `[ edit ]` btn | open editor panel | n/a | n/a |
 | Track header | n/a | toggle editor panel | n/a |

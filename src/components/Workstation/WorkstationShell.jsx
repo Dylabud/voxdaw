@@ -45,13 +45,20 @@ function getMeasureInterval(ppm) {
   return Math.pow(2, Math.max(0, Math.ceil(Math.log2(80 / ppm))));
 }
 
+// Hide the per-region [edit] badge below this rendered width — below ~60px the badge crowds
+// the resize handles and overflows the region content area.
+const EDIT_BTN_MIN_PX = 60;
+
+// Hide fade overlays + handles below this rendered region width — they're unusable below ~30px.
+const FADE_UI_MIN_PX = 30;
+
 // Returns the snap increment (in measures) matching the smallest visible grid line at this zoom.
-// Thresholds mirror computeGridBg exactly: beat lines appear at zoomLevel>=1.5 (ppm>=150),
-// sub-beat lines at zoomLevel>=3.0 (ppm>=300). 16th-note lines are never drawn.
+// Fractional range (ppm>=150) mirrors computeGridBg's beat/sub-beat thresholds (Phase 82).
+// Macro range (ppm<80) reuses getMeasureInterval — single source of truth with the drawn grid.
 function getSnapIncrement(ppm) {
   if (ppm >= 300) return 0.125; // 8th notes
   if (ppm >= 150) return 0.25;  // quarter notes
-  return 1;                      // full measures
+  return getMeasureInterval(ppm); // 1, 2, 4, 8, 16… matches visible grid period
 }
 
 // Used for both arrangement and piano roll grids — returns inline backgroundImage string.
@@ -153,7 +160,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       if (dLeft  < THRESHOLD) dx = -MAX_SPEED * Math.min(1, 1 - dLeft  / THRESHOLD);
       if (dBot   < THRESHOLD) dy =  MAX_SPEED * Math.min(1, 1 - dBot   / THRESHOLD);
       if (dTop   < THRESHOLD) dy = -MAX_SPEED * Math.min(1, 1 - dTop   / THRESHOLD);
-      if (dx !== 0) el.scrollLeft = Math.max(0, el.scrollLeft + dx);
+      if (dx !== 0) {
+        const maxScroll = el.scrollWidth - el.clientWidth;
+        if (dx > 0 && el.scrollLeft >= maxScroll) dx = 0;
+        else el.scrollLeft = Math.min(maxScroll, Math.max(0, el.scrollLeft + dx));
+      }
       if (dy !== 0) el.scrollTop  = Math.max(0, el.scrollTop  + dy);
       if (dx !== 0 || dy !== 0) {
         const { x, y } = currentMousePosRef.current;
@@ -203,7 +214,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       }]);
     } else {
       const newRegionId = `region_${nextRegionIdRef.current++}`;
-      const newRegion = { id: newRegionId, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0 };
+      const newRegion = { id: newRegionId, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0 };
       const result = applyDestructiveEdit(regionsRef.current, notesRef.current, newRegion);
       const merged = [...result.regions, newRegion].filter(r => r.durationMeasures > 0);
       const surviving = new Set(merged.map(r => r.id));
@@ -270,7 +281,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (isPositionOccupied(trackId, measure)) return;
     const n = nextRegionIdRef.current++;
     pasteAnchorTrackIndexRef.current = tracksRef.current.findIndex(t => t.id === trackId);
-    setRegions(prev => [...prev, { id: `r${n}`, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0 }]);
+    setRegions(prev => [...prev, { id: `r${n}`, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0 }]);
     if (measure + 1 > totalMeasures - 16) setTotalMeasures(prev => prev + 64);
   };
 
@@ -302,31 +313,44 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       }
       // Case B: right trim — bottle preserved, only window shrinks from the right
       if (newStart > oldStart && newEnd >= oldEnd) {
-        nextRegions.push({ ...r, durationMeasures: newStart - oldStart });
+        const newDur = newStart - oldStart;
+        const fIn  = Math.min(r.fadeIn  ?? 0, newDur);
+        const fOut = Math.min(r.fadeOut ?? 0, Math.max(0, newDur - fIn));
+        nextRegions.push({ ...r, durationMeasures: newDur, fadeIn: fIn, fadeOut: fOut });
         continue;
       }
       // Case C: left trim — bottle preserved; window starts later & advances clipOffset
       if (newStart <= oldStart && newEnd < oldEnd) {
         const shift = newEnd - oldStart;
+        const newDur = oldEnd - newEnd;
+        // Left side was eaten — fadeIn no longer meaningful; preserve fadeOut clamped.
+        const fOut = Math.min(r.fadeOut ?? 0, newDur);
         nextRegions.push({
           ...r,
           startMeasure: newEnd,
-          durationMeasures: oldEnd - newEnd,
+          durationMeasures: newDur,
           clipOffset: oldOffset + shift,
+          fadeIn: 0,
+          fadeOut: fOut,
         });
         continue;
       }
       // Case D: middle split — both halves get an independent copy of the full bottle
       const rightId = `r${nextRegionIdRef.current++}`;
       const rightShift = newEnd - oldStart;
+      const leftDur  = newStart - oldStart;
+      const rightDur = oldEnd - newEnd;
+      const leftFIn  = Math.min(r.fadeIn ?? 0, leftDur);
       nextRegions.push(
-        { ...r, durationMeasures: newStart - oldStart },
+        { ...r, durationMeasures: leftDur, fadeIn: leftFIn, fadeOut: 0 },
         {
           ...r,
           id: rightId,
           startMeasure: newEnd,
-          durationMeasures: oldEnd - newEnd,
+          durationMeasures: rightDur,
           clipOffset: oldOffset + rightShift,
+          fadeIn: 0,
+          fadeOut: Math.min(r.fadeOut ?? 0, rightDur),
         },
       );
       // Deep-clone every note belonging to r → new note IDs linked to rightId.
@@ -375,22 +399,37 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
     const regionEl = e.currentTarget.closest('[data-region-id]');
     const co = region.clipOffset ?? 0;
+    const fIn = region.fadeIn ?? 0;
+    const fOut = region.fadeOut ?? 0;
+    // Merged-joint zone upgrade: when fades meet (fadeIn + fadeOut = duration), clicking
+    // the central zone of either handle drags them together; edges still split.
+    let effectiveMode = mode;
+    if ((mode === 'fade-left' || mode === 'fade-right') &&
+        fIn + fOut >= region.durationMeasures - 1e-6) {
+      const r = e.currentTarget.getBoundingClientRect();
+      const pct = (e.clientX - r.left) / r.width;
+      if (pct >= 0.3 && pct <= 0.7) effectiveMode = 'fade-both';
+    }
     dragRef.current = {
       regionId:          region.id,
       trackId:           region.trackId,
       origTrackIndex,
       pendingTrackId:    region.trackId,
       pendingTrackIndex: origTrackIndex,
-      mode,
+      mode: effectiveMode,
       startX: e.clientX,
       startY: e.clientY,
       initStart: region.startMeasure,
       initDuration: region.durationMeasures,
       initClipOffset: co,
+      initFadeIn: fIn,
+      initFadeOut: fOut,
       el: regionEl,
       pendingStart: region.startMeasure,
       pendingDuration: region.durationMeasures,
       pendingClipOffset: co,
+      pendingFadeIn: fIn,
+      pendingFadeOut: fOut,
       startScrollLeft: timelineRef.current?.scrollLeft ?? 0,
       dragStarted: false,
       companions,
@@ -405,6 +444,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 4) return;
         d.dragStarted = true;
         document.body.classList.add('is-dragging');
+        if (d.mode === 'fade-left' || d.mode === 'fade-right' || d.mode === 'fade-both') {
+          document.body.classList.add('is-fade-dragging');
+        }
         document.body.style.cursor = d.mode === 'move' ? 'grabbing' : 'ew-resize';
         if (d.el) d.el.style.filter = 'brightness(0.6)';
         for (const c of d.companions) { if (c.el) c.el.style.filter = 'brightness(0.6)'; }
@@ -412,8 +454,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       currentMousePosRef.current = { x: e.clientX, y: e.clientY };
       startAutoScroll();
       const snapInc = getSnapIncrement(pixelsPerMeasure);
-      const scrollAdjust = (timelineRef.current?.scrollLeft ?? 0) - d.startScrollLeft;
-      const rawDelta = (e.clientX - d.startX + scrollAdjust) / pixelsPerMeasure;
+      const tl = timelineRef.current;
+      const rect = tl.getBoundingClientRect();
+      const scrollAdjust = (tl?.scrollLeft ?? 0) - d.startScrollLeft;
+      // Hard right-wall: clamp cursor to the rendered grid's right edge.
+      // Region edges may overflow past the wall (anchor's grabOffset still applies); only the cursor is walled.
+      const maxCursorClientX = rect.left + (totalMeasuresRef.current * pixelsPerMeasure) - tl.scrollLeft;
+      const clampedClientX = Math.min(e.clientX, maxCursorClientX);
+      const rawDelta = (clampedClientX - d.startX + scrollAdjust) / pixelsPerMeasure;
       let newStart    = d.pendingStart;
       let newDuration = d.pendingDuration;
 
@@ -428,7 +476,6 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           : rawDelta;
         const clampedDelta = Math.max(-minInitStart, actualDelta);
 
-        const rect       = timelineRef.current.getBoundingClientRect();
         const relContent = e.clientY - rect.top + timelineRef.current.scrollTop - RULER_HEIGHT;
         const rawTrackDelta     = Math.floor(relContent / TRACK_H) - d.origTrackIndex;
         const clampedTrackDelta = Math.max(
@@ -474,6 +521,28 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           c.pendingDuration = Math.max(snapEnabledRef.current ? snapInc : MIN_REGION, c.initDuration + rightActualDelta);
           if (c.el) { c.el.style.width = `${c.pendingDuration * pixelsPerMeasure}px`; c.el.style.zIndex = '10'; }
         }
+      } else if (d.mode === 'fade-left') {
+        // Continuous (not snap-quantized) per user choice. Push opposing fade if collision.
+        const candFadeIn = Math.max(0, Math.min(d.initDuration, d.initFadeIn + rawDelta));
+        let candFadeOut = d.initFadeOut;
+        if (candFadeIn + candFadeOut > d.initDuration) {
+          candFadeOut = Math.max(0, d.initDuration - candFadeIn);
+        }
+        d.pendingFadeIn  = candFadeIn;
+        d.pendingFadeOut = candFadeOut;
+      } else if (d.mode === 'fade-right') {
+        const candFadeOut = Math.max(0, Math.min(d.initDuration, d.initFadeOut - rawDelta));
+        let candFadeIn = d.initFadeIn;
+        if (candFadeIn + candFadeOut > d.initDuration) {
+          candFadeIn = Math.max(0, d.initDuration - candFadeOut);
+        }
+        d.pendingFadeIn  = candFadeIn;
+        d.pendingFadeOut = candFadeOut;
+      } else if (d.mode === 'fade-both') {
+        // Joint slides; fadeIn + fadeOut = initDuration is preserved (was merged on grab).
+        const jointMeasure = Math.max(0, Math.min(d.initDuration, d.initFadeIn + rawDelta));
+        d.pendingFadeIn  = jointMeasure;
+        d.pendingFadeOut = d.initDuration - jointMeasure;
       } else if (d.mode === 'resize-left') {
         // Bottle/Window: keep bottle origin (initStart - initClipOffset) fixed.
         // clipOffset = initClipOffset + (newStart - initStart) and is allowed to go negative —
@@ -502,12 +571,31 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         }
       }
 
+      // Clamp fades to fit the new duration on resize (live so the overlay tracks).
+      if (d.mode === 'resize-right' || d.mode === 'resize-left') {
+        const fIn  = Math.min(d.initFadeIn, newDuration);
+        const fOut = Math.min(d.initFadeOut, Math.max(0, newDuration - fIn));
+        d.pendingFadeIn  = fIn;
+        d.pendingFadeOut = fOut;
+      }
+
       if (d.el) {
         const yOffset = (d.pendingTrackIndex - d.origTrackIndex) * TRACK_H;
         d.el.style.left      = `${newStart    * pixelsPerMeasure}px`;
         d.el.style.width     = `${newDuration * pixelsPerMeasure}px`;
         d.el.style.transform = `translateY(${yOffset}px)`;
         d.el.style.zIndex    = '10';
+        // Live fade overlay + handle DOM updates (Zero-Re-render Rule).
+        const fInPx  = d.pendingFadeIn  * pixelsPerMeasure;
+        const fOutPx = d.pendingFadeOut * pixelsPerMeasure;
+        const inEl   = d.el.querySelector('[data-fade-in]');
+        const outEl  = d.el.querySelector('[data-fade-out]');
+        const hLEl   = d.el.querySelector('[data-fade-handle-left]');
+        const hREl   = d.el.querySelector('[data-fade-handle-right]');
+        if (inEl)  { inEl.style.display  = fInPx  > 0 ? '' : 'none'; inEl.style.width  = `${fInPx}px`; }
+        if (outEl) { outEl.style.display = fOutPx > 0 ? '' : 'none'; outEl.style.width = `${fOutPx}px`; }
+        if (hLEl)  hLEl.style.left  = `${fInPx}px`;
+        if (hREl)  hREl.style.right = `${fOutPx}px`;
       }
       d.pendingStart    = newStart;
       d.pendingDuration = newDuration;
@@ -524,13 +612,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           resetEl(d.el);
           for (const c of d.companions) resetEl(c.el);
 
-          const { regionId, pendingStart, pendingDuration, pendingTrackId, pendingClipOffset } = d;
+          const { regionId, pendingStart, pendingDuration, pendingTrackId, pendingClipOffset, pendingFadeIn, pendingFadeOut } = d;
           const clusterIds = new Set([regionId, ...d.companions.map(c => c.regionId)]);
 
           const movedRegion = {
             ...regionsRef.current.find(r => r.id === regionId),
             startMeasure: pendingStart, durationMeasures: pendingDuration, trackId: pendingTrackId,
             clipOffset: pendingClipOffset,
+            fadeIn: pendingFadeIn, fadeOut: pendingFadeOut,
           };
           const cluster = [
             movedRegion,
@@ -640,6 +729,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           const rightEdge = Math.max(...resolvedCluster.map(r => r.startMeasure + r.durationMeasures));
           if (rightEdge > totalMeasuresRef.current - 16) setTotalMeasures(prev => Math.max(prev + 64, rightEdge + 16));
           document.body.classList.remove('is-dragging');
+          document.body.classList.remove('is-fade-dragging');
           document.body.style.cursor = '';
           lastDragEndTimeRef.current = Date.now();
         }
@@ -674,6 +764,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       if (!d.active && Math.hypot(currentX - d.startX, currentY - d.startY) < 4) return;
       if (!d.active) {
         Object.values(ghostRefs.current).forEach(g => { if (g) g.style.opacity = '0'; });
+        document.body.classList.add('is-dragging');
       }
       d.active   = true;
       d.currentX = currentX;
@@ -715,6 +806,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       });
       marqueeHoverIdsRef.current = new Set();
       stopAutoScroll();
+      document.body.classList.remove('is-dragging');
       if (d.active) {
         const minX = Math.min(d.startX, d.currentX ?? d.startX);
         const maxX = Math.max(d.startX, d.currentX ?? d.startX);
@@ -1085,6 +1177,29 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         return;
       }
 
+      // Cut — Cmd/Ctrl + X (copy + delete)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'x') {
+        if (inInput) return;
+        const ids = [...selectedRegionIdsRef.current];
+        if (!ids.length) return;
+        e.preventDefault();
+        const selectedRegions = regionsRef.current.filter(r => ids.includes(r.id));
+        const selectedNotes   = notesRef.current.filter(n => ids.includes(n.regionId));
+        const leftmostMeasure   = Math.min(...selectedRegions.map(r => r.startMeasure));
+        const topmostTrackIndex = Math.min(...selectedRegions.map(r =>
+          tracksRef.current.findIndex(t => t.id === r.trackId)
+        ));
+        clipboardRef.current = JSON.parse(JSON.stringify({
+          regions: selectedRegions, notes: selectedNotes,
+          leftmostMeasure, topmostTrackIndex,
+        }));
+        const idSet = new Set(ids);
+        setRegions(prev => prev.filter(r => !idSet.has(r.id)));
+        setNotes(prev => prev.filter(n => !idSet.has(n.regionId)));
+        setSelectedRegionIds(new Set());
+        return;
+      }
+
       // Paste — Cmd/Ctrl + V
       if ((e.metaKey || e.ctrlKey) && e.key === 'v') {
         if (inInput) return;
@@ -1134,7 +1249,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         setNotes([...cleanNotes, ...newNotes]);
         setSelectedRegionIds(new Set(Object.values(idMap)));
         const rightEdge = Math.max(...newRegions.map(r => r.startMeasure + r.durationMeasures));
-        if (rightEdge > totalMeasuresRef.current - 16) setTotalMeasures(prev => prev + 64);
+        if (rightEdge > totalMeasuresRef.current - 16) {
+          setTotalMeasures(prev => Math.max(prev + 64, rightEdge + 16));
+        }
         return;
       }
     };
@@ -1157,7 +1274,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             className={snapEnabled ? styles.transportBtnActive : styles.transportBtn}
             onClick={() => setSnapEnabled(v => !v)}
             title="Snap to grid (magnet)">
-            ⌘
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                 style={{ display: 'block' }} aria-hidden="true">
+              <path d="M4 4 v7 a8 8 0 0 0 16 0 V4" />
+              <path d="M9 4 v7 a3 3 0 0 0 6 0 V4" />
+              <line x1="4" y1="4" x2="9" y2="4" />
+              <line x1="15" y1="4" x2="20" y2="4" />
+            </svg>
           </button>
         </div>
         <div className={styles.transportRight}>
@@ -1302,7 +1426,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                     const measure = Math.max(0, Math.floor((e.clientX - rect.left) / pixelsPerMeasure));
                     if (regions.some(r => r.trackId === t.id) && !isPositionOccupied(t.id, measure)) {
                       const n = nextRegionIdRef.current++;
-                      const newRegion = { id: `r${n}`, trackId: t.id, startMeasure: measure, durationMeasures: 1, clipOffset: 0 };
+                      const newRegion = { id: `r${n}`, trackId: t.id, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0 };
                       const result = applyDestructiveEdit(regionsRef.current, notesRef.current, newRegion);
                       const merged = [...result.regions, newRegion].filter(rg => rg.durationMeasures > 0);
                       const surviving = new Set(merged.map(rg => rg.id));
@@ -1323,12 +1447,36 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                       onMouseDown={(e) => startRegionDrag(e, r, 'move')}
                       onClick={(e) => e.stopPropagation()}
                       onDoubleClick={(e) => { e.stopPropagation(); setEditingTrackId(r.trackId); }}>
+                      {r.durationMeasures * pixelsPerMeasure >= FADE_UI_MIN_PX && (
+                        <>
+                          <div data-fade-in
+                            className={`${styles.fadeOverlay} ${styles.fadeInOverlay}`}
+                            style={{ width: `${(r.fadeIn ?? 0) * pixelsPerMeasure}px`, display: (r.fadeIn ?? 0) > 0 ? '' : 'none' }} />
+                          <div data-fade-out
+                            className={`${styles.fadeOverlay} ${styles.fadeOutOverlay}`}
+                            style={{ width: `${(r.fadeOut ?? 0) * pixelsPerMeasure}px`, display: (r.fadeOut ?? 0) > 0 ? '' : 'none' }} />
+                        </>
+                      )}
                       <div className={styles.resizeLeft}  onMouseDown={(e) => startRegionDrag(e, r, 'resize-left')} />
                       <div className={styles.resizeRight} onMouseDown={(e) => startRegionDrag(e, r, 'resize-right')} />
-                      <button className={styles.editBtn} onMouseDown={stopMouseDown}
-                        onClick={(e) => { e.stopPropagation(); setEditingTrackId(r.trackId); }}>
-                        edit
-                      </button>
+                      {r.durationMeasures * pixelsPerMeasure >= FADE_UI_MIN_PX && (
+                        <>
+                          <div data-fade-handle-left
+                            className={`${styles.fadeHandle} ${styles.fadeHandleLeft}`}
+                            style={{ left: `${(r.fadeIn ?? 0) * pixelsPerMeasure}px` }}
+                            onMouseDown={(e) => startRegionDrag(e, r, 'fade-left')} />
+                          <div data-fade-handle-right
+                            className={`${styles.fadeHandle} ${styles.fadeHandleRight}`}
+                            style={{ right: `${(r.fadeOut ?? 0) * pixelsPerMeasure}px` }}
+                            onMouseDown={(e) => startRegionDrag(e, r, 'fade-right')} />
+                        </>
+                      )}
+                      {r.durationMeasures * pixelsPerMeasure >= EDIT_BTN_MIN_PX && (
+                        <button className={styles.editBtn} onMouseDown={stopMouseDown}
+                          onClick={(e) => { e.stopPropagation(); setEditingTrackId(r.trackId); }}>
+                          edit
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
