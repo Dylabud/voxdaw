@@ -1,13 +1,20 @@
 import { useRef, useEffect, useState } from 'react';
 import * as Tone from 'tone';
 import styles from './RegionEditor.module.css';
-import { computeGridBg } from '../WorkstationShell';
+import { computeGridBg, getSnapIncrement } from '../WorkstationShell';
 import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
 
 const INSTRUMENTS = [
   'fm pluck', 'analog', 'strings', 'am', 'pluck',
   'sine', 'square', 'sawtooth', 'triangle',
 ];
+
+// 'grid' resolves dynamically against the visible piano-roll grid (Phase 116 bug 2).
+// 'off' = no snap. Fixed-fraction options listed here.
+const SNAP_BEATS = { '1/6': 2 / 3, '1/12': 1 / 3 };
+const SNAP_DIVISIONS = ['grid', '1/6', '1/12', 'off'];
+const DRAG_THRESHOLD = 4;
+const RESIZE_EDGE_PX = 4;
 
 function makePreviewSynth(instrument) {
   switch (instrument) {
@@ -51,12 +58,24 @@ function makePreviewSynth(instrument) {
   }
 }
 
+function regionWindow(r) {
+  const clipOffset = r.clipOffset ?? 0;
+  const baseLoop = (r.loopInterval ?? null) !== null ? r.loopInterval : r.durationMeasures;
+  return { windowStart: clipOffset * 4, windowEnd: (clipOffset + baseLoop) * 4 };
+}
+
+const noteKeyIndex = (name) => KEYS.findIndex(k => k.name === name);
+
 export default function RegionEditor({
   track,
   regions,
   notes,
   onNoteAdd,
   onNoteRemove,
+  onCommitNoteEdits,
+  onNotesDelete,
+  onNoteSelectionChange,
+  exposeSelectionSetter,
   zoomLevel,
   pixelsPerMeasure,
   totalMeasures,
@@ -66,13 +85,41 @@ export default function RegionEditor({
   onLeftColResize,
   onClose,
   scrollMemoryRef,
+  magnetOn,
 }) {
-  const [instrument, setInstrument] = useState(track?.instrument ?? 'fm pluck');
-  const [activeTab, setActiveTab] = useState('notes');
-  const previewSynthRef = useRef(null);
-  const activeKeyElRef  = useRef(null);
+  const [instrument,        setInstrument]        = useState(track?.instrument ?? 'fm pluck');
+  const [activeTab,         setActiveTab]         = useState('notes');
+  const [selectedNoteIds,   setSelectedNoteIds]   = useState(() => new Set());
+  const [noteSnapDivision,  setNoteSnapDivision]  = useState('grid');
 
-  // Preview synth lifecycle (re-created when instrument changes)
+  const previewSynthRef       = useRef(null);
+  const activeKeyElRef        = useRef(null);
+  const gridRef               = useRef(null);
+  const noteMarqueeElRef      = useRef(null);
+  const noteDragRef           = useRef(null);
+  const noteMarqueeRef        = useRef(null);
+
+  const notesRef              = useRef(notes);              notesRef.current = notes;
+  const regionsRef            = useRef(regions);            regionsRef.current = regions;
+  const selectedNoteIdsRef    = useRef(selectedNoteIds);    selectedNoteIdsRef.current = selectedNoteIds;
+  const noteSnapRef           = useRef(noteSnapDivision);   noteSnapRef.current = noteSnapDivision;
+  const magnetOnRef           = useRef(magnetOn);           magnetOnRef.current = magnetOn;
+  const pixelsPerMeasureRef   = useRef(pixelsPerMeasure);   pixelsPerMeasureRef.current = pixelsPerMeasure;
+
+  // Effective snap value (beats per snap unit) or null when no snap.
+  // - magnet off  → null (no snap regardless of dropdown)
+  // - 'off'       → null (explicit user choice)
+  // - 'grid'      → dynamic, mirrors the visible grid via getSnapIncrement (measures → beats)
+  // - '1/6','1/12' → fixed fractions from SNAP_BEATS
+  const getSnapBeats = () => {
+    if (!magnetOnRef.current) return null;
+    const div = noteSnapRef.current;
+    if (div === 'off')  return null;
+    if (div === 'grid') return getSnapIncrement(pixelsPerMeasureRef.current) * 4;
+    return SNAP_BEATS[div] ?? null;
+  };
+
+  // Preview synth lifecycle
   useEffect(() => {
     const s = makePreviewSynth(instrument);
     previewSynthRef.current = s;
@@ -90,7 +137,45 @@ export default function RegionEditor({
     const c4Index = KEYS.findIndex(k => k.name === 'C4');
     if (c4Index < 0) return;
     container.scrollTop = c4Index * KEY_H - container.clientHeight + KEY_H;
-  }, [track?.id]); // fires on mount + whenever track changes (no remount on track switch)
+  }, [track?.id]);
+
+  // Clear selection when active track changes
+  useEffect(() => { setSelectedNoteIds(new Set()); }, [track?.id]);
+
+  // Propagate selection to shell (for clipboard scope)
+  useEffect(() => {
+    onNoteSelectionChange?.(selectedNoteIds);
+  }, [selectedNoteIds, onNoteSelectionChange]);
+
+  // Expose imperative selection setter to shell (so shell can clear after delete/paste)
+  useEffect(() => {
+    if (!exposeSelectionSetter) return;
+    exposeSelectionSetter({
+      clear:  () => setSelectedNoteIds(new Set()),
+      setIds: (ids) => setSelectedNoteIds(new Set(ids)),
+    });
+    return () => exposeSelectionSetter(null);
+  }, [exposeSelectionSetter]);
+
+  // Esc / Cmd+A
+  useEffect(() => {
+    const onKey = (e) => {
+      const el = document.activeElement;
+      const inInput = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.isContentEditable;
+      if (e.key === 'Escape') {
+        if (inInput) return;
+        setSelectedNoteIds(new Set());
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
+        if (inInput) return;
+        e.preventDefault();
+        setSelectedNoteIds(new Set(notesRef.current.map(n => n.id)));
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   // ── Key preview handlers ──────────────────────────────────
   function handleMouseDown(note, e) {
@@ -113,21 +198,343 @@ export default function RegionEditor({
     activeKeyElRef.current = null;
   }
 
-  // ── Grid click — add note ─────────────────────────────────
-  function handleGridClick(e) {
-    const scroll = pianoScrollRef.current;
-    if (!scroll) return;
-    const scrollRect = scroll.getBoundingClientRect();
-    const keysW = 56;
-    const x = (e.clientX - scrollRect.left) + scroll.scrollLeft - keysW;
-    const y = (e.clientY - scrollRect.top) + scroll.scrollTop;
+  // ── Marquee hit testing (base notes only — ghosts excluded by iterating state) ──
+  // Restricted to notes whose regionId matches the marquee's starting region (bug 1).
+  function computeMarqueeHits(minX, maxX, minY, maxY, startingRegionId) {
+    if (!startingRegionId) return [];
+    const ppb = pixelsPerMeasureRef.current / 4;
+    const hits = [];
+    for (const n of notesRef.current) {
+      if (n.regionId !== startingRegionId) continue;
+      const r = regionsRef.current.find(rg => rg.id === n.regionId);
+      if (!r) continue;
+      const { windowStart, windowEnd } = regionWindow(r);
+      if (n.startBeat < windowStart || n.startBeat >= windowEnd) continue;
+      const ki = noteKeyIndex(n.note);
+      if (ki < 0) continue;
+      const bottleOriginBeat = (r.startMeasure - (r.clipOffset ?? 0)) * 4;
+      const noteX = (bottleOriginBeat + n.startBeat) * ppb;
+      const noteW = Math.max(n.durationBeats * ppb - 1, 2);
+      const noteY = ki * KEY_H;
+      const noteH = KEY_H - 1;
+      if (noteX + noteW < minX || noteX > maxX) continue;
+      if (noteY + noteH < minY || noteY > maxY) continue;
+      hits.push(n.id);
+    }
+    return hits;
+  }
+
+  // ── Cluster delta math for move / resize ──
+  function computeDragUpdates(d, dBeats, dKey) {
+    const snap = getSnapBeats();
+    const minDur = snap ?? 0.25;
+
+    // For MOVE only, we joint-clamp X (windowStart low only; high cap removed per bug 6)
+    // and Y (pitch). resize-right / resize-left are clamped per-note so the smallest note
+    // hitting minDur doesn't freeze the cluster (bug 2).
+    let dbLow = -Infinity;
+    let dkLow = -Infinity, dkHigh = Infinity;
+
+    if (d.mode === 'move') {
+      for (const id of d.clusterIds) {
+        const init = d.initByID.get(id);
+        if (!init) continue;
+        const n = notesRef.current.find(x => x.id === id);
+        if (!n) continue;
+        const r = regionsRef.current.find(rg => rg.id === n.regionId);
+        if (!r) continue;
+        const { windowStart } = regionWindow(r);
+        dbLow = Math.max(dbLow, windowStart - init.startBeat);
+        const ki = noteKeyIndex(init.note);
+        dkLow  = Math.max(dkLow,  0 - ki);
+        dkHigh = Math.min(dkHigh, (KEYS.length - 1) - ki);
+      }
+    }
+
+    const cdBeats = d.mode === 'move' ? Math.max(dbLow, dBeats) : dBeats;
+    const cdKey   = d.mode === 'move' ? Math.max(dkLow, Math.min(dkHigh, dKey)) : 0;
+
+    const updates = [];
+    for (const id of d.clusterIds) {
+      const init = d.initByID.get(id);
+      if (!init) continue;
+      const n = notesRef.current.find(x => x.id === id);
+      if (!n) continue;
+      const r = regionsRef.current.find(rg => rg.id === n.regionId);
+      if (!r) continue;
+      const { windowStart } = regionWindow(r);
+
+      if (d.mode === 'move') {
+        const ki = noteKeyIndex(init.note) + cdKey;
+        updates.push({
+          id, regionId: n.regionId,
+          startBeat: init.startBeat + cdBeats,
+          durationBeats: init.durationBeats,
+          note: KEYS[ki]?.name ?? init.note,
+        });
+      } else if (d.mode === 'resize-right') {
+        // Per-note clamp: duration ≥ minDur. No window-end cap (bug 6).
+        const candidateDur = Math.max(minDur, init.durationBeats + cdBeats);
+        updates.push({
+          id, regionId: n.regionId,
+          startBeat: init.startBeat,
+          durationBeats: candidateDur,
+          note: init.note,
+        });
+      } else if (d.mode === 'resize-left') {
+        // Per-note: newStart ≥ windowStart; newDur ≥ minDur.
+        const low  = windowStart - init.startBeat;
+        const high = init.durationBeats - minDur;
+        const clamped = Math.max(low, Math.min(high, cdBeats));
+        updates.push({
+          id, regionId: n.regionId,
+          startBeat: init.startBeat + clamped,
+          durationBeats: init.durationBeats - clamped,
+          note: init.note,
+        });
+      }
+    }
+    return updates;
+  }
+
+  // ── Global mousemove / mouseup for drag + marquee ──
+  useEffect(() => {
+    const onMove = (e) => {
+      // Drag path
+      const dD = noteDragRef.current;
+      if (dD) {
+        const dx = e.clientX - dD.startX;
+        const dy = e.clientY - dD.startY;
+        if (!dD.dragStarted && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+        if (!dD.dragStarted) {
+          dD.dragStarted = true;
+          document.body.classList.add('is-note-dragging');
+        }
+        const ppb = pixelsPerMeasureRef.current / 4;
+        const snap = getSnapBeats();
+        let deltaBeats = dx / ppb;
+        if (snap !== null) deltaBeats = Math.round(deltaBeats / snap) * snap;
+        const dKey = Math.round(dy / KEY_H);
+
+        const updates = computeDragUpdates(dD, deltaBeats, dKey);
+        dD.pendingUpdates = updates;
+        for (const u of updates) {
+          const r = regionsRef.current.find(rg => rg.id === u.regionId);
+          if (!r) continue;
+          const bottleOriginBeat = (r.startMeasure - (r.clipOffset ?? 0)) * 4;
+          const ki = noteKeyIndex(u.note);
+          const widthPx = `${Math.max(u.durationBeats * ppb - 1, 2)}px`;
+          const topPx   = `${ki * KEY_H}px`;
+          // Write to all iterations of this note so ghost copies follow live (bug 11).
+          const els = gridRef.current?.querySelectorAll(`[data-note-id="${u.id}"]`);
+          els?.forEach(el => {
+            const iter = +el.dataset.noteIter;
+            const iterOffsetBeats = iter * (r.loopInterval ?? 0) * 4;
+            const lb = bottleOriginBeat + u.startBeat + iterOffsetBeats;
+            el.style.left  = `${lb * ppb}px`;
+            el.style.top   = topPx;
+            el.style.width = widthPx;
+          });
+        }
+        return;
+      }
+
+      // Marquee path
+      const dM = noteMarqueeRef.current;
+      if (dM) {
+        const grid = gridRef.current;
+        if (!grid) return;
+        const rect = grid.getBoundingClientRect();
+        const currentX = e.clientX - rect.left;
+        const currentY = e.clientY - rect.top;
+        if (!dM.active && Math.hypot(currentX - dM.startX, currentY - dM.startY) < DRAG_THRESHOLD) return;
+        dM.active = true;
+        dM.currentX = currentX;
+        dM.currentY = currentY;
+        const left = Math.min(dM.startX, currentX);
+        const top  = Math.min(dM.startY, currentY);
+        const width  = Math.abs(currentX - dM.startX);
+        const height = Math.abs(currentY - dM.startY);
+        const mel = noteMarqueeElRef.current;
+        if (mel) {
+          mel.style.left = `${left}px`;
+          mel.style.top  = `${top}px`;
+          mel.style.width  = `${width}px`;
+          mel.style.height = `${height}px`;
+          mel.style.opacity = '1';
+        }
+        // Live highlight
+        const hits = computeMarqueeHits(
+          Math.min(dM.startX, currentX), Math.max(dM.startX, currentX),
+          Math.min(dM.startY, currentY), Math.max(dM.startY, currentY),
+          dM.startingRegionId,
+        );
+        const prev = dM.lastHits || [];
+        const hitSet = new Set(hits);
+        for (const id of prev) {
+          if (hitSet.has(id)) continue;
+          const el = grid.querySelector(`[data-note-id="${id}"][data-note-iter="0"]`);
+          if (el) el.classList.remove(styles.noteSelectedLive);
+        }
+        const prevSet = new Set(prev);
+        for (const id of hits) {
+          if (prevSet.has(id)) continue;
+          const el = grid.querySelector(`[data-note-id="${id}"][data-note-iter="0"]`);
+          if (el) el.classList.add(styles.noteSelectedLive);
+        }
+        dM.lastHits = hits;
+      }
+    };
+
+    const onUp = () => {
+      // Drag end
+      const dD = noteDragRef.current;
+      if (dD) {
+        noteDragRef.current = null;
+        document.body.classList.remove('is-note-dragging');
+        if (dD.dragStarted && dD.pendingUpdates && dD.pendingUpdates.length) {
+          onCommitNoteEdits?.(dD.pendingUpdates);
+        }
+        return;
+      }
+      // Marquee end
+      const dM = noteMarqueeRef.current;
+      if (dM) {
+        noteMarqueeRef.current = null;
+        const mel = noteMarqueeElRef.current;
+        if (mel) {
+          mel.style.opacity = '0';
+          mel.style.width = '0'; mel.style.height = '0';
+          mel.style.left = ''; mel.style.top = '';
+        }
+        // Clear live highlights
+        for (const id of dM.lastHits || []) {
+          const el = gridRef.current?.querySelector(`[data-note-id="${id}"][data-note-iter="0"]`);
+          if (el) el.classList.remove(styles.noteSelectedLive);
+        }
+
+        if (!dM.active) {
+          // Pure click — add note at start position
+          const ppb = pixelsPerMeasureRef.current / 4;
+          const snap = getSnapBeats();
+          const xBeat = dM.startX / ppb;
+          let startBeat = snap !== null ? Math.floor(xBeat / snap) * snap : xBeat;
+          if (startBeat < 0) startBeat = 0;
+          const keyIndex = Math.floor(dM.startY / KEY_H);
+          const noteName = KEYS[keyIndex]?.name;
+          if (!noteName || dM.startX < 0) return;
+          const durationBeats = snap !== null ? snap : 1;
+          const newId = onNoteAdd?.({
+            trackId: track.id, note: noteName, startBeat, durationBeats,
+          });
+          if (newId) setSelectedNoteIds(new Set([newId]));
+          return;
+        }
+        // Commit marquee hits
+        const hits = computeMarqueeHits(
+          Math.min(dM.startX, dM.currentX), Math.max(dM.startX, dM.currentX),
+          Math.min(dM.startY, dM.currentY), Math.max(dM.startY, dM.currentY),
+          dM.startingRegionId,
+        );
+        setSelectedNoteIds(new Set(hits));
+      }
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [onCommitNoteEdits, onNoteAdd, track?.id]);
+
+  // ── Note mousedown — selection + drag arming ──
+  function handleNoteMouseDown(e, note) {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const xInNote = e.clientX - rect.left;
+    const noteW = rect.width;
+    let mode = 'move';
+    if (noteW >= 14) {
+      if (xInNote < RESIZE_EDGE_PX) mode = 'resize-left';
+      else if (xInNote > noteW - RESIZE_EDGE_PX) mode = 'resize-right';
+    }
+
+    // Selection
+    let nextSelection;
+    const cur = selectedNoteIdsRef.current;
+    if (e.shiftKey || e.metaKey || e.ctrlKey) {
+      nextSelection = new Set(cur);
+      if (nextSelection.has(note.id)) nextSelection.delete(note.id);
+      else nextSelection.add(note.id);
+    } else if (!cur.has(note.id)) {
+      nextSelection = new Set([note.id]);
+    } else {
+      nextSelection = new Set(cur);
+    }
+    setSelectedNoteIds(nextSelection);
+
+    // Snapshot cluster (use the post-mousedown selection)
+    const initByID = new Map();
+    for (const id of nextSelection) {
+      const n = notesRef.current.find(x => x.id === id);
+      if (!n) continue;
+      initByID.set(id, {
+        startBeat: n.startBeat,
+        durationBeats: n.durationBeats,
+        note: n.note,
+      });
+    }
+    noteDragRef.current = {
+      mode,
+      startX: e.clientX,
+      startY: e.clientY,
+      dragStarted: false,
+      clusterIds: [...nextSelection],
+      initByID,
+      anchorId: note.id,
+      pendingUpdates: null,
+    };
+  }
+
+  // Cursor hint on hover
+  function handleNoteHover(e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const xIn = e.clientX - rect.left;
+    const w = rect.width;
+    if (w >= 14 && (xIn < RESIZE_EDGE_PX || xIn > w - RESIZE_EDGE_PX)) {
+      e.currentTarget.style.cursor = 'ew-resize';
+    } else {
+      e.currentTarget.style.cursor = 'grab';
+    }
+  }
+
+  // ── Grid mousedown — arm marquee or click-create ──
+  function handleGridMouseDown(e) {
+    if (e.button !== 0) return;
+    if (e.target !== e.currentTarget) return;
+    const grid = gridRef.current;
+    if (!grid) return;
+    const rect = grid.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
     if (x < 0) return;
-    const ppb   = pixelsPerMeasure / 4;
-    const beat  = Math.floor(x / ppb);
-    const keyIndex = Math.floor(y / KEY_H);
-    const noteName = KEYS[keyIndex]?.name;
-    if (!noteName) return;
-    onNoteAdd({ trackId: track.id, note: noteName, startBeat: beat, durationBeats: 1 });
+    // Resolve starting region from click x — marquee will only select notes from this region (bug 1).
+    const ppb = pixelsPerMeasureRef.current / 4;
+    const xBeat = x / ppb;
+    const startingRegion = regionsRef.current.find(r =>
+      xBeat >= r.startMeasure * 4 &&
+      xBeat <  (r.startMeasure + r.durationMeasures) * 4
+    );
+    noteMarqueeRef.current = {
+      startX: x, startY: y,
+      currentX: x, currentY: y,
+      active: false,
+      lastHits: [],
+      startingRegionId: startingRegion?.id ?? null,
+    };
   }
 
   const ppb          = pixelsPerMeasure / 4;
@@ -136,15 +543,32 @@ export default function RegionEditor({
   return (
     <div className={styles.editor} style={{ '--track-color': track?.color }}>
       <div className={styles.editorBar}>
-        {['notes', 'instrument', 'effects'].map(tab => (
-          <button
-            key={tab}
-            className={`${styles.tabBtn}${activeTab === tab ? ` ${styles.tabActive}` : ''}`}
-            onClick={() => setActiveTab(tab)}
-          >
-            {tab === 'notes' ? 'piano roll' : tab}
-          </button>
-        ))}
+        <div className={styles.editorTabs}>
+          {['notes', 'instrument', 'effects'].map(tab => (
+            <button
+              key={tab}
+              className={`${styles.tabBtn}${activeTab === tab ? ` ${styles.tabActive}` : ''}`}
+              onClick={() => setActiveTab(tab)}
+            >
+              {tab === 'notes' ? 'piano roll' : tab}
+            </button>
+          ))}
+        </div>
+        {activeTab === 'notes' && (
+          <div className={styles.editorTools}>
+            <label className={styles.snapLabel}>snap</label>
+            <select
+              className={`${styles.snapSelect}${magnetOn ? '' : ` ${styles.snapSelectDisabled}`}`}
+              // Magnet off forces the displayed value to 'off' without losing the user's
+              // saved division — restored when magnet is re-enabled (Phase 116 bug 4).
+              value={magnetOn ? noteSnapDivision : 'off'}
+              onChange={(e) => setNoteSnapDivision(e.target.value)}
+              title={magnetOn ? 'Snap division' : 'Magnet is off — snap forced off'}
+            >
+              {SNAP_DIVISIONS.map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </div>
+        )}
       </div>
       <div className={styles.editorBody}>
 
@@ -171,16 +595,15 @@ export default function RegionEditor({
         </div>
       </div>
 
-      {/* Left-column resizer handle (shared drag handler from shell) */}
+      {/* Left-column resizer */}
       <div className={styles.colResizer} onMouseDown={onLeftColResize} />
 
-      {/* Piano roll scroll container — always mounted (preserves scrollTop natively) */}
+      {/* Piano roll scroll container — always mounted */}
       <div
         ref={pianoScrollRef}
         className={styles.pianoRoll}
         onScroll={onGridScroll}
       >
-        {/* Keys column — always visible across all tabs */}
         <div
           className={styles.keys}
           style={{ minHeight: PIANO_ROLL_H }}
@@ -199,21 +622,21 @@ export default function RegionEditor({
           ))}
         </div>
 
-        {/* Note grid (notes tab) or placeholder (instrument/effects tabs) */}
-        {activeTab === 'notes' ? (
+        {/* Grid is always mounted so scrollLeft survives tab switches (bug 12).
+            On non-notes tabs, the placeholder overlay sits on top, sticky to the viewport. */}
+        {(
           <div
-            className={styles.grid}
+            ref={gridRef}
+            className={`${styles.grid}${activeTab !== 'notes' ? ` ${styles.gridHiddenContent}` : ''}`}
             style={{
               width: gridMinWidth,
               minHeight: PIANO_ROLL_H,
               backgroundImage: computeGridBg(pixelsPerMeasure, zoomLevel),
             }}
-            onClick={handleGridClick}
+            onMouseDown={handleGridMouseDown}
           >
-            {/* Row shading overlay (accidental/natural, theme-aware) */}
             <div className={styles.gridShading} style={{ minHeight: PIANO_ROLL_H }} />
 
-            {/* Region highlights + loop tint (Phase 110) */}
             {regions?.flatMap(r => {
               const out = [
                 <div key={`hl-${r.id}`} className={styles.regionHighlight}
@@ -234,13 +657,17 @@ export default function RegionEditor({
               return out;
             })}
 
-            {/* Note blocks — bottle-local startBeat converted to global pixels.
-                Looped regions emit one copy per iteration (Phase 110); ghosts (i > 0) are
-                dimmed and pointer-events: none. */}
-            {notes.flatMap(n => {
+            {/* Sort: larger durations first (so smaller notes paint on top via DOM order);
+                tie-break by ascending startBeat so later notes overlap earlier ones (bug 10.1/10.2). */}
+            {[...notes]
+              .sort((a, b) => {
+                if (a.durationBeats !== b.durationBeats) return b.durationBeats - a.durationBeats;
+                return a.startBeat - b.startBeat;
+              })
+              .flatMap(n => {
               const r = regions?.find(rg => rg.id === n.regionId);
               if (!r) return [];
-              const keyIndex = KEYS.findIndex(k => k.name === n.note);
+              const keyIndex = noteKeyIndex(n.note);
               if (keyIndex < 0) return [];
               const clipOffset       = r.clipOffset ?? 0;
               const baseLoop         = (r.loopInterval ?? null) !== null ? r.loopInterval : r.durationMeasures;
@@ -253,39 +680,56 @@ export default function RegionEditor({
                 ? Math.ceil(r.durationMeasures / r.loopInterval)
                 : 1;
               const out = [];
-              const regionEndBeat = (r.startMeasure + r.durationMeasures) * 4;
+              const regionStartBeat = r.startMeasure * 4;
+              const regionEndBeat   = (r.startMeasure + r.durationMeasures) * 4;
+              const isSelected = selectedNoteIds.has(n.id);
               for (let i = 0; i < iterations; i++) {
                 const iterOffsetBeats = i * (r.loopInterval ?? 0) * 4;
                 const globalLeftBeat  = baseGlobalLeftBeat + iterOffsetBeats;
-                if (globalLeftBeat >= regionEndBeat) break;
+                const noteEndBeat     = globalLeftBeat + n.durationBeats;
+                // Clip to region bounds (bugs 7.1/7.2). If fully past or fully before, skip.
+                const visibleLeft  = Math.max(globalLeftBeat, regionStartBeat);
+                const visibleRight = Math.min(noteEndBeat, regionEndBeat);
+                if (visibleRight <= visibleLeft) {
+                  // Fully outside region; if past the right edge, no later iter helps → break.
+                  if (globalLeftBeat >= regionEndBeat) break;
+                  continue;
+                }
+                const ghost = i > 0;
                 out.push(
                   <div
                     key={`${n.id}-${i}`}
-                    className={`${styles.noteBlock}${i > 0 ? ` ${styles.noteBlockGhost}` : ''}`}
+                    data-note-id={n.id}
+                    data-note-iter={i}
+                    className={`${styles.noteBlock}${ghost ? ` ${styles.noteBlockGhost}` : ''}${!ghost && isSelected ? ` ${styles.noteSelected}` : ''}`}
                     style={{
                       top:    keyIndex * KEY_H,
-                      left:   globalLeftBeat * ppb,
-                      width:  Math.max(n.durationBeats * ppb - 1, 2),
+                      left:   visibleLeft * ppb,
+                      width:  Math.max((visibleRight - visibleLeft) * ppb - 1, 2),
                       height: KEY_H - 1,
                     }}
-                    onClick={i === 0 ? (e) => { e.stopPropagation(); onNoteRemove(n.id); } : undefined}
+                    onMouseDown={ghost ? undefined : (e) => handleNoteMouseDown(e, n)}
+                    onMouseMove={ghost ? undefined : handleNoteHover}
                   />
                 );
               }
               return out;
             })}
 
-            {/* Playhead */}
+            <div ref={noteMarqueeElRef} className={styles.noteMarquee} />
             <div ref={pianoRollPlayheadRef} className={styles.playhead} />
-          </div>
-        ) : (
-          <div className={styles.placeholder}>
-            <span className={styles.placeholderText}>
-              {activeTab === 'instrument' ? 'instrument — coming soon' : 'effects — coming soon'}
-            </span>
           </div>
         )}
       </div>
+
+      {/* Placeholder overlay — outside the scroll container so it never affects scrollWidth (bug 12) */}
+      {activeTab !== 'notes' && (
+        <div className={styles.placeholderOverlay}>
+          <span className={styles.placeholderText}>
+            {activeTab === 'instrument' ? 'instrument — coming soon' : 'effects — coming soon'}
+          </span>
+        </div>
+      )}
 
       </div>
     </div>

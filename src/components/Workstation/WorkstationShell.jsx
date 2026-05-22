@@ -59,7 +59,7 @@ const FADE_UI_MIN_PX = 30;
 // Returns the snap increment (in measures) matching the smallest visible grid line at this zoom.
 // Fractional range (ppm>=150) mirrors computeGridBg's beat/sub-beat thresholds (Phase 82).
 // Macro range (ppm<80) reuses getMeasureInterval — single source of truth with the drawn grid.
-function getSnapIncrement(ppm) {
+export function getSnapIncrement(ppm) {
   if (ppm >= 300) return 0.125; // 8th notes
   if (ppm >= 150) return 0.25;  // quarter notes
   return getMeasureInterval(ppm); // 1, 2, 4, 8, 16… matches visible grid period
@@ -138,6 +138,16 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const currentMousePosRef       = useRef({ x: 0, y: 0 });
   const marqueeHoverIdsRef       = useRef(new Set());
   const snapEnabledRef           = useRef(true);
+  // Phase 117 — one-shot suppression flags so a programmatic scroll write on a partner
+  // doesn't trigger a stale mirror-back during a diagonal trackpad swipe (race fix).
+  const pianoScrollSuppressRef   = useRef(false);
+  const trackHeadersSuppressRef  = useRef(false);
+  const timelineSuppressRef      = useRef(false);
+  const noteSelectionRef         = useRef(new Set());
+  const notesClipboardRef        = useRef(null);
+  const clipboardKindRef         = useRef(null); // 'regions' | 'notes'
+  const editingTrackIdRef        = useRef(null);
+  const noteSelectionApiRef      = useRef(null); // { clear, setIds } from RegionEditor
 
   // ── Derived editor state ───────────────────────────────────
   const editingTrack      = editingTrackId ? tracks.find(t => t.id === editingTrackId) : null;
@@ -199,10 +209,32 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const toggleSolo = (id) => setTracks(prev =>
     prev.map(t => t.id === id ? { ...t, isSolo: !t.isSolo } : t));
 
+  // ── Note dedupe — same (regionId, note, startBeat, durationBeats) collapses to the
+  //    most-recently-touched (or last-in-array) survivor. Wired into every commit path
+  //    so a freshly placed/dropped note replaces a perfectly-overlapping older one.
+  const dedupePerfectOverlaps = useCallback((notes, lastTouchedIds = []) => {
+    const lastSet = new Set(lastTouchedIds);
+    const survivors = new Map(); // key → note
+    for (const n of notes) {
+      // toFixed(4) collapses floating-point drift from snap fractions (e.g. 1/3 = 0.333…)
+      // so two notes that are musically identical also key identically (Phase 116 bug 5).
+      const key = `${n.regionId}|${n.note}|${n.startBeat.toFixed(4)}|${n.durationBeats.toFixed(4)}`;
+      const prev = survivors.get(key);
+      if (!prev) { survivors.set(key, n); continue; }
+      // Prefer last-touched; otherwise prefer the later array position (current `n`).
+      if (lastSet.has(prev.id) && !lastSet.has(n.id)) continue;
+      survivors.set(key, n);
+    }
+    // Preserve original order
+    const surviveIds = new Set([...survivors.values()].map(n => n.id));
+    return notes.filter(n => surviveIds.has(n.id));
+  }, []);
+
   // ── Note CRUD ───────────────────────────────────────────────
   const handleNoteAdd = useCallback((noteData) => {
     const { trackId, startBeat } = noteData;
     const measure = Math.floor(startBeat / 4);
+    const newNoteId = `note_${nextNoteIdRef.current++}`;
 
     const existingRegion = regionsRef.current.find(r =>
       r.trackId === trackId &&
@@ -214,14 +246,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       // Phase 110: block placements inside the ghost (looped) area.
       if (existingRegion.loopInterval != null) {
         const baseEndBeat = (existingRegion.startMeasure + existingRegion.loopInterval) * 4;
-        if (startBeat >= baseEndBeat) return;
+        if (startBeat >= baseEndBeat) return null;
       }
       const bottleOriginBeat = (existingRegion.startMeasure - (existingRegion.clipOffset ?? 0)) * 4;
-      setNotes(prev => [...prev, {
-        id: `note_${nextNoteIdRef.current++}`, ...noteData,
+      const newNote = {
+        id: newNoteId, ...noteData,
         startBeat: startBeat - bottleOriginBeat,
         regionId: existingRegion.id,
-      }]);
+      };
+      setNotes(prev => dedupePerfectOverlaps([...prev, newNote], [newNoteId]));
     } else {
       const newRegionId = `region_${nextRegionIdRef.current++}`;
       const newRegion = { id: newRegionId, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0, fadeInFloor: 0, fadeOutFloor: 0, loopInterval: null };
@@ -229,16 +262,37 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const merged = [...result.regions, newRegion].filter(r => r.durationMeasures > 0);
       const surviving = new Set(merged.map(r => r.id));
       const newNote = {
-        id: `note_${nextNoteIdRef.current++}`, ...noteData,
+        id: newNoteId, ...noteData,
         startBeat: startBeat - measure * 4,
         regionId: newRegionId,
       };
       setRegions(merged);
-      setNotes([...result.notes.filter(n => surviving.has(n.regionId)), newNote]);
+      setNotes(dedupePerfectOverlaps(
+        [...result.notes.filter(n => surviving.has(n.regionId)), newNote],
+        [newNoteId],
+      ));
     }
-  }, []);
+    return newNoteId;
+  }, [dedupePerfectOverlaps]);
   const handleNoteRemove = useCallback((noteId) => {
     setNotes(prev => prev.filter(n => n.id !== noteId));
+  }, []);
+  const handleCommitNoteEdits = useCallback((updates) => {
+    if (!updates || !updates.length) return;
+    const map = new Map(updates.map(u => [u.id, u]));
+    const touchedIds = updates.map(u => u.id);
+    setNotes(prev => dedupePerfectOverlaps(
+      prev.map(n => {
+        const u = map.get(n.id);
+        return u ? { ...n, ...u } : n;
+      }),
+      touchedIds,
+    ));
+  }, [dedupePerfectOverlaps]);
+  const handleNotesDelete = useCallback((ids) => {
+    const set = ids instanceof Set ? ids : new Set(ids);
+    if (set.size === 0) return;
+    setNotes(prev => prev.filter(n => !set.has(n.id)));
   }, []);
 
   // ── Ghost region ─────────────────────────────────────────────
@@ -1134,6 +1188,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   totalMeasuresRef.current      = totalMeasures;
   selectedRegionIdsRef.current  = selectedRegionIds;
   snapEnabledRef.current        = snapEnabled;
+  editingTrackIdRef.current     = editingTrackId;
 
   // ── Left-column resizer drag ───────────────────────────────
   const startLeftColDrag = useCallback((e) => {
@@ -1306,6 +1361,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   }, [seekToClientX, stopAutoScroll]);
 
   // ── Ctrl+Scroll zoom-to-cursor ────────────────────────────────
+  // Phase 118: the wheel listener is attached ONLY while Ctrl/Meta is held. With no
+  //   passive:false listener present during ordinary wheel events, Chromium's diagonal
+  //   wheel-scroll fast-path stays enabled — two-finger trackpad diagonals pan both axes.
   useEffect(() => {
     const el = timelineRef.current;
     if (!el) return;
@@ -1323,14 +1381,33 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         const next = Math.max(minZoom, Math.min(8, prev * factor));
         if (next === prev) return prev;
         pendingScrollRef.current = absoluteX * (next / prev) - mouseX;
-        // Bugs 3+5: piano roll must land at the SAME cursor-anchored target so the
-        // scroll-sync handlers don't race and clobber one panel's anchor with the other's.
         if (pianoScrollRef.current) pendingPianoScrollRef.current = pendingScrollRef.current;
         return next;
       });
     };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
+    let attached = false;
+    const attach = () => {
+      if (attached) return;
+      el.addEventListener('wheel', onWheel, { passive: false });
+      attached = true;
+    };
+    const detach = () => {
+      if (!attached) return;
+      el.removeEventListener('wheel', onWheel);
+      attached = false;
+    };
+    const onKeyDown = (e) => { if (e.ctrlKey || e.metaKey) attach(); };
+    const onKeyUp   = (e) => { if (!e.ctrlKey && !e.metaKey) detach(); };
+    const onBlur    = () => detach();
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup',   onKeyUp);
+    window.addEventListener('blur',    onBlur);
+    return () => {
+      detach();
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup',   onKeyUp);
+      window.removeEventListener('blur',    onBlur);
+    };
   }, []);
 
   // Piano roll Ctrl+Scroll zoom — re-attaches when editor opens/closes
@@ -1351,16 +1428,34 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           : 0.05;
         const next = Math.max(minZoom, Math.min(8, prev * factor));
         if (next === prev) return prev;
-        // zoom-to-cursor for piano roll
         pendingPianoScrollRef.current = absoluteX * (next / prev) - Math.max(0, gridMouseX);
-        // Bugs 3+5: arrangement must land at the SAME target so the sync handlers can't
-        // race-overwrite the piano roll's cursor-anchored value with a divergent one.
         if (timelineRef.current) pendingScrollRef.current = pendingPianoScrollRef.current;
         return next;
       });
     };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
+    let attached = false;
+    const attach = () => {
+      if (attached) return;
+      el.addEventListener('wheel', onWheel, { passive: false });
+      attached = true;
+    };
+    const detach = () => {
+      if (!attached) return;
+      el.removeEventListener('wheel', onWheel);
+      attached = false;
+    };
+    const onKeyDown = (e) => { if (e.ctrlKey || e.metaKey) attach(); };
+    const onKeyUp   = (e) => { if (!e.ctrlKey && !e.metaKey) detach(); };
+    const onBlur    = () => detach();
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup',   onKeyUp);
+    window.addEventListener('blur',    onBlur);
+    return () => {
+      detach();
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup',   onKeyUp);
+      window.removeEventListener('blur',    onBlur);
+    };
   }, [editingTrackId]); // re-attach when editor opens/closes
 
   // Clamp zoom up if viewport widens past the project boundary
@@ -1400,28 +1495,46 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   }, [zoomLevel]);
 
   // ── Scroll sync ───────────────────────────────────────────────
-  // Value-comparison guards: only write if the position actually differs so the
-  // retaliatory scroll event on the counterpart never fires (same value → no scroll event).
+  // Phase 117 — primary defense is the one-shot suppress flag (see refs above): a
+  //   programmatic scroll on a partner sets the partner's flag; the partner's handler
+  //   consumes the flag and returns. This prevents the diagonal-scroll race where the
+  //   partner's mirror-back yanks the source's other axis. The Phase 82 value-comparison
+  //   guard stays as a secondary defense for no-op writes.
+  // Phase 117 — primary defense is the one-shot suppress flag (see refs above): a
+  //   programmatic scroll on a partner sets the partner's flag; the partner's handler
+  //   consumes the flag and returns. This prevents the cross-scroller mirror-back race.
+  //   The Phase 82 value-comparison guard stays as a secondary defense.
   const handleTimelineScroll = useCallback((e) => {
+    if (timelineSuppressRef.current) { timelineSuppressRef.current = false; return; }
     const sl = e.target.scrollLeft;
     const st = e.target.scrollTop;
-    if (pianoScrollRef.current && pianoScrollRef.current.scrollLeft !== sl)
+    if (pianoScrollRef.current && pianoScrollRef.current.scrollLeft !== sl) {
+      pianoScrollSuppressRef.current = true;
       pianoScrollRef.current.scrollLeft = sl;
-    if (trackHeadersRef.current && trackHeadersRef.current.scrollTop !== st)
+    }
+    if (trackHeadersRef.current && trackHeadersRef.current.scrollTop !== st) {
+      trackHeadersSuppressRef.current = true;
       trackHeadersRef.current.scrollTop = st;
+    }
   }, []);
 
   const handlePianoRollScroll = useCallback((e) => {
-    const sl = e.target.scrollLeft;
-    if (timelineRef.current && timelineRef.current.scrollLeft !== sl)
-      timelineRef.current.scrollLeft = sl;
     lastPianoScrollTopRef.current = e.target.scrollTop;
+    if (pianoScrollSuppressRef.current) { pianoScrollSuppressRef.current = false; return; }
+    const sl = e.target.scrollLeft;
+    if (timelineRef.current && timelineRef.current.scrollLeft !== sl) {
+      timelineSuppressRef.current = true;
+      timelineRef.current.scrollLeft = sl;
+    }
   }, []);
 
   const handleTrackHeadersScroll = useCallback((e) => {
+    if (trackHeadersSuppressRef.current) { trackHeadersSuppressRef.current = false; return; }
     const st = e.target.scrollTop;
-    if (timelineRef.current && timelineRef.current.scrollTop !== st)
+    if (timelineRef.current && timelineRef.current.scrollTop !== st) {
+      timelineSuppressRef.current = true;
       timelineRef.current.scrollTop = st;
+    }
   }, []);
 
   // ── Spacebar ─────────────────────────────────────────────────
@@ -1443,9 +1556,18 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const el = document.activeElement;
       const inInput = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.isContentEditable;
 
-      // Delete / Backspace — remove all selected regions + their notes
+      const hasNoteSel = !!editingTrackIdRef.current && noteSelectionRef.current.size > 0;
+
+      // Delete / Backspace — notes path wins when notes selected
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (inInput) return;
+        if (hasNoteSel) {
+          e.preventDefault();
+          const ids = new Set(noteSelectionRef.current);
+          setNotes(prev => prev.filter(n => !ids.has(n.id)));
+          noteSelectionApiRef.current?.clear();
+          return;
+        }
         const ids = selectedRegionIdsRef.current;
         if (!ids.size) return;
         e.preventDefault();
@@ -1455,9 +1577,34 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         return;
       }
 
+      // Cmd+A select-all is handled inside RegionEditor (when editor focused). Let it pass through.
+
       // Copy — Cmd/Ctrl + C
       if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
         if (inInput) return;
+        if (hasNoteSel) {
+          const ids = new Set(noteSelectionRef.current);
+          const selNotes = notesRef.current.filter(n => ids.has(n.id));
+          if (!selNotes.length) return;
+          const regionsMap = new Map(regionsRef.current.map(r => [r.id, r]));
+          const globals = selNotes.map(n => {
+            const r = regionsMap.get(n.regionId);
+            const bottleOrigin = ((r?.startMeasure ?? 0) - (r?.clipOffset ?? 0)) * 4;
+            return {
+              note: n.note,
+              durationBeats: n.durationBeats,
+              globalBeat: bottleOrigin + n.startBeat,
+            };
+          });
+          const anchor = Math.min(...globals.map(g => g.globalBeat));
+          notesClipboardRef.current = globals.map(g => ({
+            note: g.note,
+            durationBeats: g.durationBeats,
+            relBeat: g.globalBeat - anchor,
+          }));
+          clipboardKindRef.current = 'notes';
+          return;
+        }
         const ids = [...selectedRegionIdsRef.current];
         if (!ids.length) return;
         const selectedRegions = regionsRef.current.filter(r => ids.includes(r.id));
@@ -1470,12 +1617,39 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           regions: selectedRegions, notes: selectedNotes,
           leftmostMeasure, topmostTrackIndex,
         }));
+        clipboardKindRef.current = 'regions';
         return;
       }
 
       // Cut — Cmd/Ctrl + X (copy + delete)
       if ((e.metaKey || e.ctrlKey) && e.key === 'x') {
         if (inInput) return;
+        if (hasNoteSel) {
+          e.preventDefault();
+          const ids = new Set(noteSelectionRef.current);
+          const selNotes = notesRef.current.filter(n => ids.has(n.id));
+          if (!selNotes.length) return;
+          const regionsMap = new Map(regionsRef.current.map(r => [r.id, r]));
+          const globals = selNotes.map(n => {
+            const r = regionsMap.get(n.regionId);
+            const bottleOrigin = ((r?.startMeasure ?? 0) - (r?.clipOffset ?? 0)) * 4;
+            return {
+              note: n.note,
+              durationBeats: n.durationBeats,
+              globalBeat: bottleOrigin + n.startBeat,
+            };
+          });
+          const anchor = Math.min(...globals.map(g => g.globalBeat));
+          notesClipboardRef.current = globals.map(g => ({
+            note: g.note,
+            durationBeats: g.durationBeats,
+            relBeat: g.globalBeat - anchor,
+          }));
+          clipboardKindRef.current = 'notes';
+          setNotes(prev => prev.filter(n => !ids.has(n.id)));
+          noteSelectionApiRef.current?.clear();
+          return;
+        }
         const ids = [...selectedRegionIdsRef.current];
         if (!ids.length) return;
         e.preventDefault();
@@ -1489,6 +1663,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           regions: selectedRegions, notes: selectedNotes,
           leftmostMeasure, topmostTrackIndex,
         }));
+        clipboardKindRef.current = 'regions';
         const idSet = new Set(ids);
         setRegions(prev => prev.filter(r => !idSet.has(r.id)));
         setNotes(prev => prev.filter(n => !idSet.has(n.regionId)));
@@ -1499,6 +1674,76 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       // Paste — Cmd/Ctrl + V
       if ((e.metaKey || e.ctrlKey) && e.key === 'v') {
         if (inInput) return;
+
+        // Notes paste path
+        if (clipboardKindRef.current === 'notes' && notesClipboardRef.current?.length) {
+          if (!editingTrackIdRef.current) return;
+          e.preventDefault();
+          const tid = editingTrackIdRef.current;
+          const anchorBeat = Tone.Transport.seconds / (60 / bpm);
+
+          let nextRegions = regionsRef.current;
+          let nextNotes   = notesRef.current;
+          const newIds = [];
+          const pasteEnds = [];
+
+          for (const cn of notesClipboardRef.current) {
+            const globalBeat = anchorBeat + cn.relBeat;
+            if (globalBeat < 0) continue;
+            const measure = Math.floor(globalBeat / 4);
+            const existing = nextRegions.find(r =>
+              r.trackId === tid &&
+              globalBeat >= r.startMeasure * 4 &&
+              globalBeat < (r.startMeasure + r.durationMeasures) * 4
+            );
+            if (existing) {
+              if (existing.loopInterval != null) {
+                const baseEndBeat = (existing.startMeasure + existing.loopInterval) * 4;
+                if (globalBeat >= baseEndBeat) continue;
+              }
+              const bottleOriginBeat = (existing.startMeasure - (existing.clipOffset ?? 0)) * 4;
+              const newId = `note_${nextNoteIdRef.current++}`;
+              nextNotes = [...nextNotes, {
+                id: newId, trackId: tid, note: cn.note,
+                durationBeats: cn.durationBeats,
+                startBeat: globalBeat - bottleOriginBeat,
+                regionId: existing.id,
+              }];
+              newIds.push(newId);
+              pasteEnds.push(globalBeat + cn.durationBeats);
+            } else {
+              const newRegionId = `region_${nextRegionIdRef.current++}`;
+              const newRegion = { id: newRegionId, trackId: tid, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0, fadeInFloor: 0, fadeOutFloor: 0, loopInterval: null };
+              const result = applyDestructiveEdit(nextRegions, nextNotes, newRegion);
+              const merged = [...result.regions, newRegion].filter(r => r.durationMeasures > 0);
+              const surviving = new Set(merged.map(r => r.id));
+              nextRegions = merged;
+              nextNotes = result.notes.filter(n => surviving.has(n.regionId));
+              const newId = `note_${nextNoteIdRef.current++}`;
+              nextNotes = [...nextNotes, {
+                id: newId, trackId: tid, note: cn.note,
+                durationBeats: cn.durationBeats,
+                startBeat: globalBeat - measure * 4,
+                regionId: newRegionId,
+              }];
+              newIds.push(newId);
+              pasteEnds.push(globalBeat + cn.durationBeats);
+            }
+          }
+
+          if (newIds.length === 0) return;
+          setRegions(nextRegions);
+          setNotes(dedupePerfectOverlaps(nextNotes, newIds));
+          noteSelectionApiRef.current?.setIds(newIds);
+          if (Tone.Transport.state !== 'started') {
+            const maxEnd = Math.max(...pasteEnds);
+            Tone.Transport.seconds = maxEnd * (60 / bpm);
+            updatePlayhead();
+          }
+          return;
+        }
+
+        // Regions paste path
         if (!clipboardRef.current) return;
         e.preventDefault();
         const { regions: srcRegions, notes: srcNotes, leftmostMeasure, topmostTrackIndex } = clipboardRef.current;
@@ -1940,6 +2185,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               regions={regions.filter(r => r.trackId === editingTrackId)}
               onNoteAdd={handleNoteAdd}
               onNoteRemove={handleNoteRemove}
+              onCommitNoteEdits={handleCommitNoteEdits}
+              onNotesDelete={handleNotesDelete}
+              onNoteSelectionChange={(ids) => { noteSelectionRef.current = ids; }}
+              exposeSelectionSetter={(api) => { noteSelectionApiRef.current = api; }}
+              magnetOn={snapEnabled}
               zoomLevel={zoomLevel}
               pixelsPerMeasure={pixelsPerMeasure}
               totalMeasures={totalMeasures}

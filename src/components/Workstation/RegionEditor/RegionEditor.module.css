@@ -15,9 +15,58 @@
   background: var(--bg-panel);
   display: flex;
   align-items: flex-end;
-  justify-content: center;
+  justify-content: space-between;
   padding: 0 16px;
   gap: 4px;
+  position: relative;
+}
+.editorTabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  flex: 1;
+  justify-content: center;
+}
+.editorTools {
+  position: absolute;
+  right: 16px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.snapLabel {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-dimmer);
+}
+.snapSelect {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg-base);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235DCAA5' fill-opacity='0.7'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  border: 1px solid var(--border-mid);
+  color: var(--form-text);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 3px 22px 3px 8px;
+  border-radius: 2px;
+  cursor: pointer;
+  outline: none;
+}
+.snapSelect:hover,
+.snapSelect:focus {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+.snapSelect option {
+  background: var(--input-bg);
+  color: var(--text-primary);
 }
 
 .tabBtn {
@@ -44,13 +93,22 @@
 /* Hide panel without unmounting (preserves scroll position) */
 .hidden { display: none; }
 
-/* Placeholder panels for Instrument / Effects — lives inside .pianoRoll flex row */
-.placeholder {
-  flex: 1;
+/* Placeholder overlay for Instrument / Effects — sibling of .pianoRoll inside the
+   position:relative .editorBody. Absolutely positioned over the piano-roll area only
+   (right of the inspector + col-resizer). Keeps .pianoRoll mounted so scrollLeft
+   survives tab switches (bug 12). */
+.placeholderOverlay {
+  position: absolute;
+  left: var(--left-col-width, 316px);
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 0;
+  background: var(--bg-base);
+  pointer-events: all;
 }
 .placeholderText {
   font-size: 9px;
@@ -58,6 +116,9 @@
   text-transform: uppercase;
   color: var(--text-dimmer);
 }
+
+/* When not on the notes tab, hide grid's interactive children but preserve geometry. */
+.gridHiddenContent > * { visibility: hidden; }
 
 /* Row containing inspector + piano roll */
 .editorBody {
@@ -304,13 +365,50 @@
   position: absolute;
   background: var(--track-color, var(--accent-color));
   border-radius: 2px;
-  cursor: pointer;
+  cursor: grab;
   pointer-events: all;
   z-index: 2;
+  /* 1-px inner grey rim (bug 9) — inset = no geometry impact */
+  box-shadow: inset 0 0 0 1px rgba(128, 128, 128, 0.4);
 }
 .noteBlock:hover {
-  opacity: 1;
-  box-shadow: 0 0 4px var(--track-color, var(--accent-color));
+  /* Layer the inset rim with the outer hover glow */
+  box-shadow:
+    inset 0 0 0 1px rgba(128, 128, 128, 0.4),
+    0 0 4px var(--track-color, var(--accent-color));
+}
+.noteSelected {
+  outline: 1.5px solid var(--text-primary);
+  outline-offset: 0;
+  z-index: 4;
+}
+.noteSelectedLive {
+  outline: 1.5px solid var(--text-primary);
+  outline-offset: 0;
+  z-index: 4;
+}
+
+/* Suppress hover effects + change cursor while dragging */
+/* Preserve the 1-px inner rim during drag (bug 1, Phase 116) — strip only the outer
+   hover glow so the note doesn't pulse with shadow while moving. */
+:global(body.is-note-dragging) .noteBlock {
+  box-shadow: inset 0 0 0 1px rgba(128, 128, 128, 0.4);
+  cursor: grabbing;
+}
+:global(body.is-note-dragging) .grid { cursor: grabbing; }
+
+/* ── Marquee selection box ───────────────────────────────── */
+.noteMarquee {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  border: 1px dashed var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 12%, transparent);
+  pointer-events: none;
+  opacity: 0;
+  z-index: 5;
 }
 
 /* Phase 110: looped-region tint + ghost notes inside piano roll */
