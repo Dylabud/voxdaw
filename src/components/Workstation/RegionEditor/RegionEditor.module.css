@@ -313,6 +313,21 @@
   box-shadow: 0 0 4px var(--track-color, var(--accent-color));
 }
 
+/* Phase 110: looped-region tint + ghost notes inside piano roll */
+.loopTintEditor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--loop-tint);
+  pointer-events: none;
+  z-index: 1; /* same band as .regionHighlight, below noteBlocks */
+}
+.noteBlockGhost {
+  opacity: 0.45;
+  pointer-events: none;
+  cursor: default;
+}
+
 /* ── Playhead ────────────────────────────────────────────── */
 .playhead {
   position: absolute;

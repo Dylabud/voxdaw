@@ -2,27 +2,7 @@ import { useRef, useEffect, useState } from 'react';
 import * as Tone from 'tone';
 import styles from './RegionEditor.module.css';
 import { computeGridBg } from '../WorkstationShell';
-
-const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-const BLACK = new Set(['C#','D#','F#','G#','A#']);
-
-function buildKeys(loOct, hiOct) {
-  const keys = [];
-  for (let oct = hiOct; oct >= loOct; oct--) {
-    for (let i = 11; i >= 0; i--) {
-      const name = NOTE_NAMES[i];
-      keys.push({
-        name: `${name}${oct}`,
-        label: name === 'C' ? `C${oct}` : '',
-        black: BLACK.has(name),
-      });
-    }
-  }
-  return keys;
-}
-const KEYS          = buildKeys(-2, 8); // C-2..C8 → 132 keys
-const KEY_H         = 18;
-const PIANO_ROLL_H  = KEYS.length * KEY_H;
+import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
 
 const INSTRUMENTS = [
   'fm pluck', 'analog', 'strings', 'am', 'pluck',
@@ -233,44 +213,66 @@ export default function RegionEditor({
             {/* Row shading overlay (accidental/natural, theme-aware) */}
             <div className={styles.gridShading} style={{ minHeight: PIANO_ROLL_H }} />
 
-            {/* Region highlights — clip boundary markers behind MIDI notes */}
-            {regions?.map(r => (
-              <div
-                key={r.id}
-                className={styles.regionHighlight}
-                style={{
-                  left:  r.startMeasure     * pixelsPerMeasure,
-                  width: r.durationMeasures * pixelsPerMeasure,
-                }}
-              />
-            ))}
-
-            {/* Note blocks — bottle-local startBeat converted to global pixels via region origin.
-                Notes outside their region's visible window (clipOffset .. clipOffset+duration) are hidden. */}
-            {notes.map(n => {
-              const keyIndex = KEYS.findIndex(k => k.name === n.note);
-              if (keyIndex < 0) return null;
-              const r = regions?.find(rg => rg.id === n.regionId);
-              if (!r) return null;
-              const clipOffset       = r.clipOffset ?? 0;
-              const windowStartBeat  = clipOffset * 4;
-              const windowEndBeat    = (clipOffset + r.durationMeasures) * 4;
-              if (n.startBeat < windowStartBeat || n.startBeat >= windowEndBeat) return null;
-              const bottleOriginBeat = (r.startMeasure - clipOffset) * 4;
-              const globalLeftBeat   = bottleOriginBeat + n.startBeat;
-              return (
-                <div
-                  key={n.id}
-                  className={styles.noteBlock}
+            {/* Region highlights + loop tint (Phase 110) */}
+            {regions?.flatMap(r => {
+              const out = [
+                <div key={`hl-${r.id}`} className={styles.regionHighlight}
                   style={{
-                    top:    keyIndex * KEY_H,
-                    left:   globalLeftBeat * ppb,
-                    width:  Math.max(n.durationBeats * ppb - 1, 2),
-                    height: KEY_H - 1,
-                  }}
-                  onClick={(e) => { e.stopPropagation(); onNoteRemove(n.id); }}
-                />
-              );
+                    left:  r.startMeasure     * pixelsPerMeasure,
+                    width: r.durationMeasures * pixelsPerMeasure,
+                  }} />
+              ];
+              if ((r.loopInterval ?? null) !== null && r.durationMeasures > r.loopInterval) {
+                out.push(
+                  <div key={`tint-${r.id}`} className={styles.loopTintEditor}
+                    style={{
+                      left:  (r.startMeasure + r.loopInterval) * pixelsPerMeasure,
+                      width: (r.durationMeasures - r.loopInterval) * pixelsPerMeasure,
+                    }} />
+                );
+              }
+              return out;
+            })}
+
+            {/* Note blocks — bottle-local startBeat converted to global pixels.
+                Looped regions emit one copy per iteration (Phase 110); ghosts (i > 0) are
+                dimmed and pointer-events: none. */}
+            {notes.flatMap(n => {
+              const r = regions?.find(rg => rg.id === n.regionId);
+              if (!r) return [];
+              const keyIndex = KEYS.findIndex(k => k.name === n.note);
+              if (keyIndex < 0) return [];
+              const clipOffset       = r.clipOffset ?? 0;
+              const baseLoop         = (r.loopInterval ?? null) !== null ? r.loopInterval : r.durationMeasures;
+              const windowStartBeat  = clipOffset * 4;
+              const windowEndBeat    = (clipOffset + baseLoop) * 4;
+              if (n.startBeat < windowStartBeat || n.startBeat >= windowEndBeat) return [];
+              const bottleOriginBeat   = (r.startMeasure - clipOffset) * 4;
+              const baseGlobalLeftBeat = bottleOriginBeat + n.startBeat;
+              const iterations = (r.loopInterval ?? null) !== null
+                ? Math.ceil(r.durationMeasures / r.loopInterval)
+                : 1;
+              const out = [];
+              const regionEndBeat = (r.startMeasure + r.durationMeasures) * 4;
+              for (let i = 0; i < iterations; i++) {
+                const iterOffsetBeats = i * (r.loopInterval ?? 0) * 4;
+                const globalLeftBeat  = baseGlobalLeftBeat + iterOffsetBeats;
+                if (globalLeftBeat >= regionEndBeat) break;
+                out.push(
+                  <div
+                    key={`${n.id}-${i}`}
+                    className={`${styles.noteBlock}${i > 0 ? ` ${styles.noteBlockGhost}` : ''}`}
+                    style={{
+                      top:    keyIndex * KEY_H,
+                      left:   globalLeftBeat * ppb,
+                      width:  Math.max(n.durationBeats * ppb - 1, 2),
+                      height: KEY_H - 1,
+                    }}
+                    onClick={i === 0 ? (e) => { e.stopPropagation(); onNoteRemove(n.id); } : undefined}
+                  />
+                );
+              }
+              return out;
             })}
 
             {/* Playhead */}

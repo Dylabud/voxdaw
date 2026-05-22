@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react
 import * as Tone from 'tone';
 import styles from './WorkstationShell.module.css';
 import RegionEditor from './RegionEditor/RegionEditor';
+import { KEYS } from './pitchKeys';
 
 const PIXELS_PER_BEAT    = 25;
 const PIXELS_PER_MEASURE = PIXELS_PER_BEAT * 4;  // 100px at zoom 1
@@ -18,6 +19,9 @@ const TRACK_COLORS = [
 const TRACK_H            = 72;  // matches .trackLane height in CSS
 const RULER_HEIGHT       = 24;  // matches .ruler height in CSS
 const MIN_REGION         = 0.0625; // minimum region width in measures (one 16th note)
+const LOOP_EPS           = 1e-6;
+const normalizeLoopInterval = (durationMeasures, loopInterval) =>
+  (loopInterval == null || durationMeasures <= loopInterval + LOOP_EPS) ? null : loopInterval;
 
 const formatTime = (t) => {
   const mins = Math.floor(t / 60);
@@ -92,6 +96,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [toastMessage,     setToastMessage]     = useState(null);
   const [activeTrackId,    setActiveTrackId]    = useState(null);
   const [snapEnabled,      setSnapEnabled]      = useState(true);
+  const [advancedMode,     setAdvancedMode]     = useState(false);
 
   // Derived zoom values
   const pixelsPerMeasure = PIXELS_PER_MEASURE * zoomLevel;
@@ -206,6 +211,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     );
 
     if (existingRegion) {
+      // Phase 110: block placements inside the ghost (looped) area.
+      if (existingRegion.loopInterval != null) {
+        const baseEndBeat = (existingRegion.startMeasure + existingRegion.loopInterval) * 4;
+        if (startBeat >= baseEndBeat) return;
+      }
       const bottleOriginBeat = (existingRegion.startMeasure - (existingRegion.clipOffset ?? 0)) * 4;
       setNotes(prev => [...prev, {
         id: `note_${nextNoteIdRef.current++}`, ...noteData,
@@ -214,7 +224,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       }]);
     } else {
       const newRegionId = `region_${nextRegionIdRef.current++}`;
-      const newRegion = { id: newRegionId, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0 };
+      const newRegion = { id: newRegionId, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0, fadeInFloor: 0, fadeOutFloor: 0, loopInterval: null };
       const result = applyDestructiveEdit(regionsRef.current, notesRef.current, newRegion);
       const merged = [...result.regions, newRegion].filter(r => r.durationMeasures > 0);
       const surviving = new Set(merged.map(r => r.id));
@@ -281,7 +291,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (isPositionOccupied(trackId, measure)) return;
     const n = nextRegionIdRef.current++;
     pasteAnchorTrackIndexRef.current = tracksRef.current.findIndex(t => t.id === trackId);
-    setRegions(prev => [...prev, { id: `r${n}`, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0 }]);
+    setRegions(prev => [...prev, { id: `r${n}`, trackId, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0, fadeInFloor: 0, fadeOutFloor: 0, loopInterval: null }]);
     if (measure + 1 > totalMeasures - 16) setTotalMeasures(prev => prev + 64);
   };
 
@@ -316,7 +326,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         const newDur = newStart - oldStart;
         const fIn  = Math.min(r.fadeIn  ?? 0, newDur);
         const fOut = Math.min(r.fadeOut ?? 0, Math.max(0, newDur - fIn));
-        nextRegions.push({ ...r, durationMeasures: newDur, fadeIn: fIn, fadeOut: fOut });
+        const clampedLI = normalizeLoopInterval(newDur, r.loopInterval ?? null);
+        nextRegions.push({ ...r, durationMeasures: newDur, fadeIn: fIn, fadeOut: fOut, fadeInFloor: r.fadeInFloor ?? 0, fadeOutFloor: r.fadeOutFloor ?? 0, loopInterval: clampedLI });
         continue;
       }
       // Case C: left trim — bottle preserved; window starts later & advances clipOffset
@@ -325,6 +336,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         const newDur = oldEnd - newEnd;
         // Left side was eaten — fadeIn no longer meaningful; preserve fadeOut clamped.
         const fOut = Math.min(r.fadeOut ?? 0, newDur);
+        const clampedLI = normalizeLoopInterval(newDur, r.loopInterval ?? null);
         nextRegions.push({
           ...r,
           startMeasure: newEnd,
@@ -332,6 +344,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           clipOffset: oldOffset + shift,
           fadeIn: 0,
           fadeOut: fOut,
+          fadeInFloor: 0,
+          fadeOutFloor: r.fadeOutFloor ?? 0,
+          loopInterval: clampedLI,
         });
         continue;
       }
@@ -341,8 +356,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const leftDur  = newStart - oldStart;
       const rightDur = oldEnd - newEnd;
       const leftFIn  = Math.min(r.fadeIn ?? 0, leftDur);
+      const leftLI  = normalizeLoopInterval(leftDur,  r.loopInterval ?? null);
+      const rightLI = normalizeLoopInterval(rightDur, r.loopInterval ?? null);
       nextRegions.push(
-        { ...r, durationMeasures: leftDur, fadeIn: leftFIn, fadeOut: 0 },
+        { ...r, durationMeasures: leftDur, fadeIn: leftFIn, fadeOut: 0, fadeInFloor: r.fadeInFloor ?? 0, fadeOutFloor: 0, loopInterval: leftLI },
         {
           ...r,
           id: rightId,
@@ -351,6 +368,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           clipOffset: oldOffset + rightShift,
           fadeIn: 0,
           fadeOut: Math.min(r.fadeOut ?? 0, rightDur),
+          fadeInFloor: 0,
+          fadeOutFloor: r.fadeOutFloor ?? 0,
+          loopInterval: rightLI,
         },
       );
       // Deep-clone every note belonging to r → new note IDs linked to rightId.
@@ -387,11 +407,22 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             const tIdx = tracksRef.current.findIndex(t => t.id === r.trackId);
             const el   = timelineRef.current?.querySelector(`[data-region-id="${cId}"]`) ?? null;
             const co   = r.clipOffset ?? 0;
+            const fIn   = r.fadeIn        ?? 0;
+            const fOut  = r.fadeOut       ?? 0;
+            const fInF  = r.fadeInFloor   ?? 0;
+            const fOutF = r.fadeOutFloor  ?? 0;
+            const loopI = r.loopInterval  ?? null;
             return [{
               regionId: cId, trackId: r.trackId, origTrackIndex: tIdx,
               pendingTrackId: r.trackId, pendingTrackIndex: tIdx,
               initStart: r.startMeasure, initDuration: r.durationMeasures, initClipOffset: co,
               pendingStart: r.startMeasure, pendingDuration: r.durationMeasures, pendingClipOffset: co,
+              initFadeIn: fIn, initFadeOut: fOut,
+              initFadeInFloor: fInF, initFadeOutFloor: fOutF,
+              pendingFadeIn: fIn, pendingFadeOut: fOut,
+              pendingFadeInFloor: fInF, pendingFadeOutFloor: fOutF,
+              initLoopInterval: loopI,
+              pendingLoopInterval: loopI, // null stays null; loop modes set their fallback inline
               el,
             }];
           })
@@ -424,12 +455,19 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       initClipOffset: co,
       initFadeIn: fIn,
       initFadeOut: fOut,
+      initFadeInFloor:  region.fadeInFloor  ?? 0,
+      initFadeOutFloor: region.fadeOutFloor ?? 0,
+      regionHeight: regionEl?.getBoundingClientRect().height ?? 64,
       el: regionEl,
       pendingStart: region.startMeasure,
       pendingDuration: region.durationMeasures,
       pendingClipOffset: co,
       pendingFadeIn: fIn,
       pendingFadeOut: fOut,
+      pendingFadeInFloor:  region.fadeInFloor  ?? 0,
+      pendingFadeOutFloor: region.fadeOutFloor ?? 0,
+      initLoopInterval:    region.loopInterval ?? null,
+      pendingLoopInterval: region.loopInterval ?? null,
       startScrollLeft: timelineRef.current?.scrollLeft ?? 0,
       dragStarted: false,
       companions,
@@ -444,10 +482,18 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 4) return;
         d.dragStarted = true;
         document.body.classList.add('is-dragging');
-        if (d.mode === 'fade-left' || d.mode === 'fade-right' || d.mode === 'fade-both') {
+        if (d.mode === 'fade-left' || d.mode === 'fade-right' || d.mode === 'fade-both'
+            || d.mode === 'fade-left-floor' || d.mode === 'fade-right-floor') {
           document.body.classList.add('is-fade-dragging');
         }
-        document.body.style.cursor = d.mode === 'move' ? 'grabbing' : 'ew-resize';
+        if (d.mode === 'loop-right' || d.mode === 'loop-resize-base') {
+          document.body.classList.add('is-loop-dragging');
+        }
+        // Phase 108: per-region marker scopes handle visibility to dragged region(s) only.
+        if (d.el) d.el.setAttribute('data-active-drag', 'true');
+        for (const c of d.companions) { if (c.el) c.el.setAttribute('data-active-drag', 'true'); }
+        const isFloor = d.mode === 'fade-left-floor' || d.mode === 'fade-right-floor';
+        document.body.style.cursor = d.mode === 'move' ? 'grabbing' : (isFloor ? 'ns-resize' : 'ew-resize');
         if (d.el) d.el.style.filter = 'brightness(0.6)';
         for (const c of d.companions) { if (c.el) c.el.style.filter = 'brightness(0.6)'; }
       }
@@ -521,28 +567,103 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           c.pendingDuration = Math.max(snapEnabledRef.current ? snapInc : MIN_REGION, c.initDuration + rightActualDelta);
           if (c.el) { c.el.style.width = `${c.pendingDuration * pixelsPerMeasure}px`; c.el.style.zIndex = '10'; }
         }
+      } else if (d.mode === 'loop-right') {
+        // Same right-edge stretching math as resize-right; lock loopInterval to initDuration
+        // if it was previously null (anchor and each companion locks its own base).
+        const rawEnd     = d.initStart + d.initDuration + rawDelta;
+        const snappedEnd = snapEnabledRef.current
+          ? Math.round(rawEnd / snapInc) * snapInc
+          : rawEnd;
+        newDuration = Math.max(snapEnabledRef.current ? snapInc : MIN_REGION, snappedEnd - d.initStart);
+        d.pendingLoopInterval = d.initLoopInterval ?? d.initDuration;
+        const rightActualDelta = newDuration - d.initDuration;
+        for (const c of d.companions) {
+          c.pendingDuration = Math.max(snapEnabledRef.current ? snapInc : MIN_REGION, c.initDuration + rightActualDelta);
+          c.pendingLoopInterval = c.initLoopInterval ?? c.initDuration;
+          if (c.el) { c.el.style.width = `${c.pendingDuration * pixelsPerMeasure}px`; c.el.style.zIndex = '10'; }
+        }
+        // Phase 110/111: mid-drag setRegions so new iterations/segments/dividers/ghost notes render live.
+        // Scoped to loop-right only (other modes preserve the direct-DOM Phase 95 pattern).
+        // Phase 111: normalize so collapsing the loop back to base clears loopInterval live (not just on drop).
+        const anchorDur = newDuration;
+        const anchorLI  = normalizeLoopInterval(newDuration, d.pendingLoopInterval);
+        const companionsSnapshot = d.companions.map(c => ({
+          regionId: c.regionId,
+          durationMeasures: c.pendingDuration,
+          loopInterval: normalizeLoopInterval(c.pendingDuration, c.pendingLoopInterval),
+        }));
+        setRegions(prev => prev.map(r => {
+          if (r.id === d.regionId) return { ...r, durationMeasures: anchorDur, loopInterval: anchorLI };
+          const comp = companionsSnapshot.find(c => c.regionId === r.id);
+          if (comp) return { ...r, durationMeasures: comp.durationMeasures, loopInterval: comp.loopInterval };
+          return r;
+        }));
+      } else if (d.mode === 'loop-resize-base') {
+        // Drag the first dashed divider — resizes loopInterval; durationMeasures pushes
+        // out only if the new base would exceed it. Anchor + cluster companions.
+        const initLoop = d.initLoopInterval ?? d.initDuration;
+        const rawLoop  = initLoop + rawDelta;
+        const snapped  = snapEnabledRef.current ? Math.round(rawLoop / snapInc) * snapInc : rawLoop;
+        const newLoop  = Math.max(snapEnabledRef.current ? snapInc : MIN_REGION, snapped);
+        d.pendingLoopInterval = newLoop;
+        newDuration = Math.max(d.initDuration, newLoop);
+        const loopDelta = newLoop - initLoop;
+        for (const c of d.companions) {
+          const cInit   = c.initLoopInterval ?? c.initDuration;
+          const cNewLoop = Math.max(snapEnabledRef.current ? snapInc : MIN_REGION, cInit + loopDelta);
+          c.pendingLoopInterval = cNewLoop;
+          c.pendingDuration     = Math.max(c.initDuration, cNewLoop);
+          if (c.el) { c.el.style.width = `${c.pendingDuration * pixelsPerMeasure}px`; c.el.style.zIndex = '10'; }
+        }
       } else if (d.mode === 'fade-left') {
         // Continuous (not snap-quantized) per user choice. Push opposing fade if collision.
-        const candFadeIn = Math.max(0, Math.min(d.initDuration, d.initFadeIn + rawDelta));
-        let candFadeOut = d.initFadeOut;
-        if (candFadeIn + candFadeOut > d.initDuration) {
-          candFadeOut = Math.max(0, d.initDuration - candFadeIn);
+        // Cluster: apply same rawDelta to each companion, clamped per-region.
+        const applyFadeLeft = (initIn, initOut, dur) => {
+          const fIn = Math.max(0, Math.min(dur, initIn + rawDelta));
+          let fOut = initOut;
+          if (fIn + fOut > dur) fOut = Math.max(0, dur - fIn);
+          return [fIn, fOut];
+        };
+        [d.pendingFadeIn, d.pendingFadeOut] = applyFadeLeft(d.initFadeIn, d.initFadeOut, d.initDuration);
+        for (const c of d.companions) {
+          [c.pendingFadeIn, c.pendingFadeOut] = applyFadeLeft(c.initFadeIn, c.initFadeOut, c.initDuration);
         }
-        d.pendingFadeIn  = candFadeIn;
-        d.pendingFadeOut = candFadeOut;
       } else if (d.mode === 'fade-right') {
-        const candFadeOut = Math.max(0, Math.min(d.initDuration, d.initFadeOut - rawDelta));
-        let candFadeIn = d.initFadeIn;
-        if (candFadeIn + candFadeOut > d.initDuration) {
-          candFadeIn = Math.max(0, d.initDuration - candFadeOut);
+        const applyFadeRight = (initIn, initOut, dur) => {
+          const fOut = Math.max(0, Math.min(dur, initOut - rawDelta));
+          let fIn = initIn;
+          if (fIn + fOut > dur) fIn = Math.max(0, dur - fOut);
+          return [fIn, fOut];
+        };
+        [d.pendingFadeIn, d.pendingFadeOut] = applyFadeRight(d.initFadeIn, d.initFadeOut, d.initDuration);
+        for (const c of d.companions) {
+          [c.pendingFadeIn, c.pendingFadeOut] = applyFadeRight(c.initFadeIn, c.initFadeOut, c.initDuration);
         }
-        d.pendingFadeIn  = candFadeIn;
-        d.pendingFadeOut = candFadeOut;
       } else if (d.mode === 'fade-both') {
-        // Joint slides; fadeIn + fadeOut = initDuration is preserved (was merged on grab).
-        const jointMeasure = Math.max(0, Math.min(d.initDuration, d.initFadeIn + rawDelta));
-        d.pendingFadeIn  = jointMeasure;
-        d.pendingFadeOut = d.initDuration - jointMeasure;
+        // Joint slides by rawDelta; clamp per-region against own initDuration.
+        const applyFadeBoth = (initIn, dur) => {
+          const joint = Math.max(0, Math.min(dur, initIn + rawDelta));
+          return [joint, dur - joint];
+        };
+        [d.pendingFadeIn, d.pendingFadeOut] = applyFadeBoth(d.initFadeIn, d.initDuration);
+        for (const c of d.companions) {
+          [c.pendingFadeIn, c.pendingFadeOut] = applyFadeBoth(c.initFadeIn, c.initDuration);
+        }
+      } else if (d.mode === 'fade-left-floor' || d.mode === 'fade-right-floor') {
+        // Vertical drag: up (negative dy) raises the floor; capped at 80%.
+        const dy = e.clientY - d.startY;
+        const floorDelta = dy / d.regionHeight;
+        const isLeft = d.mode === 'fade-left-floor';
+        const anchorInit = isLeft ? d.initFadeInFloor : d.initFadeOutFloor;
+        const next = Math.max(0, Math.min(0.8, anchorInit - floorDelta));
+        if (isLeft) d.pendingFadeInFloor  = next;
+        else        d.pendingFadeOutFloor = next;
+        for (const c of d.companions) {
+          const cInit = isLeft ? c.initFadeInFloor : c.initFadeOutFloor;
+          const cNext = Math.max(0, Math.min(0.8, cInit - floorDelta));
+          if (isLeft) c.pendingFadeInFloor  = cNext;
+          else        c.pendingFadeOutFloor = cNext;
+        }
       } else if (d.mode === 'resize-left') {
         // Bottle/Window: keep bottle origin (initStart - initClipOffset) fixed.
         // clipOffset = initClipOffset + (newStart - initStart) and is allowed to go negative —
@@ -558,11 +679,24 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         newStart            = candStart;
         newDuration         = d.initDuration + (d.initStart - candStart);
         d.pendingClipOffset = d.initClipOffset + (candStart - d.initStart);
+        // Phase 106: if region had a base loop, the visible loop length tracks the moving edge.
+        const anchorMovedBy = candStart - d.initStart; // positive when shrinking from left
+        if (d.initLoopInterval !== null) {
+          d.pendingLoopInterval = Math.max(MIN_REGION, Math.min(newDuration, d.initLoopInterval - anchorMovedBy));
+        } else {
+          d.pendingLoopInterval = null;
+        }
         for (const c of d.companions) {
           const cStart    = Math.max(0, Math.min(c.initStart + preDelta, c.initStart + c.initDuration - minDur));
           c.pendingStart       = cStart;
           c.pendingDuration    = c.initDuration + (c.initStart - cStart);
           c.pendingClipOffset  = c.initClipOffset + (cStart - c.initStart);
+          if (c.initLoopInterval !== null) {
+            const cMovedBy = cStart - c.initStart;
+            c.pendingLoopInterval = Math.max(MIN_REGION, Math.min(c.pendingDuration, c.initLoopInterval - cMovedBy));
+          } else {
+            c.pendingLoopInterval = null;
+          }
           if (c.el) {
             c.el.style.left  = `${c.pendingStart    * pixelsPerMeasure}px`;
             c.el.style.width = `${c.pendingDuration * pixelsPerMeasure}px`;
@@ -579,23 +713,119 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         d.pendingFadeOut = fOut;
       }
 
+      // Live fade overlay + handle DOM updates (Zero-Re-render Rule).
+      const writeFadeDom = (el, pFadeIn, pFadeOut, pFloorIn, pFloorOut) => {
+        if (!el) return;
+        const fInPx  = pFadeIn  * pixelsPerMeasure;
+        const fOutPx = pFadeOut * pixelsPerMeasure;
+        const floorInPct  = (pFloorIn  ?? 0) * 100;
+        const floorOutPct = (pFloorOut ?? 0) * 100;
+        const inEl  = el.querySelector('[data-fade-in]');
+        const outEl = el.querySelector('[data-fade-out]');
+        const hLEl  = el.querySelector('[data-fade-handle-left]');
+        const hREl  = el.querySelector('[data-fade-handle-right]');
+        if (inEl)  {
+          inEl.style.display  = fInPx  > 0 ? '' : 'none';
+          inEl.style.width    = `${fInPx}px`;
+          inEl.style.clipPath = `polygon(0 0, 100% 0, 0 ${100 - floorInPct}%)`;
+        }
+        if (outEl) {
+          outEl.style.display = fOutPx > 0 ? '' : 'none';
+          outEl.style.width   = `${fOutPx}px`;
+          outEl.style.clipPath = `polygon(0 0, 100% 0, 100% ${100 - floorOutPct}%)`;
+        }
+        if (hLEl)  hLEl.style.left  = `${fInPx}px`;
+        if (hREl)  hREl.style.right = `${fOutPx}px`;
+        const fLEl = el.querySelector('[data-fade-floor-left]');
+        const fREl = el.querySelector('[data-fade-floor-right]');
+        if (fLEl) fLEl.style.bottom = `${floorInPct}%`;
+        if (fREl) fREl.style.bottom = `${floorOutPct}%`;
+      };
+
       if (d.el) {
         const yOffset = (d.pendingTrackIndex - d.origTrackIndex) * TRACK_H;
         d.el.style.left      = `${newStart    * pixelsPerMeasure}px`;
         d.el.style.width     = `${newDuration * pixelsPerMeasure}px`;
         d.el.style.transform = `translateY(${yOffset}px)`;
         d.el.style.zIndex    = '10';
-        // Live fade overlay + handle DOM updates (Zero-Re-render Rule).
-        const fInPx  = d.pendingFadeIn  * pixelsPerMeasure;
-        const fOutPx = d.pendingFadeOut * pixelsPerMeasure;
-        const inEl   = d.el.querySelector('[data-fade-in]');
-        const outEl  = d.el.querySelector('[data-fade-out]');
-        const hLEl   = d.el.querySelector('[data-fade-handle-left]');
-        const hREl   = d.el.querySelector('[data-fade-handle-right]');
-        if (inEl)  { inEl.style.display  = fInPx  > 0 ? '' : 'none'; inEl.style.width  = `${fInPx}px`; }
-        if (outEl) { outEl.style.display = fOutPx > 0 ? '' : 'none'; outEl.style.width = `${fOutPx}px`; }
-        if (hLEl)  hLEl.style.left  = `${fInPx}px`;
-        if (hREl)  hREl.style.right = `${fOutPx}px`;
+        writeFadeDom(d.el, d.pendingFadeIn, d.pendingFadeOut, d.pendingFadeInFloor, d.pendingFadeOutFloor);
+      }
+      // Companion fade DOM writes (cluster bulk fade — Phase 103).
+      const isFadeMode = d.mode === 'fade-left' || d.mode === 'fade-right' || d.mode === 'fade-both'
+                       || d.mode === 'fade-left-floor' || d.mode === 'fade-right-floor';
+      if (isFadeMode) {
+        for (const c of d.companions) {
+          writeFadeDom(c.el, c.pendingFadeIn, c.pendingFadeOut, c.pendingFadeInFloor, c.pendingFadeOutFloor);
+        }
+      }
+      // Phase 107: live preview for loop-resize-base + resize-left (loop tint, first divider, mini-notes).
+      const writeLoopDom = (el, loopInterval, clipOffset) => {
+        if (!el) return;
+        const baseLoop = loopInterval ?? null;
+        if (baseLoop !== null) {
+          const xPx = baseLoop * pixelsPerMeasure;
+          const tintEl = el.querySelector('[data-loop-tint]');
+          if (tintEl) tintEl.style.left = `${xPx}px`;
+          const firstDiv = el.querySelector('[data-loop-divider-first]');
+          if (firstDiv) firstDiv.style.left = `${xPx}px`;
+          // Phase 113: sync segment left/width so iteration boundaries paint in the same
+          // frame as the divider/tint. Last segment is anchored via right:0 (Phase 112).
+          const segEls = el.querySelectorAll('[data-loop-segment]');
+          let maxI = -1;
+          segEls.forEach(s => { const i = parseInt(s.dataset.loopSegmentI, 10); if (i > maxI) maxI = i; });
+          segEls.forEach(s => {
+            const i = parseInt(s.dataset.loopSegmentI, 10);
+            s.style.left = `${i * baseLoop * pixelsPerMeasure}px`;
+            if (i < maxI) s.style.width = `${baseLoop * pixelsPerMeasure}px`;
+          });
+        }
+        const wsb = (clipOffset ?? 0) * 4;
+        const ppb = pixelsPerMeasure / 4;
+        el.querySelectorAll('[data-mini-note]').forEach((mn) => {
+          const iter = parseInt(mn.dataset.miniNoteIter, 10) || 0;
+          const sb   = parseFloat(mn.dataset.miniNoteStartbeat);
+          const local = sb - wsb;
+          mn.style.left = `${iter * (baseLoop ?? 0) * pixelsPerMeasure + local * ppb}px`;
+        });
+      };
+      if (d.mode === 'loop-resize-base') {
+        writeLoopDom(d.el, d.pendingLoopInterval, d.initClipOffset);
+        for (const c of d.companions) writeLoopDom(c.el, c.pendingLoopInterval, c.initClipOffset);
+        // Phase 111: mid-drag setRegions so segments/dividers/ghost notes reflow when duration extends past initDuration.
+        const anchorDur = newDuration;
+        const anchorLI  = d.pendingLoopInterval;
+        const snap = d.companions.map(c => ({
+          regionId: c.regionId, durationMeasures: c.pendingDuration, loopInterval: c.pendingLoopInterval,
+        }));
+        setRegions(prev => prev.map(r => {
+          if (r.id === d.regionId) return { ...r, durationMeasures: anchorDur, loopInterval: anchorLI };
+          const comp = snap.find(c => c.regionId === r.id);
+          if (comp) return { ...r, durationMeasures: comp.durationMeasures, loopInterval: comp.loopInterval };
+          return r;
+        }));
+      } else if (d.mode === 'resize-left') {
+        writeLoopDom(d.el, d.pendingLoopInterval, d.pendingClipOffset);
+        for (const c of d.companions) writeLoopDom(c.el, c.pendingLoopInterval, c.pendingClipOffset);
+        // Phase 111: mid-drag setRegions so segments/dividers/ghost notes reflow with the moving left edge.
+        const anchorStart = newStart;
+        const anchorDur   = newDuration;
+        const anchorCO    = d.pendingClipOffset;
+        const anchorLI    = d.pendingLoopInterval;
+        const snap = d.companions.map(c => ({
+          regionId: c.regionId,
+          startMeasure: c.pendingStart,
+          durationMeasures: c.pendingDuration,
+          clipOffset: c.pendingClipOffset,
+          loopInterval: c.pendingLoopInterval,
+        }));
+        setRegions(prev => prev.map(r => {
+          if (r.id === d.regionId) {
+            return { ...r, startMeasure: anchorStart, durationMeasures: anchorDur, clipOffset: anchorCO, loopInterval: anchorLI };
+          }
+          const comp = snap.find(c => c.regionId === r.id);
+          if (comp) return { ...r, ...comp };
+          return r;
+        }));
       }
       d.pendingStart    = newStart;
       d.pendingDuration = newDuration;
@@ -603,6 +833,19 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     const onUp = (e) => {
       const d = dragRef.current;
       if (d) {
+        // Phase 106: click-without-drag on the loop handle appends one base-loop length
+        // to the anchor and to each cluster companion (each uses its own base length).
+        if (!d.dragStarted && d.mode === 'loop-right') {
+          const baseLoop = d.initLoopInterval ?? d.initDuration;
+          d.pendingDuration = d.initDuration + baseLoop;
+          d.pendingLoopInterval = baseLoop;
+          for (const c of d.companions) {
+            const cBase = c.initLoopInterval ?? c.initDuration;
+            c.pendingDuration = c.initDuration + cBase;
+            c.pendingLoopInterval = cBase;
+          }
+          d.dragStarted = true; // fall through to existing commit path
+        }
         if (d.dragStarted) {
           const resetEl = (el) => {
             if (!el) return;
@@ -612,22 +855,56 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           resetEl(d.el);
           for (const c of d.companions) resetEl(c.el);
 
-          const { regionId, pendingStart, pendingDuration, pendingTrackId, pendingClipOffset, pendingFadeIn, pendingFadeOut } = d;
+          const { regionId, pendingStart, pendingDuration, pendingTrackId, pendingClipOffset, pendingFadeIn, pendingFadeOut, pendingFadeInFloor, pendingFadeOutFloor, pendingLoopInterval } = d;
           const clusterIds = new Set([regionId, ...d.companions.map(c => c.regionId)]);
 
+          // Phase 105/106/109: loopInterval commit policy by drag mode.
+          //   - loop-right / loop-resize-base : commit pendingLoopInterval as-is (explicit loop edit).
+          //   - resize-right                  : normalize current loopInterval against the new duration
+          //                                     (auto-null if shrunk back to ≤ 1 iteration — Phase 109).
+          //   - resize-left                   : normalize pendingLoopInterval (Phase 106 + Phase 109).
+          //   - other modes                   : leave loopInterval untouched (preserved by ...r spread).
+          const anchorOriginal = regionsRef.current.find(r => r.id === regionId);
+          const anchorLoopOverride =
+            d.mode === 'loop-right'
+              ? { loopInterval: normalizeLoopInterval(pendingDuration, pendingLoopInterval) }
+              : d.mode === 'loop-resize-base'
+                ? { loopInterval: pendingLoopInterval } // explicit loop edit; preserve even when duration == loopInterval
+                : d.mode === 'resize-right'
+                  ? { loopInterval: normalizeLoopInterval(pendingDuration, anchorOriginal?.loopInterval ?? null) }
+                  : d.mode === 'resize-left'
+                    ? { loopInterval: normalizeLoopInterval(pendingDuration, pendingLoopInterval) }
+                    : {};
           const movedRegion = {
-            ...regionsRef.current.find(r => r.id === regionId),
+            ...anchorOriginal,
             startMeasure: pendingStart, durationMeasures: pendingDuration, trackId: pendingTrackId,
             clipOffset: pendingClipOffset,
             fadeIn: pendingFadeIn, fadeOut: pendingFadeOut,
+            fadeInFloor: pendingFadeInFloor, fadeOutFloor: pendingFadeOutFloor,
+            ...anchorLoopOverride,
           };
           const cluster = [
             movedRegion,
-            ...d.companions.map(c => ({
-              ...regionsRef.current.find(r => r.id === c.regionId),
-              startMeasure: c.pendingStart, durationMeasures: c.pendingDuration, trackId: c.pendingTrackId,
-              clipOffset: c.pendingClipOffset,
-            })),
+            ...d.companions.map(c => {
+              const cLoopOverride =
+                d.mode === 'loop-right'
+                  ? { loopInterval: normalizeLoopInterval(c.pendingDuration, c.pendingLoopInterval) }
+                  : d.mode === 'loop-resize-base'
+                    ? { loopInterval: c.pendingLoopInterval }
+                    : d.mode === 'resize-right'
+                      ? { loopInterval: normalizeLoopInterval(c.pendingDuration, c.initLoopInterval) }
+                      : d.mode === 'resize-left'
+                        ? { loopInterval: normalizeLoopInterval(c.pendingDuration, c.pendingLoopInterval) }
+                        : {};
+              return {
+                ...regionsRef.current.find(r => r.id === c.regionId),
+                startMeasure: c.pendingStart, durationMeasures: c.pendingDuration, trackId: c.pendingTrackId,
+                clipOffset: c.pendingClipOffset,
+                fadeIn: c.pendingFadeIn, fadeOut: c.pendingFadeOut,
+                fadeInFloor: c.pendingFadeInFloor, fadeOutFloor: c.pendingFadeOutFloor,
+                ...cLoopOverride,
+              };
+            }),
           ];
 
           // Pre-drag startMeasure sidecar — keeps the intrusion-direction signal alive
@@ -730,6 +1007,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           if (rightEdge > totalMeasuresRef.current - 16) setTotalMeasures(prev => Math.max(prev + 64, rightEdge + 16));
           document.body.classList.remove('is-dragging');
           document.body.classList.remove('is-fade-dragging');
+          document.body.classList.remove('is-loop-dragging');
+          if (d.el) d.el.removeAttribute('data-active-drag');
+          for (const c of d.companions) { if (c.el) c.el.removeAttribute('data-active-drag'); }
           document.body.style.cursor = '';
           lastDragEndTimeRef.current = Date.now();
         }
@@ -880,9 +1160,13 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // ── Editor panel divider drag ──────────────────────────────
   const startDividerDrag = (e) => {
     e.preventDefault();
-    let pending = editorHeight;
+    // Phase 112: delta-from-mousedown math so the click point's offset within the
+    // divider handle is preserved (no first-mousemove jump).
+    const startY = e.clientY;
+    const startH = editorHeight;
+    let pending  = startH;
     const onMove = (ev) => {
-      const wanted = window.innerHeight - ev.clientY;
+      const wanted = startH - (ev.clientY - startY);
       pending = Math.max(150, Math.min(wanted, window.innerHeight - 200));
       if (editorWrapRef.current) editorWrapRef.current.style.height = `${pending}px`;
     };
@@ -911,10 +1195,22 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   useEffect(() => {
     if (!isPlaying) return;
-    const tick = () => { updatePlayhead(); rafRef.current = requestAnimationFrame(tick); };
+    const tick = () => {
+      // Phase 108: auto-pause when transport reaches the rendered right edge.
+      const maxSec = totalMeasuresRef.current * 4 * (60 / bpm);
+      if (Tone.Transport.seconds >= maxSec) {
+        Tone.Transport.seconds = maxSec;
+        Tone.Transport.pause();
+        setIsPlaying(false);
+        updatePlayhead();
+        return;
+      }
+      updatePlayhead();
+      rafRef.current = requestAnimationFrame(tick);
+    };
     rafRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [isPlaying, updatePlayhead]);
+  }, [isPlaying, updatePlayhead, bpm]);
 
   const handlePlayPause = useCallback(async () => {
     await Tone.start();
@@ -1252,12 +1548,18 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         if (rightEdge > totalMeasuresRef.current - 16) {
           setTotalMeasures(prev => Math.max(prev + 64, rightEdge + 16));
         }
+        // Phase 104/105: advance global playhead to the right edge of the pasted payload —
+        // but only when transport is not playing, so the live sweep isn't interrupted (Phase 105 guard).
+        if (Tone.Transport.state !== 'started') {
+          Tone.Transport.seconds = rightEdge * 4 * (60 / bpm);
+          updatePlayhead();
+        }
         return;
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [bpm, updatePlayhead]);
 
   return (
     <div ref={shellRef} className={styles.shell} style={{ '--left-col-width': `${leftColWidth}px` }}>
@@ -1281,6 +1583,16 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               <path d="M9 4 v7 a3 3 0 0 0 6 0 V4" />
               <line x1="4" y1="4" x2="9" y2="4" />
               <line x1="15" y1="4" x2="20" y2="4" />
+            </svg>
+          </button>
+          <button
+            className={advancedMode ? styles.transportBtnActive : styles.transportBtn}
+            onClick={() => setAdvancedMode(v => !v)}
+            title="Advanced mode (fade floor handles)">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                 style={{ display: 'block' }} aria-hidden="true">
+              <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.5-2.5z" />
             </svg>
           </button>
         </div>
@@ -1426,7 +1738,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                     const measure = Math.max(0, Math.floor((e.clientX - rect.left) / pixelsPerMeasure));
                     if (regions.some(r => r.trackId === t.id) && !isPositionOccupied(t.id, measure)) {
                       const n = nextRegionIdRef.current++;
-                      const newRegion = { id: `r${n}`, trackId: t.id, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0 };
+                      const newRegion = { id: `r${n}`, trackId: t.id, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0, fadeInFloor: 0, fadeOutFloor: 0, loopInterval: null };
                       const result = applyDestructiveEdit(regionsRef.current, notesRef.current, newRegion);
                       const merged = [...result.regions, newRegion].filter(rg => rg.durationMeasures > 0);
                       const surviving = new Set(merged.map(rg => rg.id));
@@ -1438,7 +1750,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                   }}>
                   <div ref={(el) => { ghostRefs.current[t.id] = el; }} className={styles.ghost} />
                   {regions.filter(r => r.trackId === t.id).map(r => (
-                    <div key={r.id} data-region-id={r.id} className={`${styles.region}${selectedRegionIds.has(r.id) ? ` ${styles.regionSelected}` : ''}`}
+                    <div key={r.id} data-region-id={r.id}
+                      {...((r.loopInterval ?? null) !== null ? { 'data-looped': true } : {})}
+                      className={`${styles.region}${selectedRegionIds.has(r.id) ? ` ${styles.regionSelected}` : ''}`}
                       style={{
                         left:  `${r.startMeasure    * pixelsPerMeasure}px`,
                         width: `${r.durationMeasures * pixelsPerMeasure}px`,
@@ -1447,18 +1761,129 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                       onMouseDown={(e) => startRegionDrag(e, r, 'move')}
                       onClick={(e) => e.stopPropagation()}
                       onDoubleClick={(e) => { e.stopPropagation(); setEditingTrackId(r.trackId); }}>
+                      {(r.loopInterval ?? null) !== null && (() => {
+                        const segs = [];
+                        const total = r.durationMeasures;
+                        const li    = r.loopInterval;
+                        const lastIter = Math.ceil(total / li) - 1;
+                        for (let i = 0; i <= lastIter; i++) {
+                          const segStart = i * li;
+                          const segLen   = Math.min(li, total - segStart);
+                          // Phase 112: anchor the last segment to the region's right edge so any
+                          // one-frame lag between region width and segment commit can't show through.
+                          const isLast = i === lastIter;
+                          segs.push(
+                            <div key={`seg-${i}`} data-loop-segment data-loop-segment-i={i}
+                              className={styles.loopSegment}
+                              style={isLast
+                                ? { left: `${segStart * pixelsPerMeasure}px`, right: 0 }
+                                : { left: `${segStart * pixelsPerMeasure}px`, width: `${Math.max(0, segLen * pixelsPerMeasure)}px` }
+                              } />
+                          );
+                        }
+                        return segs;
+                      })()}
+                      {(r.loopInterval ?? null) !== null && r.durationMeasures > r.loopInterval && (
+                        <div data-loop-tint className={styles.loopTint}
+                          style={{ left: `${r.loopInterval * pixelsPerMeasure}px` }} />
+                      )}
+                      {(() => {
+                        const regionNotes = notes.filter(n => n.regionId === r.id);
+                        if (regionNotes.length === 0) return null;
+                        const clipOffset = r.clipOffset ?? 0;
+                        const baseLoop   = r.loopInterval ?? r.durationMeasures;
+                        const windowStartBeat = clipOffset * 4;
+                        const windowEndBeat   = (clipOffset + baseLoop) * 4;
+                        const inWindow = regionNotes.filter(n =>
+                          n.startBeat >= windowStartBeat && n.startBeat < windowEndBeat
+                        );
+                        if (inWindow.length === 0) return null;
+                        const idxList = inWindow.map(n => KEYS.findIndex(k => k.name === n.note)).filter(i => i >= 0);
+                        if (idxList.length === 0) return null;
+                        const minIdx  = Math.min(...idxList);
+                        const maxIdx  = Math.max(...idxList);
+                        const idxSpan = Math.max(1, maxIdx - minIdx);
+                        const iterations = r.loopInterval ? Math.ceil(r.durationMeasures / r.loopInterval) : 1;
+                        const ppb        = pixelsPerMeasure / 4;
+                        const regionWidthPx = r.durationMeasures * pixelsPerMeasure;
+                        const out = [];
+                        for (let i = 0; i < iterations; i++) {
+                          for (const n of inWindow) {
+                            const keyIndex = KEYS.findIndex(k => k.name === n.note);
+                            if (keyIndex < 0) continue;
+                            const yRel = (keyIndex - minIdx) / idxSpan;
+                            const noteLocalBeat = n.startBeat - windowStartBeat;
+                            const xPx = i * baseLoop * pixelsPerMeasure + noteLocalBeat * ppb;
+                            if (xPx >= regionWidthPx) continue;
+                            out.push(
+                              <div key={`mn-${i}-${n.id}`}
+                                data-mini-note
+                                data-mini-note-iter={i}
+                                data-mini-note-startbeat={n.startBeat}
+                                className={`${styles.miniNote}${i > 0 ? ` ${styles.miniNoteGhost}` : ''}`}
+                                style={{
+                                  left: `${xPx}px`,
+                                  top:  `${4 + yRel * 70}%`,
+                                  width: `${Math.max(n.durationBeats * ppb - 1, 2)}px`,
+                                }} />
+                            );
+                          }
+                        }
+                        return out;
+                      })()}
+                      {(r.loopInterval ?? null) !== null && r.loopInterval > 0 && (() => {
+                        const lines = [];
+                        for (let i = 1; ; i++) {
+                          const x = i * r.loopInterval * pixelsPerMeasure;
+                          if (x >= r.durationMeasures * pixelsPerMeasure) break;
+                          const isFirst = i === 1;
+                          lines.push(
+                            <div key={`loop-${i}`}
+                              {...(isFirst ? { 'data-loop-divider-first': true } : {})}
+                              className={`${styles.loopDivider}${isFirst ? ` ${styles.loopDividerBase}` : ''}`}
+                              style={{ left: `${x}px` }}
+                              onMouseDown={isFirst ? (e) => startRegionDrag(e, r, 'loop-resize-base') : undefined}
+                            />
+                          );
+                        }
+                        return lines;
+                      })()}
                       {r.durationMeasures * pixelsPerMeasure >= FADE_UI_MIN_PX && (
                         <>
                           <div data-fade-in
                             className={`${styles.fadeOverlay} ${styles.fadeInOverlay}`}
-                            style={{ width: `${(r.fadeIn ?? 0) * pixelsPerMeasure}px`, display: (r.fadeIn ?? 0) > 0 ? '' : 'none' }} />
+                            style={{
+                              width: `${(r.fadeIn ?? 0) * pixelsPerMeasure}px`,
+                              display: (r.fadeIn ?? 0) > 0 ? '' : 'none',
+                              clipPath: `polygon(0 0, 100% 0, 0 ${100 - (r.fadeInFloor ?? 0) * 100}%)`,
+                            }} />
                           <div data-fade-out
                             className={`${styles.fadeOverlay} ${styles.fadeOutOverlay}`}
-                            style={{ width: `${(r.fadeOut ?? 0) * pixelsPerMeasure}px`, display: (r.fadeOut ?? 0) > 0 ? '' : 'none' }} />
+                            style={{
+                              width: `${(r.fadeOut ?? 0) * pixelsPerMeasure}px`,
+                              display: (r.fadeOut ?? 0) > 0 ? '' : 'none',
+                              clipPath: `polygon(0 0, 100% 0, 100% ${100 - (r.fadeOutFloor ?? 0) * 100}%)`,
+                            }} />
                         </>
                       )}
                       <div className={styles.resizeLeft}  onMouseDown={(e) => startRegionDrag(e, r, 'resize-left')} />
                       <div className={styles.resizeRight} onMouseDown={(e) => startRegionDrag(e, r, 'resize-right')} />
+                      {r.durationMeasures * pixelsPerMeasure >= FADE_UI_MIN_PX && (
+                        <button data-loop-handle
+                          className={`${styles.cornerBtn} ${styles.loopHandle}`}
+                          onMouseDown={(e) => startRegionDrag(e, r, 'loop-right')}
+                          onClick={(e) => e.stopPropagation()}
+                          title="Loop region (click to add one, drag to extend)">
+                          <svg viewBox="0 0 14 14" width="10" height="10" fill="none"
+                               stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+                               style={{ display: 'block' }} aria-hidden="true">
+                            <path d="M3 5 a4 4 0 0 1 8 0 v2" />
+                            <path d="M11 9 a4 4 0 0 1 -8 0 v-2" />
+                            <path d="M9 5 l2 0 l0 -2" />
+                            <path d="M5 9 l-2 0 l0 2" />
+                          </svg>
+                        </button>
+                      )}
                       {r.durationMeasures * pixelsPerMeasure >= FADE_UI_MIN_PX && (
                         <>
                           <div data-fade-handle-left
@@ -1469,10 +1894,24 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                             className={`${styles.fadeHandle} ${styles.fadeHandleRight}`}
                             style={{ right: `${(r.fadeOut ?? 0) * pixelsPerMeasure}px` }}
                             onMouseDown={(e) => startRegionDrag(e, r, 'fade-right')} />
+                          {advancedMode && (
+                            <>
+                              <div data-fade-floor-left
+                                className={`${styles.fadeFloorHandle} ${styles.fadeFloorHandleLeft}`}
+                                style={{ bottom: `${(r.fadeInFloor ?? 0) * 100}%` }}
+                                onMouseDown={(e) => startRegionDrag(e, r, 'fade-left-floor')} />
+                              <div data-fade-floor-right
+                                className={`${styles.fadeFloorHandle} ${styles.fadeFloorHandleRight}`}
+                                style={{ bottom: `${(r.fadeOutFloor ?? 0) * 100}%` }}
+                                onMouseDown={(e) => startRegionDrag(e, r, 'fade-right-floor')} />
+                            </>
+                          )}
                         </>
                       )}
                       {r.durationMeasures * pixelsPerMeasure >= EDIT_BTN_MIN_PX && (
-                        <button className={styles.editBtn} onMouseDown={stopMouseDown}
+                        <button
+                          className={`${styles.cornerBtn} ${styles.editBtn}${advancedMode ? ` ${styles.editBtnShifted}` : ''}`}
+                          onMouseDown={stopMouseDown}
                           onClick={(e) => { e.stopPropagation(); setEditingTrackId(r.trackId); }}>
                           edit
                         </button>

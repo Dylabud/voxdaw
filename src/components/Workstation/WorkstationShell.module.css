@@ -411,7 +411,23 @@
 .region:hover .fadeHandle { opacity: 0.85; }
 .fadeHandleLeft  { transform: translateX(-50%); }
 .fadeHandleRight { transform: translateX(50%); }
-:global(body.is-fade-dragging) .fadeHandle { opacity: 0.85; }
+.region[data-active-drag] .fadeHandle { opacity: 0.85; }
+
+/* ── Fade-floor handles (Advanced Mode: vertical, bottom corners) ── */
+.fadeFloorHandle {
+  position: absolute;
+  width: 7px; height: 14px;
+  background: var(--track-color, var(--accent-color));
+  cursor: ns-resize;
+  z-index: 5;
+  opacity: 0;
+  transition: opacity 80ms linear;
+  transform: translateY(50%);
+}
+.region:hover .fadeFloorHandle { opacity: 0.85; }
+.region[data-active-drag] .fadeFloorHandle { opacity: 0.85; }
+.fadeFloorHandleLeft  { left: 0;  border-radius: 0 14px 14px 0; }
+.fadeFloorHandleRight { right: 0; border-radius: 14px 0 0 14px; }
 
 /* Resize handles on left/right edges */
 .resizeLeft,
@@ -453,11 +469,9 @@
   transition: opacity 80ms linear;
 }
 
-/* ── Edit button (revealed on region hover) ──────────────── */
-.editBtn {
+/* ── Shared corner-button chrome (EDIT, loop handle) ─────── */
+.cornerBtn {
   position: absolute;
-  bottom: 4px;
-  right: 4px;
   appearance: none;
   background: var(--bg-panel);
   border: 1px solid var(--track-color, var(--accent-color));
@@ -473,11 +487,89 @@
   z-index: 4;
   transition: opacity 80ms linear, background 0.15s, color 0.15s;
 }
-.region:hover .editBtn { opacity: 1; }
-.editBtn:hover {
+.region:hover .cornerBtn { opacity: 1; }
+.cornerBtn:hover {
   background: var(--track-color, var(--accent-color));
   color: var(--bg-panel);
 }
+
+/* ── Edit button (revealed on region hover) ──────────────── */
+.editBtn {
+  bottom: 4px;
+  right: 4px;
+}
+.editBtnShifted { right: 14px; }
+
+/* ── Loop handle (top-right button, Phase 105/106) ───────── */
+.loopHandle {
+  top: 4px;
+  right: 4px;
+  padding: 1px 4px;
+  cursor: ew-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+.region[data-active-drag] .loopHandle { opacity: 1; }
+
+/* Loop dividers — dashed vertical lines at every loopInterval boundary */
+.loopDivider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed color-mix(in srgb, var(--track-color, var(--accent-color)) 60%, transparent);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* First (base-loop) divider doubles as a drag handle — Phase 106 */
+.loopDividerBase {
+  pointer-events: auto;
+  cursor: ew-resize;
+  width: 6px;
+  margin-left: -3px;
+  border-left: 1px dashed color-mix(in srgb, var(--track-color, var(--accent-color)) 80%, transparent);
+}
+:global(body.is-loop-dragging) .loopDividerBase {
+  background: color-mix(in srgb, var(--track-color, var(--accent-color)) 14%, transparent);
+}
+
+/* Looped-region segmented backgrounds — Phase 108 */
+.region[data-looped] { background: transparent; }
+.loopSegment {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--track-color, var(--accent-color)) 25%, transparent);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Loop tint — darkens every iteration past the base loop */
+.loopTint {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  background: var(--loop-tint);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Mini-note preview rendered inside timeline regions */
+.miniNote {
+  position: absolute;
+  height: 2px;
+  background: var(--track-color, var(--accent-color));
+  border-radius: 1px;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0.85;
+}
+.miniNoteGhost { opacity: 0.45; }
 
 /* ── Add-track buttons ───────────────────────────────────── */
 .addTrackPrimary {
