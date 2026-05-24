@@ -25,6 +25,98 @@ VoxDaw is actively under development. Core gesture engine, audio DSP chain, arpe
 
 ## Completed Steps Log
 
+* **[2026-05-22] Phase 130 — BPM Commit Fix: Remove Seconds Rescale (`WorkstationShell.jsx`):**
+  Phase 129's tick-driven playhead worked when paused but visibly jumped on mid-playback BPM changes. Root cause was hiding inside `handleBpmCommit`: the line `Tone.Transport.seconds = Tone.Transport.seconds * (bpm / n)` was actually breaking musical-position preservation, not preserving it. Tone uses ticks as the source of truth; assigning `Transport.seconds = X` converts X→ticks using the *current* (pre-change) bpm, so the rescale perturbed ticks by `bpm_old/n`. Pre-Phase-129 the visual was seconds-based, so both sides drifted in compensating ways and the bug was invisible. Post-Phase-129 the visual reads ticks directly → the perturbation manifested as a jump.
+
+  Fix: remove the rescale entirely. `Tone.Transport.bpm.value = n` alone preserves ticks (and therefore bar:beat position) by design. Now both audio and visual stay locked to the same musical position across any bpm change.
+
+  Critique of Gemini's Phase-129 plan: he correctly identified that ticks-based visuals were the right architecture but missed that the actual desync was being introduced upstream by our own preserve-musical-position helper. Worth flagging: a "preserve X" helper that depends on the order of two API calls is a smell — the simpler API (Tone's native ticks-stable bpm assignment) is usually right.
+
+* **[2026-05-22] Phase 129 — Tick-Driven Visual Playhead (`WorkstationShell.jsx`):**
+  Replaced the seconds-based playhead math (`x = Tone.Transport.seconds * pxPerSec`, where `pxPerSec` includes React `bpm`) with a tick-based formula: `beats = Tone.Transport.ticks / Tone.Transport.PPQ; x = beats * PIXELS_PER_BEAT * zoomLevel`. React `bpm` is no longer in the visual pipeline at all. Also updated the auto-pause ceiling from `maxSec = totalMeasures * 4 * (60/bpm)` to `maxTicks = totalMeasures * 4 * PPQ` so the right-edge comparison can't be tripped by a bpm change. Wall-clock readout (`timeRef.textContent`) still reads `Transport.seconds` (it's a clock, not a position).
+
+  Critique of Gemini: correct on the fix; missed the auto-pause ceiling, which had the same desync vulnerability. Also recommended `bpm.rampTo(n, 0.1)` instead of `.value = n` — orthogonal to the bug; skipped.
+
+* **[2026-05-22] Phase 128 — PanKnob Layout Tweak (`WorkstationShell.jsx` + `PanKnob.module.css`):**
+  Moved the PanKnob from a row of its own (above the volume slider) into the `.trackToggles` flex row, just left of the M/S/✎ buttons. Reduced size from 28→20 px and switched the wrapper from a block element with vertical margins to an inline-flex with a 4 px right margin so it sits flush with the buttons.
+
+* **[2026-05-22] Phase 127 — PanKnob + Scrub-Pause Clutch + Strict Spacebar Hijack (`PanKnob.jsx` + `.module.css` + `WorkstationShell.jsx` + `.module.css`):**
+  Three independent items.
+
+  * **PanKnob component:** new SVG rotary dial replacing the previous horizontal pan slider. Drag horizontal — 100 px = full range; hold Shift for 4× fine-tune; double-click to recenter. Visual indicator rotates `value * 135°` for a 270° travel arc, with an arc backdrop and accent-colored line. `stopPropagation` only on bubble-phase mousedown/click — the editor's capture-phase deselect listener still runs first, so clicking the knob clears note selection per user request. CSS module ships with the component; deleted the now-unused `.panSlider` block from the shell.
+
+  * **Scrub-pause clutch:** new `scrubClutchRef`. In the ruler-mousedown branch, if `Tone.Transport.state === 'started'`, silently pause + `silenceAll()`. `isPlaying` React state is intentionally NOT changed so the play button stays lit. On window mouseup the clutch resumes: `recomputeFades()` + `Transport.start()`. Scrub-while-paused unaffected.
+
+  * **Strict spacebar hijack:** replaced the bubble-phase keydown listener with a capture-phase one that `preventDefault + stopPropagation`s, blurs the active element (so even browsers that activate buttons on keyup get nothing focused), guards on `e.repeat`, and adds a matching capture-phase keyup blocker. Text inputs still bypass. A focused Mute/Solo/✎ no longer steals the space-press.
+
+  Critique of Gemini: scrub-pause framing as a "clutch" was correct; needed to add the explicit "do NOT setIsPlaying(false)" clarification so the UI stays lit. Spacebar: his "violently instruct the browser" wording was vague; concrete fix is capture-phase + `blur()`. Pan knob math was right; SVG over CSS-rotated div was chosen for crisp arc rendering at any size.
+
+* **[2026-05-22] Phase 126 — Track Panning + Fade Seek-Sync + Toolbar Button Sizing (`useWorkstationAudio.js` + `audioBounce.js` + `WorkstationShell.jsx` + `.module.css` + `projectIO.js`):**
+  Three items, two of them touching the audio engine.
+
+  * **Per-track panning:** new `pannersByTrackIdRef` Map, inserted between `volume` and `mute` in the per-track chain (`regionFadeGain → volume → pan → mute → Destination`). Track shape gains `pan: -1..+1` (default 0). New pan-sync `useEffect` with delta-checked `pan.pan.rampTo(v, 0.02)`. Initial UI was a horizontal slider (later replaced by PanKnob in Phase 127). `audioBounce.js` mirrors the panner in the offline graph. Persisted in `projectIO.js` (additive, old projects default to 0).
+
+  * **Region fade seek-sync:** new exported pure helper `computeFadeGainAt(r, transportSec, bpm)` plus a `recomputeFades()` hook method that cancels queued ramps, `setValueAtTime`s the correct intermediate at `Tone.now()`, and schedules remaining ramps in absolute AudioContext time keyed off current transport offset. Wired into `handlePlayPause` (play), `handleStop`, `seekToClientX`, and `handleBpmCommit`. The original `Tone.Transport.schedule`-based envelope from Phase 124 stays for forward playback entering a region naturally; `recomputeFades` is the seek/play-from-middle fixer.
+
+  * **Toolbar button sizing:** new `.transportTextBtn` modifier (`width: auto; min-width: 0; padding: 0 12px; flex-shrink: 0; white-space: nowrap`) applied to `[ save ]`, `[ load ]`, `[ export ]`. The base `.transportBtn` (34 px) still drives the icon buttons.
+
+  Critique of Gemini: pan placement (between volume and mute, not before volume) preserves single-writer per node and keeps mute as the final hard cut. Fade seek-sync — Gemini's "transport-synced automation" alternative doesn't exist for raw AudioParams; explicit recompute is the right tool.
+
+* **[2026-05-22] Phase 125 — Universal Click-Away Deselect for Notes (`RegionEditor.jsx` + `WorkstationShell.jsx`):**
+  Phase 124's click-away cleared selection only when the click landed outside the editor root. User asked for it to also clear on clicks inside the editor that aren't on notes (tabs, inspector, snap dropdown) and on arrangement-side surfaces (regions, lanes, track headers). Replaced the containment check with a universal rule: any left-click that isn't on a `[data-note-id]` element and isn't the bare grid clears selection.
+
+  Region/lane handlers call `stopPropagation`, so the listener was switched to **capture phase** to run before propagation can be stopped. Added a `data-no-note-deselect` opt-out attribute, honored by `closest()` in the listener and applied to the editor height divider, the track-headers/timeline width resizer, the inspector/grid width resizer, and the ruler — so dragging those handles or scrubbing the timeline preserves the current note selection.
+
+* **[2026-05-22] Phase 124 — Region Fade Envelopes + Piano-Roll Click-Away + Piano-Roll Edge Auto-Scroll (`useWorkstationAudio.js` + `audioBounce.js` + `RegionEditor.jsx`):**
+  Largest change of this stretch — refactored the playback engine.
+
+  * **Per-region synth + fade gain.** Switched from per-track synth (Phase 123) to per-region synth+gain. New signal: `regionSynth → regionFadeGain → trackVolumeGain → trackMuteGain → Destination`. Each region's gain runs a linear fade envelope (`fadeInFloor → 1` over `fadeIn`; `1 → fadeOutFloor` over `fadeOut`) scheduled via `Tone.Transport.schedule` keyed on the region's start tick. Single-writer-per-node preserved across all four writers (slider, mute/solo, fade scheduler, region rebuild). Delta-checked rebuild via `partKey` and `fadeKey` so editing one region doesn't reschedule all of them. Looped regions: envelope spans the whole region (not per-iteration), matching the visual fade.
+
+  * **Click-away deselect (initial cut).** New `editorRootRef` + window `mousedown` listener that clears `selectedNoteIds` on any left-click outside the editor. Refined in Phase 125 below.
+
+  * **Piano-roll edge auto-scroll.** New `pianoMousePosRef` + `pianoAutoScrollFrameRef` + `startPianoAutoScroll`/`stopPianoAutoScroll` mirroring the shell's arrangement auto-scroll (`WorkstationShell.jsx:161-197`) but scoped to `pianoScrollRef`, both axes, no ruler offset. Started on note-drag and marquee mousedown; stopped on mouseup and effect cleanup. Synthetic `mousemove` dispatched after each scroll tick so the in-flight drag handler updates as the grid pans.
+
+  Critique of Gemini: his "one Tone.Gain per region" idea was correct in spirit but missed the architectural consequence — a single PolySynth per track can't host per-region gain automation without all regions on that track sharing the envelope. Per-region synth was the right call.
+
+* **[2026-05-22] Phase 123 — Track Volume + Project Save/Load + Audio Bounce (`useWorkstationAudio.js` + `WorkstationShell.jsx` + `.module.css` + `projectIO.js` + `audioBounce.js`):**
+  Three items.
+
+  * **Per-track volume.** Track shape gains `volume: 0..100` (default 75). Audio chain split mute/volume into two nodes: `synth → volumeGain → muteGain → Destination` (single-writer rule). dB curve: `db = -24 + (v/100) * 32` → 0 = -24, 75 = 0 (unity), 100 = +8. Slider replaces the previous purely-visual `.fakeSlider` with a real `<input type="range">` styled identically.
+
+  * **Project Save/Load.** New `src/components/Workstation/projectIO.js` — versioned `.voxdaw` JSON schema (`{ version: 1, kind: 'voxdaw-project', bpm, totalMeasures, tracks, regions, notes }`) with `serializeProject`, `deserializeProject`, `downloadJSON`, `readJSONFile`. Loader resets `nextIdRef`/`nextRegionIdRef` from the max numeric suffix across both `t12` and `region_34` style IDs so future additions don't collide.
+
+  * **Audio export.** New `src/components/Workstation/audioBounce.js` — `bounceProject` rebuilds the entire synth graph inside `Tone.Offline` (synths from the live hook belong to the realtime context and can't be reused). Mute/solo and volume snapshotted at call time. Reuses `exportWAV`/`exportMP3` from `src/utils/audioExport.js`. UI: small mp3/wav dropdown on the top transport bar; `isBouncing` flag disables play during the render.
+
+  Critique of Gemini: he proposed writing volume to the existing mute gain — would have violated single-writer rule. The two-gain split was correct. Offline render was the right call over realtime recording.
+
+* **[2026-05-22] Phase 122 — Audio Timing Fix + Pause Tail Silencing (`useWorkstationAudio.js` + `WorkstationShell.jsx`):**
+  Two bugs from Phase 121's freshly-shipped audio engine.
+
+  * **Notes played exactly 2× late.** Root cause: `Tone.Time` arithmetic syntax requires parentheses — `"(5)*(4n)"` parses as "5 quarter notes". Without them (`"5*4n"`), the parser falls back to interpreting the leading number as **seconds**; at 120 BPM, beat N → second N → exactly 2× the intended position. Fix: encode event times in PPQ-based ticks (`"<n>i"`) — unambiguous integer parsing and survives BPM changes (Tone.Transport stretches scheduled ticks automatically).
+
+  * **Synths rang forever on pause.** `Tone.Transport.pause()` stops scheduling but doesn't release in-flight voices. Added `silenceAll()` (iterates synths, calls `releaseAll()`), wired into `handlePlayPause` (pause branch), `handleStop`, and the auto-pause-at-right-edge branch.
+
+  Critique of Gemini: he diagnosed bug 1 as "absBeat passed as raw seconds" — closer to right than wrong, but the actual mechanism was Tone's `*` regex requiring parens. His suggested fix (`* (60/bpm)` to seconds) would have broken BPM-change reflow; ticks is the BPM-stable encoding.
+
+* **[2026-05-22] Phase 121 — Workstation Audio Engine Creation (`useWorkstationAudio.js` + `synthFactory.js` + `WorkstationShell.jsx` + `RegionEditor.jsx`):**
+  First sound from the Workstation timeline. New peer hook `useWorkstationAudio` alongside VoxTool's `useAudioEngine` / `useVocoder` / `useAutotune`. Owns:
+  - `synthsByTrackIdRef`: one PolySynth per track, built via shared `makeSynth(instrument)` factory.
+  - `gainsByTrackIdRef`: one Gain per track for mute/solo writes.
+  - `partsByRegionIdRef`: one `Tone.Part` per region holding unrolled note events.
+  - Region/note sync diffs incoming props and rebuilds affected Parts on the fly; track sync handles synth lifecycle and instrument-change rebuilds; mute/solo sync writes `gain.rampTo(0|1, 0.02)`.
+  - Cleanup on unmount: `Tone.Transport.stop()` + dispose all nodes → clean handoff to VoxTool.
+
+  Extracted the existing `makePreviewSynth` from `RegionEditor.jsx` into a shared `synthFactory.js` so the audio hook and the editor's preview synth share one source of truth (9 instruments: fm pluck, analog, strings, am, pluck, sine/square/saw/triangle). RegionEditor's instrument dropdown now writes back to `track.instrument` via a new `onInstrumentChange` prop so all regions on the track get the new sound and the track header label stays in sync.
+
+  Schedule encoding initially used `Tone.Time` `*4n` notation (BPM-reflowing) — fixed to ticks in Phase 122 after observing the 2× timing bug. The hook does NOT call `Tone.start()` — that stays on the user-gesture path. Loop unroll honors the Bottle/Window model and clips the final iteration at region end, matching Phases 109/110 visual semantics.
+
+  Critique of Gemini: he proposed `Tone.Transport.cancel(0)` on every change, which would have nuked VoxTool's arp pattern if both engines ever ran in one session. Per-region Part dispose + rebuild was the right alternative. He also wanted to rewrite the playhead loop (already correctly tied to `Tone.Transport.seconds`) and re-add `Tone.start()` (already present) — both skipped.
+
+* **[2026-05-22] Phase 120 — Trackpad Pinch-Zoom Fix (`WorkstationShell.jsx`):**
+  Phase 118's conditional-attach for the Ctrl/Meta-wheel zoom listener broke macOS trackpad pinch-zoom. The OS synthesizes a wheel event with `ctrlKey: true` but **does not fire a real keydown** — no key is pressed. So `attach()` never ran and the pinch event bubbled to the browser default. Phase 119 already disproved Phase 118's diagonal-scroll motivation; reverting the lifecycle costs nothing and restores pinch-zoom on both surfaces.
+
+  Fix: always-attach `wheel` listener on both `.timeline` and `.pianoRoll` with `{ passive: false }`, keeping the existing internal `if (!e.ctrlKey && !e.metaKey) return;` guard. Removed the keydown/keyup/blur attach-detach machinery. Diagonal trackpad scroll remains a documented known issue (independent of this change).
+
 * **[2026-05-22] Phase 119 — Diagonal Trackpad Scroll Diagnostic (Inconclusive, `WorkstationShell.jsx` + `WorkstationShell.module.css` + `RegionEditor.module.css` + `index.css`):**
   Phase 117 + 118 didn't fix diagonal scrolling. Ran a structured diagnostic: stubbed the three cross-scroller sync handlers (`handleTimelineScroll`, `handlePianoRollScroll`, `handleTrackHeadersScroll`) to return early, and removed `overscroll-behavior: none` from `.timeline`, `.pianoRoll`, and `html/body/#root` in turn.
 

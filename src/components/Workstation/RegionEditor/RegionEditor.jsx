@@ -1,13 +1,9 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import * as Tone from 'tone';
 import styles from './RegionEditor.module.css';
 import { computeGridBg, getSnapIncrement } from '../WorkstationShell';
 import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
-
-const INSTRUMENTS = [
-  'fm pluck', 'analog', 'strings', 'am', 'pluck',
-  'sine', 'square', 'sawtooth', 'triangle',
-];
+import { INSTRUMENTS, makeSynth } from '../synthFactory';
 
 // 'grid' resolves dynamically against the visible piano-roll grid (Phase 116 bug 2).
 // 'off' = no snap. Fixed-fraction options listed here.
@@ -15,48 +11,6 @@ const SNAP_BEATS = { '1/6': 2 / 3, '1/12': 1 / 3 };
 const SNAP_DIVISIONS = ['grid', '1/6', '1/12', 'off'];
 const DRAG_THRESHOLD = 4;
 const RESIZE_EDGE_PX = 4;
-
-function makePreviewSynth(instrument) {
-  switch (instrument) {
-    case 'fm pluck':
-      return new Tone.PolySynth(Tone.FMSynth, {
-        harmonicity: 3, modulationIndex: 10,
-        envelope: { attack: 0.005, decay: 0.2, sustain: 0.1, release: 0.3 },
-      }).toDestination();
-    case 'strings':
-      return new Tone.PolySynth(Tone.FMSynth, {
-        harmonicity: 3.5, modulationIndex: 10,
-        oscillator: { type: 'sawtooth' },
-        modulation: { type: 'sine' },
-        envelope: { attack: 0.3, decay: 0.2, sustain: 0.8, release: 0.8 },
-        modulationEnvelope: { attack: 0.5, decay: 0.1, sustain: 0.8, release: 0.6 },
-      }).toDestination();
-    case 'am':
-      return new Tone.PolySynth(Tone.AMSynth, {
-        harmonicity: 2,
-        envelope: { attack: 0.005, decay: 0.2, sustain: 0.1, release: 0.3 },
-      }).toDestination();
-    case 'pluck':
-      return new Tone.PolySynth(Tone.Synth, {
-        oscillator: { type: 'sawtooth' },
-        envelope: { attack: 0.001, decay: 0.3, sustain: 0, release: 0.1 },
-      }).toDestination();
-    case 'sine':
-    case 'square':
-    case 'sawtooth':
-    case 'triangle':
-      return new Tone.PolySynth(Tone.Synth, {
-        oscillator: { type: instrument },
-        envelope: { attack: 0.01, decay: 0.1, sustain: 0.5, release: 0.3 },
-      }).toDestination();
-    case 'analog':
-    default:
-      return new Tone.PolySynth(Tone.Synth, {
-        oscillator: { type: 'triangle' },
-        envelope: { attack: 0.005, decay: 0.12, sustain: 0.3, release: 0.25 },
-      }).toDestination();
-  }
-}
 
 function regionWindow(r) {
   const clipOffset = r.clipOffset ?? 0;
@@ -86,6 +40,7 @@ export default function RegionEditor({
   onClose,
   scrollMemoryRef,
   magnetOn,
+  onInstrumentChange,
 }) {
   const [instrument,        setInstrument]        = useState(track?.instrument ?? 'fm pluck');
   const [activeTab,         setActiveTab]         = useState('notes');
@@ -98,6 +53,9 @@ export default function RegionEditor({
   const noteMarqueeElRef      = useRef(null);
   const noteDragRef           = useRef(null);
   const noteMarqueeRef        = useRef(null);
+  const editorRootRef         = useRef(null);
+  const pianoMousePosRef      = useRef({ x: 0, y: 0 });
+  const pianoAutoScrollFrameRef = useRef(null);
 
   const notesRef              = useRef(notes);              notesRef.current = notes;
   const regionsRef            = useRef(regions);            regionsRef.current = regions;
@@ -119,9 +77,19 @@ export default function RegionEditor({
     return SNAP_BEATS[div] ?? null;
   };
 
-  // Preview synth lifecycle
+  // Sync local instrument state from track.instrument when the prop changes
+  // (e.g., another editor for the same track wrote back).
   useEffect(() => {
-    const s = makePreviewSynth(instrument);
+    if (track?.instrument && track.instrument !== instrument) {
+      setInstrument(track.instrument);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [track?.instrument]);
+
+  // Preview synth lifecycle — independent instance routed straight to Destination
+  // (separate from the playback synth owned by useWorkstationAudio).
+  useEffect(() => {
+    const s = makeSynth(instrument).toDestination();
     previewSynthRef.current = s;
     return () => s.dispose();
   }, [instrument]);
@@ -156,6 +124,71 @@ export default function RegionEditor({
     });
     return () => exposeSelectionSetter(null);
   }, [exposeSelectionSetter]);
+
+  // Click-away deselect — any left-click that isn't on a note or the bare grid
+  // (where the marquee handler owns selection) clears note selection. Covers:
+  // arrangement regions/grid, track headers, editor tabs (notes/instrument/effects),
+  // inspector column, snap dropdown, etc. Note mousedown and grid marquee both
+  // manage their own selection state, so we skip those.
+  useEffect(() => {
+    const onDocDown = (e) => {
+      if (e.button !== 0) return;
+      if (noteDragRef.current || noteMarqueeRef.current) return;
+      const onNote = e.target.closest && e.target.closest('[data-note-id]');
+      if (onNote) return;
+      if (gridRef.current && e.target === gridRef.current) return;
+      // Opt-out: divider/resizer drags (height + width handles for piano roll, region grid, track grid).
+      if (e.target.closest && e.target.closest('[data-no-note-deselect]')) return;
+      if (selectedNoteIdsRef.current.size === 0) return;
+      setSelectedNoteIds(new Set());
+    };
+    // Capture phase so region/lane handlers' stopPropagation can't suppress us.
+    window.addEventListener('mousedown', onDocDown, true);
+    return () => window.removeEventListener('mousedown', onDocDown, true);
+  }, []);
+
+  // Piano-roll edge auto-scroll while dragging notes or drawing the marquee.
+  // Mirrors WorkstationShell's arrangement auto-scroll; scoped to pianoScrollRef.
+  const stopPianoAutoScroll = useCallback(() => {
+    if (pianoAutoScrollFrameRef.current != null) {
+      cancelAnimationFrame(pianoAutoScrollFrameRef.current);
+      pianoAutoScrollFrameRef.current = null;
+    }
+  }, []);
+  const startPianoAutoScroll = useCallback(() => {
+    if (pianoAutoScrollFrameRef.current != null) return;
+    const THRESHOLD = 80;
+    const MAX_SPEED = 15;
+    const tick = () => {
+      const el = pianoScrollRef?.current;
+      if (!el) { pianoAutoScrollFrameRef.current = null; return; }
+      const b  = el.getBoundingClientRect();
+      const { x: mx, y: my } = pianoMousePosRef.current;
+      let dx = 0, dy = 0;
+      const dRight = b.right  - mx; const dLeft = mx - b.left;
+      const dBot   = b.bottom - my; const dTop  = my - b.top;
+      if (dRight < THRESHOLD) dx =  MAX_SPEED * Math.min(1, 1 - dRight / THRESHOLD);
+      if (dLeft  < THRESHOLD) dx = -MAX_SPEED * Math.min(1, 1 - dLeft  / THRESHOLD);
+      if (dBot   < THRESHOLD) dy =  MAX_SPEED * Math.min(1, 1 - dBot   / THRESHOLD);
+      if (dTop   < THRESHOLD) dy = -MAX_SPEED * Math.min(1, 1 - dTop   / THRESHOLD);
+      if (dx !== 0) {
+        const maxX = el.scrollWidth - el.clientWidth;
+        el.scrollLeft = Math.max(0, Math.min(maxX, el.scrollLeft + dx));
+      }
+      if (dy !== 0) {
+        const maxY = el.scrollHeight - el.clientHeight;
+        el.scrollTop = Math.max(0, Math.min(maxY, el.scrollTop + dy));
+      }
+      if (dx !== 0 || dy !== 0) {
+        const { x, y } = pianoMousePosRef.current;
+        window.dispatchEvent(new MouseEvent('mousemove', {
+          clientX: x, clientY: y, bubbles: true, buttons: 1, cancelable: true,
+        }));
+      }
+      pianoAutoScrollFrameRef.current = requestAnimationFrame(tick);
+    };
+    pianoAutoScrollFrameRef.current = requestAnimationFrame(tick);
+  }, [pianoScrollRef]);
 
   // Esc / Cmd+A
   useEffect(() => {
@@ -300,6 +333,7 @@ export default function RegionEditor({
   // ── Global mousemove / mouseup for drag + marquee ──
   useEffect(() => {
     const onMove = (e) => {
+      pianoMousePosRef.current = { x: e.clientX, y: e.clientY };
       // Drag path
       const dD = noteDragRef.current;
       if (dD) {
@@ -392,6 +426,7 @@ export default function RegionEditor({
       if (dD) {
         noteDragRef.current = null;
         document.body.classList.remove('is-note-dragging');
+        stopPianoAutoScroll();
         if (dD.dragStarted && dD.pendingUpdates && dD.pendingUpdates.length) {
           onCommitNoteEdits?.(dD.pendingUpdates);
         }
@@ -400,6 +435,7 @@ export default function RegionEditor({
       // Marquee end
       const dM = noteMarqueeRef.current;
       if (dM) {
+        stopPianoAutoScroll();
         noteMarqueeRef.current = null;
         const mel = noteMarqueeElRef.current;
         if (mel) {
@@ -445,8 +481,9 @@ export default function RegionEditor({
     return () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      stopPianoAutoScroll();
     };
-  }, [onCommitNoteEdits, onNoteAdd, track?.id]);
+  }, [onCommitNoteEdits, onNoteAdd, track?.id, stopPianoAutoScroll]);
 
   // ── Note mousedown — selection + drag arming ──
   function handleNoteMouseDown(e, note) {
@@ -497,6 +534,8 @@ export default function RegionEditor({
       anchorId: note.id,
       pendingUpdates: null,
     };
+    pianoMousePosRef.current = { x: e.clientX, y: e.clientY };
+    startPianoAutoScroll();
   }
 
   // Cursor hint on hover
@@ -535,13 +574,15 @@ export default function RegionEditor({
       lastHits: [],
       startingRegionId: startingRegion?.id ?? null,
     };
+    pianoMousePosRef.current = { x: e.clientX, y: e.clientY };
+    startPianoAutoScroll();
   }
 
   const ppb          = pixelsPerMeasure / 4;
   const gridMinWidth = totalMeasures * pixelsPerMeasure;
 
   return (
-    <div className={styles.editor} style={{ '--track-color': track?.color }}>
+    <div ref={editorRootRef} className={styles.editor} style={{ '--track-color': track?.color }}>
       <div className={styles.editorBar}>
         <div className={styles.editorTabs}>
           {['notes', 'instrument', 'effects'].map(tab => (
@@ -588,7 +629,10 @@ export default function RegionEditor({
           <select
             className={styles.select}
             value={instrument}
-            onChange={(e) => setInstrument(e.target.value)}
+            onChange={(e) => {
+              setInstrument(e.target.value);
+              if (onInstrumentChange && track?.id) onInstrumentChange(track.id, e.target.value);
+            }}
           >
             {INSTRUMENTS.map(i => <option key={i} value={i}>{i}</option>)}
           </select>
@@ -596,7 +640,7 @@ export default function RegionEditor({
       </div>
 
       {/* Left-column resizer */}
-      <div className={styles.colResizer} onMouseDown={onLeftColResize} />
+      <div data-no-note-deselect className={styles.colResizer} onMouseDown={onLeftColResize} />
 
       {/* Piano roll scroll container — always mounted */}
       <div

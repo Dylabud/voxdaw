@@ -3,6 +3,11 @@ import * as Tone from 'tone';
 import styles from './WorkstationShell.module.css';
 import RegionEditor from './RegionEditor/RegionEditor';
 import { KEYS } from './pitchKeys';
+import useWorkstationAudio from '../../hooks/useWorkstationAudio';
+import PanKnob from './PanKnob';
+import { serializeProject, deserializeProject, downloadJSON, readJSONFile } from './projectIO';
+import { bounceProject } from './audioBounce';
+import { exportWAV, exportMP3 } from '../../utils/audioExport';
 
 const PIXELS_PER_BEAT    = 25;
 const PIXELS_PER_MEASURE = PIXELS_PER_BEAT * 4;  // 100px at zoom 1
@@ -116,6 +121,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const rulerRef             = useRef(null);
   const rafRef               = useRef(null);
   const isDraggingRef        = useRef(false);
+  const scrubClutchRef       = useRef(false); // ruler-scrub: transport was playing → silently pause; resume on mouseup
   const pianoScrollRef       = useRef(null);   // RegionEditor scroll container
   const trackHeadersRef      = useRef(null);
   const pendingScrollRef      = useRef(null);  // arrangement zoom-to-cursor pending scrollLeft
@@ -201,13 +207,96 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       color: TRACK_COLORS[(n - 1) % TRACK_COLORS.length],
       isMuted: false,
       isSolo: false,
+      volume: 75,
+      pan: 0,
     }]);
   }, []);
+
+  const handleVolumeChange = useCallback((trackId, v) => {
+    const clamped = Math.max(0, Math.min(100, Math.round(v)));
+    setTracks(prev => prev.map(t => t.id === trackId ? { ...t, volume: clamped } : t));
+  }, []);
+
+  const handlePanChange = useCallback((trackId, n) => {
+    const clamped = Math.max(-1, Math.min(1, n));
+    setTracks(prev => prev.map(t => t.id === trackId ? { ...t, pan: clamped } : t));
+  }, []);
+
+  // ── Project save / load / audio bounce ────────────────────────
+  const loadInputRef = useRef(null);
+  const [isBouncing, setIsBouncing] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+
+  const showToast = useCallback((msg, ms = 3000) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), ms);
+  }, []);
+
+  const handleSaveProject = useCallback(() => {
+    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes });
+    downloadJSON(payload, 'project.voxdaw');
+    showToast('saved project.voxdaw');
+  }, [bpm, totalMeasures, tracks, regions, notes, showToast]);
+
+  const handleLoadProject = useCallback(async (file) => {
+    if (!file) return;
+    try {
+      const raw = await readJSONFile(file);
+      const data = deserializeProject(raw);
+      Tone.Transport.stop();
+      setIsPlaying(false);
+      setEditingTrackId(null);
+      setSelectedRegionIds(new Set());
+      setBpm(data.bpm);
+      setTempBpm(String(data.bpm));
+      Tone.Transport.bpm.value = data.bpm;
+      setTotalMeasures(Math.max(24, data.totalMeasures));
+      setTracks(data.tracks);
+      setRegions(data.regions);
+      setNotes(data.notes);
+      nextIdRef.current       = data.nextId;
+      nextRegionIdRef.current = data.nextRegionId;
+      showToast(`loaded ${file.name}`);
+    } catch (e) {
+      console.error('load project failed', e);
+      showToast(`load failed: ${e.message}`);
+    }
+  }, [showToast]);
+
+  const handleExportAudio = useCallback(async (format) => {
+    setShowExportMenu(false);
+    if (isBouncing) return;
+    setIsBouncing(true);
+    showToast('bouncing audio…', 60000);
+    try {
+      const ab = await bounceProject({ tracks, regions, notes, bpm });
+      const blob = format === 'wav' ? exportWAV(ab) : exportMP3(ab);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `project.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`exported project.${format}`);
+    } catch (e) {
+      console.error('bounce failed', e);
+      showToast(`bounce failed: ${e.message}`);
+    } finally {
+      setIsBouncing(false);
+    }
+  }, [tracks, regions, notes, bpm, isBouncing, showToast]);
 
   const toggleMute = (id) => setTracks(prev =>
     prev.map(t => t.id === id ? { ...t, isMuted: !t.isMuted } : t));
   const toggleSolo = (id) => setTracks(prev =>
     prev.map(t => t.id === id ? { ...t, isSolo: !t.isSolo } : t));
+  const handleInstrumentChange = useCallback((trackId, instrument) => setTracks(prev =>
+    prev.map(t => t.id === trackId ? { ...t, instrument } : t)), []);
+
+  // Workstation audio engine — reconciles synths/gains/parts against tracks/regions/notes.
+  // Does NOT call Tone.start(); the user-gesture path (handlePlayPause, RegionEditor preview)
+  // already handles that. Stops Transport + disposes nodes on unmount → clean handoff to VoxTool.
+  const { silenceAll, recomputeFades } = useWorkstationAudio({ tracks, regions, notes, bpm });
 
   // ── Note dedupe — same (regionId, note, startBeat, durationBeats) collapses to the
   //    most-recently-touched (or last-in-array) survivor. Wired into every commit path
@@ -1238,24 +1327,29 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   // ── Playhead ─────────────────────────────────────────────────
   const updatePlayhead = useCallback(() => {
-    const t = Tone.Transport.seconds;
-    const x = t * pxPerSec;
+    // Tick-driven so bpm changes can't desync the visual from the audio.
+    // Tone.Transport.ticks is canonical musical time; it never jumps when bpm
+    // changes. Seconds is kept only for the wall-clock readout.
+    const beats = Tone.Transport.ticks / Tone.Transport.PPQ;
+    const x     = beats * PIXELS_PER_BEAT * zoomLevel;
     if (playheadRef.current)          playheadRef.current.style.transform          = `translateX(${x}px)`;
     if (pianoRollPlayheadRef.current) pianoRollPlayheadRef.current.style.transform = `translateX(${x}px)`;
-    if (timeRef.current)              timeRef.current.textContent                  = formatTime(t);
-  }, [pxPerSec]);
+    if (timeRef.current)              timeRef.current.textContent                  = formatTime(Tone.Transport.seconds);
+  }, [zoomLevel]);
 
   // Reposition playhead when zoom changes (even while paused)
-  useEffect(() => { updatePlayhead(); }, [pxPerSec, updatePlayhead]);
+  useEffect(() => { updatePlayhead(); }, [updatePlayhead]);
 
   useEffect(() => {
     if (!isPlaying) return;
     const tick = () => {
-      // Phase 108: auto-pause when transport reaches the rendered right edge.
-      const maxSec = totalMeasuresRef.current * 4 * (60 / bpm);
-      if (Tone.Transport.seconds >= maxSec) {
-        Tone.Transport.seconds = maxSec;
+      // Auto-pause when transport reaches the rendered right edge — compare
+      // ticks-to-ticks so a mid-playback bpm change doesn't trip the ceiling.
+      const maxTicks = totalMeasuresRef.current * 4 * Tone.Transport.PPQ;
+      if (Tone.Transport.ticks >= maxTicks) {
+        Tone.Transport.ticks = maxTicks;
         Tone.Transport.pause();
+        silenceAll();
         setIsPlaying(false);
         updatePlayhead();
         return;
@@ -1265,28 +1359,32 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     };
     rafRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [isPlaying, updatePlayhead, bpm]);
+  }, [isPlaying, updatePlayhead, silenceAll]);
 
   const handlePlayPause = useCallback(async () => {
     await Tone.start();
     Tone.Transport.bpm.value = bpm;
     if (Tone.Transport.state === 'started') {
       Tone.Transport.pause();
+      silenceAll();
       setIsPlaying(false);
       updatePlayhead();
     } else {
+      recomputeFades();
       Tone.Transport.start();
       setIsPlaying(true);
     }
-  }, [updatePlayhead]);
+  }, [updatePlayhead, bpm, silenceAll, recomputeFades]);
 
   const handleStop = useCallback(() => {
     Tone.Transport.stop();
+    silenceAll();
+    recomputeFades();
     setIsPlaying(false);
     if (playheadRef.current)          playheadRef.current.style.transform          = 'translateX(0px)';
     if (pianoRollPlayheadRef.current) pianoRollPlayheadRef.current.style.transform = 'translateX(0px)';
     if (timeRef.current)              timeRef.current.textContent                  = '00:00:00';
-  }, []);
+  }, [silenceAll, recomputeFades]);
 
   // ── BPM editing ──────────────────────────────────────────
   function handleBpmCommit() {
@@ -1295,10 +1393,13 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     n = Math.max(20, Math.min(300, n));
 
     if (n !== bpm) {
-      // Preserve musical position: scale Transport.seconds by BPM ratio before
-      // changing tempo, so the playhead stays anchored at the same bar:beat.
-      Tone.Transport.seconds = Tone.Transport.seconds * (bpm / n);
+      // Tone's source of truth is ticks; assigning .bpm.value preserves the
+      // current tick (and therefore musical position) automatically. A manual
+      // seconds rescale here would re-convert seconds→ticks at the old bpm,
+      // perturbing ticks by bpm_old/n — invisible while paused but a visible
+      // playhead jump under the tick-driven visual loop.
       Tone.Transport.bpm.value = n;
+      recomputeFades();
     }
 
     setBpm(n);
@@ -1320,8 +1421,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     } else {
       Tone.Transport.seconds = Math.max(0, x / pxPerSec);
     }
+    recomputeFades();
     updatePlayhead();
-  }, [pxPerSec, updatePlayhead, snapEnabled, pixelsPerMeasure, bpm]);
+  }, [pxPerSec, updatePlayhead, snapEnabled, pixelsPerMeasure, bpm, recomputeFades]);
 
   const handleMouseDown = (e) => {
     e.preventDefault();
@@ -1332,6 +1434,13 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       document.body.classList.add('is-dragging');
       currentMousePosRef.current = { x: e.clientX, y: e.clientY };
       startAutoScroll();
+      // Clutch: silently pause the transport while scrubbing so the audio
+      // engine isn't fighting the seek writes. UI Play button stays lit.
+      if (Tone.Transport.state === 'started') {
+        scrubClutchRef.current = true;
+        Tone.Transport.pause();
+        silenceAll();
+      }
     } else if (scroller) {
       const rect     = scroller.getBoundingClientRect();
       const contentX = e.clientX - rect.left + scroller.scrollLeft;
@@ -1351,6 +1460,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       isDraggingRef.current = false;
       document.body.classList.remove('is-dragging');
       stopAutoScroll();
+      if (scrubClutchRef.current) {
+        scrubClutchRef.current = false;
+        recomputeFades();
+        Tone.Transport.start();
+      }
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup',   onUp);
@@ -1361,9 +1475,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   }, [seekToClientX, stopAutoScroll]);
 
   // ── Ctrl+Scroll zoom-to-cursor ────────────────────────────────
-  // Phase 118: the wheel listener is attached ONLY while Ctrl/Meta is held. With no
-  //   passive:false listener present during ordinary wheel events, Chromium's diagonal
-  //   wheel-scroll fast-path stays enabled — two-finger trackpad diagonals pan both axes.
+  // Phase 120: listener is ALWAYS attached. Phase 118's conditional attach (only while
+  //   a real Ctrl/Meta keydown was held) broke macOS trackpad pinch-zoom — the OS
+  //   synthesizes a wheel event with ctrlKey:true but fires no keydown, so attach()
+  //   never ran. Phase 119 disproved the diagonal-scroll motivation for the conditional
+  //   attach, so reverting costs nothing and restores pinch-zoom on both surfaces.
   useEffect(() => {
     const el = timelineRef.current;
     if (!el) return;
@@ -1385,29 +1501,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         return next;
       });
     };
-    let attached = false;
-    const attach = () => {
-      if (attached) return;
-      el.addEventListener('wheel', onWheel, { passive: false });
-      attached = true;
-    };
-    const detach = () => {
-      if (!attached) return;
-      el.removeEventListener('wheel', onWheel);
-      attached = false;
-    };
-    const onKeyDown = (e) => { if (e.ctrlKey || e.metaKey) attach(); };
-    const onKeyUp   = (e) => { if (!e.ctrlKey && !e.metaKey) detach(); };
-    const onBlur    = () => detach();
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup',   onKeyUp);
-    window.addEventListener('blur',    onBlur);
-    return () => {
-      detach();
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup',   onKeyUp);
-      window.removeEventListener('blur',    onBlur);
-    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
   }, []);
 
   // Piano roll Ctrl+Scroll zoom — re-attaches when editor opens/closes
@@ -1433,29 +1528,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         return next;
       });
     };
-    let attached = false;
-    const attach = () => {
-      if (attached) return;
-      el.addEventListener('wheel', onWheel, { passive: false });
-      attached = true;
-    };
-    const detach = () => {
-      if (!attached) return;
-      el.removeEventListener('wheel', onWheel);
-      attached = false;
-    };
-    const onKeyDown = (e) => { if (e.ctrlKey || e.metaKey) attach(); };
-    const onKeyUp   = (e) => { if (!e.ctrlKey && !e.metaKey) detach(); };
-    const onBlur    = () => detach();
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup',   onKeyUp);
-    window.addEventListener('blur',    onBlur);
-    return () => {
-      detach();
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup',   onKeyUp);
-      window.removeEventListener('blur',    onBlur);
-    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
   }, [editingTrackId]); // re-attach when editor opens/closes
 
   // Clamp zoom up if viewport widens past the project boundary
@@ -1537,17 +1611,35 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     }
   }, []);
 
-  // ── Spacebar ─────────────────────────────────────────────────
+  // ── Spacebar (strict hijack) ─────────────────────────────────
+  // Capture-phase + blur-active-element so a previously-focused Mute/Solo/✎
+  // button doesn't also fire its default activate-on-keyup. preventDefault
+  // also blocks page scroll. Bypass for text inputs.
   useEffect(() => {
+    const isTextField = (el) =>
+      !el || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable;
     const onKey = (e) => {
       if (e.code !== 'Space') return;
-      const el = document.activeElement;
-      if (el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.isContentEditable) return;
+      if (isTextField(document.activeElement)) return;
       e.preventDefault();
+      e.stopPropagation();
+      const ae = document.activeElement;
+      if (ae && ae !== document.body && typeof ae.blur === 'function') ae.blur();
+      if (e.repeat) return;
       handlePlayPause();
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    const onKeyUp = (e) => {
+      if (e.code !== 'Space') return;
+      if (isTextField(document.activeElement)) return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    window.addEventListener('keydown', onKey,   true);
+    window.addEventListener('keyup',   onKeyUp, true);
+    return () => {
+      window.removeEventListener('keydown', onKey,   true);
+      window.removeEventListener('keyup',   onKeyUp, true);
+    };
   }, [handlePlayPause]);
 
   // ── Delete / Backspace / Copy / Paste keyboard handlers ─────
@@ -1817,6 +1909,30 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             {isDarkMode ? '◑' : '○'}
           </button>
           <button className={styles.homeBtn} onClick={onNavigateHome}>[ ⌂ home ]</button>
+          <button className={`${styles.transportBtn} ${styles.transportTextBtn}`} onClick={handleSaveProject} title="Save project to .voxdaw">[ save ]</button>
+          <button className={`${styles.transportBtn} ${styles.transportTextBtn}`} onClick={() => loadInputRef.current?.click()} title="Load project from .voxdaw">[ load ]</button>
+          <div className={styles.exportWrap}>
+            <button
+              className={`${isBouncing ? styles.transportBtnActive : styles.transportBtn} ${styles.transportTextBtn}`}
+              onClick={() => setShowExportMenu(v => !v)}
+              disabled={isBouncing}
+              title="Export audio bounce">
+              {isBouncing ? '[ bouncing… ]' : '[ export ]'}
+            </button>
+            {showExportMenu && !isBouncing && (
+              <div className={styles.exportMenu}>
+                <button className={styles.exportMenuItem} onClick={() => handleExportAudio('mp3')}>mp3</button>
+                <button className={styles.exportMenuItem} onClick={() => handleExportAudio('wav')}>wav</button>
+              </div>
+            )}
+          </div>
+          <input
+            ref={loadInputRef}
+            type="file"
+            accept=".voxdaw,.json,application/json"
+            style={{ display: 'none' }}
+            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; handleLoadProject(f); }}
+          />
           <button
             className={snapEnabled ? styles.transportBtnActive : styles.transportBtn}
             onClick={() => setSnapEnabled(v => !v)}
@@ -1902,6 +2018,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                       <button className={styles.trackInstrument} title="Change instrument">{t.instrument}</button>
                     </div>
                     <div className={styles.trackToggles}>
+                      <PanKnob
+                        value={t.pan ?? 0}
+                        onChange={(v) => handlePanChange(t.id, v)}
+                        size={20}
+                      />
                       <button
                         className={t.isMuted ? styles.trackBtnActive : styles.trackBtn}
                         onClick={() => toggleMute(t.id)} title="Mute">M</button>
@@ -1914,9 +2035,19 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                         title="Open piano roll">✎</button>
                     </div>
                   </div>
-                  <div className={styles.fakeSlider}>
-                    <div className={styles.fakeSliderThumb} />
-                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={t.volume ?? 75}
+                    onChange={(e) => handleVolumeChange(t.id, parseInt(e.target.value, 10))}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    className={styles.volumeSlider}
+                    title={`volume ${t.volume ?? 75}`}
+                  />
                 </div>
               ))}
               <button className={styles.addTrackGhost} onClick={handleAddTrack}>[ + add track ]</button>
@@ -1925,7 +2056,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         </div>
 
         {/* Left-column resizer handle */}
-        <div className={styles.colResizer} onMouseDown={startLeftColDrag} />
+        <div data-no-note-deselect className={styles.colResizer} onMouseDown={startLeftColDrag} />
 
         {/* Timeline grid */}
         <div
@@ -1942,7 +2073,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             }}
           >
             {/* Ruler */}
-            <div ref={rulerRef} className={styles.ruler}>
+            <div ref={rulerRef} data-no-note-deselect className={styles.ruler}>
               {(() => {
                 const labelStep = getMeasureInterval(pixelsPerMeasure);
                 return Array.from({ length: totalMeasures }, (_, i) => {
@@ -2177,7 +2308,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       {/* ── Piano roll editor ────────────────────────────── */}
       {editingTrackId && (
         <>
-          <div className={styles.divider} onMouseDown={startDividerDrag} title="Drag to resize" />
+          <div data-no-note-deselect className={styles.divider} onMouseDown={startDividerDrag} title="Drag to resize" />
           <div ref={editorWrapRef} className={styles.editorWrap} style={{ height: editorHeight }}>
             <RegionEditor
               track={editingTrack}
@@ -2199,6 +2330,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onLeftColResize={startLeftColDrag}
               onClose={() => setEditingTrackId(null)}
               scrollMemoryRef={lastPianoScrollTopRef}
+              onInstrumentChange={handleInstrumentChange}
             />
           </div>
         </>

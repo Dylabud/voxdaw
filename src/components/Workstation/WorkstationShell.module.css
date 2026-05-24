@@ -91,6 +91,16 @@
   background: var(--row-bg);
 }
 
+/* Modifier: text-label buttons (save / load / export). Lets them grow past
+   the 34px icon-button width and breathe within the toolbar flex row. */
+.transportTextBtn {
+  width: auto;
+  min-width: 0;
+  padding: 0 12px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .transportBtnActive {
   appearance: none;
   background: var(--accent-color);
@@ -636,6 +646,87 @@
   border: 1px solid var(--accent-color);
   transform: translate(-50%, -50%);
   box-shadow: 0 0 4px rgba(0, 0, 0, 0.3);
+}
+
+/* Real volume slider — same visual language as fakeSlider, fully functional */
+.volumeSlider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 14px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+}
+.volumeSlider::-webkit-slider-runnable-track {
+  height: 3px;
+  background: var(--border-subtle);
+  border-radius: 2px;
+}
+.volumeSlider::-moz-range-track {
+  height: 3px;
+  background: var(--border-subtle);
+  border-radius: 2px;
+  border: none;
+}
+.volumeSlider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 8px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--bg-base);
+  border: 1px solid var(--accent-color);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.3);
+  margin-top: -5.5px; /* re-center on the 3px track */
+  cursor: pointer;
+}
+.volumeSlider::-moz-range-thumb {
+  width: 8px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--bg-base);
+  border: 1px solid var(--accent-color);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+
+/* Export dropdown anchor */
+.exportWrap {
+  position: relative;
+  display: inline-flex;
+}
+.exportMenu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  min-width: 80px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  border-radius: 2px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  z-index: 50;
+}
+.exportMenuItem {
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  padding: 8px 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.exportMenuItem:hover {
+  background: var(--row-bg);
+  color: var(--accent-color);
 }
 
 /* Timeline grid (right) */

@@ -1,0 +1,29 @@
+.knob {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ew-resize;
+  user-select: none;
+  margin: 0 4px 0 0;
+}
+
+.knob svg { display: block; }
+
+.body {
+  fill: var(--bg-elevated);
+  stroke: var(--border-mid);
+  stroke-width: 1;
+}
+.knob:hover .body {
+  stroke: var(--accent-color);
+}
+
+.indicator {
+  stroke: var(--accent-color);
+  stroke-width: 2;
+}
+
+.arc {
+  stroke: var(--border-subtle);
+  stroke-width: 1.5;
+}
