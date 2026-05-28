@@ -443,3 +443,36 @@ Both achieve the same visual semantic ("accidentals look darker than naturals") 
 
 **Grid alignment gotcha:** explicit `minHeight: KEYS.length * KEY_H` (= 1296px) is set on both keys column and grid via inline style. `align-items: stretch` inside an `overflow: auto` flex container is bounded by the visible cross-size, not the line's natural maximum — so flex stretch alone leaves the grid background blank below the viewport on scroll. The explicit pixel min-height is the reliable fix.
 
+---
+
+## 16. Workstation Instrument Library
+
+The Workstation supports two instrument families, both routed through `makeSynth(name, opts)` in `src/components/Workstation/synthFactory.js`:
+
+### Synth voices (`SYNTH_INSTRUMENTS`)
+9 oscillator-based `Tone.PolySynth` configs: `fm pluck`, `analog`, `strings`, `am`, `pluck`, `sine`, `square`, `sawtooth`, `triangle`. Construction is synchronous, zero load cost.
+
+### Sampled voices (`SAMPLED_INSTRUMENT_NAMES`)
+20 `Tone.Sampler`-backed instruments from the [nbrosowsky/tonejs-instruments](https://github.com/nbrosowsky/tonejs-instruments) library: `bass-electric`, `bassoon`, `cello`, `clarinet`, `contrabass`, `flute`, `french-horn`, `guitar-acoustic`, `guitar-electric`, `guitar-nylon`, `harmonium`, `harp`, `organ`, `piano`, `saxophone`, `trombone`, `trumpet`, `tuba`, `violin`, `xylophone`.
+
+- **Sample files** are vendored at `public/samples/<instrument>/<pitch>.mp3` (~82MB total, mp3-only — `.ogg`/`.wav` from the upstream repo are not vendored).
+- **URL maps** live in `src/components/Workstation/sampleInstruments.js` as pure data (`{ baseUrl, urls, release }` per instrument) — no Tone.js imports, safe to import anywhere.
+- **`makeSynth(name, { onLoad })`** creates `new Tone.Sampler({ urls, baseUrl, release, onload })`. The optional `onLoad` callback fires once buffers are decoded.
+
+### Loading lifecycle
+Per-region synths are created lazily in `useWorkstationAudio.js`. For sampled instruments:
+1. `loadingRegionsRef` (Map<regionId, trackId>) marks the region as pending on construction.
+2. The sampler's `onload` callback removes the region from the map and recomputes `loadingTrackIds` React state.
+3. The shell reads `loadingTrackIds` to render a ` …` suffix on the affected track's instrument label.
+
+**Buffer cache amortization:** Tone's internal `ToneAudioBuffer` cache is keyed by URL and shared across all `Sampler` instances in the same `AudioContext`. The first region using `piano` downloads the .mp3 set; every subsequent `Sampler` constructed with the same URL map resolves `onload` essentially instantly. No app-level sampler cache is needed — sharing samplers across regions would break the per-region `fadeGain` envelope architecture.
+
+### Preview synths (`RegionEditor.jsx`)
+A module-level `previewSynthCache: Map<instrumentName, Synth|Sampler>` keeps preview voices warm across editor opens and instrument switches. Cached instances route direct to Destination — distinct from playback synths owned by `useWorkstationAudio` (single-writer rule preserved). Instances are never disposed; the cache lives for the process lifetime.
+
+### Offline render (`audioBounce.js`)
+`Tone.Offline` creates a separate `AudioContext`, so realtime-context buffers cannot be reused. The bounce callback is `async` and `await Tone.loaded()` before `transport.start()` — this awaits all `Tone.Sampler` decoders created inside the callback, including the offline context's own buffer set. Without this await, sampled instruments could render silent on the first export of a session.
+
+### RegionEditor dropdown UX
+The instrument `<select>` uses `<optgroup label="synth">` / `<optgroup label="sampled">` to keep the 29-item list scannable.
+

@@ -1,13 +1,33 @@
 import * as Tone from 'tone';
+import { SAMPLED_INSTRUMENTS, SAMPLED_INSTRUMENT_NAMES } from './sampleInstruments';
 
-export const INSTRUMENTS = [
+export const SYNTH_INSTRUMENTS = [
   'fm pluck', 'analog', 'strings', 'am', 'pluck',
   'sine', 'square', 'sawtooth', 'triangle',
 ];
 
-// Builds a fresh PolySynth for the given instrument name. Caller owns disposal
-// and is responsible for routing (.toDestination(), .connect(node), etc.).
-export function makeSynth(instrument) {
+export { SAMPLED_INSTRUMENT_NAMES };
+
+export const INSTRUMENTS = [...SYNTH_INSTRUMENTS, ...SAMPLED_INSTRUMENT_NAMES];
+
+export function isSampledInstrument(name) {
+  return Object.prototype.hasOwnProperty.call(SAMPLED_INSTRUMENTS, name);
+}
+
+// Builds a fresh PolySynth or Tone.Sampler for the given instrument name.
+// Caller owns disposal and routing. For sampled instruments, pass { onLoad }
+// to be notified when buffers are decoded; Tone.Sampler silently ignores
+// triggers before load completes.
+export function makeSynth(instrument, opts = {}) {
+  if (isSampledInstrument(instrument)) {
+    const cfg = SAMPLED_INSTRUMENTS[instrument];
+    return new Tone.Sampler({
+      urls: cfg.urls,
+      baseUrl: cfg.baseUrl,
+      release: cfg.release,
+      onload: opts.onLoad,
+    });
+  }
   switch (instrument) {
     case 'fm pluck':
       return new Tone.PolySynth(Tone.FMSynth, {

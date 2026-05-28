@@ -20,7 +20,7 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = 2 }
   );
   const durationSec = Math.max(0.1, rightMeasure * 4 * (60 / bpm) + tailSec);
 
-  const buffer = await Tone.Offline(({ transport }) => {
+  const buffer = await Tone.Offline(async ({ transport }) => {
     transport.bpm.value = bpm;
     const anySoloed = tracks.some(t => t.isSolo);
 
@@ -54,6 +54,10 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = 2 }
         ).start(0);
       }
     }
+
+    // Defensive: ensure any Tone.Sampler buffers used by sampled instruments
+    // finish decoding in this offline context before rendering begins.
+    await Tone.loaded();
 
     transport.start();
   }, durationSec);

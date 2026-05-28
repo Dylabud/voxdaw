@@ -1,6 +1,6 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import * as Tone from 'tone';
-import { makeSynth } from '../components/Workstation/synthFactory';
+import { makeSynth, isSampledInstrument } from '../components/Workstation/synthFactory';
 
 /**
  * Workstation playback engine — peer to useAudioEngine / useVocoder / useAutotune.
@@ -33,11 +33,25 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
   const bpmRef     = useRef(bpm);     bpmRef.current     = bpm;
 
   // Per-region
-  const synthsByRegionIdRef    = useRef(new Map()); // regionId → PolySynth
+  const synthsByRegionIdRef    = useRef(new Map()); // regionId → PolySynth | Sampler
   const fadeGainsByRegionIdRef = useRef(new Map()); // regionId → Gain
   const partsByRegionIdRef     = useRef(new Map()); // regionId → Part
   const fadeEventIdByRegionRef = useRef(new Map()); // regionId → Transport schedule id
-  const appliedRegionStateRef  = useRef(new Map()); // regionId → { instrument, partKey, fadeKey }
+  const appliedRegionStateRef  = useRef(new Map()); // regionId → { instrument, partKey, fadeKey, loaded }
+
+  // Sampler-load tracking: which regions are still downloading buffers,
+  // and the derived per-track set for the UI loading indicator.
+  const loadingRegionsRef = useRef(new Map()); // regionId → trackId
+  const [loadingTrackIds, setLoadingTrackIds] = useState(() => new Set());
+
+  const recomputeLoadingTrackIds = useCallback(() => {
+    const next = new Set();
+    for (const tid of loadingRegionsRef.current.values()) next.add(tid);
+    setLoadingTrackIds(prev => {
+      if (prev.size === next.size && [...prev].every(id => next.has(id))) return prev;
+      return next;
+    });
+  }, []);
 
   // ── 1. Track sync — owns volume + pan + mute nodes ─────────────────────
   // Signal:  regionFadeGain → volume → pan → mute → Destination
@@ -138,7 +152,27 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       fades.delete(id);
       fadeIds.delete(id);
       applied.delete(id);
+      if (loadingRegionsRef.current.delete(id)) recomputeLoadingTrackIds();
     }
+
+    // Helper — build a synth, wire sampler loading bookkeeping if needed.
+    const buildSynthForRegion = (regionId, trackId, instrument, destination) => {
+      const sampled = isSampledInstrument(instrument);
+      if (sampled) {
+        loadingRegionsRef.current.set(regionId, trackId);
+        recomputeLoadingTrackIds();
+      }
+      const synth = makeSynth(instrument, sampled ? {
+        onLoad: () => {
+          // Mark this region loaded only if it still maps to this instrument.
+          const st = applied.get(regionId);
+          if (st) applied.set(regionId, { ...st, loaded: true });
+          if (loadingRegionsRef.current.delete(regionId)) recomputeLoadingTrackIds();
+        },
+      } : undefined);
+      synth.connect(destination);
+      return synth;
+    };
 
     for (const r of regions) {
       const track = trackById.get(r.trackId);
@@ -156,12 +190,14 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       // (Re)build synth + fadeGain on first appearance OR when track moved / instrument changed.
       if (!synths.has(r.id)) {
         const fadeGain = new Tone.Gain(1).connect(trackVolume);
-        const synth    = makeSynth(track.instrument).connect(fadeGain);
+        const synth    = buildSynthForRegion(r.id, r.trackId, track.instrument, fadeGain);
         synths.set(r.id, synth);
         fades.set(r.id, fadeGain);
       } else if (instrumentChanged) {
+        // Clear any pending sampler load for the prior instrument.
+        if (loadingRegionsRef.current.delete(r.id)) recomputeLoadingTrackIds();
         synths.get(r.id)?.dispose();
-        const synth = makeSynth(track.instrument).connect(fades.get(r.id));
+        const synth = buildSynthForRegion(r.id, r.trackId, track.instrument, fades.get(r.id));
         synths.set(r.id, synth);
       }
 
@@ -188,9 +224,13 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
         else               fadeIds.delete(r.id);
       }
 
-      applied.set(r.id, { instrument: track.instrument, partKey, fadeKey });
+      const prevLoaded = applied.get(r.id)?.loaded;
+      const loaded = isSampledInstrument(track.instrument)
+        ? (instrumentChanged ? !!synths.get(r.id)?.loaded : (prevLoaded ?? !!synths.get(r.id)?.loaded))
+        : true;
+      applied.set(r.id, { instrument: track.instrument, partKey, fadeKey, loaded });
     }
-  }, [tracks, regions, notes, bpm]);
+  }, [tracks, regions, notes, bpm, recomputeLoadingTrackIds]);
 
   // Silence in-flight voices on pause/stop (Tone.Transport.pause keeps tails alive).
   const silenceAll = useCallback(() => {
@@ -277,7 +317,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     };
   }, []);
 
-  return { silenceAll, recomputeFades };
+  return { silenceAll, recomputeFades, loadingTrackIds };
 }
 
 // Pure: envelope's expected linear gain at a given transport time (seconds).

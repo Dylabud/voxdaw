@@ -296,7 +296,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // Workstation audio engine — reconciles synths/gains/parts against tracks/regions/notes.
   // Does NOT call Tone.start(); the user-gesture path (handlePlayPause, RegionEditor preview)
   // already handles that. Stops Transport + disposes nodes on unmount → clean handoff to VoxTool.
-  const { silenceAll, recomputeFades } = useWorkstationAudio({ tracks, regions, notes, bpm });
+  const { silenceAll, recomputeFades, loadingTrackIds } = useWorkstationAudio({ tracks, regions, notes, bpm });
 
   // ── Note dedupe — same (regionId, note, startBeat, durationBeats) collapses to the
   //    most-recently-touched (or last-in-array) survivor. Wired into every commit path
@@ -2015,7 +2015,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                         <span className={styles.trackColorDot} style={{ background: t.color }} />
                         <span className={styles.trackName}>{t.name}</span>
                       </div>
-                      <button className={styles.trackInstrument} title="Change instrument">{t.instrument}</button>
+                      <button className={styles.trackInstrument} title={loadingTrackIds.has(t.id) ? 'Loading samples…' : 'Change instrument'}>{t.instrument}{loadingTrackIds.has(t.id) ? ' …' : ''}</button>
                     </div>
                     <div className={styles.trackToggles}>
                       <PanKnob

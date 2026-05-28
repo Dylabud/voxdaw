@@ -3,7 +3,21 @@ import * as Tone from 'tone';
 import styles from './RegionEditor.module.css';
 import { computeGridBg, getSnapIncrement } from '../WorkstationShell';
 import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
-import { INSTRUMENTS, makeSynth } from '../synthFactory';
+import { SYNTH_INSTRUMENTS, SAMPLED_INSTRUMENT_NAMES, makeSynth } from '../synthFactory';
+
+// Process-wide preview-synth cache, keyed by instrument name. Keeps sampler
+// buffers warm across editor opens / instrument switches so we don't pay a
+// network re-download per interaction. Synth-type voices are also cached for
+// uniformity (they're cheap so this is incidental). Routed direct to Destination —
+// distinct from the per-region playback synths owned by useWorkstationAudio (single-writer rule).
+const previewSynthCache = new Map();
+function getPreviewSynth(name) {
+  const cached = previewSynthCache.get(name);
+  if (cached) return cached;
+  const s = makeSynth(name).toDestination();
+  previewSynthCache.set(name, s);
+  return s;
+}
 
 // 'grid' resolves dynamically against the visible piano-roll grid (Phase 116 bug 2).
 // 'off' = no snap. Fixed-fraction options listed here.
@@ -86,12 +100,11 @@ export default function RegionEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [track?.instrument]);
 
-  // Preview synth lifecycle — independent instance routed straight to Destination
-  // (separate from the playback synth owned by useWorkstationAudio).
+  // Preview synth — read from the module-level cache so samplers don't redownload
+  // on instrument switch or editor reopen. No dispose: instances live for the
+  // process lifetime, which is acceptable for a small fixed set of instruments.
   useEffect(() => {
-    const s = makeSynth(instrument).toDestination();
-    previewSynthRef.current = s;
-    return () => s.dispose();
+    previewSynthRef.current = getPreviewSynth(instrument);
   }, [instrument]);
 
   // Restore saved scroll position, or default to C4 at bottom on first open
@@ -634,7 +647,12 @@ export default function RegionEditor({
               if (onInstrumentChange && track?.id) onInstrumentChange(track.id, e.target.value);
             }}
           >
-            {INSTRUMENTS.map(i => <option key={i} value={i}>{i}</option>)}
+            <optgroup label="synth">
+              {SYNTH_INSTRUMENTS.map(i => <option key={i} value={i}>{i}</option>)}
+            </optgroup>
+            <optgroup label="sampled">
+              {SAMPLED_INSTRUMENT_NAMES.map(i => <option key={i} value={i}>{i}</option>)}
+            </optgroup>
           </select>
         </div>
       </div>
