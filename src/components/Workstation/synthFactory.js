@@ -1,6 +1,7 @@
 import * as Tone from 'tone';
 import { SAMPLED_INSTRUMENTS, SAMPLED_INSTRUMENT_NAMES } from './sampleInstruments';
 
+// sampleInstruments added Phase 131 — re-exported for RegionEditor / audioBounce consumers
 export const SYNTH_INSTRUMENTS = [
   'fm pluck', 'analog', 'strings', 'am', 'pluck',
   'sine', 'square', 'sawtooth', 'triangle',
