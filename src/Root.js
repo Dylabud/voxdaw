@@ -2,6 +2,7 @@ import { useState } from 'react';
 import HomePage from './components/HomePage/HomePage';
 import App from './App';
 import Workstation from './components/Workstation/Workstation';
+import MoogModular from './components/MoogModular/MoogShell';
 
 export default function Root() {
   const [page, setPage] = useState('home');
@@ -13,6 +14,8 @@ export default function Root() {
     pageEl = <App onNavigateHome={() => setPage('home')} isDarkMode={isDarkMode} onThemeToggle={onThemeToggle} />;
   } else if (page === 'workstation') {
     pageEl = <Workstation onNavigateHome={() => setPage('home')} isDarkMode={isDarkMode} onThemeToggle={onThemeToggle} />;
+  } else if (page === 'moogmodular') {
+    pageEl = <MoogModular onNavigateHome={() => setPage('home')} />;
   } else {
     pageEl = <HomePage onNavigate={setPage} />;
   }

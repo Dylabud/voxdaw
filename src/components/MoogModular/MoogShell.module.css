@@ -1,0 +1,620 @@
+/* ═══════════════════════════════════════════════════════
+   MoogShell — 1960s Moog Modular hardware aesthetic
+   All colors are hardware-literal (not CSS-var themed)
+   ═══════════════════════════════════════════════════════ */
+
+/* ── Page shell ── */
+.shell {
+  width: 100vw;
+  height: 100vh;
+  background: radial-gradient(ellipse at 50% 0%, #160c04 0%, #070403 70%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 18px 16px;
+  overflow: auto;
+  box-sizing: border-box;
+}
+
+/* ── Home nav ── */
+.homeBtn {
+  position: fixed;
+  top: 12px;
+  left: 16px;
+  z-index: 100;
+  appearance: none;
+  background: transparent;
+  border: 1px solid #4a2c10;
+  color: #7a5020;
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 5px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.18s, color 0.18s;
+}
+.homeBtn:hover {
+  border-color: #c8a86a;
+  color: #c8a86a;
+}
+
+/* ══════════════════════════════════════════════════════
+   CABINET — walnut wood shows only at the outer edges
+   (the .rack covers the interior with dark metal)
+   ══════════════════════════════════════════════════════ */
+.cabinet {
+  width: 100%;
+  max-width: 1380px;
+  background:
+    repeating-linear-gradient(
+      180deg,
+      transparent 0px,
+      transparent 3px,
+      rgba(0, 0, 0, 0.06) 3px,
+      rgba(0, 0, 0, 0.06) 4px
+    ),
+    repeating-linear-gradient(
+      177deg,
+      transparent 0px,
+      transparent 22px,
+      rgba(255, 255, 255, 0.018) 22px,
+      rgba(255, 255, 255, 0.018) 23px
+    ),
+    linear-gradient(
+      to bottom,
+      #2c1507 0%,
+      #5a3016 10%,
+      #4a280f 25%,
+      #693b1a 44%,
+      #59300f 62%,
+      #4a280f 78%,
+      #3a1f08 90%,
+      #2c1507 100%
+    );
+  border-radius: 8px;
+  /* Wood visible only as this padding border */
+  padding: 12px 20px 14px;
+  box-shadow:
+    0 0 0 2px #8a5228,
+    0 0 0 4px #2e1806,
+    0 20px 60px rgba(0, 0, 0, 0.88),
+    0 6px 18px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.5);
+}
+
+/* ── Nameplate — aluminum strip spanning top of rack ── */
+.nameplate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: linear-gradient(
+    to bottom,
+    #c4bca4 0%,
+    #a49470 28%,
+    #b4a480 58%,
+    #948460 100%
+  );
+  border-radius: 3px 3px 0 0;
+  padding: 5px 18px;
+  box-shadow:
+    0 1px 4px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28);
+}
+
+.nameplateModel {
+  font-size: 9px;
+  letter-spacing: 0.28em;
+  color: #3a2808;
+  font-weight: 700;
+  opacity: 0.65;
+}
+
+.nameplateBrand {
+  font-size: 12px;
+  letter-spacing: 0.42em;
+  color: #18100a;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.nameplateSerial {
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  color: #3a2808;
+  opacity: 0.55;
+  font-style: italic;
+}
+
+/* ══════════════════════════════════════════════════════
+   RACK — dark metal interior; no wood between tiers
+   ══════════════════════════════════════════════════════ */
+.rack {
+  display: flex;
+  flex-direction: column;
+  background: #0e0c0a;
+  border-radius: 0 0 3px 3px;
+  box-shadow:
+    inset 0 3px 10px rgba(0, 0, 0, 0.85),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+
+/* Thin machined-metal strip between tiers */
+.tierSep {
+  height: 4px;
+  background: linear-gradient(
+    to bottom,
+    #1a1612 0%,
+    #221e18 50%,
+    #1a1612 100%
+  );
+  border-top: 1px solid #100e0c;
+  border-bottom: 1px solid #2a2420;
+}
+
+/* ── Tier layouts (CSS Grid) ── */
+.tier {
+  display: grid;
+  gap: 2px;
+  background: #0e0c0a;
+  padding: 0;
+}
+
+.tierVco  { grid-template-columns: repeat(3, 1fr); }
+.tierFilt { grid-template-columns: 2.1fr 1fr; }
+.tierEnv  { grid-template-columns: 1fr 1fr 1.2fr; }
+
+/* ══════════════════════════════════════════════════════
+   MODULE PANEL
+   ══════════════════════════════════════════════════════ */
+
+.module {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Faceplate ── */
+.plate {
+  flex: 1;
+  background: linear-gradient(155deg, #1d1c1b 0%, #161514 45%, #121110 100%);
+  padding: 10px 13px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.5),
+    inset 1px 0 3px rgba(0, 0, 0, 0.25);
+}
+
+.moduleBlank .plate {
+  background: linear-gradient(to bottom, #111010, #0e0d0c);
+}
+
+/* ── Corner screws ── */
+.screw {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 33% 28%,
+    #aca49a 0%,
+    #726a60 38%,
+    #443e38 68%,
+    #242018 100%
+  );
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.8),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  z-index: 2;
+}
+.screw::before,
+.screw::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 1px;
+}
+.screw::before { width: 6px; height: 1.5px; }
+.screw::after  { width: 1.5px; height: 6px; }
+
+.screwTL { top: 5px;    left: 5px; }
+.screwTR { top: 5px;    right: 5px; }
+.screwBL { bottom: 5px; left: 5px; }
+.screwBR { bottom: 5px; right: 5px; }
+
+/* ── Plate header ── */
+.plateHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 0 3px;
+}
+
+.plateNum {
+  font-size: 18px;
+  font-weight: 200;
+  color: rgba(200, 188, 155, 0.15);
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.plateTitles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.plateTitle {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  color: #c4bb9c;
+  text-transform: uppercase;
+  line-height: 1;
+}
+
+.plateSub {
+  font-size: 5.5px;
+  letter-spacing: 0.22em;
+  color: #6a6254;
+  text-transform: uppercase;
+}
+
+/* ── Plate body ── */
+.plateBody {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plateDivider {
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    #363028 18%,
+    #363028 82%,
+    transparent
+  );
+}
+
+/* ══════════════════════════════════════════════════════
+   KNOBS — silver top face, skirt ring, indicator marks
+   ══════════════════════════════════════════════════════ */
+
+.knobRow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 3px 0;
+  flex-wrap: wrap;
+}
+
+.knobGroup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ── Knob wrap — contains both scale ring and knob ── */
+.knobWrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.knobWrap_xl { width: 76px; height: 76px; }
+.knobWrap_lg { width: 62px; height: 62px; }
+.knobWrap_md { width: 48px; height: 48px; }
+.knobWrap_sm { width: 38px; height: 38px; }
+
+/* ── Knob body — silver brushed-aluminum face ──
+   Three gradient layers:
+   1. Sharp specular highlight (top-left studio lamp)
+   2. Broad warm sheen
+   3. Base silver-to-pewter radial */
+.knob {
+  border-radius: 50%;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 2;
+  background:
+    radial-gradient(
+      ellipse at 32% 18%,
+      rgba(255, 255, 255, 0.72) 0%,
+      rgba(255, 255, 255, 0.18) 28%,
+      transparent 55%
+    ),
+    radial-gradient(
+      ellipse at 60% 72%,
+      rgba(255, 255, 255, 0.10) 0%,
+      transparent 44%
+    ),
+    radial-gradient(
+      circle at 40% 36%,
+      #d8d5ce 0%,
+      #ababA2 28%,
+      #888880 52%,
+      #626258 72%,
+      #464640 100%
+    );
+  box-shadow:
+    /* dark gap between top face and skirt */
+    0 0 0 2px #141414,
+    /* machined silver skirt ring */
+    0 0 0 4px #888880,
+    /* outer dark edge */
+    0 0 0 5px #1a1a18,
+    /* panel drop shadow */
+    0 5px 14px rgba(0, 0, 0, 0.92),
+    0 2px 5px rgba(0, 0, 0, 0.7),
+    /* inner specular rim on top face */
+    inset 0 1px 3px rgba(255, 255, 255, 0.35),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.25);
+}
+
+/* ── Indicator pointer — dark line on silver face ──
+   Runs from near-center toward top edge.
+   Phase 2 MoogKnob will rotate this element for live control. */
+.knobCap {
+  position: absolute;
+  top: 11%;
+  left: 50%;
+  transform: translateX(-50%);
+  border-radius: 1.5px;
+  background: linear-gradient(
+    to bottom,
+    #1a1a18 0%,
+    #2a2a26 65%,
+    transparent 100%
+  );
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+}
+
+/* Knob element sizes (visual size = element + 5px skirt ring each side) */
+.knob_xl { width: 44px; height: 44px; }
+.knob_lg { width: 34px; height: 34px; }
+.knob_md { width: 26px; height: 26px; }
+.knob_sm { width: 20px; height: 20px; }
+
+/* Indicator proportions */
+.knob_xl .knobCap { width: 3.5px; height: 38%; }
+.knob_lg .knobCap { width: 3px;   height: 37%; }
+.knob_md .knobCap { width: 2.5px; height: 36%; top: 12%; }
+.knob_sm .knobCap { width: 2px;   height: 35%; top: 12%; }
+
+.knobLabel {
+  font-size: 6px;
+  letter-spacing: 0.24em;
+  color: #7a7260;
+  text-transform: uppercase;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* ══════════════════════════════════════════════════════
+   KNOB SCALE MARKS — silkscreened tick lines + numbers
+   painted on the faceplate around each knob
+   ══════════════════════════════════════════════════════ */
+
+.knobScale {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 1;
+}
+/* size variants — dimensionless, they fill the knobWrap via inset 0 */
+.ks_xl, .ks_lg, .ks_md, .ks_sm { top: 0; left: 0; right: 0; bottom: 0; }
+
+/* Each tickArm is a thin rectangle standing upright,
+   rotated around its bottom edge (= center of the knob). */
+.tickArm {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  height: 50%;
+  transform-origin: 50% 100%;
+}
+
+/* Minor tick */
+.tickLine {
+  position: absolute;
+  top: 3px;
+  left: 0;
+  width: 2px;
+  height: 4px;
+  background: rgba(180, 168, 138, 0.52);
+  border-radius: 1px;
+}
+
+/* Major tick (0, 5, 10) — taller and brighter */
+.tickMajor {
+  top: 1px;
+  height: 7px;
+  width: 2px;
+  background: rgba(210, 198, 162, 0.82);
+}
+
+/* Number label for major ticks — counter-rotated to stay upright */
+.tickNum {
+  position: absolute;
+  top: -7px;   /* sits just outside the scale arc */
+  left: 50%;
+  font-size: 5px;
+  line-height: 1;
+  color: rgba(190, 178, 145, 0.7);
+  letter-spacing: 0;
+  white-space: nowrap;
+  text-align: center;
+  /* inline style applies counter-rotation per tick */
+}
+
+/* ══════════════════════════════════════════════════════
+   TOGGLE SWITCHES
+   ══════════════════════════════════════════════════════ */
+
+.switchRow {
+  display: flex;
+  gap: 14px;
+  padding: 0 3px;
+  align-items: center;
+}
+
+.toggleGroup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.toggleLabel {
+  font-size: 6px;
+  letter-spacing: 0.18em;
+  color: #6a6052;
+  text-transform: uppercase;
+}
+
+.toggle {
+  width: 10px;
+  height: 20px;
+  background: linear-gradient(to bottom, #181818, #0e0e0e);
+  border-radius: 5px;
+  border: 1px solid #363636;
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.85),
+    0 1px 1px rgba(255, 255, 255, 0.03);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2px 0;
+}
+
+.toggleLever {
+  width: 7px;
+  height: 8px;
+  background: radial-gradient(circle at 38% 28%, #aca49a 0%, #726862 48%, #404038 100%);
+  border-radius: 3px;
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+/* ══════════════════════════════════════════════════════
+   PATCH JACKS — brass ring socket appearance
+   ══════════════════════════════════════════════════════ */
+
+.jackRow {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0 3px;
+  align-items: flex-end;
+}
+
+.jackGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.jackGroup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.jack {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  position: relative;
+  /* Deep black hole surrounded by a brushed-aluminum ring */
+  background: radial-gradient(
+    circle at 35% 30%,
+    #1c1a18 0%,
+    #0c0a08 50%,
+    #040302 100%
+  );
+  /* Silver ring — matches knob skirt color language */
+  border: 2px solid #909088;
+  box-shadow:
+    /* outer drop shadow */
+    0 2px 5px rgba(0, 0, 0, 0.85),
+    /* silver ring specular highlight */
+    0 0 0 1px rgba(200, 196, 186, 0.25),
+    /* inner depth — the actual plug hole */
+    inset 0 2px 5px rgba(0, 0, 0, 0.98),
+    inset 0 -1px 0 rgba(180, 175, 162, 0.12);
+}
+
+/* Central hole detail */
+.jack::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #181614, #030202);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 1);
+}
+
+.jackLabel {
+  font-size: 5.5px;
+  letter-spacing: 0.16em;
+  color: #6a6254;
+  text-transform: uppercase;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.jackLabelEmpty {
+  display: block;
+  height: 8px;
+}
+
+/* ══════════════════════════════════════════════════════
+   BLANK PANEL
+   ══════════════════════════════════════════════════════ */
+
+.blankContent {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  opacity: 0.28;
+}
+
+.blankLabel {
+  font-size: 8px;
+  letter-spacing: 0.55em;
+  color: #6a6050;
+  text-transform: uppercase;
+}

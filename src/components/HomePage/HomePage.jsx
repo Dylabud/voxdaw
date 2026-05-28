@@ -31,6 +31,12 @@ export default function HomePage({ onNavigate }) {
           >
             [ New Project ]
           </button>
+          <button
+            className={styles.moogBtn}
+            onClick={() => onNavigate('moogmodular')}
+          >
+            [ Moog Modular ]
+          </button>
         </div>
 
       </div>

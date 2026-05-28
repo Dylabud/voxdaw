@@ -110,3 +110,23 @@
   border-color: var(--border-strong);
   color: var(--text-primary);
 }
+
+.moogBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid #4a2c10;
+  color: #8a5a28;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  padding: 12px 36px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+
+.moogBtn:hover {
+  border-color: #c8a86a;
+  color: #c8a86a;
+}
