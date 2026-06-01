@@ -3,6 +3,7 @@ import * as Tone from 'tone';
 import styles from './RegionEditor.module.css';
 import { computeGridBg, getSnapIncrement } from '../WorkstationShell';
 import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
+import { firstLoopOffsetMeasures } from '../loopMath';
 import { SYNTH_INSTRUMENTS, SAMPLED_INSTRUMENT_NAMES, makeSynth } from '../synthFactory';
 
 // Process-wide preview-synth cache, keyed by instrument name. Keeps sampler
@@ -42,6 +43,7 @@ export default function RegionEditor({
   onNoteRemove,
   onCommitNoteEdits,
   onNotesDelete,
+  onNoteContextMenu,
   onNoteSelectionChange,
   exposeSelectionSetter,
   zoomLevel,
@@ -736,33 +738,31 @@ export default function RegionEditor({
               const windowStartBeat  = clipOffset * 4;
               const windowEndBeat    = (clipOffset + baseLoop) * 4;
               if (n.startBeat < windowStartBeat || n.startBeat >= windowEndBeat) return [];
-              const bottleOriginBeat   = (r.startMeasure - clipOffset) * 4;
-              const baseGlobalLeftBeat = bottleOriginBeat + n.startBeat;
-              const iterations = (r.loopInterval ?? null) !== null
-                ? Math.ceil(r.durationMeasures / r.loopInterval)
-                : 1;
+              if (!(baseLoop > 0)) return [];
+              // Phase-aware loop unroll: occurrences at firstOffset + j*baseLoop (loopMath),
+              // wrapping the home cycle by the region's loopPhase. phase 0 ⇒ old i*baseLoop.
+              const phase = (r.loopInterval ?? null) !== null ? (r.loopPhase ?? 0) : 0;
+              const homeLocalMeasures = n.startBeat / 4 - clipOffset;
+              const firstOff = firstLoopOffsetMeasures(homeLocalMeasures, phase, baseLoop);
               const out = [];
               const regionStartBeat = r.startMeasure * 4;
               const regionEndBeat   = (r.startMeasure + r.durationMeasures) * 4;
               const isSelected = selectedNoteIds.has(n.id);
-              for (let i = 0; i < iterations; i++) {
-                const iterOffsetBeats = i * (r.loopInterval ?? 0) * 4;
-                const globalLeftBeat  = baseGlobalLeftBeat + iterOffsetBeats;
+              for (let j = 0; ; j++) {
+                const globalLeftBeat  = regionStartBeat + (firstOff + j * baseLoop) * 4;
+                // No later occurrence helps once we're past the region's right edge.
+                if (globalLeftBeat >= regionEndBeat) break;
                 const noteEndBeat     = globalLeftBeat + n.durationBeats;
-                // Clip to region bounds (bugs 7.1/7.2). If fully past or fully before, skip.
+                // Clip to region bounds (bugs 7.1/7.2).
                 const visibleLeft  = Math.max(globalLeftBeat, regionStartBeat);
                 const visibleRight = Math.min(noteEndBeat, regionEndBeat);
-                if (visibleRight <= visibleLeft) {
-                  // Fully outside region; if past the right edge, no later iter helps → break.
-                  if (globalLeftBeat >= regionEndBeat) break;
-                  continue;
-                }
-                const ghost = i > 0;
+                if (visibleRight <= visibleLeft) continue;
+                const ghost = j > 0;
                 out.push(
                   <div
-                    key={`${n.id}-${i}`}
+                    key={`${n.id}-${j}`}
                     data-note-id={n.id}
-                    data-note-iter={i}
+                    data-note-iter={j}
                     className={`${styles.noteBlock}${ghost ? ` ${styles.noteBlockGhost}` : ''}${!ghost && isSelected ? ` ${styles.noteSelected}` : ''}`}
                     style={{
                       top:    keyIndex * KEY_H,
@@ -772,6 +772,11 @@ export default function RegionEditor({
                     }}
                     onMouseDown={ghost ? undefined : (e) => handleNoteMouseDown(e, n)}
                     onMouseMove={ghost ? undefined : handleNoteHover}
+                    onContextMenu={ghost ? undefined : (e) => {
+                      e.preventDefault(); e.stopPropagation();
+                      if (!selectedNoteIdsRef.current.has(n.id)) setSelectedNoteIds(new Set([n.id]));
+                      onNoteContextMenu?.(e.clientX, e.clientY, n.id);
+                    }}
                   />
                 );
               }

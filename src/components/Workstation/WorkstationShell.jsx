@@ -2,7 +2,9 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react
 import * as Tone from 'tone';
 import styles from './WorkstationShell.module.css';
 import RegionEditor from './RegionEditor/RegionEditor';
+import ContextMenu from './ContextMenu/ContextMenu';
 import { KEYS } from './pitchKeys';
+import { firstLoopOffsetMeasures, loopBoundaries } from './loopMath';
 import useWorkstationAudio from '../../hooks/useWorkstationAudio';
 import PanKnob from './PanKnob';
 import { serializeProject, deserializeProject, downloadJSON, readJSONFile } from './projectIO';
@@ -384,6 +386,138 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     setNotes(prev => prev.filter(n => !set.has(n.id)));
   }, []);
 
+  // ── Right-click context menu (regions + notes) ─────────────────
+  // menu = null | { x, y, targetType: 'region'|'note', targetId }
+  const [contextMenu, setContextMenu] = useState(null);
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+
+  // Transpose by `semis` semitones (musical: + is up). KEYS is ordered high→low
+  // (buildKeys runs hiOct→loOct), so a higher pitch is a *lower* index → ki − semis.
+  const shiftNoteName = (name, semis) => {
+    const ki = KEYS.findIndex(k => k.name === name);
+    if (ki < 0) return name;
+    return KEYS[Math.max(0, Math.min(KEYS.length - 1, ki - semis))].name;
+  };
+  const transposeRegions = useCallback((regionIds, semis) => {
+    const set = regionIds instanceof Set ? regionIds : new Set(regionIds);
+    setNotes(prev => prev.map(n =>
+      set.has(n.regionId) ? { ...n, note: shiftNoteName(n.note, semis) } : n));
+  }, []);
+  const transposeNotes = useCallback((noteIds, semis) => {
+    const set = noteIds instanceof Set ? noteIds : new Set(noteIds);
+    setNotes(prev => prev.map(n =>
+      set.has(n.id) ? { ...n, note: shiftNoteName(n.note, semis) } : n));
+  }, []);
+
+  // Split a region at global measure P into Left (keeps id + notes) and Right
+  // (new id + cloned notes). Bottle-preserving; phase-aware for looped regions
+  // (R resumes the loop mid-cycle so the grid timing is unchanged). Returns
+  // { left, right, clones } or null if P is not strictly inside the region.
+  // Mints region/note ids eagerly (called once per region, never inside a state
+  // updater) so React StrictMode double-invokes can't double-increment.
+  const splitRegionAtMeasure = useCallback((r, P) => {
+    const S = r.startMeasure;
+    const D = r.durationMeasures;
+    const EPS = 1e-6;
+    if (P <= S + EPS || P >= S + D - EPS) return null;
+    const rel = P - S;
+    const co  = r.clipOffset ?? 0;
+    const li  = r.loopInterval ?? null;
+    const origPhase = li != null ? (r.loopPhase ?? 0) : 0;
+
+    // ── Left: original truncated at the playhead.
+    let leftLI, leftPhase;
+    if (li == null)            { leftLI = null; leftPhase = 0; }
+    else if (origPhase === 0)  { leftLI = normalizeLoopInterval(rel, li); leftPhase = 0; }
+    else                       { leftLI = li;  leftPhase = origPhase; } // keep phased loop intact
+    const left = {
+      ...r,
+      durationMeasures: rel,
+      fadeIn:  Math.min(r.fadeIn ?? 0, rel),
+      fadeOut: 0,
+      fadeInFloor:  r.fadeInFloor ?? 0,
+      fadeOutFloor: 0,
+      loopInterval: leftLI,
+      loopPhase: leftPhase,
+    };
+
+    // ── Right: new region starting exactly at the playhead.
+    const rightId  = `r${nextRegionIdRef.current++}`;
+    const rightDur = D - rel;
+    const right = {
+      ...r,
+      id: rightId,
+      startMeasure: P,
+      durationMeasures: rightDur,
+      fadeIn: 0,
+      fadeOut: Math.min(r.fadeOut ?? 0, rightDur),
+      fadeInFloor: 0,
+      fadeOutFloor: r.fadeOutFloor ?? 0,
+      ...(li != null
+        // looped: same home block, advance the cycle phase to the playhead
+        ? { clipOffset: co, loopInterval: li, loopPhase: (((origPhase + rel) % li) + li) % li }
+        // non-looped: slide the bottle window forward by the cut amount
+        : { clipOffset: co + rel, loopInterval: null, loopPhase: 0 }),
+    };
+
+    // Both halves hold the full bottle (windowed). Left keeps the originals;
+    // Right gets deep clones with fresh ids.
+    const clones = [];
+    for (const n of notesRef.current) {
+      if (n.regionId === r.id) clones.push({ ...n, id: `note_${nextNoteIdRef.current++}`, regionId: rightId });
+    }
+    return { left, right, clones };
+  }, []);
+
+  // Context-menu commands operate on the whole active selection when the clicked
+  // item is part of it; otherwise just the clicked item. `payload` carries the
+  // semitone count for the pitch submenu.
+  const handleContextCommand = useCallback((action, type, id, payload) => {
+    if (type === 'region') {
+      const ids = selectedRegionIdsRef.current.has(id)
+        ? [...selectedRegionIdsRef.current] : [id];
+      const set = new Set(ids);
+      if (action === 'delete') {
+        setRegions(prev => prev.filter(r => !set.has(r.id)));
+        setNotes(prev => prev.filter(n => !set.has(n.regionId)));
+        setSelectedRegionIds(new Set());
+      } else if (action === 'mute') {
+        const anchor = regionsRef.current.find(r => r.id === id);
+        const next = !(anchor?.isMuted);
+        setRegions(prev => prev.map(r => set.has(r.id) ? { ...r, isMuted: next } : r));
+      } else if (action === 'pitch') {
+        transposeRegions(set, payload);
+      } else if (action === 'split') {
+        const P = Tone.Transport.ticks / (Tone.Transport.PPQ * 4); // playhead in measures
+        const splits = [];
+        for (const rid of ids) {
+          const r = regionsRef.current.find(x => x.id === rid);
+          if (!r) continue;
+          const res = splitRegionAtMeasure(r, P);
+          if (res) splits.push(res);
+        }
+        if (!splits.length) return;
+        const splitById = new Map(splits.map(s => [s.left.id, s]));
+        setRegions(prev => prev.flatMap(rg => {
+          const s = splitById.get(rg.id);
+          return s ? [s.left, s.right] : [rg];
+        }));
+        const allClones = splits.flatMap(s => s.clones);
+        if (allClones.length) setNotes(prev => [...prev, ...allClones]);
+        const nextSel = new Set();
+        for (const s of splits) { nextSel.add(s.left.id); nextSel.add(s.right.id); }
+        setSelectedRegionIds(nextSel);
+      } else console.log('[context-menu] region', action, ids); // copy / paste (stubs)
+    } else {
+      const sel = noteSelectionRef.current;
+      const ids = sel?.has(id) ? [...sel] : [id];
+      const set = new Set(ids);
+      if (action === 'delete') handleNotesDelete(set);
+      else if (action === 'pitch') transposeNotes(set, payload);
+      else console.log('[context-menu] note', action, ids); // copy / paste (stubs)
+    }
+  }, [transposeRegions, transposeNotes, handleNotesDelete, splitRegionAtMeasure]);
+
   // ── Ghost region ─────────────────────────────────────────────
   // Returns true if `measure` falls inside any existing region on this track.
   const isPositionOccupied = (trackId, measure) =>
@@ -531,6 +665,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   // ── Region drag ──────────────────────────────────────────────
   const startRegionDrag = (e, region, mode) => {
+    if (e.button !== 0) return; // ignore right/middle click — context menu handles those
     e.stopPropagation();
     e.preventDefault();
     const origTrackIndex = tracksRef.current.findIndex(t => t.id === region.trackId);
@@ -1370,6 +1505,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       setIsPlaying(false);
       updatePlayhead();
     } else {
+      silenceAll(); // kill any stale voice ringing from a prior position before resuming
       recomputeFades();
       Tone.Transport.start();
       setIsPlaying(true);
@@ -1421,9 +1557,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     } else {
       Tone.Transport.seconds = Math.max(0, x / pxPerSec);
     }
+    silenceAll(); // cut any voice still ringing from the pre-seek position (ghost note)
     recomputeFades();
     updatePlayhead();
-  }, [pxPerSec, updatePlayhead, snapEnabled, pixelsPerMeasure, bpm, recomputeFades]);
+  }, [pxPerSec, updatePlayhead, snapEnabled, pixelsPerMeasure, bpm, recomputeFades, silenceAll]);
 
   const handleMouseDown = (e) => {
     e.preventDefault();
@@ -2128,7 +2265,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                   {regions.filter(r => r.trackId === t.id).map(r => (
                     <div key={r.id} data-region-id={r.id}
                       {...((r.loopInterval ?? null) !== null ? { 'data-looped': true } : {})}
-                      className={`${styles.region}${selectedRegionIds.has(r.id) ? ` ${styles.regionSelected}` : ''}`}
+                      className={`${styles.region}${selectedRegionIds.has(r.id) ? ` ${styles.regionSelected}` : ''}${(r.isMuted || t.isMuted) ? ` ${styles.regionMuted}` : ''}`}
                       style={{
                         left:  `${r.startMeasure    * pixelsPerMeasure}px`,
                         width: `${r.durationMeasures * pixelsPerMeasure}px`,
@@ -2136,33 +2273,39 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                       onMouseDownCapture={(e) => { capturedRegionStartRef.current = { x: e.clientX, y: e.clientY }; }}
                       onMouseDown={(e) => startRegionDrag(e, r, 'move')}
                       onClick={(e) => e.stopPropagation()}
+                      onContextMenu={(e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        if (!selectedRegionIds.has(r.id)) setSelectedRegionIds(new Set([r.id]));
+                        setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'region', targetId: r.id });
+                      }}
                       onDoubleClick={(e) => { e.stopPropagation(); setEditingTrackId(r.trackId); }}>
                       {(r.loopInterval ?? null) !== null && (() => {
-                        const segs = [];
                         const total = r.durationMeasures;
-                        const li    = r.loopInterval;
-                        const lastIter = Math.ceil(total / li) - 1;
-                        for (let i = 0; i <= lastIter; i++) {
-                          const segStart = i * li;
-                          const segLen   = Math.min(li, total - segStart);
+                        // Phase-aware cycle boundaries; edges[] = each segment's left edge.
+                        const edges = [0, ...loopBoundaries(r.loopPhase ?? 0, r.loopInterval, total)];
+                        const segs = [];
+                        for (let i = 0; i < edges.length; i++) {
+                          const segStart = edges[i];
                           // Phase 112: anchor the last segment to the region's right edge so any
                           // one-frame lag between region width and segment commit can't show through.
-                          const isLast = i === lastIter;
+                          const isLast = i === edges.length - 1;
                           segs.push(
                             <div key={`seg-${i}`} data-loop-segment data-loop-segment-i={i}
                               className={styles.loopSegment}
                               style={isLast
                                 ? { left: `${segStart * pixelsPerMeasure}px`, right: 0 }
-                                : { left: `${segStart * pixelsPerMeasure}px`, width: `${Math.max(0, segLen * pixelsPerMeasure)}px` }
+                                : { left: `${segStart * pixelsPerMeasure}px`, width: `${Math.max(0, (edges[i + 1] - segStart) * pixelsPerMeasure)}px` }
                               } />
                           );
                         }
                         return segs;
                       })()}
-                      {(r.loopInterval ?? null) !== null && r.durationMeasures > r.loopInterval && (
-                        <div data-loop-tint className={styles.loopTint}
-                          style={{ left: `${r.loopInterval * pixelsPerMeasure}px` }} />
-                      )}
+                      {(r.loopInterval ?? null) !== null && (() => {
+                        const bounds = loopBoundaries(r.loopPhase ?? 0, r.loopInterval, r.durationMeasures);
+                        if (!bounds.length) return null; // no repeat yet → no tint
+                        return <div data-loop-tint className={styles.loopTint}
+                          style={{ left: `${bounds[0] * pixelsPerMeasure}px` }} />;
+                      })()}
                       {(() => {
                         const regionNotes = notes.filter(n => n.regionId === r.id);
                         if (regionNotes.length === 0) return null;
@@ -2179,50 +2322,54 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                         const minIdx  = Math.min(...idxList);
                         const maxIdx  = Math.max(...idxList);
                         const idxSpan = Math.max(1, maxIdx - minIdx);
-                        const iterations = r.loopInterval ? Math.ceil(r.durationMeasures / r.loopInterval) : 1;
+                        const phase      = r.loopInterval != null ? (r.loopPhase ?? 0) : 0;
                         const ppb        = pixelsPerMeasure / 4;
                         const regionWidthPx = r.durationMeasures * pixelsPerMeasure;
                         const out = [];
-                        for (let i = 0; i < iterations; i++) {
+                        if (baseLoop > 0) {
                           for (const n of inWindow) {
                             const keyIndex = KEYS.findIndex(k => k.name === n.note);
                             if (keyIndex < 0) continue;
                             const yRel = (keyIndex - minIdx) / idxSpan;
-                            const noteLocalBeat = n.startBeat - windowStartBeat;
-                            const xPx = i * baseLoop * pixelsPerMeasure + noteLocalBeat * ppb;
-                            if (xPx >= regionWidthPx) continue;
-                            out.push(
-                              <div key={`mn-${i}-${n.id}`}
-                                data-mini-note
-                                data-mini-note-iter={i}
-                                data-mini-note-startbeat={n.startBeat}
-                                className={`${styles.miniNote}${i > 0 ? ` ${styles.miniNoteGhost}` : ''}`}
-                                style={{
-                                  left: `${xPx}px`,
-                                  top:  `${4 + yRel * 70}%`,
-                                  width: `${Math.max(n.durationBeats * ppb - 1, 2)}px`,
-                                }} />
-                            );
+                            // Phase-aware occurrences: firstOffset + j*baseLoop measures.
+                            const homeLocalMeasures = n.startBeat / 4 - clipOffset;
+                            const firstOff = firstLoopOffsetMeasures(homeLocalMeasures, phase, baseLoop);
+                            for (let j = 0; ; j++) {
+                              const xPx = (firstOff + j * baseLoop) * pixelsPerMeasure;
+                              if (xPx >= regionWidthPx) break;
+                              out.push(
+                                <div key={`mn-${j}-${n.id}`}
+                                  data-mini-note
+                                  data-mini-note-iter={j}
+                                  data-mini-note-startbeat={n.startBeat}
+                                  className={`${styles.miniNote}${j > 0 ? ` ${styles.miniNoteGhost}` : ''}`}
+                                  style={{
+                                    left: `${xPx}px`,
+                                    top:  `${4 + yRel * 70}%`,
+                                    width: `${Math.max(n.durationBeats * ppb - 1, 2)}px`,
+                                  }} />
+                              );
+                            }
                           }
                         }
                         return out;
                       })()}
                       {(r.loopInterval ?? null) !== null && r.loopInterval > 0 && (() => {
-                        const lines = [];
-                        for (let i = 1; ; i++) {
-                          const x = i * r.loopInterval * pixelsPerMeasure;
-                          if (x >= r.durationMeasures * pixelsPerMeasure) break;
-                          const isFirst = i === 1;
-                          lines.push(
-                            <div key={`loop-${i}`}
+                        const phase  = r.loopPhase ?? 0;
+                        const bounds = loopBoundaries(phase, r.loopInterval, r.durationMeasures);
+                        return bounds.map((bx, idx) => {
+                          // The draggable base-loop handle only makes sense on un-phased
+                          // loops (phase 0). Phased split-halves omit it.
+                          const isFirst = idx === 0 && phase === 0;
+                          return (
+                            <div key={`loop-${idx}`}
                               {...(isFirst ? { 'data-loop-divider-first': true } : {})}
                               className={`${styles.loopDivider}${isFirst ? ` ${styles.loopDividerBase}` : ''}`}
-                              style={{ left: `${x}px` }}
+                              style={{ left: `${bx * pixelsPerMeasure}px` }}
                               onMouseDown={isFirst ? (e) => startRegionDrag(e, r, 'loop-resize-base') : undefined}
                             />
                           );
-                        }
-                        return lines;
+                        });
                       })()}
                       {r.durationMeasures * pixelsPerMeasure >= FADE_UI_MIN_PX && (
                         <>
@@ -2318,6 +2465,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onNoteRemove={handleNoteRemove}
               onCommitNoteEdits={handleCommitNoteEdits}
               onNotesDelete={handleNotesDelete}
+              onNoteContextMenu={(x, y, id) => setContextMenu({ x, y, targetType: 'note', targetId: id })}
               onNoteSelectionChange={(ids) => { noteSelectionRef.current = ids; }}
               exposeSelectionSetter={(api) => { noteSelectionApiRef.current = api; }}
               magnetOn={snapEnabled}
@@ -2343,6 +2491,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         <button className={styles.transportBtn} onClick={handleStop} title="Stop">■</button>
         <button className={styles.transportBtn} title="Record">●</button>
       </div>
+      <ContextMenu menu={contextMenu} onClose={closeContextMenu} onCommand={handleContextCommand} />
     </div>
   );
 }

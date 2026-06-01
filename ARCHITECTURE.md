@@ -282,10 +282,28 @@ index.js → <Root>
 ```
 Workstation.jsx                 — view container: warning ↔ shell
 └── WorkstationShell.jsx        — top transport bar, tracks/regions/ruler, editor host, bottom transport bar
-    └── RegionEditor/           — bottom-docked panel (mounted when editingRegion ≠ null)
-        ├── RegionEditor.jsx    — inspector + piano roll shell
-        └── RegionEditor.module.css
+    ├── RegionEditor/           — bottom-docked panel (mounted when editingRegion ≠ null)
+    │   ├── RegionEditor.jsx    — inspector + piano roll shell
+    │   └── RegionEditor.module.css
+    └── ContextMenu/            — right-click menu for regions + notes (always rendered, returns null when closed)
+        ├── ContextMenu.jsx
+        └── ContextMenu.module.css
 ```
+
+### Region/Note context menu (`ContextMenu/`)
+Custom right-click menu (`position: fixed; z-index: 500`, styled after `.exportMenu`). A single `contextMenu` state (`null | { x, y, targetType: 'region'|'note', targetId }`) lives in `WorkstationShell` — the home of `notes`/`regions` state and every edit handler — so menu state and **all** command execution are centralized there. Regions wire `onContextMenu` inline; notes (in child `RegionEditor`) forward right-clicks up via the `onNoteContextMenu(x, y, id)` prop.
+
+- **Selection-preserving:** right-click only resets selection when the target isn't already part of the active multi-selection, so group operations survive the click.
+- **Group execution:** `handleContextCommand(action, type, id, payload)` resolves an effective id set (`selectedRegionIdsRef` / `noteSelectionRef` — the whole selection if the clicked item is in it, else just it) and applies Delete / Mute / Pitch across all of them.
+- **Functional:** Delete, Mute Region (group-toggle anchored on the clicked region), and **Pitch** via a nested `Pitch ▸` submenu (+12…−12 excluding 0, scrollable `max-height: 60vh`, hover-open with 180ms close-delay, flips to `right: 100%` near the screen edge). **Stubs:** Copy / Paste / Split (`console.log`).
+- **Transpose direction:** `KEYS` is ordered high→low (`buildKeys` runs `hiOct→loOct`), so shifting *up* by `s` semitones is `KEYS[ki − s]` (helper `shiftNoteName`).
+- Close lifecycle is capture-phase (outside mousedown/contextmenu, Escape, scroll, wheel, blur, post-command); position clamps to the viewport. **Right-click button guard:** `startRegionDrag` early-returns on `e.button !== 0` so a right-click never starts a region drag.
+
+### Region mute (`region.isMuted`)
+Boolean on the region shape (default false). **Audio:** `buildRegionEvents` early-returns `[]` when muted, so the region schedules no Part events — covering both the live engine and `audioBounce` (which reuses the same pure function); `isMuted` is part of `computePartKey` so a toggle rebuilds. **Visual:** a single `.regionMuted` class (`opacity: 0.5; filter: grayscale(0.85)`) applies when `r.isMuted || t.isMuted`, covering both region mute and **cascading track mute** (a muted track grays every region in its lane). Persisted additively in `projectIO.js`. Track master-mute audio is still the existing `trackMuteGain` writer; `isMuted` only adds the per-region gate + the unified visual.
+
+### Pause hard-cut + ghost-note silencing (`useWorkstationAudio.js` + `WorkstationShell.jsx`)
+`silenceAll()` calls `.releaseAll()` on every region synth **and** ramps each region's fade gain to 0 over `HARD_CUT_SEC = 0.02` to kill release tails for an instant cut. Single-writer preserved: pause writes 0, `recomputeFades()` restores on resume (temporally exclusive). It is wired into pause/stop/auto-pause/scrub-clutch **and** into `seekToClientX` and the `handlePlayPause` resume branch — so a voice ringing from a prior position can never bleed across a seek or into resume (the "ghost note"). No Part rebuild is needed: Tone.Part's one-shot `transport.schedule` events natively re-fire at/after the playhead on a backward seek and skip forward, so only voice silencing was missing.
 
 ### Layout (flex column, `100vw × 100vh`)
 ```
@@ -384,6 +402,9 @@ Regions render absolutely inside their lane. Both `trackRow` (left header column
 
 ### Track color system
 `TRACK_COLORS` is a 7-color module-level array of mid-saturation hex values chosen for visibility on `#0e0e10`. Color assigned in `handleAddTrack` via `TRACK_COLORS[(n - 1) % TRACK_COLORS.length]` using the stable `nextIdRef` counter. Stored as `track.color` (hex string). Applied via the `--track-color` CSS custom property which cascades to `.trackName`, `.trackRowActive`, `.region`, `.noteBlock`, `.regionHighlight`. A 7px color dot (`<span className={styles.trackColorDot}>`) sits inside a `.trackNameRow` flex wrapper next to the track name in the header.
+
+### Loop phase (`loopPhase`) — phase-aware split
+Looped regions carry `loopPhase` (measures into the home cycle at the region's left edge, default `0`). Note occurrences unroll at `regionStart + ((homeLocalMeasures − loopPhase) mod li) + j·li`. At phase `0` this reduces to the original `i·baseLoop` unroll, so all pre-existing regions are unchanged. A nonzero phase is produced only by **Split Region** (`splitRegionAtMeasure`) on a looped region: the right half keeps the same `clipOffset`/home block but sets `loopPhase = (origPhase + rel) mod li`, so it resumes the loop *mid-cycle* and the content past the split is bit-identical to the original (Soundtrap-style, seamless; the right edge never moves). The math lives in **`src/components/Workstation/loopMath.js`** (`firstLoopOffsetMeasures`, `loopBoundaries`) — the single source of truth shared by the audio unroll (`buildRegionEvents`), the arrangement loop visuals (segments/dividers/tint/mini-notes), and the piano-roll note ghosts. Persisted in `projectIO`; in `computePartKey`. **Limitation:** the `loop-resize-base` drag handle is hidden on phased halves (`loopPhase !== 0`).
 
 ### Note shape (Bottle/Window model)
 ```

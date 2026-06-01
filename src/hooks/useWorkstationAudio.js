@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import * as Tone from 'tone';
 import { makeSynth, isSampledInstrument } from '../components/Workstation/synthFactory';
+import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
 
 /**
  * Workstation playback engine — peer to useAudioEngine / useVocoder / useAutotune.
@@ -233,8 +234,20 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
   }, [tracks, regions, notes, bpm, recomputeLoadingTrackIds]);
 
   // Silence in-flight voices on pause/stop (Tone.Transport.pause keeps tails alive).
+  // releaseAll() still triggers each synth/sampler release tail, so we also ramp
+  // every region's fade gain to 0 in ~20ms for a true hard cut. recomputeFades()
+  // (called on resume before Transport.start) cancels this and restores the gain —
+  // pause writes 0, play recomputes, never concurrent (single-writer preserved).
+  const HARD_CUT_SEC = 0.02;
   const silenceAll = useCallback(() => {
+    const audioNow = Tone.now();
     for (const s of synthsByRegionIdRef.current.values()) s?.releaseAll?.();
+    for (const g of fadeGainsByRegionIdRef.current.values()) {
+      if (!g) continue;
+      g.gain.cancelScheduledValues(audioNow);
+      g.gain.setValueAtTime(g.gain.value, audioNow);
+      g.gain.linearRampToValueAtTime(0, audioNow + HARD_CUT_SEC);
+    }
   }, []);
 
   // Reset every region's fade gain to its correct value at the current Transport
@@ -359,34 +372,49 @@ export function volForSliderValue(v) {
 
 // Tone.Part event list for a region. Pure — safe to call inside Tone.Offline.
 export function buildRegionEvents(r, allNotes) {
+  if (r.isMuted) return []; // muted region schedules nothing (live engine + offline bounce)
+  const PPQ           = Tone.Transport.PPQ;
   const co            = r.clipOffset ?? 0;
-  const baseLoop      = (r.loopInterval != null) ? r.loopInterval : r.durationMeasures;
+  const looped        = r.loopInterval != null;
+  const li            = looped ? r.loopInterval : r.durationMeasures; // home/base length
+  const phase         = looped ? (r.loopPhase ?? 0) : 0;
+  const regionStartB  = r.startMeasure * 4;
   const regionEndB    = (r.startMeasure + r.durationMeasures) * 4;
-  const bottleOriginB = (r.startMeasure - co) * 4;
-  const windowLoB     = co * 4;
-  const windowHiB     = (co + baseLoop) * 4;
-  const iterations    = r.loopInterval != null
-    ? Math.ceil(r.durationMeasures / r.loopInterval)
-    : 1;
+  const windowLoB     = co * 4;          // home window: bottle beats [co, co+li)
+  const windowHiB     = (co + li) * 4;
+
+  const push = (events, globalStartB, dur, note) => {
+    if (globalStartB >= regionEndB) return false;
+    const clippedEnd = Math.min(globalStartB + dur, regionEndB);
+    const durBeats   = clippedEnd - globalStartB;
+    if (durBeats <= 0) return true;
+    events.push({
+      time:     `${Math.round(globalStartB * PPQ)}i`,
+      note,
+      duration: `${Math.round(durBeats     * PPQ)}i`,
+    });
+    return true;
+  };
 
   const events = [];
   for (const n of allNotes) {
     if (n.regionId !== r.id) continue;
     if (n.startBeat <  windowLoB) continue;
     if (n.startBeat >= windowHiB) continue;
-    for (let i = 0; i < iterations; i++) {
-      const globalStartB = bottleOriginB + n.startBeat + i * baseLoop * 4;
-      if (globalStartB >= regionEndB) break;
-      const rawEndB    = globalStartB + n.durationBeats;
-      const clippedEnd = Math.min(rawEndB, regionEndB);
-      const durBeats   = clippedEnd - globalStartB;
-      if (durBeats <= 0) continue;
-      const PPQ = Tone.Transport.PPQ;
-      events.push({
-        time:     `${Math.round(globalStartB * PPQ)}i`,
-        note:     n.note,
-        duration: `${Math.round(durBeats     * PPQ)}i`,
-      });
+
+    if (!looped) {
+      // Single window pass — bottle origin at (startMeasure − clipOffset).
+      push(events, (r.startMeasure - co) * 4 + n.startBeat, n.durationBeats, n.note);
+      continue;
+    }
+    // Looped: replay this note at firstLoopOffset + j*li, wrapping the home cycle
+    // by the region's loopPhase (see loopMath). phase 0 ⇒ identical to the old
+    // `i*baseLoop` unroll.
+    const homeLocalMeasures = n.startBeat / 4 - co;            // [0, li)
+    const firstOffM = firstLoopOffsetMeasures(homeLocalMeasures, phase, li);
+    for (let j = 0; ; j++) {
+      const globalStartB = (regionStartB / 4 + firstOffM + j * li) * 4;
+      if (!push(events, globalStartB, n.durationBeats, n.note)) break;
     }
   }
   return events;
@@ -448,7 +476,7 @@ export function scheduleFadeEnvelope(fadeGain, r, bpm) {
 // Internal — change-detection keys
 function computePartKey(r, notes) {
   // Anything that buildRegionEvents reads.
-  let key = `${r.id}|${r.startMeasure}|${r.durationMeasures}|${r.clipOffset ?? 0}|${r.loopInterval ?? 'n'}`;
+  let key = `${r.id}|${r.startMeasure}|${r.durationMeasures}|${r.clipOffset ?? 0}|${r.loopInterval ?? 'n'}|${r.loopPhase ?? 0}|${r.isMuted ? 'm' : ''}`;
   for (const n of notes) {
     if (n.regionId !== r.id) continue;
     key += `|${n.id}:${n.note}:${n.startBeat.toFixed(4)}:${n.durationBeats.toFixed(4)}`;

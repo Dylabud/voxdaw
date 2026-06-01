@@ -20,6 +20,8 @@ export function serializeProject({ bpm, totalMeasures, tracks, regions, notes })
       fadeIn: r.fadeIn ?? 0, fadeOut: r.fadeOut ?? 0,
       fadeInFloor: r.fadeInFloor ?? 0, fadeOutFloor: r.fadeOutFloor ?? 0,
       loopInterval: r.loopInterval ?? null,
+      loopPhase: r.loopPhase ?? 0,
+      isMuted: !!r.isMuted,
     })),
     notes: notes.map(n => ({
       id: n.id, trackId: n.trackId, regionId: n.regionId,
@@ -63,6 +65,8 @@ export function deserializeProject(raw) {
       fadeInFloor:  Number(r.fadeInFloor)  || 0,
       fadeOutFloor: Number(r.fadeOutFloor) || 0,
       loopInterval: r.loopInterval == null ? null : Number(r.loopInterval),
+      loopPhase: Number(r.loopPhase) || 0,
+      isMuted: !!r.isMuted,
     })),
     notes: notes.map(n => ({
       id: String(n.id),

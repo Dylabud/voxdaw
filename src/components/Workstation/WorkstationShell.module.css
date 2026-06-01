@@ -209,7 +209,10 @@
   border-top: 1px solid var(--border-mid);
   border-bottom: 1px solid var(--border-mid);
   cursor: row-resize;
-  transition: background 0.15s;
+  /* No background transition: its base is the theme var --bg-panel, and the
+     surrounding panels snap instantly on theme toggle. A transition here would
+     lag 150ms behind them → the theme-flash. Hover highlight snapping on a 6px
+     resize handle is unobtrusive. */
 }
 .divider:hover {
   background: color-mix(in srgb, var(--accent-color) 35%, var(--bg-panel));
@@ -391,6 +394,10 @@
 .region:active { cursor: grabbing; filter: brightness(0.6); }
 
 .regionSelected { filter: brightness(0.8); }
+
+/* Muted region OR region on a muted track — desaturated + dimmed.
+   Declared after .regionSelected so its filter wins when both classes apply. */
+.regionMuted { opacity: 0.5; filter: grayscale(0.85); }
 
 /* Suppress hover/edit-button on all regions while any drag is active */
 :global(body.is-dragging) .region { pointer-events: none; }
