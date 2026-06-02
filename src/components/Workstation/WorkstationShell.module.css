@@ -91,6 +91,16 @@
   background: var(--row-bg);
 }
 
+.transportBtn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.transportBtn:disabled:hover {
+  border-color: var(--border-mid);
+  color: var(--form-text-mid);
+  background: transparent;
+}
+
 /* Modifier: text-label buttons (save / load / export). Lets them grow past
    the 34px icon-button width and breathe within the toolbar flex row. */
 .transportTextBtn {
@@ -750,6 +760,24 @@
   min-height: 100%;
   cursor: pointer;
   padding-bottom: 50px; /* matches addTrackGhost button height so scroll ranges stay in sync */
+}
+
+/* Grid-line canvas pinned to the scroll viewport. Zero-height sticky holder takes no flow
+   space and never scrolls away; the absolute canvas hangs over the viewport behind the
+   lanes/regions (drawn per-line-snapped in drawGrid). */
+.gridCanvasHolder {
+  position: sticky;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+.gridCanvasHolder > canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
 }
 
 /* ── Timeline ruler ───────────────────────────────────────── */

@@ -292,6 +292,26 @@
   background: color-mix(in srgb, var(--accent-color) 60%, var(--piano-key-black));
 }
 
+/* Grid-line canvas pinned to the piano-roll viewport. Zero-size sticky flex item (no
+   layout impact, never scrolls away); the absolute canvas hangs over the viewport behind
+   the grid content + keys (drawn per-line-snapped in drawGrid). */
+.gridCanvasHolder {
+  position: sticky;
+  top: 0;
+  left: 0;
+  flex: 0 0 0;
+  width: 0;
+  height: 0;
+  align-self: flex-start;
+  z-index: 0;
+  pointer-events: none;
+}
+.gridCanvasHolder > canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
 /* ── Note grid ───────────────────────────────────────────── */
 .grid {
   flex: 0 0 auto;
@@ -377,6 +397,8 @@
     inset 0 0 0 1px rgba(128, 128, 128, 0.4),
     0 0 4px var(--track-color, var(--accent-color));
 }
+/* Mute visual — matches the arrangement region's .regionMuted (opacity 0.5 + grayscale 0.85). */
+.noteMuted { opacity: 0.5; filter: grayscale(0.85); }
 .noteSelected {
   outline: 1.5px solid var(--text-primary);
   outline-offset: 0;

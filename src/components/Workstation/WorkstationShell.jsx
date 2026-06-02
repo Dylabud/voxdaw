@@ -13,6 +13,7 @@ import { exportWAV, exportMP3 } from '../../utils/audioExport';
 
 const PIXELS_PER_BEAT    = 25;
 const PIXELS_PER_MEASURE = PIXELS_PER_BEAT * 4;  // 100px at zoom 1
+const MAX_HISTORY        = 100;                  // undo/redo stack cap
 // BPM and totalMeasures are state inside the component
 const TRACK_COLORS = [
   '#5DCAA5', // teal (brand accent)
@@ -64,7 +65,7 @@ const EDIT_BTN_MIN_PX = 60;
 const FADE_UI_MIN_PX = 30;
 
 // Returns the snap increment (in measures) matching the smallest visible grid line at this zoom.
-// Fractional range (ppm>=150) mirrors computeGridBg's beat/sub-beat thresholds (Phase 82).
+// Fractional range (ppm>=150) mirrors drawGrid's beat/sub-beat thresholds (Phase 82).
 // Macro range (ppm<80) reuses getMeasureInterval — single source of truth with the drawn grid.
 export function getSnapIncrement(ppm) {
   if (ppm >= 300) return 0.125; // 8th notes
@@ -72,18 +73,47 @@ export function getSnapIncrement(ppm) {
   return getMeasureInterval(ppm); // 1, 2, 4, 8, 16… matches visible grid period
 }
 
-// Used for both arrangement and piano roll grids — returns inline backgroundImage string.
-export function computeGridBg(ppm, zoomLevel) {
-  const labelStep    = getMeasureInterval(ppm);
-  const effectivePpm = ppm * labelStep;
-  const ppb = effectivePpm / 4;
-  const pp8 = effectivePpm / 8;
-  const layers = [
-    `repeating-linear-gradient(to right, var(--border-mid) 0, var(--border-mid) 1px, transparent 1px, transparent ${effectivePpm}px)`,
-    ...(labelStep === 1 && zoomLevel >= 1.5 ? [`repeating-linear-gradient(to right, var(--border-faint) 0, var(--border-faint) 1px, transparent 1px, transparent ${ppb}px)`] : []),
-    ...(labelStep === 1 && zoomLevel >= 3.0 ? [`repeating-linear-gradient(to right, var(--border-subtle) 0, var(--border-subtle) 1px, transparent 1px, transparent ${pp8}px)`] : []),
-  ];
-  return layers.join(', ');
+// Crisp grid renderer for both the arrangement and piano-roll grids. Draws onto a canvas
+// pinned to the scroll viewport, virtualized to the visible measure range. pixelsPerMeasure
+// stays float (smooth zoom, regions never jump) and each LINE is snapped to a whole pixel
+// here at draw time (Math.round) so it can't smear — the only way to get smooth + crisp +
+// aligned at once (a uniform CSS gradient can't snap lines individually). CSS vars are read
+// at draw time so light/dark themes resolve automatically; fillRect of a 1px-wide rect at
+// an integer X is crisp at any devicePixelRatio.
+export function drawGrid(canvas, { scrollLeft, viewW, viewH, ppm, zoomLevel, leftInset = 0 }) {
+  if (!canvas || viewW <= 0 || viewH <= 0) return;
+  const dpr = window.devicePixelRatio || 1;
+  const bw = Math.round(viewW * dpr);
+  const bh = Math.round(viewH * dpr);
+  if (canvas.width !== bw)  canvas.width  = bw;
+  if (canvas.height !== bh) canvas.height = bh;
+  canvas.style.width  = `${viewW}px`;
+  canvas.style.height = `${viewH}px`;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, viewW, viewH);
+
+  const cs     = getComputedStyle(canvas);
+  const cMid   = cs.getPropertyValue('--border-mid').trim();
+  const cFaint = cs.getPropertyValue('--border-faint').trim();
+  const cSub   = cs.getPropertyValue('--border-subtle').trim();
+  const labelStep = getMeasureInterval(ppm);
+  const showBeats = labelStep === 1 && zoomLevel >= 1.5;
+  const show8ths  = labelStep === 1 && zoomLevel >= 3.0;
+
+  const line = (xContent, color) => {
+    const x = Math.round(leftInset + xContent - scrollLeft); // per-line whole-pixel snap
+    if (x < leftInset || x > viewW) return;
+    ctx.fillStyle = color;
+    ctx.fillRect(x, 0, 1, viewH);
+  };
+  const firstM = Math.max(0, Math.floor((scrollLeft - leftInset) / ppm));
+  const lastM  = Math.ceil((scrollLeft + (viewW - leftInset)) / ppm);
+  for (let m = firstM; m <= lastM; m++) {
+    if (m % labelStep === 0) line(m * ppm, cMid);                       // down-beat
+    if (showBeats) for (let k = 1; k <= 3; k++) line(m * ppm + k * ppm / 4, cFaint); // quarters
+    if (show8ths)  for (const k of [1, 3, 5, 7]) line(m * ppm + k * ppm / 8, cSub);  // eighths
+  }
 }
 
 export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeToggle }) {
@@ -105,9 +135,23 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [snapEnabled,      setSnapEnabled]      = useState(true);
   const [advancedMode,     setAdvancedMode]     = useState(false);
 
-  // Derived zoom values
+  // ── Undo/redo history (arrangement data only: tracks/regions/notes) ──────────
+  const [past,   setPast]   = useState([]);   // [{tracks,regions,notes}, …] oldest→newest
+  const [future, setFuture] = useState([]);
+  const pastRef   = useRef(past);   pastRef.current   = past;   // read by the keydown handler
+  const futureRef = useRef(future); futureRef.current = future;
+  const latestRef        = useRef(null);   // most-recent committed snapshot (refs, immutable)
+  const burstActiveRef   = useRef(false);  // leading-edge coalescing of a drag's many commits
+  const burstTimerRef    = useRef(null);
+  const timeTravelingRef = useRef(false);  // set while undo/redo/load applies state → don't record
+  const undoRef          = useRef(null);
+  const redoRef          = useRef(null);
+
+  // Derived zoom values. pixelsPerMeasure stays float so zoom is smooth and regions
+  // don't jump (a rounded unit shifts measure m by m·Δ px far down the timeline). Grid
+  // lines are kept crisp instead by per-line whole-pixel snapping in drawGrid (canvas).
   const pixelsPerMeasure = PIXELS_PER_MEASURE * zoomLevel;
-  const pxPerSec         = PIXELS_PER_BEAT * (bpm / 60) * zoomLevel;
+  const pxPerSec         = (pixelsPerMeasure / 4) * (bpm / 60);
 
   const editorWrapRef        = useRef(null);
   const nextIdRef            = useRef(1);
@@ -120,6 +164,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const pianoRollPlayheadRef = useRef(null);
   const timeRef              = useRef(null);
   const timelineRef          = useRef(null);
+  const timelineCanvasRef    = useRef(null);   // pinned grid-line canvas over the timeline viewport
   const rulerRef             = useRef(null);
   const rafRef               = useRef(null);
   const isDraggingRef        = useRef(false);
@@ -128,6 +173,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const trackHeadersRef      = useRef(null);
   const pendingScrollRef      = useRef(null);  // arrangement zoom-to-cursor pending scrollLeft
   const pendingPianoScrollRef = useRef(null);  // piano roll pending scrollLeft
+  const liveZoomRef           = useRef(1);     // target zoom, ahead of committed `zoomLevel` during a gesture
   const shellRef              = useRef(null);
   const leftColWidthRef       = useRef(316);
   const regionsRef            = useRef([]);
@@ -188,7 +234,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         if (dx > 0 && el.scrollLeft >= maxScroll) dx = 0;
         else el.scrollLeft = Math.min(maxScroll, Math.max(0, el.scrollLeft + dx));
       }
-      if (dy !== 0) el.scrollTop  = Math.max(0, el.scrollTop  + dy);
+      // Suppress vertical auto-scroll during a ruler scrub (isDraggingRef is true only
+      // then) — the scrub cursor sits inside the ruler's top edge-zone, which would
+      // otherwise scroll the grid up every frame. Region/marquee/note drags keep it.
+      if (dy !== 0 && !isDraggingRef.current) el.scrollTop = Math.max(0, el.scrollTop + dy);
       if (dx !== 0 || dy !== 0) {
         const { x, y } = currentMousePosRef.current;
         window.dispatchEvent(new MouseEvent('mousemove', {
@@ -253,6 +302,13 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       setTempBpm(String(data.bpm));
       Tone.Transport.bpm.value = data.bpm;
       setTotalMeasures(Math.max(24, data.totalMeasures));
+      // Reset undo/redo to the loaded project (the load itself isn't an undoable step).
+      timeTravelingRef.current = true; // make the recorder treat this commit as non-recordable
+      latestRef.current = { tracks: data.tracks, regions: data.regions, notes: data.notes };
+      burstActiveRef.current = false;
+      if (burstTimerRef.current) { clearTimeout(burstTimerRef.current); burstTimerRef.current = null; }
+      setPast([]);
+      setFuture([]);
       setTracks(data.tracks);
       setRegions(data.regions);
       setNotes(data.notes);
@@ -299,6 +355,78 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // Does NOT call Tone.start(); the user-gesture path (handlePlayPause, RegionEditor preview)
   // already handles that. Stops Transport + disposes nodes on unmount → clean handoff to VoxTool.
   const { silenceAll, recomputeFades, loadingTrackIds } = useWorkstationAudio({ tracks, regions, notes, bpm });
+
+  // ── History recorder ────────────────────────────────────────
+  // Passive: records AFTER React commits, so multi-setter actions (e.g. split =
+  // setRegions + setNotes) coalesce into one entry via React 18 batching — no changes
+  // to any of the ~46 mutation sites. Leading-edge burst coalescing folds a drag's many
+  // mid-flight commits (and continuous volume/pan slider commits) into a single entry.
+  // Snapshots store array refs (state is updated immutably, so they're effectively frozen).
+  useEffect(() => {
+    const cur = { tracks, regions, notes };
+    if (timeTravelingRef.current) {            // change came from undo/redo/load → don't record
+      timeTravelingRef.current = false;
+      latestRef.current = cur;
+      burstActiveRef.current = false;
+      if (burstTimerRef.current) { clearTimeout(burstTimerRef.current); burstTimerRef.current = null; }
+      return;
+    }
+    if (latestRef.current === null) { latestRef.current = cur; return; } // initial mount
+    const baseline = latestRef.current;
+    // No real change (e.g. StrictMode's mount double-invoke, or a re-render that didn't
+    // touch these arrays) → don't record. State updates immutably, so a changed array is
+    // always a new reference.
+    if (baseline.tracks === cur.tracks && baseline.regions === cur.regions && baseline.notes === cur.notes) return;
+    latestRef.current = cur;
+    if (!burstActiveRef.current) {             // leading edge → push the pre-change snapshot
+      burstActiveRef.current = true;
+      setPast(p => { const n = [...p, baseline]; return n.length > MAX_HISTORY ? n.slice(n.length - MAX_HISTORY) : n; });
+      setFuture([]);
+    }
+    if (burstTimerRef.current) clearTimeout(burstTimerRef.current);
+    burstTimerRef.current = setTimeout(() => { burstActiveRef.current = false; burstTimerRef.current = null; }, 200);
+  }, [tracks, regions, notes]);
+
+  const applyHistory = useCallback((s) => { setTracks(s.tracks); setRegions(s.regions); setNotes(s.notes); }, []);
+  const endBurst = useCallback(() => {
+    burstActiveRef.current = false;
+    if (burstTimerRef.current) { clearTimeout(burstTimerRef.current); burstTimerRef.current = null; }
+  }, []);
+
+  const undo = useCallback(() => {
+    const p = pastRef.current;
+    if (!p.length) return;
+    endBurst();
+    const prev = p[p.length - 1];
+    const current = latestRef.current;   // capture present BEFORE reassigning latestRef below
+    timeTravelingRef.current = true;
+    setFuture(f => [current, ...f]);      // updater runs at render time — must use the captured value
+    setPast(a => a.slice(0, -1));
+    latestRef.current = prev;
+    applyHistory(prev);
+    silenceAll();        // kill any voice ringing from a region this undo just removed (no ghost notes)
+    recomputeFades();    // re-anchor region fade gains to the restored region set
+  }, [endBurst, applyHistory, silenceAll, recomputeFades]);
+
+  const redo = useCallback(() => {
+    const f = futureRef.current;
+    if (!f.length) return;
+    endBurst();
+    const next = f[0];
+    const current = latestRef.current;   // capture present BEFORE reassigning latestRef below
+    timeTravelingRef.current = true;
+    setPast(p => { const n = [...p, current]; return n.length > MAX_HISTORY ? n.slice(n.length - MAX_HISTORY) : n; });
+    setFuture(a => a.slice(1));
+    latestRef.current = next;
+    applyHistory(next);
+    silenceAll();
+    recomputeFades();
+  }, [endBurst, applyHistory, silenceAll, recomputeFades]);
+
+  undoRef.current = undo;
+  redoRef.current = redo;
+  const canUndo = past.length > 0;
+  const canRedo = future.length > 0;
 
   // ── Note dedupe — same (regionId, note, startBeat, durationBeats) collapses to the
   //    most-recently-touched (or last-in-array) survivor. Wired into every commit path
@@ -425,12 +553,30 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     const li  = r.loopInterval ?? null;
     const origPhase = li != null ? (r.loopPhase ?? 0) : 0;
 
-    // ── Left: original truncated at the playhead.
+    // Aggregate of every produced region + every cloned note. regions[0] is the
+    // Left piece (reuses r.id, keeps the originals); each new piece gets fresh
+    // ids minted eagerly here (never inside a state updater) so StrictMode
+    // double-invokes can't double-increment. `clones` deep-copies the full
+    // bottle for each right-side piece (out-of-window notes stay hidden, not
+    // destroyed — the Bottle/Window model).
+    const regions = [];
+    const clones  = [];
+    const newRegion = (fields) => {
+      const id = `r${nextRegionIdRef.current++}`;
+      for (const n of notesRef.current) {
+        if (n.regionId === r.id) clones.push({ ...n, id: `note_${nextNoteIdRef.current++}`, regionId: id });
+      }
+      return { ...r, id, ...fields };
+    };
+
+    // ── Left: original truncated at the playhead (keeps looping with a partial
+    // tail). Identical to the prior behavior; preserves a pre-existing phase for
+    // back-compat with already-phased regions loaded from old projects.
     let leftLI, leftPhase;
     if (li == null)            { leftLI = null; leftPhase = 0; }
     else if (origPhase === 0)  { leftLI = normalizeLoopInterval(rel, li); leftPhase = 0; }
     else                       { leftLI = li;  leftPhase = origPhase; } // keep phased loop intact
-    const left = {
+    regions.push({
       ...r,
       durationMeasures: rel,
       fadeIn:  Math.min(r.fadeIn ?? 0, rel),
@@ -439,34 +585,72 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       fadeOutFloor: 0,
       loopInterval: leftLI,
       loopPhase: leftPhase,
-    };
+    });
 
-    // ── Right: new region starting exactly at the playhead.
-    const rightId  = `r${nextRegionIdRef.current++}`;
-    const rightDur = D - rel;
-    const right = {
-      ...r,
-      id: rightId,
-      startMeasure: P,
-      durationMeasures: rightDur,
-      fadeIn: 0,
-      fadeOut: Math.min(r.fadeOut ?? 0, rightDur),
-      fadeInFloor: 0,
-      fadeOutFloor: r.fadeOutFloor ?? 0,
-      ...(li != null
-        // looped: same home block, advance the cycle phase to the playhead
-        ? { clipOffset: co, loopInterval: li, loopPhase: (((origPhase + rel) % li) + li) % li }
-        // non-looped: slide the bottle window forward by the cut amount
-        : { clipOffset: co + rel, loopInterval: null, loopPhase: 0 }),
-    };
-
-    // Both halves hold the full bottle (windowed). Left keeps the originals;
-    // Right gets deep clones with fresh ids.
-    const clones = [];
-    for (const n of notesRef.current) {
-      if (n.regionId === r.id) clones.push({ ...n, id: `note_${nextNoteIdRef.current++}`, regionId: rightId });
+    // ── Non-looped region: existing 2-piece Case-D split (slide the bottle
+    // window forward by the cut). No remainder/clean-loop concept applies.
+    if (li == null) {
+      regions.push(newRegion({
+        startMeasure: P,
+        durationMeasures: D - rel,
+        fadeIn: 0,
+        fadeOut: Math.min(r.fadeOut ?? 0, D - rel),
+        fadeInFloor: 0,
+        fadeOutFloor: r.fadeOutFloor ?? 0,
+        clipOffset: co + rel,
+        loopInterval: null,
+        loopPhase: 0,
+      }));
+      return { regions, clones };
     }
-    return { left, right, clones };
+
+    // ── Looped region: boundary-aware three-piece split.
+    //   homeLocalRel = which home-cycle position the playhead sits on.
+    //   nextBoundaryRel = next cycle boundary (home-local wraps to 0) right of P.
+    const homeLocalRel    = (((rel + origPhase) % li) + li) % li;
+    const distToNext      = homeLocalRel <= EPS ? 0 : li - homeLocalRel;
+    const nextBoundaryRel = rel + distToNext;
+    const onBoundary      = distToNext <= EPS;
+    const hasR            = !onBoundary && nextBoundaryRel < D - EPS;
+
+    if (!onBoundary) {
+      // ── M: the severed remainder of the in-progress cycle, from the playhead
+      // to the next boundary (or the region end when no full cycle follows).
+      // Non-looping; clipOffset windows the bottle onto home-local [homeLocalRel, li).
+      const mDur = hasR ? (nextBoundaryRel - rel) : (D - rel);
+      regions.push(newRegion({
+        startMeasure: P,
+        durationMeasures: mDur,
+        fadeIn: 0,
+        fadeInFloor: 0,
+        fadeOut: hasR ? 0 : Math.min(r.fadeOut ?? 0, mDur),
+        fadeOutFloor: hasR ? 0 : (r.fadeOutFloor ?? 0),
+        clipOffset: co + homeLocalRel,
+        loopInterval: null,
+        loopPhase: 0,
+      }));
+    }
+
+    if (onBoundary || hasR) {
+      // ── R: a fresh, clean phase-0 loop starting at the next boundary, with the
+      // full home block and a working loop-resize handle. On an on-boundary split
+      // R starts at the playhead itself (no remainder produced).
+      const rStartRel = onBoundary ? rel : nextBoundaryRel;
+      const rDur      = D - rStartRel;
+      regions.push(newRegion({
+        startMeasure: S + rStartRel,
+        durationMeasures: rDur,
+        fadeIn: 0,
+        fadeInFloor: 0,
+        fadeOut: Math.min(r.fadeOut ?? 0, rDur),
+        fadeOutFloor: r.fadeOutFloor ?? 0,
+        clipOffset: co,
+        loopInterval: normalizeLoopInterval(rDur, li),
+        loopPhase: 0,
+      }));
+    }
+
+    return { regions, clones };
   }, []);
 
   // Context-menu commands operate on the whole active selection when the clicked
@@ -494,18 +678,18 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           const r = regionsRef.current.find(x => x.id === rid);
           if (!r) continue;
           const res = splitRegionAtMeasure(r, P);
-          if (res) splits.push(res);
+          if (res) splits.push({ leftId: rid, ...res }); // leftId === res.regions[0].id
         }
         if (!splits.length) return;
-        const splitById = new Map(splits.map(s => [s.left.id, s]));
+        const splitById = new Map(splits.map(s => [s.leftId, s]));
         setRegions(prev => prev.flatMap(rg => {
           const s = splitById.get(rg.id);
-          return s ? [s.left, s.right] : [rg];
+          return s ? s.regions : [rg];
         }));
         const allClones = splits.flatMap(s => s.clones);
         if (allClones.length) setNotes(prev => [...prev, ...allClones]);
         const nextSel = new Set();
-        for (const s of splits) { nextSel.add(s.left.id); nextSel.add(s.right.id); }
+        for (const s of splits) for (const pr of s.regions) nextSel.add(pr.id);
         setSelectedRegionIds(nextSel);
       } else console.log('[context-menu] region', action, ids); // copy / paste (stubs)
     } else {
@@ -1464,16 +1648,42 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const updatePlayhead = useCallback(() => {
     // Tick-driven so bpm changes can't desync the visual from the audio.
     // Tone.Transport.ticks is canonical musical time; it never jumps when bpm
-    // changes. Seconds is kept only for the wall-clock readout.
+    // changes. Seconds is kept only for the wall-clock readout. Uses the same float
+    // measure unit (pixelsPerMeasure/4 = px per beat) as the grid/regions so it stays
+    // locked to them at any zoom.
     const beats = Tone.Transport.ticks / Tone.Transport.PPQ;
-    const x     = beats * PIXELS_PER_BEAT * zoomLevel;
+    const x     = beats * (pixelsPerMeasure / 4);
     if (playheadRef.current)          playheadRef.current.style.transform          = `translateX(${x}px)`;
     if (pianoRollPlayheadRef.current) pianoRollPlayheadRef.current.style.transform = `translateX(${x}px)`;
     if (timeRef.current)              timeRef.current.textContent                  = formatTime(Tone.Transport.seconds);
-  }, [zoomLevel]);
+  }, [pixelsPerMeasure]);
 
-  // Reposition playhead when zoom changes (even while paused)
-  useEffect(() => { updatePlayhead(); }, [updatePlayhead]);
+  // Reposition playhead when zoom changes (even while paused) — layout phase so the
+  // playhead transform commits in the SAME pre-paint pass as the grid rescale and the
+  // zoom-to-cursor scrollLeft correction (a plain useEffect runs post-paint, painting
+  // one stale-transform frame against the new grid scale → the "jump then snap" jitter,
+  // worst far down the timeline where the per-zoom delta is largest).
+  useLayoutEffect(() => { updatePlayhead(); }, [updatePlayhead]);
+
+  // ── Timeline grid canvas ─────────────────────────────────────
+  // Redraws the pinned grid-line canvas for the current viewport + scroll + zoom.
+  const drawTimelineGrid = useCallback(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    drawGrid(timelineCanvasRef.current, {
+      scrollLeft: el.scrollLeft,
+      viewW: el.clientWidth,
+      viewH: el.clientHeight,
+      ppm: pixelsPerMeasure,
+      zoomLevel,
+      leftInset: 0,
+    });
+  }, [pixelsPerMeasure, zoomLevel]);
+
+  // Redraw on zoom/unit change + theme toggle (layout phase, in lockstep with the grid
+  // rescale + playhead so they move together). Scroll redraws are wired in
+  // handleTimelineScroll; resize redraws ride the existing ResizeObserver below.
+  useLayoutEffect(() => { drawTimelineGrid(); }, [drawTimelineGrid, isDarkMode, totalMeasures]);
 
   useEffect(() => {
     if (!isPlaying) return;
@@ -1623,20 +1833,27 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     const onWheel = (e) => {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
-      const mouseX    = e.clientX - el.getBoundingClientRect().left;
-      const absoluteX = mouseX + el.scrollLeft;
+      const mouseX   = e.clientX - el.getBoundingClientRect().left;
+      const prevZoom = liveZoomRef.current;
+      const minZoom  = el.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current);
+      const nextZoom = Math.max(minZoom, Math.min(8, prevZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
+      if (nextZoom === prevZoom) return;
       Object.values(ghostRefs.current).forEach(g => { if (g) g.style.opacity = '0'; });
-      const factor    = e.deltaY > 0 ? 0.9 : 1.1;
-      setZoomLevel(prev => {
-        const minZoom = timelineRef.current
-          ? timelineRef.current.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current)
-          : 0.05;
-        const next = Math.max(minZoom, Math.min(8, prev * factor));
-        if (next === prev) return prev;
-        pendingScrollRef.current = absoluteX * (next / prev) - mouseX;
-        if (pianoScrollRef.current) pendingPianoScrollRef.current = pendingScrollRef.current;
-        return next;
-      });
+      // Anchor against the scroll target that WILL be applied (pendingScrollRef) while a
+      // correction is in flight — NOT el.scrollLeft, which is stale whenever React hasn't
+      // committed a prior zoom step yet (i.e. exactly when there's a lot to render). When
+      // idle, pendingScrollRef is null and we use the real DOM scroll (captures manual
+      // scrolls + edge clamping). This chains the anchor across batched wheel events with
+      // no scroll-event reconciliation, so no feedback loop.
+      const ratio      = nextZoom / prevZoom;
+      const baseScroll = pendingScrollRef.current != null ? pendingScrollRef.current : el.scrollLeft;
+      const absoluteX  = mouseX + baseScroll;
+      const maxScroll  = Math.max(0, totalMeasuresRef.current * PIXELS_PER_MEASURE * nextZoom - el.clientWidth);
+      const nextScroll = Math.min(maxScroll, Math.max(0, absoluteX * ratio - mouseX));
+      liveZoomRef.current = nextZoom;
+      pendingScrollRef.current = nextScroll;
+      if (pianoScrollRef.current) pendingPianoScrollRef.current = nextScroll;
+      setZoomLevel(nextZoom);
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
@@ -1650,20 +1867,27 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
       const rect       = el.getBoundingClientRect();
-      const gridMouseX = e.clientX - rect.left - 56; // subtract sticky keys column
-      const absoluteX  = Math.max(0, gridMouseX) + el.scrollLeft;
+      const gridMouseX = Math.max(0, e.clientX - rect.left - 56); // subtract sticky keys column
+      const prevZoom   = liveZoomRef.current;
+      const minZoom    = timelineRef.current
+        ? timelineRef.current.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current)
+        : 0.05;
+      const nextZoom = Math.max(minZoom, Math.min(8, prevZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
+      if (nextZoom === prevZoom) return;
       Object.values(ghostRefs.current).forEach(g => { if (g) g.style.opacity = '0'; });
-      const factor     = e.deltaY > 0 ? 0.9 : 1.1;
-      setZoomLevel(prev => {
-        const minZoom = timelineRef.current
-          ? timelineRef.current.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current)
-          : 0.05;
-        const next = Math.max(minZoom, Math.min(8, prev * factor));
-        if (next === prev) return prev;
-        pendingPianoScrollRef.current = absoluteX * (next / prev) - Math.max(0, gridMouseX);
-        if (timelineRef.current) pendingScrollRef.current = pendingPianoScrollRef.current;
-        return next;
-      });
+      // Same batching-independent anchor as the arrangement handler (scroll is mirrored, so
+      // clamp to the timeline's max). Base = the in-flight piano scroll target, else the
+      // real DOM scroll. Keeps the grid point under the cursor fixed.
+      const ratio      = nextZoom / prevZoom;
+      const baseScroll = pendingPianoScrollRef.current != null ? pendingPianoScrollRef.current : el.scrollLeft;
+      const absoluteX  = gridMouseX + baseScroll;
+      const tl         = timelineRef.current;
+      const maxScroll  = tl ? Math.max(0, totalMeasuresRef.current * PIXELS_PER_MEASURE * nextZoom - tl.clientWidth) : Infinity;
+      const nextScroll = Math.min(maxScroll, Math.max(0, absoluteX * ratio - gridMouseX));
+      liveZoomRef.current = nextZoom;
+      pendingPianoScrollRef.current = nextScroll;
+      if (timelineRef.current) pendingScrollRef.current = nextScroll;
+      setZoomLevel(nextZoom);
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
@@ -1675,12 +1899,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (!el) return;
     const observer = new ResizeObserver(() => {
       if (el.clientWidth <= 0) return;
+      drawTimelineGrid(); // viewport size changed → repaint grid lines
       const minZoom = el.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current);
+      liveZoomRef.current = Math.max(liveZoomRef.current, minZoom); // keep the zoom anchor ref in sync
       setZoomLevel(prev => Math.max(prev, minZoom));
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, []);
+  }, [drawTimelineGrid]);
 
   // Bug 1: when the editor opens, the piano roll mounts at scrollLeft=0. RegionEditor's
   // mount useEffect then sets scrollTop, which fires a scroll event whose scrollLeft=0
@@ -1716,6 +1942,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   //   consumes the flag and returns. This prevents the cross-scroller mirror-back race.
   //   The Phase 82 value-comparison guard stays as a secondary defense.
   const handleTimelineScroll = useCallback((e) => {
+    drawTimelineGrid(); // repaint pinned grid lines for the new scrollLeft (before any suppress return)
     if (timelineSuppressRef.current) { timelineSuppressRef.current = false; return; }
     const sl = e.target.scrollLeft;
     const st = e.target.scrollTop;
@@ -1727,7 +1954,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       trackHeadersSuppressRef.current = true;
       trackHeadersRef.current.scrollTop = st;
     }
-  }, []);
+  }, [drawTimelineGrid]);
 
   const handlePianoRollScroll = useCallback((e) => {
     lastPianoScrollTopRef.current = e.target.scrollTop;
@@ -1786,6 +2013,21 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const inInput = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.isContentEditable;
 
       const hasNoteSel = !!editingTrackIdRef.current && noteSelectionRef.current.size > 0;
+
+      // Undo / Redo — Cmd/Ctrl+Z (undo), Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y (redo).
+      // Called via refs so this handler's effect deps don't need to track undo/redo.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+        if (inInput) return;
+        e.preventDefault();
+        (e.shiftKey ? redoRef : undoRef).current?.();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y')) {
+        if (inInput) return;
+        e.preventDefault();
+        redoRef.current?.();
+        return;
+      }
 
       // Delete / Backspace — notes path wins when notes selected
       if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -2046,6 +2288,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             {isDarkMode ? '◑' : '○'}
           </button>
           <button className={styles.homeBtn} onClick={onNavigateHome}>[ ⌂ home ]</button>
+          <button className={styles.transportBtn} onClick={() => undoRef.current?.()} disabled={!canUndo} title="Undo (⌘Z)">↶</button>
+          <button className={styles.transportBtn} onClick={() => redoRef.current?.()} disabled={!canRedo} title="Redo (⌘⇧Z)">↷</button>
           <button className={`${styles.transportBtn} ${styles.transportTextBtn}`} onClick={handleSaveProject} title="Save project to .voxdaw">[ save ]</button>
           <button className={`${styles.transportBtn} ${styles.transportTextBtn}`} onClick={() => loadInputRef.current?.click()} title="Load project from .voxdaw">[ load ]</button>
           <div className={styles.exportWrap}>
@@ -2202,11 +2446,13 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           onMouseDown={handleMouseDown}
           onScroll={handleTimelineScroll}
         >
+          {/* Grid lines: canvas pinned to the scroll viewport (zero-height sticky holder),
+              redrawn per-line-snapped on scroll/zoom/resize/theme. Behind the lanes. */}
+          <div className={styles.gridCanvasHolder}><canvas ref={timelineCanvasRef} /></div>
           <div
             className={styles.timelineInner}
             style={{
               width: `${totalMeasures * pixelsPerMeasure}px`,
-              backgroundImage: computeGridBg(pixelsPerMeasure, zoomLevel),
             }}
           >
             {/* Ruler */}
@@ -2344,7 +2590,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                                   data-mini-note-startbeat={n.startBeat}
                                   className={`${styles.miniNote}${j > 0 ? ` ${styles.miniNoteGhost}` : ''}`}
                                   style={{
-                                    left: `${xPx}px`,
+                                    left: `${Math.round(xPx)}px`,
                                     top:  `${4 + yRel * 70}%`,
                                     width: `${Math.max(n.durationBeats * ppb - 1, 2)}px`,
                                   }} />
@@ -2479,6 +2725,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onClose={() => setEditingTrackId(null)}
               scrollMemoryRef={lastPianoScrollTopRef}
               onInstrumentChange={handleInstrumentChange}
+              isDarkMode={isDarkMode}
             />
           </div>
         </>

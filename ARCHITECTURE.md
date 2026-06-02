@@ -302,6 +302,12 @@ Custom right-click menu (`position: fixed; z-index: 500`, styled after `.exportM
 ### Region mute (`region.isMuted`)
 Boolean on the region shape (default false). **Audio:** `buildRegionEvents` early-returns `[]` when muted, so the region schedules no Part events — covering both the live engine and `audioBounce` (which reuses the same pure function); `isMuted` is part of `computePartKey` so a toggle rebuilds. **Visual:** a single `.regionMuted` class (`opacity: 0.5; filter: grayscale(0.85)`) applies when `r.isMuted || t.isMuted`, covering both region mute and **cascading track mute** (a muted track grays every region in its lane). Persisted additively in `projectIO.js`. Track master-mute audio is still the existing `trackMuteGain` writer; `isMuted` only adds the per-region gate + the unified visual.
 
+### Undo/redo history (Phase 139, `WorkstationShell.jsx`)
+Tracks **arrangement data only** (`tracks`/`regions`/`notes` — mute/solo/volume/pan/instrument live on those objects); UI state (zoom/scroll/playhead/selection) is not tracked. A **passive recorder** `useEffect([tracks, regions, notes])` records history *after* React commits, so React 18 batching coalesces a multi-setter action (e.g. split = `setRegions`+`setNotes`) into one entry — **zero changes to the ~46 mutation sites**. **Leading-edge burst coalescing** (push the pre-change snapshot on the first change of a burst, suppress further pushes for ~200ms) folds a drag's mid-flight commits + continuous volume/pan slider commits into one entry. Snapshots store array **references** (state is updated immutably). `undo`/`redo` swap snapshots between `past`/`future`/`latestRef` under a `timeTravelingRef` guard, then `silenceAll()` + `recomputeFades()` (no forced pause); capped at `MAX_HISTORY = 100`. Toolbar ↶/↷ (disabled via `canUndo`/`canRedo`) + Cmd/Ctrl+Z / Cmd/Ctrl+Shift+Z / Cmd/Ctrl+Y, input-guarded. **Gotcha (fixed):** the `setFuture`/`setPast` updater closures must capture the present (`const current = latestRef.current`) *before* `latestRef` is reassigned — reading it inside the updater (which runs later) grabbed the post-mutation value, making the first redo a no-op.
+
+### Sampler load guard (Phase 140, `useWorkstationAudio.js`)
+`makePartCallback` guards `if (!synth || synth.disposed || synth.loaded === false) return;` before `triggerAttackRelease` — a `Tone.Sampler` throws "buffer is either not set or not loaded" if triggered before its buffers load (instrument hot-swap / paste while the Transport runs). Strict `=== false` is load-bearing: PolySynths have no `loaded` prop (`undefined`), so they always play. Same guard on the editor's preview-audition (`previewAttack`).
+
 ### Pause hard-cut + ghost-note silencing (`useWorkstationAudio.js` + `WorkstationShell.jsx`)
 `silenceAll()` calls `.releaseAll()` on every region synth **and** ramps each region's fade gain to 0 over `HARD_CUT_SEC = 0.02` to kill release tails for an instant cut. Single-writer preserved: pause writes 0, `recomputeFades()` restores on resume (temporally exclusive). It is wired into pause/stop/auto-pause/scrub-clutch **and** into `seekToClientX` and the `handlePlayPause` resume branch — so a voice ringing from a prior position can never bleed across a seek or into resume (the "ghost note"). No Part rebuild is needed: Tone.Part's one-shot `transport.schedule` events natively re-fire at/after the playhead on a backward seek and skip forward, so only voice silencing was missing.
 
@@ -403,8 +409,15 @@ Regions render absolutely inside their lane. Both `trackRow` (left header column
 ### Track color system
 `TRACK_COLORS` is a 7-color module-level array of mid-saturation hex values chosen for visibility on `#0e0e10`. Color assigned in `handleAddTrack` via `TRACK_COLORS[(n - 1) % TRACK_COLORS.length]` using the stable `nextIdRef` counter. Stored as `track.color` (hex string). Applied via the `--track-color` CSS custom property which cascades to `.trackName`, `.trackRowActive`, `.region`, `.noteBlock`, `.regionHighlight`. A 7px color dot (`<span className={styles.trackColorDot}>`) sits inside a `.trackNameRow` flex wrapper next to the track name in the header.
 
-### Loop phase (`loopPhase`) — phase-aware split
-Looped regions carry `loopPhase` (measures into the home cycle at the region's left edge, default `0`). Note occurrences unroll at `regionStart + ((homeLocalMeasures − loopPhase) mod li) + j·li`. At phase `0` this reduces to the original `i·baseLoop` unroll, so all pre-existing regions are unchanged. A nonzero phase is produced only by **Split Region** (`splitRegionAtMeasure`) on a looped region: the right half keeps the same `clipOffset`/home block but sets `loopPhase = (origPhase + rel) mod li`, so it resumes the loop *mid-cycle* and the content past the split is bit-identical to the original (Soundtrap-style, seamless; the right edge never moves). The math lives in **`src/components/Workstation/loopMath.js`** (`firstLoopOffsetMeasures`, `loopBoundaries`) — the single source of truth shared by the audio unroll (`buildRegionEvents`), the arrangement loop visuals (segments/dividers/tint/mini-notes), and the piano-roll note ghosts. Persisted in `projectIO`; in `computePartKey`. **Limitation:** the `loop-resize-base` drag handle is hidden on phased halves (`loopPhase !== 0`).
+### Loop phase (`loopPhase`) — boundary-aware three-piece split
+Looped regions carry `loopPhase` (measures into the home cycle at the region's left edge, default `0`). Note occurrences unroll at `regionStart + ((homeLocalMeasures − loopPhase) mod li) + j·li`. At phase `0` this reduces to the original `i·baseLoop` unroll, so all pre-existing regions are unchanged. The math lives in **`src/components/Workstation/loopMath.js`** (`firstLoopOffsetMeasures`, `loopBoundaries`) — the single source of truth shared by the audio unroll (`buildRegionEvents`), the arrangement loop visuals (segments/dividers/tint/mini-notes), and the piano-roll note ghosts. Persisted in `projectIO`; in `computePartKey`.
+
+**Split Region** (`splitRegionAtMeasure`) on a looped region produces a **boundary-aware three-piece split** (Phase 135) — the right side is split at *both* the playhead and the next loop boundary so no second-class phased region is ever minted:
+- **L** (reuses `r.id`, keeps the originals) — original truncated at the playhead; keeps looping with a partial tail.
+- **M** (new id, cloned notes) — the **non-looping** severed remainder of the in-progress cycle, from the playhead to the next boundary (`clipOffset = co + homeLocalRel` windows the bottle onto home-local `[homeLocalRel, li)`).
+- **R** (new id, cloned notes) — a fresh, **clean phase-0 loop** starting at the next boundary (`clipOffset = co`, full home block, working `loop-resize-base` handle).
+
+Edge cases collapse cleanly: split **on** a boundary → 2-piece L + R (clean); split in the **last partial iteration** (no full cycle after) → 2-piece L + M; non-looped region → existing Case-D 2-piece (bottle slides forward). Because R is always phase `0`, **new splits never create `loopPhase !== 0`** — the phase machinery is retained only so old `.voxdaw` projects containing phased regions (minted by the pre-Phase-135 model) still load and play correctly. **Limitation:** the `loop-resize-base` drag handle is still hidden on any pre-existing phased region (`loopPhase !== 0`).
 
 ### Note shape (Bottle/Window model)
 ```
@@ -446,15 +459,15 @@ Generated via `buildKeys(loOct, hiOct)`:
 - Note blocks and region highlights use `var(--track-color, var(--accent-color))` — injected on the editor root div via `style={{ '--track-color': track?.color }}`
 - Grid click (`handleGridClick`): `x = (clientX - rect.left) + scrollLeft - keysW`, `y = (clientY - rect.top) + scrollTop` — both axes compensate for scroll position
 
-**`computeGridBg(ppm, zoomLevel)`** (exported from `WorkstationShell.jsx`, shared with `RegionEditor`): Builds the CSS `background-image` string for arrangement and piano roll grids. At macro zoom-out, `ppm` can drop to 1–2px, collapsing all gradients into a solid block. Fix: `labelStep = Math.max(1, Math.ceil(50 / ppm))` (identical to the ruler's label-skip formula) scales the effective measure period to `effectivePpm = ppm * labelStep`. Beat and sub-beat layers are suppressed when `labelStep > 1` (they would be sub-pixel at those zoom levels). Grid lines are thus guaranteed to align with visible ruler labels at all zoom levels.
+**Vertical grid lines — `drawGrid(canvas, {...})`** (Phases 137-138-141, exported from `WorkstationShell.jsx`, shared with `RegionEditor`): the arrangement and piano-roll **vertical** lines (down-beat / quarter-beat / off-beat-eighth tiers) are drawn on a `<canvas>` pinned to each scroll viewport via a zero-size `position: sticky` holder, redrawn on scroll/zoom/resize/theme. `pixelsPerMeasure` stays a continuous float (smooth zoom, regions never jump) and **each line is snapped to a whole pixel** at draw time (`Math.round(leftInset + idx·floatPpm − scrollLeft)`), so lines stay crisp at any zoom without drifting off the float-positioned regions — the one thing a uniform `repeating-linear-gradient` can't do (it forced the earlier `computeGridBg` to round the shared unit, which caused a zoom-jump). DPR-scaled for retina; colours read from CSS vars at draw time (theme-aware); `getMeasureInterval(ppm)` drives the macro-zoom tier/label step. Piano-roll uses `leftInset = 56` (sticky keys column).
 
-Grid backgrounds (six layered `repeating-linear-gradient`s on `.grid`, top → bottom):
-1. Bar lines — `var(--border-mid)` every 200px (1 bar = 4 beats × 50px)
-2. Sub-beat lines — `var(--border-faint)` every 50px
-3. Octave lines — `var(--border-mid)` every 216px (12 × 18px)
-4. Semitone rows — `var(--border-subtle)` every 18px
-5. **Accidental-row shading** — `var(--pr-shade-accidental)` (5 black-key rows per octave)
-6. **Natural-row shading** — `var(--pr-shade-natural)` (7 white-key rows per octave)
+**Zoom anchor** (Phase 141): the Ctrl/pinch wheel handlers compute the zoom-to-cursor scroll target chained through refs (`liveZoomRef` for zoom, `pendingScrollRef ?? el.scrollLeft` for the base scroll) so the anchor is independent of React's commit timing — fixes the fast-zoom "jump" that grew with distance + render load. The `useLayoutEffect([zoomLevel])` applies the (correctly-chained) `pendingScrollRef` after the width commits.
+
+Horizontal rows + shading stay CSS on the piano-roll `.grid` / `.gridShading` overlay:
+- Octave lines — `var(--border-mid)` every 216px (12 × 18px)
+- Semitone rows — `var(--border-subtle)` every 18px
+- **Accidental-row shading** — `var(--pr-shade-accidental)` (5 black-key rows per octave)
+- **Natural-row shading** — `var(--pr-shade-natural)` (7 white-key rows per octave)
 
 Theme-aware shading inverts direction per theme:
 - **Dark theme:** `--pr-shade-natural = rgba(255,255,255,0.04)` (brighten naturals), `--pr-shade-accidental = transparent`

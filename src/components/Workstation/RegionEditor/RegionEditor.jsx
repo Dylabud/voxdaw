@@ -1,7 +1,7 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
 import * as Tone from 'tone';
 import styles from './RegionEditor.module.css';
-import { computeGridBg, getSnapIncrement } from '../WorkstationShell';
+import { drawGrid, getSnapIncrement } from '../WorkstationShell';
 import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
 import { firstLoopOffsetMeasures } from '../loopMath';
 import { SYNTH_INSTRUMENTS, SAMPLED_INSTRUMENT_NAMES, makeSynth } from '../synthFactory';
@@ -35,6 +35,9 @@ function regionWindow(r) {
 
 const noteKeyIndex = (name) => KEYS.findIndex(k => k.name === name);
 
+// Sticky keys-column width (matches .keys flex-basis) — grid lines start after it.
+const KEYS_W = 56;
+
 export default function RegionEditor({
   track,
   regions,
@@ -57,6 +60,7 @@ export default function RegionEditor({
   scrollMemoryRef,
   magnetOn,
   onInstrumentChange,
+  isDarkMode,
 }) {
   const [instrument,        setInstrument]        = useState(track?.instrument ?? 'fm pluck');
   const [activeTab,         setActiveTab]         = useState('notes');
@@ -66,6 +70,7 @@ export default function RegionEditor({
   const previewSynthRef       = useRef(null);
   const activeKeyElRef        = useRef(null);
   const gridRef               = useRef(null);
+  const gridCanvasRef         = useRef(null);   // pinned grid-line canvas over the piano-roll viewport
   const noteMarqueeElRef      = useRef(null);
   const noteDragRef           = useRef(null);
   const noteMarqueeRef        = useRef(null);
@@ -79,6 +84,33 @@ export default function RegionEditor({
   const noteSnapRef           = useRef(noteSnapDivision);   noteSnapRef.current = noteSnapDivision;
   const magnetOnRef           = useRef(magnetOn);           magnetOnRef.current = magnetOn;
   const pixelsPerMeasureRef   = useRef(pixelsPerMeasure);   pixelsPerMeasureRef.current = pixelsPerMeasure;
+
+  // ── Grid-line canvas ─────────────────────────────────────────
+  // Per-line whole-pixel-snapped grid for the piano roll (smooth zoom + crisp lines).
+  // leftInset = sticky keys-column width so lines never draw under the keys.
+  const drawPianoGrid = useCallback(() => {
+    const el = pianoScrollRef.current;
+    if (!el) return;
+    drawGrid(gridCanvasRef.current, {
+      scrollLeft: el.scrollLeft,
+      viewW: el.clientWidth,
+      viewH: el.clientHeight,
+      ppm: pixelsPerMeasure,
+      zoomLevel,
+      leftInset: KEYS_W,
+    });
+  }, [pixelsPerMeasure, zoomLevel, pianoScrollRef]);
+
+  // Redraw on zoom/theme/tab/totalMeasures (layout phase). Scroll redraws ride the
+  // .pianoRoll onScroll wrapper; resize redraws ride the ResizeObserver below.
+  useLayoutEffect(() => { drawPianoGrid(); }, [drawPianoGrid, isDarkMode, totalMeasures, activeTab]);
+  useEffect(() => {
+    const el = pianoScrollRef.current;
+    if (!el) return;
+    const obs = new ResizeObserver(() => drawPianoGrid());
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [drawPianoGrid, pianoScrollRef]);
 
   // Effective snap value (beats per snap unit) or null when no snap.
   // - magnet off  → null (no snap regardless of dropdown)
@@ -226,8 +258,14 @@ export default function RegionEditor({
   }, []);
 
   // ── Key preview handlers ──────────────────────────────────
+  // Guarded attack: a Tone.Sampler whose buffers are still loading throws on triggerAttack.
+  // `loaded !== false` plays PolySynths (no `loaded` prop) and ready Samplers, skips unready ones.
+  const previewAttack = (note) => {
+    const s = previewSynthRef.current;
+    if (s && !s.disposed && s.loaded !== false) s.triggerAttack(note);
+  };
   function handleMouseDown(note, e) {
-    Tone.start().then(() => previewSynthRef.current?.triggerAttack(note));
+    Tone.start().then(() => previewAttack(note));
     activeKeyElRef.current?.classList.remove(styles.keyActive);
     activeKeyElRef.current = e.currentTarget;
     e.currentTarget.classList.add(styles.keyActive);
@@ -238,7 +276,7 @@ export default function RegionEditor({
     activeKeyElRef.current?.classList.remove(styles.keyActive);
     activeKeyElRef.current = e.currentTarget;
     e.currentTarget.classList.add(styles.keyActive);
-    previewSynthRef.current?.triggerAttack(note);
+    previewAttack(note);
   }
   function handleMouseUp() {
     previewSynthRef.current?.releaseAll();
@@ -436,6 +474,9 @@ export default function RegionEditor({
     };
 
     const onUp = () => {
+      // Release any note auditioned on grid/note mousedown (precedes the early
+      // returns below so it fires for placement, note-drag, and marquee paths).
+      previewSynthRef.current?.releaseAll();
       // Drag end
       const dD = noteDragRef.current;
       if (dD) {
@@ -504,6 +545,9 @@ export default function RegionEditor({
   function handleNoteMouseDown(e, note) {
     if (e.button !== 0) return;
     e.stopPropagation();
+
+    // Audition the grabbed note's pitch (released in the window mouseup below).
+    Tone.start().then(() => previewAttack(note.note));
 
     const rect = e.currentTarget.getBoundingClientRect();
     const xInNote = e.clientX - rect.left;
@@ -575,6 +619,10 @@ export default function RegionEditor({
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     if (x < 0) return;
+    // Audition the pitch under the cursor (press-and-hold; released in the window
+    // mouseup below). Reuses the key-preview synth → track's instrument.
+    const auditionName = KEYS[Math.floor(y / KEY_H)]?.name;
+    if (auditionName) Tone.start().then(() => previewAttack(auditionName));
     // Resolve starting region from click x — marquee will only select notes from this region (bug 1).
     const ppb = pixelsPerMeasureRef.current / 4;
     const xBeat = x / ppb;
@@ -666,8 +714,11 @@ export default function RegionEditor({
       <div
         ref={pianoScrollRef}
         className={styles.pianoRoll}
-        onScroll={onGridScroll}
+        onScroll={(e) => { drawPianoGrid(); onGridScroll?.(e); }}
       >
+        {/* Grid lines: canvas pinned to the scroll viewport, per-line-snapped on
+            scroll/zoom/resize/theme. Behind the keys + grid content. */}
+        <div className={styles.gridCanvasHolder}><canvas ref={gridCanvasRef} /></div>
         <div
           className={styles.keys}
           style={{ minHeight: PIANO_ROLL_H }}
@@ -695,7 +746,6 @@ export default function RegionEditor({
             style={{
               width: gridMinWidth,
               minHeight: PIANO_ROLL_H,
-              backgroundImage: computeGridBg(pixelsPerMeasure, zoomLevel),
             }}
             onMouseDown={handleGridMouseDown}
           >
@@ -748,6 +798,10 @@ export default function RegionEditor({
               const regionStartBeat = r.startMeasure * 4;
               const regionEndBeat   = (r.startMeasure + r.durationMeasures) * 4;
               const isSelected = selectedNoteIds.has(n.id);
+              // Dim + desaturate to match the grayed-out parent region (per-region
+              // mute) or a cascading track mute — mirrors the arrangement's
+              // `r.isMuted || t.isMuted` rule. Purely visual; notes stay editable.
+              const muted = !!(r.isMuted || track?.isMuted);
               for (let j = 0; ; j++) {
                 const globalLeftBeat  = regionStartBeat + (firstOff + j * baseLoop) * 4;
                 // No later occurrence helps once we're past the region's right edge.
@@ -763,10 +817,12 @@ export default function RegionEditor({
                     key={`${n.id}-${j}`}
                     data-note-id={n.id}
                     data-note-iter={j}
-                    className={`${styles.noteBlock}${ghost ? ` ${styles.noteBlockGhost}` : ''}${!ghost && isSelected ? ` ${styles.noteSelected}` : ''}`}
+                    className={`${styles.noteBlock}${ghost ? ` ${styles.noteBlockGhost}` : ''}${!ghost && isSelected ? ` ${styles.noteSelected}` : ''}${muted ? ` ${styles.noteMuted}` : ''}`}
                     style={{
                       top:    keyIndex * KEY_H,
-                      left:   visibleLeft * ppb,
+                      // Round to a whole pixel so a note on a beat lands exactly on the
+                      // (now crisp) grid beat line instead of ~0.75px off it.
+                      left:   Math.round(visibleLeft * ppb),
                       width:  Math.max((visibleRight - visibleLeft) * ppb - 1, 2),
                       height: KEY_H - 1,
                     }}

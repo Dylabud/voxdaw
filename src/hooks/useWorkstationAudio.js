@@ -359,7 +359,13 @@ export function computeFadeGainAt(r, transportSec, bpm) {
 
 function makePartCallback(synth) {
   return (time, ev) => {
-    synth?.triggerAttackRelease(ev.note, ev.duration, time, 0.8);
+    // A Tone.Sampler throws "buffer is either not set or not loaded" if triggered before
+    // its buffers finish loading (instrument hot-swap or paste while the Transport runs).
+    // `loaded === false` ONLY skips an unready Sampler — PolySynths have no `loaded`
+    // (undefined !== false) so they always play. Re-checked at fire time, so once the
+    // sampler loads, later events on the same Part play normally (no Part rebuild needed).
+    if (!synth || synth.disposed || synth.loaded === false) return;
+    synth.triggerAttackRelease(ev.note, ev.duration, time, 0.8);
   };
 }
 
