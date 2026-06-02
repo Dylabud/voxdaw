@@ -1,0 +1,12 @@
+.overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* overflow visible so cables can droop below cabinet bottom edge */
+  overflow: visible;
+  /* SVG element itself has no background — events pass through to modules.
+     Individual cable paths opt into pointer-events via SVG attribute. */
+  pointer-events: none;
+  z-index: 50;
+}

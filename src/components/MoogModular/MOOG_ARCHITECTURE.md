@@ -176,7 +176,65 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 
 ---
 
-### 7. I/O — Input / Output Module
+### 7. CP3 Mixer — Signal Combiner [Visual scaffold: Moog Phase 1.5]
+
+**Function:** A transistor-based summing amplifier. Takes up to 4 audio signals (typically VCO outputs) and combines them into a single output with individual channel level controls and a master output gain. At high gain settings, the transistor summing bus produces characteristic warm saturation — a primary contributor to the classic Moog "fat" sound. This is not simple clipping; it is asymmetric transistor-level compression.
+
+**Controls:**
+| Knob | Function |
+|---|---|
+| **CH 1–4 Gain** | Individual input level for each channel. |
+| **Master** | Overall output level. High settings drive the transistor bus into warm saturation/clipping. |
+
+**Ports (5 Total):**
+| Port | Direction | Signal | Description |
+|---|---|---|---|
+| IN 1 | Input | AUDIO | Channel 1 input (typically VCO 1 SAW or SQR output). |
+| IN 2 | Input | AUDIO | Channel 2 input (typically VCO 2 output). |
+| IN 3 | Input | AUDIO | Channel 3 input (typically VCO 3 output). |
+| IN 4 | Input | AUDIO | Channel 4 input (auxiliary — noise, external, or LFO audio). |
+| OUT | Output | AUDIO | Summed output. Patch to VCF Audio IN. |
+
+**Tone.js Node:** Four `Tone.Gain` channel nodes summing into a single `Tone.Gain` master bus. For clipping character: a `WaveShaperNode` on the output with a soft-knee transfer curve. Phase 3 will initialize the nodes disconnected; Phase 8a will wire knobs.
+
+---
+
+### 8. Noise Generator [Visual scaffold: Moog Phase 1.5]
+
+**Function:** Generates random electrical signals across all frequencies simultaneously. White noise has equal energy per frequency (Hz). Pink noise rolls off at −3 dB/octave, giving equal energy per octave — it sounds perceptually "flatter" and more natural. Used as a sound source (wind, ocean, percussion transients), as a random CV source for organic pitch drift, or as a test signal.
+
+**Controls:**
+| Knob | Function |
+|---|---|
+| **Level** | Output amplitude of the noise signal before the output jacks. |
+
+**Ports (2 Total):**
+| Port | Direction | Signal | Description |
+|---|---|---|---|
+| WHITE OUT | Output | AUDIO / CV | Flat spectrum — full-range randomness. Harsh, bright. |
+| PINK OUT | Output | AUDIO / CV | −3 dB/oct rolloff — perceptually even energy distribution. Warmer. |
+
+**Tone.js Node:** `Tone.Noise` (type: `'white'` or `'pink'`). Two separate noise instances, each through a `Tone.Gain` level node. Both run continuously once started. Phase 8b will wire the Level knob.
+
+---
+
+### 9. Multiples — Passive Signal Router [Visual scaffold: Moog Phase 1.5]
+
+**Function:** A purely passive (no electronics, no power) signal distribution utility. Within each bank, all 4 jacks are hardwired together. Plugging a signal into any jack of a bank routes that signal to all other jacks in the same bank simultaneously. Used to distribute a single CV or audio source to multiple destinations (e.g., one LFO simultaneously modulating both VCF cutoff and VCO 2 frequency).
+
+**Controls:** None.
+
+**Ports (8 Total — 2 banks of 4):**
+| Port | Direction | Signal | Description |
+|---|---|---|---|
+| A1–A4 | Bidirectional | Any | Bank A: all 4 jacks electrically tied. Signal in → signal on all other A jacks. |
+| B1–B4 | Bidirectional | Any | Bank B: same as Bank A, electrically isolated from Bank A. |
+
+**Tone.js Implementation:** No dedicated audio node. Implemented in Phase 7 (patch cable simulator) as a fan-out: when a cable connects to a Multiples jack, `useMoogAudio.connect(src, dest)` is called for every other currently-occupied jack in that bank. Bank isolation is enforced in the connection manager.
+
+---
+
+### 10. I/O — Input / Output Module
 
 **Function:** The bridge between the modular world and the real world. Routes external audio (mic, guitar) into the patch system as an audio signal source, and routes the final patched signal out to speakers or a recording interface.
 
@@ -231,13 +289,18 @@ This gives the user an immediately playable arpeggio on load, showcasing the ins
 | Phase | Deliverable | Modules Covered |
 |---|---|---|
 | Moog Phase 1 ✅ | Visual shell, routing | All (scaffold only) |
-| Moog Phase 2 | `MoogKnob.jsx` — drag-to-rotate | All knobs |
-| Moog Phase 3 | `useMoogAudio.js` — node init, default chain | VCO, VCF, VCA, Envelope, I/O |
-| Moog Phase 4 | VCO panel wired | VCO |
-| Moog Phase 5 | VCF panel wired | VCF |
-| Moog Phase 6 | Envelope + VCA wired + keyboard trigger | VCA, Envelope |
-| Moog Phase 7 | Patch cable simulation (SVG bezier) | All |
-| Moog Phase 8 | LFO module | LFO |
-| Moog Phase 9 | Sequencer module | Sequencer |
-| Moog Phase 10 | I/O module + mic input | I/O |
-| Moog Phase 11 | Visual polish, LEDs, aging effects | All |
+| Moog Phase 1.5 ✅ | 4-tier visual expansion — 4 new module panels, thicker cabinet, metal texture | VCO+Noise (Row 1), CP3+VCF+LFO (Row 2), VCA+ENV×2+Multiples (Row 3), Sequencer blanks (Row 4) |
+| Moog Phase 1.6 ✅ | Photorealistic UI overhaul — multi-cabinet tiers, cream typography, improved jacks | All |
+| Moog Phase 2 ✅ | `MoogKnob.jsx` — drag-to-rotate with shift fine-mode, double-click reset | All knobs |
+| Moog Phase 3 ✅ | `useMoogAudio.js` — 15 Tone.js nodes, jackMap (52 IDs), patch bridge via `MoogPatchContext` callbacks, Power/I/O module | VCO, VCF, VCA, Envelope, CP3, Noise, LFO, I/O |
+| Moog Phase 7 ✅ | SVG patch cable simulation — zero-re-render drag, bezier droop, click-to-remove | All 52 jacks |
+| Moog Phase 4 | VCO panel knob wiring (freq, fine, wave, range) | VCO |
+| Moog Phase 5 | VCF panel knob wiring (cutoff, resonance, env amt, kbd) | VCF |
+| Moog Phase 6 | Envelope + VCA wiring + keyboard trigger (A-K keys) | VCA, Envelope |
+| Moog Phase 7 (audio) | Wire patch cables to audio — `useMoogAudio.connect()` on completeDrag | All |
+| Moog Phase 8 | LFO audio wiring (rate, level knobs → Tone.LFO params) | LFO |
+| Moog Phase 8a | CP3 Mixer knob wiring + clipping drive WaveShaperNode | CP3 |
+| Moog Phase 8b | Noise Generator Level knob wiring | Noise |
+| Moog Phase 9 | Sequencer module (960 Sequential Controller) | Sequencer |
+| Moog Phase 10 | I/O module mic input + master volume knob wiring | I/O |
+| Moog Phase 11 | Visual polish — LEDs, aging effects, mobile fallback | All |
