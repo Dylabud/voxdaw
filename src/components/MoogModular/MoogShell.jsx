@@ -4,6 +4,7 @@ import MoogKnob from './MoogKnob';
 import { MoogPatchProvider, useMoogPatch } from './MoogPatchContext';
 import PatchCableOverlay from './PatchCableOverlay';
 import useMoogAudio from './useMoogAudio';
+import Oscilloscope from './Oscilloscope';
 
 // ──────────── Atomic hardware primitives ────────────
 
@@ -85,12 +86,44 @@ function PowerSwitch({ isPowered, onToggle }) {
 
 // ──────────── Module panels ────────────
 
-// number prop (1/2/3) drives both the display label and jack ID prefixes.
-function VcoModule({ number }) {
-  const [freq, setFreq] = useState(0.5);
-  const [fine, setFine] = useState(0.5);
-  const [wave, setWave] = useState(0.0);
-  const p = `vco${number}`;
+// Exponential frequency mapping: C1 (32.703 Hz) → C6 (1046.502 Hz)
+const VCO_FREQ_MIN = 32.703;
+const VCO_FREQ_MAX = 1046.502;
+const WAVE_TYPES   = ['sine', 'triangle', 'sawtooth', 'square'];
+const WAVE_LABELS  = { sine: 'SIN', triangle: 'TRI', sawtooth: 'SAW', square: 'SQR' };
+const RANGE_STEPS  = [-2, -1, 0, 1, 2];
+const RANGE_LABELS = { '-2': "32'", '-1': "16'", '0': "8'", '1': "4'", '2': "2'" };
+
+// number prop (1/2/3) drives the display label and jack ID prefixes.
+// onParamUpdate(vcoId, { hz, detune, type }) is the audio update callback from useMoogAudio.
+function VcoModule({ number, onParamUpdate }) {
+  // VCO2/VCO3 start slightly detuned for classic analog thickness
+  const defaultFine = number === 2 ? 0.52 : number === 3 ? 0.48 : 0.5;
+
+  const [freqBase,    setFreqBase]    = useState(0.5);
+  const [fineTune,    setFineTune]    = useState(defaultFine);
+  const [waveType,    setWaveType]    = useState('sawtooth');
+  const [rangeOctave, setRangeOctave] = useState(0);
+
+  const vcoId = `vco${number}`;
+  const p     = vcoId;
+
+  useEffect(() => {
+    if (!onParamUpdate) return;
+    // Exponential Hz: freqBase 0→1 maps C1→C6
+    const baseHz  = VCO_FREQ_MIN * Math.pow(VCO_FREQ_MAX / VCO_FREQ_MIN, freqBase);
+    const finalHz = baseHz * Math.pow(2, rangeOctave);
+    // Fine tune: 0–1 → ±100 cents
+    const detune  = (fineTune - 0.5) * 200;
+    onParamUpdate(vcoId, { hz: finalHz, detune, type: waveType });
+  }, [freqBase, fineTune, waveType, rangeOctave, vcoId, onParamUpdate]);
+
+  const cycleWave = () =>
+    setWaveType(prev => WAVE_TYPES[(WAVE_TYPES.indexOf(prev) + 1) % WAVE_TYPES.length]);
+
+  const cycleRange = () =>
+    setRangeOctave(prev => RANGE_STEPS[(RANGE_STEPS.indexOf(prev) + 1) % RANGE_STEPS.length]);
+
   return (
     <div className={styles.module}>
       <Screw pos="screwTL" /><Screw pos="screwTR" />
@@ -105,13 +138,18 @@ function VcoModule({ number }) {
         </div>
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
-            <MoogKnob label="FREQ" size="xl" value={freq} onChange={setFreq} defaultValue={0.5} />
-            <MoogKnob label="FINE" size="sm" value={fine} onChange={setFine} defaultValue={0.5} />
-            <MoogKnob label="WAVE" size="sm" value={wave} onChange={setWave} defaultValue={0.0} />
+            <MoogKnob label="FREQ" size="xl" value={freqBase} onChange={setFreqBase} defaultValue={0.5} />
+            <MoogKnob label="FINE" size="sm" value={fineTune} onChange={setFineTune} defaultValue={defaultFine} />
           </div>
-          <div className={styles.switchRow}>
-            <ToggleSwitch labels={['HI', 'LO']} />
-            <ToggleSwitch labels={['SAW', 'SQR']} />
+          <div className={styles.selectorRow}>
+            <div className={styles.selectorGroup} onClick={cycleWave} title="Click to cycle waveform">
+              <span className={styles.selectorLabel}>WAVE</span>
+              <span className={styles.selectorValue}>{WAVE_LABELS[waveType]}</span>
+            </div>
+            <div className={styles.selectorGroup} onClick={cycleRange} title="Click to cycle range">
+              <span className={styles.selectorLabel}>RANGE</span>
+              <span className={styles.selectorValue}>{RANGE_LABELS[String(rangeOctave)]}</span>
+            </div>
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
@@ -195,11 +233,19 @@ function Cp3MixerModule() {
   );
 }
 
-function VcfModule() {
-  const [cutoff, setCutoff] = useState(0.8);
-  const [res, setRes]       = useState(0.1);
-  const [envAmt, setEnvAmt] = useState(0.5);
-  const [kbd, setKbd]       = useState(0.5);
+// onParamUpdate({ cutoff, resonance }) is the audio update callback from useMoogAudio.
+// envAmt and kbdTracking are visual-only in this phase (Phase 6 will wire them).
+function VcfModule({ onParamUpdate }) {
+  const [cutoff, setCutoff] = useState(1.0);   // fully open — matches vcf init at 20kHz
+  const [res, setRes]       = useState(0.0);
+  const [envAmt, setEnvAmt] = useState(0.5);   // visual only
+  const [kbd, setKbd]       = useState(0.0);   // visual only
+
+  useEffect(() => {
+    if (!onParamUpdate) return;
+    onParamUpdate({ cutoff, resonance: res });
+  }, [cutoff, res, onParamUpdate]);
+
   return (
     <div className={styles.module}>
       <Screw pos="screwTL" /><Screw pos="screwTR" />
@@ -213,10 +259,10 @@ function VcfModule() {
         </div>
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
-            <MoogKnob label="CUTOFF"    size="xl" value={cutoff} onChange={setCutoff} defaultValue={0.8} />
-            <MoogKnob label="RESONANCE" size="lg" value={res}    onChange={setRes}    defaultValue={0.1} />
+            <MoogKnob label="CUTOFF"    size="xl" value={cutoff} onChange={setCutoff} defaultValue={1.0} />
+            <MoogKnob label="RESONANCE" size="lg" value={res}    onChange={setRes}    defaultValue={0.0} />
             <MoogKnob label="ENV AMT"   size="md" value={envAmt} onChange={setEnvAmt} defaultValue={0.5} />
-            <MoogKnob label="KBD"       size="sm" value={kbd}    onChange={setKbd}    defaultValue={0.5} />
+            <MoogKnob label="KBD"       size="sm" value={kbd}    onChange={setKbd}    defaultValue={0.0} />
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
@@ -232,9 +278,27 @@ function VcfModule() {
   );
 }
 
-function LfoModule() {
-  const [rate, setRate]   = useState(0.3);
-  const [level, setLevel] = useState(0.5);
+// LFO waveform options — same cycling pattern as VcoModule (Phase 4).
+// Patching a specific output jack (lfo-sin, lfo-tri, etc.) overrides the type
+// at cable-connect time via the jackMap waveform field. The UI selector sets
+// the default type for the currently-running LFO signal.
+const LFO_WAVE_TYPES  = ['sine', 'triangle', 'square', 'sawtooth'];
+const LFO_WAVE_LABELS = { sine: 'SIN', triangle: 'TRI', square: 'SQR', sawtooth: 'SAW' };
+
+// onParamUpdate({ rate, depth, type }) wires knobs and wave selector to useMoogAudio.
+function LfoModule({ onParamUpdate }) {
+  const [rate,     setRate]     = useState(0.3);
+  const [depth,    setDepth]    = useState(0.5);
+  const [waveType, setWaveType] = useState('sine');
+
+  useEffect(() => {
+    if (!onParamUpdate) return;
+    onParamUpdate({ rate, depth, type: waveType });
+  }, [rate, depth, waveType, onParamUpdate]);
+
+  const cycleWave = () =>
+    setWaveType(prev => LFO_WAVE_TYPES[(LFO_WAVE_TYPES.indexOf(prev) + 1) % LFO_WAVE_TYPES.length]);
+
   return (
     <div className={styles.module}>
       <Screw pos="screwTL" /><Screw pos="screwTR" />
@@ -249,9 +313,13 @@ function LfoModule() {
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
             <MoogKnob label="RATE"  size="lg" value={rate}  onChange={setRate}  defaultValue={0.3} />
-            <MoogKnob label="LEVEL" size="md" value={level} onChange={setLevel} defaultValue={0.5} />
+            <MoogKnob label="DEPTH" size="md" value={depth} onChange={setDepth} defaultValue={0.5} />
           </div>
-          <div className={styles.switchRow}>
+          <div className={styles.selectorRow}>
+            <div className={styles.selectorGroup} onClick={cycleWave} title="Click to cycle waveform">
+              <span className={styles.selectorLabel}>WAVE</span>
+              <span className={styles.selectorValue}>{LFO_WAVE_LABELS[waveType]}</span>
+            </div>
             <ToggleSwitch labels={['FREE', 'SYNC']} />
           </div>
           <PlateDivider />
@@ -268,9 +336,19 @@ function LfoModule() {
   );
 }
 
-function VcaModule() {
+// onParamUpdate({ gain }) wires the GAIN knob to n.vca.gain.
+// GAIN is the initial/bias level (0=closed, 1=fully open).
+// Set GAIN=0 and patch an envelope to vca-cv for full gating behavior.
+// ENV AMT knob is visual-only this phase.
+function VcaModule({ onParamUpdate }) {
   const [gain, setGain]     = useState(0.5);
-  const [envAmt, setEnvAmt] = useState(1.0);
+  const [envAmt, setEnvAmt] = useState(1.0); // visual only
+
+  useEffect(() => {
+    if (!onParamUpdate) return;
+    onParamUpdate({ gain });
+  }, [gain, onParamUpdate]);
+
   return (
     <div className={styles.module}>
       <Screw pos="screwTL" /><Screw pos="screwTR" />
@@ -302,13 +380,23 @@ function VcaModule() {
   );
 }
 
-// label ("ENV 1" / "ENV 2") is used both as the displayed title and to derive jack IDs.
-function EnvelopeModule({ label }) {
+// label ("ENV 1" / "ENV 2") drives the title and jack IDs.
+// onParamUpdate(envId, { attack, decay, sustain, release }) wires knobs to the audio engine.
+// onGate(envId, isDown) fires triggerAttack / triggerRelease on the Tone.Envelope.
+// All knob values are normalized 0–1; useMoogAudio applies the exponential time mapping.
+function EnvelopeModule({ label, onParamUpdate, onGate }) {
   const [attack,  setAttack]  = useState(0.1);
   const [decay,   setDecay]   = useState(0.3);
   const [sustain, setSustain] = useState(0.7);
   const [release, setRelease] = useState(0.4);
+
   const envId = label.toLowerCase().replace(/\s+/g, ''); // "env1" or "env2"
+
+  useEffect(() => {
+    if (!onParamUpdate) return;
+    onParamUpdate(envId, { attack, decay, sustain, release });
+  }, [attack, decay, sustain, release, envId, onParamUpdate]);
+
   return (
     <div className={styles.module}>
       <Screw pos="screwTL" /><Screw pos="screwTR" />
@@ -326,6 +414,15 @@ function EnvelopeModule({ label }) {
             <MoogKnob label="D" size="md" value={decay}   onChange={setDecay}   defaultValue={0.3} />
             <MoogKnob label="S" size="md" value={sustain} onChange={setSustain} defaultValue={0.7} />
             <MoogKnob label="R" size="md" value={release} onChange={setRelease} defaultValue={0.4} />
+          </div>
+          <div className={styles.gateBtnRow}>
+            <span className={styles.gateBtnLabel}>GATE</span>
+            <button
+              className={styles.gateBtn}
+              onMouseDown={() => onGate?.(envId, true)}
+              onMouseUp={() => onGate?.(envId, false)}
+              onMouseLeave={() => onGate?.(envId, false)}
+            />
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
@@ -374,11 +471,16 @@ function MultiplesModule() {
   );
 }
 
-// I/O module — houses the Power switch and Master Volume knob.
-// VCA → Master → Destination is hardwired by useMoogAudio on powerOn;
-// the SPKR jack is decorative in Phase 3.
-function IoModule({ isPowered, onPower }) {
+// I/O module — oscilloscope display, POWER switch, MASTER VOL knob, and the "io-in" patch jack.
+// getOscData() is passed down from MoogShell → useMoogAudio.getOscilloscopeData.
+function IoModule({ isPowered, onPower, onParamUpdate, getOscData }) {
   const [masterVol, setMasterVol] = useState(0.7);
+
+  useEffect(() => {
+    if (!onParamUpdate) return;
+    onParamUpdate({ volume: masterVol });
+  }, [masterVol, onParamUpdate]);
+
   return (
     <div className={styles.module}>
       <Screw pos="screwTL" /><Screw pos="screwTR" />
@@ -391,6 +493,7 @@ function IoModule({ isPowered, onPower }) {
           </div>
         </div>
         <div className={styles.plateBody}>
+          <Oscilloscope getData={getOscData} />
           <div className={styles.switchRow}>
             <PowerSwitch isPowered={isPowered} onToggle={onPower} />
           </div>
@@ -405,7 +508,7 @@ function IoModule({ isPowered, onPower }) {
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id="io-spkr-out" label="SPKR" />
+            <Jack id="io-in" label="IN" />
           </div>
         </div>
       </div>
@@ -439,19 +542,44 @@ export default function MoogShell({ onNavigateHome }) {
     if (!el) return;
 
     const fit = () => {
-      el.style.transform = 'none';
+      // Reset to natural size so we can measure it accurately
+      el.style.transform    = 'none';
+      el.style.marginBottom = '0px';
+
       const natW = el.offsetWidth;
       const natH = el.offsetHeight;
+      if (!natW || !natH) return;
+
+      // Available space inside the shell's padding (16px sides, 44px top, 16px bottom)
       const availW = window.innerWidth  - 32;
       const availH = window.innerHeight - 60;
       const scale  = Math.min(availW / natW, availH / natH, 1);
-      el.style.transform       = scale < 1 ? `scale(${scale})` : 'none';
+
       el.style.transformOrigin = 'top center';
+
+      if (scale < 1) {
+        el.style.transform    = `scale(${scale})`;
+        // transform: scale() is visual-only — the layout footprint stays at natH.
+        // A negative marginBottom collapses the unused layout space so the flex
+        // container never overflows its 100vh boundary.
+        el.style.marginBottom = `${Math.round(natH * (scale - 1))}px`;
+      } else {
+        el.style.transform    = 'none';
+        el.style.marginBottom = '0px';
+      }
     };
 
     fit();
+
+    // Re-fit if the cabinet's own content height ever changes (e.g. after fonts load)
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+
     window.addEventListener('resize', fit);
-    return () => window.removeEventListener('resize', fit);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', fit);
+    };
   }, []);
 
   return (
@@ -472,31 +600,31 @@ export default function MoogShell({ onNavigateHome }) {
           <div className={styles.rack}>
             {/* Row 1: VCO bank + Noise source */}
             <div className={`${styles.tier} ${styles.tierRow1}`}>
-              <VcoModule number={1} />
-              <VcoModule number={2} />
-              <VcoModule number={3} />
+              <VcoModule number={1} onParamUpdate={audio.updateVcoParams} />
+              <VcoModule number={2} onParamUpdate={audio.updateVcoParams} />
+              <VcoModule number={3} onParamUpdate={audio.updateVcoParams} />
               <NoiseModule />
             </div>
 
             {/* Row 2: Mixer → Filter → LFO */}
             <div className={`${styles.tier} ${styles.tierRow2}`}>
               <Cp3MixerModule />
-              <VcfModule />
-              <LfoModule />
+              <VcfModule onParamUpdate={audio.updateVcfParams} />
+              <LfoModule onParamUpdate={audio.updateLfoParams} />
             </div>
 
             {/* Row 3: VCA, Envelopes, Multiples */}
             <div className={`${styles.tier} ${styles.tierRow3}`}>
-              <VcaModule />
-              <EnvelopeModule label="ENV 1" />
-              <EnvelopeModule label="ENV 2" />
+              <VcaModule onParamUpdate={audio.updateVcaParams} />
+              <EnvelopeModule label="ENV 1" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} />
+              <EnvelopeModule label="ENV 2" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} />
               <MultiplesModule />
             </div>
 
             {/* Row 4: I/O module + 960 Sequencer reserved */}
             <div className={`${styles.tier} ${styles.tierRow4}`}>
               <SequencerReservedPanel />
-              <IoModule isPowered={audio.isPowered} onPower={audio.powerOn} />
+              <IoModule isPowered={audio.isPowered} onPower={audio.powerOn} onParamUpdate={audio.updateIoParams} getOscData={audio.getOscilloscopeData} />
             </div>
           </div>
         </div>

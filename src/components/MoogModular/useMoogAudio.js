@@ -1,6 +1,25 @@
 import * as Tone from 'tone';
 import { useRef, useState, useCallback, useEffect } from 'react';
 
+// Safe parameter ramp.
+//
+// Problem: Tone.js Param.rampTo() calls assertRange(value, param.minValue, param.maxValue).
+// When the AudioContext is suspended (before Tone.start()), AudioParams report
+// minValue = maxValue = 0, so any non-zero value throws RangeError [0, 0].
+// Additionally, for exponential-type params (frequency, Q), a target of 0 or a
+// Tone-internal substitution of 1e-7 also triggers this check.
+//
+// Fix: use direct .value assignment (always valid regardless of context state) when the
+// context is not running, and rampTo() only when it is running.  This also initialises
+// params correctly so they are set to the right value the moment powerOn() resumes the context.
+function safeRamp(param, value, rampTime = 0.05) {
+  if (Tone.context.state === 'running') {
+    param.rampTo(value, rampTime);
+  } else {
+    param.value = value;
+  }
+}
+
 // Maps all 52 jack IDs to Tone.js port descriptors.
 // type:'out' → source node (plus optional waveform to set before connecting)
 // type:'in'  → destination: ToneAudioNode (audio input) or AudioParam (CV input)
@@ -66,8 +85,8 @@ function buildJackMap(n) {
     'mult-a3': { type: 'in', dest: null }, 'mult-a4': { type: 'in', dest: null },
     'mult-b1': { type: 'in', dest: null }, 'mult-b2': { type: 'in', dest: null },
     'mult-b3': { type: 'in', dest: null }, 'mult-b4': { type: 'in', dest: null },
-    // ── I/O ── (VCA→Master is hardwired on powerOn; SPKR jack is decorative in Phase 3)
-    'io-spkr-out': { type: 'in', dest: null },
+    // ── I/O ── audio signal enters the I/O module here and exits to Destination
+    'io-in': { type: 'in', dest: n.master },
   };
 }
 
@@ -75,7 +94,6 @@ export default function useMoogAudio() {
   const [isPowered, setIsPowered] = useState(false);
 
   const isPoweredRef   = useRef(false);
-  const hardwiredRef   = useRef(false); // cp3 internal wires + vca→master, done once
   const nodesRef       = useRef(null);
   const jackMapRef     = useRef(null);
   const connectionsRef = useRef(new Map()); // key: "fromId→toId" → { node, dest }
@@ -92,19 +110,31 @@ export default function useMoogAudio() {
       cp3ch3: new Tone.Gain(0.8),
       cp3ch4: new Tone.Gain(0.8),
       cp3bus: new Tone.Gain(0.7),
-      vcf:    new Tone.Filter({ frequency: 2000, type: 'lowpass', rolloff: -24 }),
+      vcf:    new Tone.Filter({ frequency: 20000, type: 'lowpass', rolloff: -24 }),
       vca:    new Tone.Gain(1.0),
       env1:   new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
       env2:   new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
       lfo:    new Tone.LFO({ frequency: 0.5, type: 'sine', min: -1, max: 1 }),
-      master: new Tone.Volume(-12).toDestination(),
+      master:   new Tone.Volume(-14).toDestination(),
+      analyser: new Tone.Analyser('waveform', 512),
     };
+
+    // CP3 internal summing — channels always sum to bus (internal mixer architecture,
+    // not a patch cable concern). Everything else starts fully disconnected.
+    n.cp3ch1.connect(n.cp3bus);
+    n.cp3ch2.connect(n.cp3bus);
+    n.cp3ch3.connect(n.cp3bus);
+    n.cp3ch4.connect(n.cp3bus);
+
+    // Oscilloscope tap — side connection after master volume, dead-end (no further output).
+    // Tone.Analyser wraps a native AnalyserNode; connecting to it is additive and does not
+    // affect the master → Destination path.
+    n.master.connect(n.analyser);
 
     nodesRef.current   = n;
     jackMapRef.current = buildJackMap(n);
 
     return () => {
-      // Stop sources and dispose all nodes on unmount
       [n.vco1, n.vco2, n.vco3, n.noiseW, n.noiseP, n.lfo].forEach(node => {
         try { node.stop(); } catch (_) {}
       });
@@ -113,7 +143,6 @@ export default function useMoogAudio() {
       });
       connectionsRef.current.clear();
       isPoweredRef.current = false;
-      hardwiredRef.current = false;
     };
   }, []);
 
@@ -124,21 +153,9 @@ export default function useMoogAudio() {
 
     const n = nodesRef.current;
     if (!n) return;
-
     [n.vco1, n.vco2, n.vco3, n.noiseW, n.noiseP, n.lfo].forEach(node => {
       try { node.start(); } catch (_) {}
     });
-
-    // Hardwire permanent internal connections (once only — survives powerOff/powerOn cycles)
-    if (!hardwiredRef.current) {
-      hardwiredRef.current = true;
-      n.cp3ch1.connect(n.cp3bus);
-      n.cp3ch2.connect(n.cp3bus);
-      n.cp3ch3.connect(n.cp3bus);
-      n.cp3ch4.connect(n.cp3bus);
-      // VCA → Master is always active; user only needs to patch the chain up to VCA-IN
-      n.vca.connect(n.master);
-    }
 
     setIsPowered(true);
   }, []);
@@ -193,5 +210,95 @@ export default function useMoogAudio() {
     connectionsRef.current.delete(key);
   }, []);
 
-  return { powerOn, powerOff, connect, disconnect, isPowered };
+  // Update VCO audio parameters — single writer per node.
+  // vcoId: 'vco1' | 'vco2' | 'vco3'
+  const updateVcoParams = useCallback((vcoId, { hz, detune, type } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    const vco = n[vcoId];
+    if (!vco) return;
+    if (hz      !== undefined) safeRamp(vco.frequency, hz);
+    if (detune  !== undefined) safeRamp(vco.detune, detune);
+    if (type    !== undefined) vco.type = type;
+  }, []);
+
+  // Update VCF audio parameters — single writer per node.
+  // cutoff   (0–1) → exponential 20 Hz–20 kHz  (20 * 1000^cutoff)
+  // resonance (0–1) → Q 0–20; floored at 0.001 — Q=0 is mathematically equivalent to
+  //   flat response but Tone.js uses exponential ramps for Q and can't ramp to/from 0.
+  const updateVcfParams = useCallback(({ cutoff, resonance } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (cutoff    !== undefined) safeRamp(n.vcf.frequency, 20 * Math.pow(1000, cutoff));
+    if (resonance !== undefined) safeRamp(n.vcf.Q, Math.max(0.001, resonance * 20));
+  }, []);
+
+  // Update Envelope ADSR params.  envId: 'env1' | 'env2'.
+  // All time values use exponential mapping so short/long times feel equally reachable.
+  // attack/decay/release: 0–1 → 0.01s–10s   sustain: 0–1 → 0.0–1.0 (linear)
+  const updateEnvParams = useCallback((envId, { attack, decay, sustain, release } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    const env = n[envId];
+    if (!env) return;
+    if (attack  !== undefined) env.attack  = 0.01 * Math.pow(1000, attack);
+    if (decay   !== undefined) env.decay   = 0.01 * Math.pow(1000, decay);
+    if (sustain !== undefined) env.sustain = sustain;
+    if (release !== undefined) env.release = 0.01 * Math.pow(1000, release);
+  }, []);
+
+  // Trigger or release an envelope gate.  envId: 'env1' | 'env2'.
+  // Tone.Envelope outputs a 0–1 CV signal — when patched to vca-cv the Web Audio
+  // API adds it to vca.gain's base value (set by the GAIN knob / updateVcaParams).
+  const triggerGate = useCallback((envId, isDown) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    const env = n[envId];
+    if (!env) return;
+    if (isDown) env.triggerAttack();
+    else        env.triggerRelease();
+  }, []);
+
+  // Update VCA initial gain (manual bias, 0–1 linear).
+  // The VCA is Tone.Gain; env CV adds on top — set GAIN=0 for full envelope gating.
+  const updateVcaParams = useCallback(({ gain } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (gain !== undefined) safeRamp(n.vca.gain, gain);
+  }, []);
+
+  // Update LFO parameters.
+  // rate  (0–1) → exponential 0.1 Hz–30 Hz  (0.1 * 300^rate)
+  // depth (0–1) → lfo.amplitude 0–1 (scales the ±1 output swing)
+  // type  (string) → lfo.type; UI-driven default, overridden by whichever waveform jack
+  //        is patched (the connect() function also sets lfo.type via from.waveform).
+  const updateLfoParams = useCallback(({ rate, depth, type } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (rate  !== undefined) safeRamp(n.lfo.frequency, 0.1 * Math.pow(300, rate));
+    if (depth !== undefined) safeRamp(n.lfo.amplitude, depth);
+    if (type  !== undefined) n.lfo.type = type;
+  }, []);
+
+  // Update master output volume — single writer on n.master.volume.
+  // volume (0–1) → -60 dB to +6 dB  (linear dB scale; 0.75 ≈ -13.5 dB, matching init)
+  const updateIoParams = useCallback(({ volume } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (volume !== undefined) safeRamp(n.master.volume, -60 + volume * 66);
+  }, []);
+
+  // Returns the current waveform snapshot from the oscilloscope analyser tap.
+  // Returns Float32Array of 512 samples in [-1, 1], or null before nodes are created.
+  const getOscilloscopeData = useCallback(() => {
+    const n = nodesRef.current;
+    if (!n) return null;
+    return n.analyser.getValue();
+  }, []);
+
+  return {
+    powerOn, powerOff, connect, disconnect, isPowered,
+    updateVcoParams, updateVcfParams, updateEnvParams, triggerGate, updateVcaParams,
+    updateLfoParams, updateIoParams, getOscilloscopeData,
+  };
 }

@@ -30,41 +30,13 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 - In `MoogPatchContext.completeDrag` / `removeCable`: call `useMoogAudio.connect(fromJackId, toJackId)` / `disconnect(cableId)`
 - Jack IDs already match the architecture signal-type system — the visual graph already models the correct connection data, just needs an audio back-end
 
-### Moog Phase 3 — Audio Architecture (`useMoogAudio.js`)
-- Create `src/components/MoogModular/useMoogAudio.js` (peer hook, never added to `useAudioEngine`)
-- Initialize nodes: 3× `Tone.Oscillator`, 1× `Tone.Filter` (ladder type), 2× `Tone.AmplitudeEnvelope`, 1× `Tone.Volume`, CP3 summing bus (`Tone.Gain` × 5), 2× `Tone.Noise`
-- Architecture: do NOT hardwire permanently — expose `connect(srcRef, destRef)` / `disconnect(srcRef, destRef)` for future patch cable simulation
-- Default wiring for immediate sound: VCO1 → CP3 → VCF → VCA → Destination
-- Expose `startMoog()` / `stopMoog()` lifecycle (requires user gesture before `Tone.start()`)
-- **State migration:** lift the local `useState` values currently in each module component up to `MoogShell`, convert to refs, and wire knob `onChange` callbacks → audio node params via `.rampTo(value, 0.02)`
-- Single writer per node rule applies here too
+### Moog Phase 5 — VCF Panel Wiring ✅ (see Completed Phases Log)
 
-### Moog Phase 3 — Audio Architecture (`useMoogAudio.js`)
-- Create `src/components/MoogModular/useMoogAudio.js` (peer hook, never added to `useAudioEngine`)
-- Initialize nodes: 3× `Tone.Oscillator`, 1× `Tone.Filter` (ladder type), 2× `Tone.AmplitudeEnvelope`, 1× `Tone.Volume`
-- Architecture: do NOT hardwire permanently — expose `connect(srcRef, destRef)` / `disconnect(srcRef, destRef)` for future patch cable simulation
-- Default wiring for immediate sound: VCO1 → VCF → VCA → Destination
-- Expose `startMoog()` / `stopMoog()` lifecycle (requires user gesture before `Tone.start()`)
-- Wire knob `onChange` callbacks → audio node params via `.rampTo(value, 0.02)`
-- Single writer per node rule applies here too
+### Moog Phase 6 — Envelope + VCA Wiring ✅ (see Completed Phases Log)
 
-### Moog Phase 4 — VCO Panel Wiring
-- Connect VCO 1/2/3 frequency knobs → `oscillator.frequency.rampTo()`
-- Fine tune knob → frequency offset in semitones
-- Waveform selector knob → `oscillator.type` (sine/triangle/sawtooth/square)
-- Range toggle → octave multiplier
-- Detune VCO 2/3 slightly from VCO 1 for classic analog thickness
+### Moog Phase 11 — Oscilloscope Visualization ✅ (see Completed Phases Log)
 
-### Moog Phase 5 — VCF Panel Wiring
-- Cutoff knob → `filter.frequency.rampTo()`
-- Resonance knob → `filter.Q.rampTo()`
-- Envelope Amount knob → envelope-to-cutoff routing amount
-- Keyboard tracking knob → pitch-proportional cutoff offset
-
-### Moog Phase 6 — Envelope + VCA Wiring
-- ADSR knobs → `envelope.attack/decay/sustain/release`
-- VCA Gain knob → `volume.volume.rampTo()`
-- Add keyboard (MIDI-style) trigger: on-screen keys or computer keyboard (A-K = notes)
+### Moog Phase 10 — Master I/O & True Modular Routing ✅ (see Completed Phases Log)
 
 ### Moog Phase 7 — Patch Cable Simulation
 - Visual patch cables as SVG bezier curves between jacks
@@ -73,11 +45,7 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 - Color-coded cables (random per patch)
 - Dynamic `connect()` / `disconnect()` to `useMoogAudio.js`
 
-### Moog Phase 8 — LFO Module (Audio Wiring)
-- Visual scaffold already complete (Phase 1.5) — Rate, Level knobs + SYNC toggle + 5 output jacks exist
-- Wire `Tone.LFO` node in `useMoogAudio.js`
-- Rate knob → `lfo.frequency.rampTo()`, Level knob → LFO amplitude
-- Patch cable simulator (Phase 7) handles routing to VCF cutoff / VCO frequency / VCA gain
+### Moog Phase 8 — LFO Module (Audio Wiring) ✅ (see Completed Phases Log)
 
 ### Moog Phase 8a — CP3 Mixer Audio Wiring
 - Prerequisite: Phase 3 (audio architecture) complete
@@ -100,6 +68,127 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 ---
 
 ## Completed Phases Log
+
+### [2026-06-04] Layout & Visual Fixes — Viewport Fit, Wood Removal, Screw Positioning
+
+**Files modified:**
+- `src/components/MoogModular/MoogShell.module.css` — Three rounds of layout fixes:
+  1. **Wood between rows removed**: `.tier` stripped of all walnut `background`, `border-radius`, `padding`, and `box-shadow` rings — now a plain transparent grid. `.rack` gets `background: #0a0908` (dark metal) and `gap: 2px`; the 2px gap shows as a thin rack rail between rows. Walnut now visible only at the outer `.cabinet` padding edges (reduced to `8px 10px 10px`). All internal spacing condensed: `.plate` padding `10px 13px 9px → 10px`, gap `7px → 5px`; `.plateBody` gap `6px → 4px`; `.knobRow/switchRow/selectorRow/jackRow/gateBtnRow` gaps and paddings reduced 2–4px each.
+  2. **Screw overlap fixed**: Screws reduced to `7px × 7px`, positioned at `top/bottom: 2px, left/right: 2px` — corner of each screw reaches 9px from edge. Plate `padding: 10px` (all sides) ensures content starts at 10px — 1px clearance. Phillips cross arms reduced to 4px width/height.
+  3. **`flex-shrink: 0` on `.cabinet`**: Prevents flexbox from shrinking the cabinet before `fit()` measures it, which was causing `el.offsetHeight` to return the shell height (not the cabinet's true content height), resulting in `scale = 1` and unscaled overflow.
+
+- `src/components/MoogModular/MoogShell.jsx` — `fit()` function overhauled:
+  - Resets both `transform` and `marginBottom` before measuring so natural dimensions are always accurate.
+  - Applies `marginBottom: Math.round(natH * (scale - 1))` (negative) after scaling — collapses the layout footprint left by `transform: scale()` (which is visual-only) so the flex container never exceeds `100vh`.
+  - Added `ResizeObserver` on the cabinet alongside the `window.resize` listener — re-fires `fit()` if cabinet height settles after mount (font load, CSS cascade, etc.).
+
+---
+
+### [2026-06-04] Moog Phase 11 — Retro Oscilloscope Visualization
+
+**Files created:**
+- `src/components/MoogModular/Oscilloscope.jsx` — Zero-re-render canvas component. Receives `getData` prop (the `getOscilloscopeData` callback from `useMoogAudio`). `useEffect` starts a `requestAnimationFrame` loop that clears the canvas, calls `getData()`, then draws the waveform. Y-mapping: `(1 - sample) / 2 * H` maps +1→top, -1→bottom, 0→centre. Draws a flat centre line when `getData` returns null (pre-powerOn). Trace: `strokeStyle='#5DCAA5'` (VoxDAW accent mint), `lineWidth=1.5`, `shadowBlur=6` for phosphor glow. Shadow reset after each stroke to prevent bleed. `cancelAnimationFrame` on cleanup. Canvas fixed at 200×64 px.
+- `src/components/MoogModular/Oscilloscope.module.css` — CRT screen aesthetic: dark `#060e08` background, two-layer `repeating-linear-gradient` grid (8px horizontal divisions, 20px vertical divisions in dim green `rgba(80,180,120,0.10)`). Layered `box-shadow` for bezel recess and outer dark border.
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Added `n.analyser = new Tone.Analyser('waveform', 512)` to the node creation block; connected via `n.master.connect(n.analyser)` (dead-end side tap — does not affect master→Destination path). `analyser` disposed in cleanup via the existing `Object.values(n).forEach(node => node.dispose())`. Added `getOscilloscopeData()` (`useCallback`, empty deps) that returns `n.analyser.getValue()` (Float32Array of 512 samples in [-1, 1]) or null.
+- `src/components/MoogModular/MoogShell.jsx` — Imported `Oscilloscope`. Added `getOscData` prop to `IoModule`; rendered `<Oscilloscope getData={getOscData} />` at top of `.plateBody`. Wired at call site: `getOscData={audio.getOscilloscopeData}`.
+
+**Gemini corrections:**
+- `useRef(new Tone.Analyser(...))` at the hook call site creates the node during render, outside any lifecycle. Moved to the `useEffect` node creation block alongside all other nodes — correct lifecycle management.
+- No `MoogPatchContext` — same correction as every previous phase. Prop-drill: `MoogShell → IoModule → Oscilloscope`.
+
+---
+
+### [2026-06-04] Moog Phase 10 — Master I/O & True Modular Routing
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Four changes:
+  1. **CP3 internal wiring moved to `useEffect` (node creation)**: `cp3ch1-4 → cp3bus` now connects synchronously at node creation time. These are CP3's internal fixed architecture (channels always sum to bus), not "training wheels" — moved out of `powerOn` where they had a redundant `hardwiredRef` guard. `hardwiredRef` ref deleted.
+  2. **VCA → Master hardwire removed from `powerOn`**: Audio no longer reaches the destination automatically. The user must patch `vca-out → io-in` (or any source → `io-in`) for sound to exit. True modular routing.
+  3. **`io-in` jack added to `buildJackMap`**: `{ type: 'in', dest: n.master }` — replaces the former `io-spkr-out: { type: 'in', dest: null }`. Patching any source to `io-in` connects it to the `Tone.Volume` master node → Destination.
+  4. **`updateIoParams({ volume })`** added (useCallback, empty deps): maps `volume` (0–1) linearly to -60 dB to +6 dB (`-60 + volume * 66`); uses `safeRamp` on `n.master.volume`. At default `volume=0.75`: ≈ -10.5 dB. Master `Tone.Volume` init changed from -12 → -14 dB (matches 0.7 knob default more closely).
+- `src/components/MoogModular/MoogShell.jsx` — `IoModule`: added `onParamUpdate` prop; `useEffect([masterVol])` → `onParamUpdate({ volume: masterVol })`; jack renamed `io-spkr-out` → `io-in` with label "IN". Wired at call site with `onParamUpdate={audio.updateIoParams}`.
+
+**Gemini corrections:**
+- CP3 internal wires are NOT training wheels — they're the mixer's fixed internal architecture. They were correctly kept, just moved to the right location (node creation, not `powerOn`).
+- VCA→Master WAS a training wheel and is correctly removed.
+- No `MoogPatchContext` — same correction as every previous phase.
+- `safeRamp` used for master volume — consistent with the [0, 0] RangeError fix.
+
+---
+
+### [2026-06-04] Bug Fix — Tone.js rampTo RangeError [0, 0] (`useMoogAudio.js`)
+
+**Root cause:** `Param.rampTo()` calls Tone.js's `assertRange(value, param.minValue, param.maxValue)`. When the AudioContext is **suspended** (before `powerOn()`), AudioParams report `minValue = maxValue = 0`, so any call to `rampTo` throws `RangeError: Value must be within [0, 0], got: 1e-7`. All module `useEffect` hooks fire on mount before POWER is clicked, which was calling `updateVcoParams`, `updateVcfParams`, etc. into a suspended context. Secondary issue: `resonance=0.0 → Q=0`, which Tone.js substitutes as `1e-7` for exponential ramps, hitting the same validation.
+
+**Fix (`useMoogAudio.js` only):** Added module-level `safeRamp(param, value, rampTime)` — uses `.rampTo()` when `Tone.context.state === 'running'`, direct `.value =` assignment otherwise. `.value` is always valid regardless of context state and pre-initialises the params so they are correct the moment `powerOn()` resumes the AudioContext. Replaced all 7 `.rampTo()` calls in `updateVcoParams`, `updateVcfParams`, `updateVcaParams`, and `updateLfoParams` with `safeRamp()`. Added `Math.max(0.001, resonance * 20)` floor on VCF Q — Q=0 fails exponential ramp validation even in a running context.
+
+**Gemini plan corrections:** Jack IDs were already in sync (no audit needed). The `MoogPatchContext connect()` null guards already existed. The jack map multi-waveform routing was already correct. Only the `rampTo` crash was real.
+
+---
+
+### [2026-06-03] Moog Phase 8 — LFO Audio Wiring
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Added `updateLfoParams({ rate, depth, type })` (useCallback, empty deps). Maps `rate` (0–1) exponentially to 0.1–30 Hz via `0.1 * Math.pow(300, rate)` and calls `n.lfo.frequency.rampTo(hz, 0.05)`. Maps `depth` (0–1) directly to `n.lfo.amplitude.rampTo(depth, 0.05)` — the LFO amplitude scales the ±1 output swing. Sets `n.lfo.type = type` for UI-driven waveform default (cable connections still override waveform at connect-time via `from.waveform` in `connect()`). Returned from hook.
+- `src/components/MoogModular/MoogShell.jsx` — Rewrote `LfoModule` in-place (same file, same pattern as all other modules). State: `rate=0.3`, `depth=0.5`, `waveType='sine'`. `useEffect` on all three calls `onParamUpdate({ rate, depth, type: waveType })`. Added click-to-cycle WAVE selector using existing `.selectorRow`/`.selectorGroup` CSS (consistent with VCO Phase 4). Renamed "LEVEL" knob → "DEPTH" (correct terminology for LFO modulation amount). SYNC toggle remains visual-only (audio SYNC is future work). Wired at call site: `<LfoModule onParamUpdate={audio.updateLfoParams} />`.
+
+**Gemini corrections:**
+- `Tone.LFO` was already instantiated in Phase 3 (`n.lfo`) and already started in `powerOn` — Gemini's "instantiate and start immediately" would have created a duplicate.
+- Jack map already has 4 waveform output jacks (`lfo-sin/tri/sqr/saw`) — Gemini's proposed single `"lfo-out"` jack would be worse; the 4-jack design is authentic to the Moog hardware and cable-connects already set waveform.
+- No separate `LfoModule.jsx` file — all modules are co-located in `MoogShell.jsx`, and that pattern is correct.
+- No `MoogPatchContext` — same correction as all previous phases.
+- Wave selector uses existing CSS (`.selectorRow`/`.selectorGroup`) from Phase 4 — zero new CSS needed.
+
+---
+
+### [2026-06-03] Moog Phase 6 — Envelope & VCA Wiring
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Added three new functions, all `useCallback` with `[]` deps:
+  - `updateEnvParams(envId, { attack, decay, sustain, release })` — looks up `nodesRef.current[envId]` (env1/env2, both `Tone.Envelope`); maps A/D/R exponentially `0.01 * Math.pow(1000, v)` (0.01s–10s) and sustain linearly (0–1); writes directly to `env.attack/decay/sustain/release` properties (no rampTo on time params — Tone.Envelope properties are not AudioParams).
+  - `triggerGate(envId, isDown)` — calls `env.triggerAttack()` or `env.triggerRelease()` on the named envelope. Works with `Tone.Envelope` (CV source) — when patched via cable `env1-out → vca-cv`, the Web Audio additive connection gates the VCA gain. The VCA GAIN knob sets the bias (initial gain); set GAIN=0 for full envelope gating.
+  - `updateVcaParams({ gain })` — ramps `n.vca.gain.rampTo(gain, 0.05)` (linear 0–1); VCA is `Tone.Gain`, gain is an AudioParam.
+  - Returned all five new functions alongside existing ones.
+- `src/components/MoogModular/MoogShell.jsx` — `VcaModule`: added `onParamUpdate` prop, `useEffect([gain])` → `onParamUpdate({ gain })`; ENV AMT visual-only. `EnvelopeModule`: added `onParamUpdate` and `onGate` props; `useEffect([attack,decay,sustain,release])` → `onParamUpdate(envId, {...})`; added GATE pushbutton (`onMouseDown/Up/Leave` → `onGate(envId, bool)`, mouse-leave prevents stuck notes). All three wired in `MoogShell`.
+- `src/components/MoogModular/MoogShell.module.css` — Added `.gateBtnRow`, `.gateBtnLabel`, `.gateBtn` — round (22px) deep-red vintage pushbutton with radial-gradient face, embossed ring shadow, press animation (`translateY(2px) scale(0.94)`), hover glow.
+
+**Gemini corrections:**
+- `Tone.Envelope` ≠ `Tone.AmplitudeEnvelope` — Gemini assumed the latter, but Phase 3 instantiated `Tone.Envelope` (CV source). `triggerAttack/Release` still works on `Tone.Envelope`; it outputs a 0–1 signal that adds to `vca.gain` when patched. VCA GAIN knob documented as "initial gain / bias" — this is authentic Moog hardware behavior (the original 902 VCA had an INITIAL GAIN control).
+- ADSR time params are Envelope properties, not AudioParams — no `.rampTo()`, direct property assignment.
+- No `MoogPatchContext` changes — same wrong abstraction as Phases 4 and 5. Prop-drilled from `MoogShell`.
+- VCA gain kept linear 0–1 (not dB conversion) — `Tone.Gain.gain` is a linear AudioParam; direct mapping is correct and avoids unnecessary complexity.
+
+---
+
+### [2026-06-03] Moog Phase 5 — VCF Panel Wiring
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Added `updateVcfParams({ cutoff, resonance })` (useCallback, empty deps). Maps `cutoff` (0–1) exponentially to 20 Hz–20 kHz via `20 * Math.pow(1000, cutoff)` and calls `n.vcf.frequency.rampTo(hz, 0.05)`. Maps `resonance` (0–1) to Q 0–20 and calls `n.vcf.Q.rampTo(q, 0.05)`. Also corrected VCF init frequency from 2000 Hz → 20000 Hz to match the knob's fully-open default of `cutoffBase=1.0` — prevents UI/audio desync on first load. Returned from the hook.
+- `src/components/MoogModular/MoogShell.jsx` — Added `onParamUpdate` prop to `VcfModule`. Fixed defaults: `cutoff=1.0` (fully open, matching 20 kHz init), `res=0.0`, `kbd=0.0`. Added `useEffect([cutoff, res, onParamUpdate])` that calls `onParamUpdate({ cutoff, resonance: res })`. ENV AMT and KBD knobs remain visual-only state (Phase 6 will wire them). Wired `<VcfModule onParamUpdate={audio.updateVcfParams} />` in MoogShell.
+
+**Gemini corrections:**
+- Rejected exposing `updateVcfParams` through `MoogPatchContext` — same wrong abstraction as Phase 4. Prop-drilling from `MoogShell` is correct.
+- `vcf.current` in Gemini's description was wrong — node lives at `nodesRef.current.vcf`.
+- No `KnobPlaceholder` replacements needed — Phase 2 had already installed `MoogKnob` on all VCF controls.
+- Fixed VCF node init frequency to 20000 Hz to match the UI default — Gemini's plan left an implicit init/UI mismatch.
+
+---
+
+### [2026-06-03] Moog Phase 4 — VCO Panel Wiring
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Added `updateVcoParams(vcoId, { hz, detune, type })` (useCallback, empty deps). Looks up `nodesRef.current[vcoId]` (vco1/vco2/vco3); calls `vco.frequency.rampTo(hz, 0.05)`, `vco.detune.rampTo(detune, 0.05)`, and `vco.type = type` for each provided field. Returned from the hook.
+- `src/components/MoogModular/MoogShell.jsx` — Rewrote `VcoModule`. Replaced the continuous `wave` knob (wrong for a discrete waveform selection) and the static `ToggleSwitch` pairs with click-to-cycle selectors. State: `freqBase` (0–1, default 0.5), `fineTune` (0–1, VCO2=0.52/VCO3=0.48 for built-in analog detuning), `waveType` (string, default 'sawtooth'), `rangeOctave` (int -2..+2, default 0). `useEffect` on all four: exponential Hz map (C1=32.703 Hz → C6=1046.502 Hz), `rangeOctave` octave multiplier, `fineTune` → ±100 cents, calls `onParamUpdate`. `VcoModule` receives `onParamUpdate` prop (prop-drilled from MoogShell, not via MoogPatchContext which owns cable state only). All three VcoModules wired: `onParamUpdate={audio.updateVcoParams}`.
+- `src/components/MoogModular/MoogShell.module.css` — Added `.selectorRow`, `.selectorGroup`, `.selectorLabel`, `.selectorValue` styles: inset dark display pill, hover/active accent, hardware-literal palette. Removed duplicate Phase 3 entry from Future Phases.
+
+**Gemini corrections:**
+- Rejected exposing `updateVcoParams` through `MoogPatchContext` — that context owns cable routing, not audio control. Prop-drilling from `MoogShell` is the correct and simpler path.
+- `vco.current` in Gemini's description was wrong — nodes live at `nodesRef.current[vcoId]`.
+- Replaced the continuous WAVE knob with a click-to-cycle selector — a 0–1 knob cannot map meaningfully to discrete waveform types.
+
+---
 
 ### [2026-06-02] Moog Phase 3 — Audio Architecture & Patch Bridge
 
