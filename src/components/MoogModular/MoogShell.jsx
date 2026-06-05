@@ -5,6 +5,7 @@ import { MoogPatchProvider, useMoogPatch } from './MoogPatchContext';
 import PatchCableOverlay from './PatchCableOverlay';
 import useMoogAudio from './useMoogAudio';
 import Oscilloscope from './Oscilloscope';
+import KeyboardModule from './KeyboardModule';
 
 // ──────────── Atomic hardware primitives ────────────
 
@@ -516,15 +517,117 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData }) {
   );
 }
 
-function SequencerReservedPanel() {
+// ──────────── 960 Sequential Controller ────────────
+// onStepsChange(steps[]) — pushes step data to the audio engine ref (no re-render path).
+// onTempoChange(bpm)     — ramps Tone.Transport.bpm.
+// onSetCallback(fn|null) — registers/deregisters the step-advance LED callback.
+// LEDs are driven by direct DOM classList mutation from inside Tone.Loop — zero React
+// state writes in the audio hot path, consistent with the Zero-Re-render Rule.
+function SequencerModule({ onStepsChange, onTempoChange, onSetCallback }) {
+  const [steps, setSteps] = useState(() =>
+    Array.from({ length: 8 }, () => ({ voltage: 0.5, gate: true }))
+  );
+  const [tempo, setTempoState] = useState(120);
+  const ledRefs    = useRef([]);
+  const prevStepRef = useRef(-1);
+
+  useEffect(() => { onStepsChange?.(steps); }, [steps, onStepsChange]);
+  useEffect(() => { onTempoChange?.(tempo);  }, [tempo,  onTempoChange]);
+
+  // Register DOM-mutation callback for LED animation.
+  // The callback receives stepIndex (0–7) or -1 to clear all.
+  useEffect(() => {
+    onSetCallback?.((idx) => {
+      const prev = prevStepRef.current;
+      if (prev >= 0 && ledRefs.current[prev]) {
+        ledRefs.current[prev].classList.remove(styles.seqLedActive);
+      }
+      if (idx >= 0) {
+        if (ledRefs.current[idx]) ledRefs.current[idx].classList.add(styles.seqLedActive);
+        prevStepRef.current = idx;
+      } else {
+        prevStepRef.current = -1;
+      }
+    });
+    return () => {
+      onSetCallback?.(null);
+      // Clear active LED on unmount
+      const prev = prevStepRef.current;
+      if (prev >= 0 && ledRefs.current[prev]) {
+        ledRefs.current[prev].classList.remove(styles.seqLedActive);
+      }
+    };
+  }, [onSetCallback]);
+
+  const updateStep = (i, field, value) =>
+    setSteps(prev => {
+      const next = [...prev];
+      next[i] = { ...next[i], [field]: value };
+      return next;
+    });
+
+  // Map knob 0–1 to BPM 20–300
+  const handleTempoKnob = (v) => setTempoState(Math.round(20 + v * 280));
+
   return (
-    <div className={`${styles.module} ${styles.moduleBlank}`}>
+    <div className={styles.module}>
       <Screw pos="screwTL" /><Screw pos="screwTR" />
       <Screw pos="screwBL" /><Screw pos="screwBR" />
       <div className={styles.plate}>
-        <div className={styles.blankContent}>
-          <div className={styles.blankLabel}>960 SEQUENCER</div>
-          <div className={styles.blankSub}>RESERVED</div>
+        <div className={styles.plateHeader}>
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>960</span>
+            <span className={styles.plateSub}>SEQUENTIAL CONTROLLER · 8-STEP PROGRAMMABLE SEQUENCER</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          <div className={styles.seqLayout}>
+
+            {/* Left: tempo knob + BPM readout + patch jacks */}
+            <div className={styles.seqCtrl}>
+              <MoogKnob
+                label="TEMPO"
+                size="lg"
+                value={(tempo - 20) / 280}
+                onChange={handleTempoKnob}
+                defaultValue={(120 - 20) / 280}
+              />
+              <div className={styles.seqBpmDisplay}>
+                <span className={styles.selectorValue}>{tempo}</span>
+              </div>
+              <PlateDivider />
+              <div className={styles.jackRow}>
+                <Jack id="seq-pitch-out" label="PITCH" />
+                <Jack id="seq-gate-out"  label="GATE" />
+                <Jack id="seq-clk-in"    label="CLK↓" />
+                <Jack id="seq-clk-out"   label="CLK↑" />
+              </div>
+            </div>
+
+            {/* Right: 8 step columns */}
+            <div className={styles.seqSteps}>
+              {steps.map((step, i) => (
+                <div key={i} className={styles.seqStep}>
+                  <div
+                    ref={el => { ledRefs.current[i] = el; }}
+                    className={styles.seqLed}
+                  />
+                  <MoogKnob
+                    label={String(i + 1)}
+                    size="sm"
+                    value={step.voltage}
+                    onChange={v => updateStep(i, 'voltage', v)}
+                    defaultValue={0.5}
+                  />
+                  <button
+                    className={`${styles.seqGateBtn} ${step.gate ? styles.seqGateOn : ''}`}
+                    onClick={() => updateStep(i, 'gate', !step.gate)}
+                  />
+                </div>
+              ))}
+            </div>
+
+          </div>
         </div>
       </div>
     </div>
@@ -621,12 +724,24 @@ export default function MoogShell({ onNavigateHome }) {
               <MultiplesModule />
             </div>
 
-            {/* Row 4: I/O module + 960 Sequencer reserved */}
+            {/* Row 4: 960 Sequencer + I/O */}
             <div className={`${styles.tier} ${styles.tierRow4}`}>
-              <SequencerReservedPanel />
-              <IoModule isPowered={audio.isPowered} onPower={audio.powerOn} onParamUpdate={audio.updateIoParams} getOscData={audio.getOscilloscopeData} />
+              <SequencerModule
+                onStepsChange={audio.updateSequencerSteps}
+                onTempoChange={audio.setTempo}
+                onSetCallback={audio.setSeqStepCallback}
+              />
+              <IoModule
+                isPowered={audio.isPowered}
+                onPower={audio.powerOn}
+                onParamUpdate={audio.updateIoParams}
+                getOscData={audio.getOscilloscopeData}
+              />
             </div>
           </div>
+
+          {/* 953 Keyboard Controller — sits below the rack, spans full cabinet width */}
+          <KeyboardModule onUpdate={audio.updateKeyboard} />
         </div>
       </div>
     </MoogPatchProvider>

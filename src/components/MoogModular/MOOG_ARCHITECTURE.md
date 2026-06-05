@@ -292,15 +292,18 @@ This gives the user an immediately playable arpeggio on load, showcasing the ins
 | Moog Phase 1.5 ✅ | 4-tier visual expansion — 4 new module panels, thicker cabinet, metal texture | VCO+Noise (Row 1), CP3+VCF+LFO (Row 2), VCA+ENV×2+Multiples (Row 3), Sequencer blanks (Row 4) |
 | Moog Phase 1.6 ✅ | Photorealistic UI overhaul — multi-cabinet tiers, cream typography, improved jacks | All |
 | Moog Phase 2 ✅ | `MoogKnob.jsx` — drag-to-rotate with shift fine-mode, double-click reset | All knobs |
-| Moog Phase 3 ✅ | `useMoogAudio.js` — 15 Tone.js nodes, jackMap (52 IDs), patch bridge via `MoogPatchContext` callbacks, Power/I/O module | VCO, VCF, VCA, Envelope, CP3, Noise, LFO, I/O |
-| Moog Phase 7 ✅ | SVG patch cable simulation — zero-re-render drag, bezier droop, click-to-remove | All 52 jacks |
-| Moog Phase 4 | VCO panel knob wiring (freq, fine, wave, range) | VCO |
-| Moog Phase 5 | VCF panel knob wiring (cutoff, resonance, env amt, kbd) | VCF |
-| Moog Phase 6 | Envelope + VCA wiring + keyboard trigger (A-K keys) | VCA, Envelope |
-| Moog Phase 7 (audio) | Wire patch cables to audio — `useMoogAudio.connect()` on completeDrag | All |
-| Moog Phase 8 | LFO audio wiring (rate, level knobs → Tone.LFO params) | LFO |
+| Moog Phase 3 ✅ | `useMoogAudio.js` — 15 Tone.js nodes, jackMap, patch bridge via `MoogPatchContext` callbacks, Power/I/O module | VCO, VCF, VCA, Envelope, CP3, Noise, LFO, I/O |
+| Moog Phase 7 ✅ | SVG patch cable simulation — zero-re-render drag, bezier droop, click-to-remove | All jacks |
+| Moog Phase 4 ✅ | VCO panel knob wiring (freq, fine, wave, range) | VCO |
+| Moog Phase 5 ✅ | VCF panel knob wiring (cutoff, resonance) | VCF |
+| Moog Phase 6 ✅ | Envelope + VCA wiring + manual GATE button | VCA, Envelope |
+| Moog Phase 8 ✅ | LFO audio wiring (rate, depth, wave) | LFO |
+| Moog Phase 10 ✅ | Master I/O + true modular routing (vca→io-in hardwire removed) | I/O |
+| Moog Phase 11 ✅ | Retro oscilloscope visualizer on I/O module | I/O |
+| Moog Phase 9 ✅ | 960 Sequential Controller — 8-step sequencer, Tone.Loop, pitch CV out, gate routing | Sequencer |
+| Bug Fix ✅ | `setTargetAtTime` for VCO/VCF frequency params — eliminates exponential-ramp-from-zero crashes | VCO, VCF |
+| CV Scaling ✅ | FM + VCF CV input `Tone.Gain` scalers (×500 FM, ×5000 VCF cv, ×1000 VCF env) — LFO now audible | VCO FM, VCF |
+| Moog Phase 13 ✅ | 953 Keyboard Controller — 3-oct piano (C3–B5), pitch CV + gate out, computer keyboard (A–K) | Keyboard |
 | Moog Phase 8a | CP3 Mixer knob wiring + clipping drive WaveShaperNode | CP3 |
 | Moog Phase 8b | Noise Generator Level knob wiring | Noise |
-| Moog Phase 9 | Sequencer module (960 Sequential Controller) | Sequencer |
-| Moog Phase 10 | I/O module mic input + master volume knob wiring | I/O |
-| Moog Phase 11 | Visual polish — LEDs, aging effects, mobile fallback | All |
+| Moog Phase 12 | Visual polish — LEDs, aging effects, mobile fallback | All |

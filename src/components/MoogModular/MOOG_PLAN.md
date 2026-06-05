@@ -58,7 +58,7 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 - Wire LEVEL knob → gain node
 - Separate output refs for WHITE and PINK jacks for patch cable routing
 
-### Moog Phase 9 — Visual Polish
+### Moog Phase 12 — Visual Polish
 - Animated indicator LEDs (env activity, VCO trigger)
 - Knob tooltip labels on hover
 - Module-level bypass switches
@@ -68,6 +68,49 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 ---
 
 ## Completed Phases Log
+
+### [2026-06-05] Moog Phase 13 — 953 Keyboard Controller
+
+**Files created:**
+- `src/components/MoogModular/KeyboardModule.jsx` — playable 3-octave keyboard (C3–B5, 21 white + 15 black keys). Registers `kbd-pitch-out` and `kbd-gate-out` jacks via `MoogPatchContext` so patch cables connect them to the rest of the rack. Pointer events (single shared handler using `data-note-name`/`data-note-hz` attributes to avoid per-key closures) + window-level `pointerup` for reliable note-off on mouse-leave. Computer keyboard support: A W S E D F T G Y H U J K plays C4–C5. Note labels at each C key; computer shortcut hint on the key faces.
+- `src/components/MoogModular/KeyboardModule.module.css` — hardware-literal CSS. Walnut control strip matching the cabinet aesthetic; ivory white keys with `border-box` layout (28px each, shared left borders, bottom rounding); ebony black keys (`position:absolute`, 17px wide, z-index 2); pressed state via `transform: translateY(2px)` and darkened gradient; `drop-shadow` filter on the key bed for depth.
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Four changes:
+  1. **`kbdPitchOut`** Tone.Signal (init=SEQ_HZ_MIN) added to node creation; `kbd-pitch-out` jack added to jackMap; `kbd-gate-out` added as `{ isGate: true }` output.
+  2. **`gateActionsRef` refactor** — rekeyed from `toJackId` to the full cable key (`"fromId→toId"`). Fixes a collision: if both `seq-gate-out` and `kbd-gate-out` connect to the same env jack, the second `set()` now uses a different key and neither overwrites the other. The sequencer loop now filters by `fromId === 'seq-gate-out'`; `updateKeyboard` filters by `'kbd-gate-out'`.
+  3. **`connect()` / `disconnect()`** updated for the new gate key format.
+  4. **`updateKeyboard(hz, isGateDown)`** — `kbdPitchOut.setValueAtTime(hz, Tone.now())` + iterate gate map (kbd-only) and `triggerAttack`/`triggerRelease`.
+- `src/components/MoogModular/MoogShell.jsx` — imported `KeyboardModule`; rendered below `.rack` inside `.cabinet` (inside the `MoogPatchProvider` so jacks can register, and inside the `PatchCableOverlay` z-index so cables reach keyboard jacks).
+
+**Gemini corrections:**
+- `useRef(new Tone.Signal(0))` at hook call site — nodes must be inside `useEffect`. Same bug as Phases 3, 8, 11, and the scaler phase.
+- "New `vco?-pitch-in` jacks" — unnecessary. `vco?-cv` already goes direct-to-frequency (previous CV scaling fix intentionally kept it as a bypass path for Hz-range sources). Keyboard patches there.
+- "Expose via MoogPatchContext" — rejected in every prior phase. Gate routing via `gateActionsRef` + `connect()`/`disconnect()`.
+
+---
+
+### [2026-06-04] Moog Phase 9 — 960 Sequential Controller
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Five changes:
+  1. **`Tone.Signal seqPitchOut`** added to node creation block; exposed via `seq-pitch-out` jack (type `out`). Patch to any VCO `cv-in` for pitch control — outputs Hz in the C1–C6 range (same scale as the VCO FREQ knob; set VCO FREQ to minimum for pure sequencer pitch control).
+  2. **`Tone.Loop`** created at node-init time (not in `powerOn`) for correct Tone.js lifecycle. Fires every `'8n'` on `Tone.Transport`. Loop callback: advances `seqCurrentStepRef` (0–7), calls `n.seqPitchOut.setValueAtTime(hz, time)` for sample-accurate pitch, triggers/releases connected envelopes at 80% gate width, and calls `seqStepCbRef.current(idx)` for DOM-direct LED animation.
+  3. **Gate routing** — `env1-gate` / `env2-gate` jacks upgraded from deferred `dest:null` to `{ isGate:true, envId }`. `seq-gate-out` is `{ type:'out', isGate:true }`. `connect()` detects the `isGate` pair and registers the env in `gateActionsRef` (Map). `disconnect()` removes from the map. Programmatic `triggerAttack/Release` — `Tone.Envelope` has no CV-driveable AudioParam for gating.
+  4. **Transport lifecycle** — `powerOn` calls `Tone.Transport.start()` + `seqLoop.start(0)`, resets `seqCurrentStepRef=-1` so first tick lands on step 0. `powerOff` calls `seqLoop.stop()`, `Tone.Transport.stop()`, fires `seqStepCbRef(-1)` to clear LEDs.
+  5. **New exports**: `setTempo(bpm)` (ramps `Transport.bpm`), `updateSequencerSteps(steps[])` (writes `seqStepsRef` — zero React state), `setSeqStepCallback(fn|null)` (registers LED callback).
+
+- `src/components/MoogModular/MoogShell.jsx` — Added `SequencerModule` component (replaces `SequencerReservedPanel`). State: `steps[]` (8×`{voltage,gate}`), `tempo` (20–300 BPM). Tempo knob → `setTempoState` → `onTempoChange(bpm)` via `useEffect`. Steps → `onStepsChange(steps)` via `useEffect`. Step callback registered via `useEffect([onSetCallback])` — writes a DOM-mutation closure into `seqStepCbRef`; uses `ledRefs` array and `classList.add/remove` for zero re-render LED animation. Gate toggles are React state (click → `setSteps`) since they're discrete user actions, not audio-hot-path. Row 4 now uses `<SequencerModule>` + `<IoModule>`.
+
+- `src/components/MoogModular/MoogShell.module.css` — Updated `tierRow4` to `3.5fr 1fr` (sequencer takes most of the row). Added `.seqLayout`, `.seqCtrl`, `.seqBpmDisplay`, `.seqSteps`, `.seqStep`, `.seqLed`, `.seqLedActive`, `.seqGateBtn`, `.seqGateOn`.
+
+**Gemini corrections:**
+- "Look up connected jacks in MoogPatchContext" — the audio hook has no context access. Gate routing uses `gateActionsRef` populated by the existing `connect()/disconnect()` pair.
+- "Instantiate `Tone.Signal` at hook call site" — creates node during render, outside lifecycle. Moved to the `useEffect` node creation block alongside all other nodes.
+- "`Tone.Transport.start()` inside powerOn" — correct for the Moog page (separate route, only one page mounted at a time). Confirmed safe per ARCHITECTURE.md Tone.Transport coordination note.
+- Gemini proposed `useRef(new Tone.Loop(...))` at hook call site — same lifecycle issue as the Signal. Moved inside `useEffect`.
+
+---
 
 ### [2026-06-04] Layout & Visual Fixes — Viewport Fit, Wood Removal, Screw Positioning
 

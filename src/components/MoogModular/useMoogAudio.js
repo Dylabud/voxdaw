@@ -1,6 +1,10 @@
 import * as Tone from 'tone';
 import { useRef, useState, useCallback, useEffect } from 'react';
 
+// Sequencer pitch range — same as VCO FREQ knob (C1–C6)
+const SEQ_HZ_MIN = 32.703;
+const SEQ_HZ_MAX = 1046.502;
+
 // Safe parameter ramp.
 //
 // Problem: Tone.js Param.rampTo() calls assertRange(value, param.minValue, param.maxValue).
@@ -20,29 +24,31 @@ function safeRamp(param, value, rampTime = 0.05) {
   }
 }
 
-// Maps all 52 jack IDs to Tone.js port descriptors.
+// Maps all jack IDs to Tone.js port descriptors.
 // type:'out' → source node (plus optional waveform to set before connecting)
 // type:'in'  → destination: ToneAudioNode (audio input) or AudioParam (CV input)
 // dest:null  → deferred jack (patching does nothing until a later phase wires it)
 function buildJackMap(n) {
   return {
     // ── VCO 1 ──
+    // cv  → direct to frequency: Hz-range sources (sequencer, keyboard) patch here
+    // fm  → through vco1fm Gain(500): LFO/audio-rate mod — ±1 signal → ±500 Hz
     'vco1-cv':  { type: 'in',  dest: n.vco1.frequency },
-    'vco1-fm':  { type: 'in',  dest: n.vco1.frequency },
+    'vco1-fm':  { type: 'in',  dest: n.vco1fm },
     'vco1-sin': { type: 'out', node: n.vco1, waveform: 'sine'      },
     'vco1-tri': { type: 'out', node: n.vco1, waveform: 'triangle'  },
     'vco1-saw': { type: 'out', node: n.vco1, waveform: 'sawtooth'  },
     'vco1-sqr': { type: 'out', node: n.vco1, waveform: 'square'    },
     // ── VCO 2 ──
     'vco2-cv':  { type: 'in',  dest: n.vco2.frequency },
-    'vco2-fm':  { type: 'in',  dest: n.vco2.frequency },
+    'vco2-fm':  { type: 'in',  dest: n.vco2fm },
     'vco2-sin': { type: 'out', node: n.vco2, waveform: 'sine'      },
     'vco2-tri': { type: 'out', node: n.vco2, waveform: 'triangle'  },
     'vco2-saw': { type: 'out', node: n.vco2, waveform: 'sawtooth'  },
     'vco2-sqr': { type: 'out', node: n.vco2, waveform: 'square'    },
     // ── VCO 3 ──
     'vco3-cv':  { type: 'in',  dest: n.vco3.frequency },
-    'vco3-fm':  { type: 'in',  dest: n.vco3.frequency },
+    'vco3-fm':  { type: 'in',  dest: n.vco3fm },
     'vco3-sin': { type: 'out', node: n.vco3, waveform: 'sine'      },
     'vco3-tri': { type: 'out', node: n.vco3, waveform: 'triangle'  },
     'vco3-saw': { type: 'out', node: n.vco3, waveform: 'sawtooth'  },
@@ -57,22 +63,24 @@ function buildJackMap(n) {
     'cp3-in4': { type: 'in',  dest: n.cp3ch4 },
     'cp3-out': { type: 'out', node: n.cp3bus },
     // ── VCF ──
+    // cv1/cv2 → vcfcv1/vcfcv2 Gain(5000): LFO ±1 → ±5000 Hz — sweeps full audible spectrum
+    // env     → vcfenv Gain(1000):         env  0→1 →  0→1000 Hz lift above base cutoff
     'vcf-in':  { type: 'in',  dest: n.vcf },
-    'vcf-cv1': { type: 'in',  dest: n.vcf.frequency },
-    'vcf-cv2': { type: 'in',  dest: n.vcf.frequency },
-    'vcf-env': { type: 'in',  dest: n.vcf.frequency },
+    'vcf-cv1': { type: 'in',  dest: n.vcfcv1 },
+    'vcf-cv2': { type: 'in',  dest: n.vcfcv2 },
+    'vcf-env': { type: 'in',  dest: n.vcfenv },
     'vcf-out': { type: 'out', node: n.vcf },
     // ── VCA ──
     'vca-in':  { type: 'in',  dest: n.vca },
     'vca-cv':  { type: 'in',  dest: n.vca.gain },
     'vca-out': { type: 'out', node: n.vca },
-    // ── ENV 1 ── (gate/trig deferred to Phase 6; out available as CV source)
-    'env1-gate': { type: 'in',  dest: null },
-    'env1-trig': { type: 'in',  dest: null },
+    // ── ENV 1 ── gate jack wired to gateActionsRef by connect(); trig deferred
+    'env1-gate': { type: 'in', dest: null, isGate: true, envId: 'env1' },
+    'env1-trig': { type: 'in', dest: null },
     'env1-out':  { type: 'out', node: n.env1 },
     // ── ENV 2 ──
-    'env2-gate': { type: 'in',  dest: null },
-    'env2-trig': { type: 'in',  dest: null },
+    'env2-gate': { type: 'in', dest: null, isGate: true, envId: 'env2' },
+    'env2-trig': { type: 'in', dest: null },
     'env2-out':  { type: 'out', node: n.env2 },
     // ── LFO ──
     'lfo-sync': { type: 'in',  dest: null },
@@ -85,6 +93,14 @@ function buildJackMap(n) {
     'mult-a3': { type: 'in', dest: null }, 'mult-a4': { type: 'in', dest: null },
     'mult-b1': { type: 'in', dest: null }, 'mult-b2': { type: 'in', dest: null },
     'mult-b3': { type: 'in', dest: null }, 'mult-b4': { type: 'in', dest: null },
+    // ── Sequencer ──
+    'seq-pitch-out': { type: 'out', node: n.seqPitchOut },
+    'seq-gate-out':  { type: 'out', node: null, isGate: true },
+    'seq-clk-in':    { type: 'in',  dest: null },
+    'seq-clk-out':   { type: 'out', node: null },
+    // ── Keyboard ──
+    'kbd-pitch-out': { type: 'out', node: n.kbdPitchOut },
+    'kbd-gate-out':  { type: 'out', node: null, isGate: true },
     // ── I/O ── audio signal enters the I/O module here and exits to Destination
     'io-in': { type: 'in', dest: n.master },
   };
@@ -93,30 +109,54 @@ function buildJackMap(n) {
 export default function useMoogAudio() {
   const [isPowered, setIsPowered] = useState(false);
 
-  const isPoweredRef   = useRef(false);
-  const nodesRef       = useRef(null);
-  const jackMapRef     = useRef(null);
-  const connectionsRef = useRef(new Map()); // key: "fromId→toId" → { node, dest }
+  const isPoweredRef      = useRef(false);
+  const nodesRef          = useRef(null);
+  const jackMapRef        = useRef(null);
+  const connectionsRef    = useRef(new Map()); // key: "fromId→toId" → { node, dest }
+  const seqLoopRef        = useRef(null);
+  const seqStepsRef       = useRef(Array.from({ length: 8 }, () => ({ voltage: 0.5, gate: true })));
+  const seqCurrentStepRef = useRef(-1);
+  const seqStepCbRef      = useRef(null);   // UI callback for LED animation
+  const gateActionsRef    = useRef(new Map()); // toJackId → Tone.Envelope
 
   useEffect(() => {
     const n = {
-      vco1:   new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
-      vco2:   new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
-      vco3:   new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
-      noiseW: new Tone.Noise({ type: 'white' }),
-      noiseP: new Tone.Noise({ type: 'pink'  }),
-      cp3ch1: new Tone.Gain(0.8),
-      cp3ch2: new Tone.Gain(0.8),
-      cp3ch3: new Tone.Gain(0.8),
-      cp3ch4: new Tone.Gain(0.8),
-      cp3bus: new Tone.Gain(0.7),
-      vcf:    new Tone.Filter({ frequency: 20000, type: 'lowpass', rolloff: -24 }),
-      vca:    new Tone.Gain(1.0),
-      env1:   new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
-      env2:   new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
-      lfo:    new Tone.LFO({ frequency: 0.5, type: 'sine', min: -1, max: 1 }),
-      master:   new Tone.Volume(-14).toDestination(),
-      analyser: new Tone.Analyser('waveform', 512),
+      vco1:        new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
+      vco2:        new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
+      vco3:        new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
+      noiseW:      new Tone.Noise({ type: 'white' }),
+      noiseP:      new Tone.Noise({ type: 'pink'  }),
+      cp3ch1:      new Tone.Gain(0.8),
+      cp3ch2:      new Tone.Gain(0.8),
+      cp3ch3:      new Tone.Gain(0.8),
+      cp3ch4:      new Tone.Gain(0.8),
+      cp3bus:      new Tone.Gain(0.7),
+      vcf:         new Tone.Filter({ frequency: 20000, type: 'lowpass', rolloff: -24 }),
+      vca:         new Tone.Gain(1.0),
+      env1:        new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
+      env2:        new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
+      lfo:         new Tone.LFO({ frequency: 0.5, type: 'sine', min: -1, max: 1 }),
+      master:      new Tone.Volume(-14).toDestination(),
+      analyser:    new Tone.Analyser('waveform', 512),
+      seqPitchOut: new Tone.Signal(SEQ_HZ_MIN), // never init to 0 — exponential ramps from 0 are undefined
+      kbdPitchOut: new Tone.Signal(SEQ_HZ_MIN), // keyboard pitch CV out — same non-zero init rule
+
+      // CV input scalers — LFO outputs -1..+1 which adds ±1 Hz directly to frequency
+      // params: completely inaudible. These Gain nodes sit between a patch cable's source
+      // and the AudioParam, scaling the signal to a musically useful range.
+      //
+      // vco?-cv (pitch CV) stays DIRECT to frequency — the sequencer outputs Hz values
+      // (32–1046 Hz) and patches here; multiplying by 500 would wreck it.
+      // vco?-fm (FM / LFO mod) goes through a ×500 scaler: LFO at depth=1 → ±500 Hz.
+      //
+      // VCF cv1/cv2 (LFO sweep) ×5000: sweeps most of the 20 Hz–20 kHz range at depth=1.
+      // VCF env (envelope track) ×1000: envelope 0→1 lifts cutoff by 0–1000 Hz above base.
+      vco1fm: new Tone.Gain(500),
+      vco2fm: new Tone.Gain(500),
+      vco3fm: new Tone.Gain(500),
+      vcfcv1: new Tone.Gain(5000),
+      vcfcv2: new Tone.Gain(5000),
+      vcfenv: new Tone.Gain(1000),
     };
 
     // CP3 internal summing — channels always sum to bus (internal mixer architecture,
@@ -126,10 +166,50 @@ export default function useMoogAudio() {
     n.cp3ch3.connect(n.cp3bus);
     n.cp3ch4.connect(n.cp3bus);
 
+    // CV scaler hardwires — permanent front-doors for modulation inputs.
+    // Sources patched to the FM / CV1 / CV2 / ENV jacks flow through these gains
+    // before reaching the AudioParam; the scaler itself is never a patch destination.
+    n.vco1fm.connect(n.vco1.frequency);
+    n.vco2fm.connect(n.vco2.frequency);
+    n.vco3fm.connect(n.vco3.frequency);
+    n.vcfcv1.connect(n.vcf.frequency);
+    n.vcfcv2.connect(n.vcf.frequency);
+    n.vcfenv.connect(n.vcf.frequency);
+
     // Oscilloscope tap — side connection after master volume, dead-end (no further output).
     // Tone.Analyser wraps a native AnalyserNode; connecting to it is additive and does not
     // affect the master → Destination path.
     n.master.connect(n.analyser);
+
+    // Sequencer loop — 8th-note clock driven by Tone.Transport.
+    // Advances step, sets seqPitchOut Hz, fires connected envelope gates,
+    // and calls the UI LED callback (all on the main thread — safe per Tone.js design).
+    const loop = new Tone.Loop((time) => {
+      seqCurrentStepRef.current = (seqCurrentStepRef.current + 1) % 8;
+      const idx  = seqCurrentStepRef.current;
+      const step = seqStepsRef.current[idx];
+
+      // Pitch CV — sample-accurate step change at exact note boundary
+      const hz = SEQ_HZ_MIN * Math.pow(SEQ_HZ_MAX / SEQ_HZ_MIN, step.voltage);
+      n.seqPitchOut.setValueAtTime(hz, time);
+
+      // Gate — trigger envelopes connected to seq-gate-out specifically.
+      // gateActionsRef is keyed by cable key ("fromId→toId") so keyboard and
+      // sequencer gates don't interfere even if both are patched to the same env.
+      if (step.gate && gateActionsRef.current.size > 0) {
+        const stepDur = Tone.Time('8n').toSeconds();
+        for (const [, { env, fromId }] of gateActionsRef.current) {
+          if (fromId !== 'seq-gate-out') continue;
+          env.triggerAttack(time);
+          env.triggerRelease(time + stepDur * 0.8);
+        }
+      }
+
+      // Notify UI for LED animation (Tone callbacks execute on main thread)
+      if (seqStepCbRef.current) seqStepCbRef.current(idx);
+    }, '8n');
+
+    seqLoopRef.current = loop;
 
     nodesRef.current   = n;
     jackMapRef.current = buildJackMap(n);
@@ -138,10 +218,17 @@ export default function useMoogAudio() {
       [n.vco1, n.vco2, n.vco3, n.noiseW, n.noiseP, n.lfo].forEach(node => {
         try { node.stop(); } catch (_) {}
       });
+      if (seqLoopRef.current) {
+        try { seqLoopRef.current.stop(); } catch (_) {}
+        try { seqLoopRef.current.dispose(); } catch (_) {}
+        seqLoopRef.current = null;
+      }
+      try { Tone.Transport.stop(); } catch (_) {}
       Object.values(n).forEach(node => {
         try { node.dispose(); } catch (_) {}
       });
       connectionsRef.current.clear();
+      gateActionsRef.current.clear();
       isPoweredRef.current = false;
     };
   }, []);
@@ -157,6 +244,11 @@ export default function useMoogAudio() {
       try { node.start(); } catch (_) {}
     });
 
+    // Start sequencer clock — reset step so first tick lands on step 0
+    seqCurrentStepRef.current = -1;
+    Tone.Transport.start();
+    seqLoopRef.current?.start(0);
+
     setIsPowered(true);
   }, []);
 
@@ -170,21 +262,42 @@ export default function useMoogAudio() {
       try { node.stop(); } catch (_) {}
     });
 
+    // Stop sequencer loop and clear active LED
+    seqLoopRef.current?.stop();
+    seqCurrentStepRef.current = -1;
+    if (seqStepCbRef.current) seqStepCbRef.current(-1); // signal LEDs to clear
+    Tone.Transport.stop();
+
     setIsPowered(false);
   }, []);
 
   const connect = useCallback((fromId, toId) => {
     const jm = jackMapRef.current;
-    if (!jm) return;
+    const n  = nodesRef.current;
+    if (!jm || !n) return;
 
     const from = jm[fromId];
     const to   = jm[toId];
     if (!from || !to) return;
-    if (from.type !== 'out' || to.type !== 'in') return;
-    if (to.dest === null) return; // deferred jack — silently no-op
 
     const key = `${fromId}→${toId}`;
     if (connectionsRef.current.has(key)) return;
+
+    // Gate cable: any isGate out → env?-gate — register programmatic trigger.
+    // Keyed by full cable key so kbd-gate and seq-gate can both connect to the
+    // same env jack independently without overwriting each other.
+    if (from.isGate && to.isGate) {
+      const env = n[to.envId];
+      if (env) {
+        gateActionsRef.current.set(key, { env, fromId });
+        connectionsRef.current.set(key, { isGate: true, toId });
+      }
+      return;
+    }
+
+    if (from.type !== 'out' || to.type !== 'in') return;
+    if (to.dest === null) return;   // deferred jack — silently no-op
+    if (from.node === null) return; // unimplemented output (e.g. seq-clk-out)
 
     // Set VCO or LFO waveform to match the specific output jack patched
     if (from.waveform) from.node.type = from.waveform;
@@ -202,6 +315,12 @@ export default function useMoogAudio() {
     const conn = connectionsRef.current.get(key);
     if (!conn) return;
 
+    if (conn.isGate) {
+      gateActionsRef.current.delete(key); // keyed by cable key, not toId
+      connectionsRef.current.delete(key);
+      return;
+    }
+
     try {
       conn.node.disconnect(conn.dest);
     } catch (e) {
@@ -212,24 +331,37 @@ export default function useMoogAudio() {
 
   // Update VCO audio parameters — single writer per node.
   // vcoId: 'vco1' | 'vco2' | 'vco3'
+  //
+  // Uses setTargetAtTime (τ=20ms) instead of safeRamp/rampTo for frequency and detune.
+  // Reason: rampTo dispatches to exponentialRampTo for frequency-type AudioParams.
+  // Exponential ramps are undefined at 0 — if seqPitchOut (initialized to 0 before this
+  // fix) schedules a setValueAtTime(0) on the same AudioParam via a patch cable, the
+  // subsequent exponential ramp crashes: "Value must be within [0, 0]".
+  // setTargetAtTime bypasses Tone.js assertRange, accepts any value, and approaches the
+  // target asymptotically (never actually reaches 0), so it is safe in all cases.
   const updateVcoParams = useCallback((vcoId, { hz, detune, type } = {}) => {
     const n = nodesRef.current;
     if (!n) return;
     const vco = n[vcoId];
     if (!vco) return;
-    if (hz      !== undefined) safeRamp(vco.frequency, hz);
-    if (detune  !== undefined) safeRamp(vco.detune, detune);
-    if (type    !== undefined) vco.type = type;
+    if (hz     !== undefined) vco.frequency.setTargetAtTime(Math.max(0.1, hz), Tone.now(), 0.02);
+    if (detune !== undefined) vco.detune.setTargetAtTime(detune, Tone.now(), 0.02);
+    if (type   !== undefined) vco.type = type;
   }, []);
 
   // Update VCF audio parameters — single writer per node.
   // cutoff   (0–1) → exponential 20 Hz–20 kHz  (20 * 1000^cutoff)
-  // resonance (0–1) → Q 0–20; floored at 0.001 — Q=0 is mathematically equivalent to
-  //   flat response but Tone.js uses exponential ramps for Q and can't ramp to/from 0.
+  // resonance (0–1) → Q 0–20; floored at 0.001 — Q=0 fails exponential ramp.
+  //
+  // cutoff uses setTargetAtTime for the same reason as VCO frequency — it is a
+  // frequency-type AudioParam where rampTo → exponentialRampTo, unsafe near 0.
+  // resonance uses safeRamp (linear path, floor already applied, no crash risk).
   const updateVcfParams = useCallback(({ cutoff, resonance } = {}) => {
     const n = nodesRef.current;
     if (!n) return;
-    if (cutoff    !== undefined) safeRamp(n.vcf.frequency, 20 * Math.pow(1000, cutoff));
+    if (cutoff    !== undefined) n.vcf.frequency.setTargetAtTime(
+      20 * Math.pow(1000, cutoff), Tone.now(), 0.02
+    );
     if (resonance !== undefined) safeRamp(n.vcf.Q, Math.max(0.001, resonance * 20));
   }, []);
 
@@ -296,9 +428,41 @@ export default function useMoogAudio() {
     return n.analyser.getValue();
   }, []);
 
+  // Sequencer BPM — ramps Transport tempo so the change is click-free.
+  const setTempo = useCallback((bpm) => {
+    Tone.Transport.bpm.rampTo(bpm, 0.1);
+  }, []);
+
+  // Push latest step data into the audio loop ref — no React state involved.
+  const updateSequencerSteps = useCallback((steps) => {
+    seqStepsRef.current = steps;
+  }, []);
+
+  // Register the UI step-advance callback (called inside Tone.Loop, main thread).
+  // Pass null to deregister. The callback receives: (stepIndex: 0–7) | -1 (clear all).
+  const setSeqStepCallback = useCallback((fn) => {
+    seqStepCbRef.current = fn;
+  }, []);
+
+  // Keyboard pitch + gate control.
+  // hz: the note frequency in Hz (e.g. Tone.Frequency("C4").toFrequency()).
+  // isGateDown: true = note on (triggerAttack), false = note off (triggerRelease).
+  // Only envelopes connected via kbd-gate-out are triggered; seq-gate-out is unaffected.
+  const updateKeyboard = useCallback((hz, isGateDown) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    n.kbdPitchOut.setValueAtTime(hz, Tone.now());
+    for (const [, { env, fromId }] of gateActionsRef.current) {
+      if (fromId !== 'kbd-gate-out') continue;
+      if (isGateDown) env.triggerAttack();
+      else            env.triggerRelease();
+    }
+  }, []);
+
   return {
     powerOn, powerOff, connect, disconnect, isPowered,
     updateVcoParams, updateVcfParams, updateEnvParams, triggerGate, updateVcaParams,
     updateLfoParams, updateIoParams, getOscilloscopeData,
+    setTempo, updateSequencerSteps, setSeqStepCallback, updateKeyboard,
   };
 }
