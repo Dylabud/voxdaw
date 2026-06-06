@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import styles from './MoogShell.module.css';
 import MoogKnob from './MoogKnob';
 import { MoogPatchProvider, useMoogPatch } from './MoogPatchContext';
@@ -6,6 +6,7 @@ import PatchCableOverlay from './PatchCableOverlay';
 import useMoogAudio from './useMoogAudio';
 import Oscilloscope from './Oscilloscope';
 import KeyboardModule from './KeyboardModule';
+import Led from './Led';
 
 // ──────────── Atomic hardware primitives ────────────
 
@@ -287,7 +288,8 @@ const LFO_WAVE_TYPES  = ['sine', 'triangle', 'square', 'sawtooth'];
 const LFO_WAVE_LABELS = { sine: 'SIN', triangle: 'TRI', square: 'SQR', sawtooth: 'SAW' };
 
 // onParamUpdate({ rate, depth, type }) wires knobs and wave selector to useMoogAudio.
-function LfoModule({ onParamUpdate }) {
+// getLedValue() — stable getter (pre-bound in MoogShell) for the LFO level meter.
+function LfoModule({ onParamUpdate, getLedValue }) {
   const [rate,     setRate]     = useState(0.3);
   const [depth,    setDepth]    = useState(0.5);
   const [waveType, setWaveType] = useState('sine');
@@ -313,6 +315,7 @@ function LfoModule({ onParamUpdate }) {
         </div>
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
+            <Led getValue={getLedValue} color="yellow" />
             <MoogKnob label="RATE"  size="lg" value={rate}  onChange={setRate}  defaultValue={0.3} />
             <MoogKnob label="DEPTH" size="md" value={depth} onChange={setDepth} defaultValue={0.5} />
           </div>
@@ -330,6 +333,44 @@ function LfoModule({ onParamUpdate }) {
             <Jack id="lfo-tri"  label="TRI" />
             <Jack id="lfo-sqr"  label="SQR" />
             <Jack id="lfo-saw"  label="SAW" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// onParamUpdate({ roomSize, wet }) wires ROOM and MIX knobs to n.reverb.
+// wet=0 on mount so the module is transparent until the user raises MIX.
+function ReverbModule({ onParamUpdate }) {
+  const [roomSize, setRoomSize] = useState(0.7);
+  const [wet,      setWet]      = useState(0.0);
+
+  useEffect(() => {
+    if (!onParamUpdate) return;
+    onParamUpdate({ roomSize, wet });
+  }, [roomSize, wet, onParamUpdate]);
+
+  return (
+    <div className={styles.module}>
+      <Screw pos="screwTL" /><Screw pos="screwTR" />
+      <Screw pos="screwBL" /><Screw pos="screwBR" />
+      <div className={styles.plate}>
+        <div className={styles.plateHeader}>
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>REV</span>
+            <span className={styles.plateSub}>STUDIO REVERB — FREEVERB DIFFUSION</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          <div className={styles.knobRow}>
+            <MoogKnob label="ROOM" size="md" value={roomSize} onChange={setRoomSize} defaultValue={0.7} />
+            <MoogKnob label="MIX"  size="md" value={wet}      onChange={setWet}      defaultValue={0.0} />
+          </div>
+          <PlateDivider />
+          <div className={styles.jackRow}>
+            <Jack id="reverb-in"  label="IN" />
+            <Jack id="reverb-out" label="OUT" />
           </div>
         </div>
       </div>
@@ -384,8 +425,9 @@ function VcaModule({ onParamUpdate }) {
 // label ("ENV 1" / "ENV 2") drives the title and jack IDs.
 // onParamUpdate(envId, { attack, decay, sustain, release }) wires knobs to the audio engine.
 // onGate(envId, isDown) fires triggerAttack / triggerRelease on the Tone.Envelope.
+// getLedValue() — stable getter (pre-bound in MoogShell) for this envelope's level meter.
 // All knob values are normalized 0–1; useMoogAudio applies the exponential time mapping.
-function EnvelopeModule({ label, onParamUpdate, onGate }) {
+function EnvelopeModule({ label, onParamUpdate, onGate, getLedValue }) {
   const [attack,  setAttack]  = useState(0.1);
   const [decay,   setDecay]   = useState(0.3);
   const [sustain, setSustain] = useState(0.7);
@@ -417,6 +459,7 @@ function EnvelopeModule({ label, onParamUpdate, onGate }) {
             <MoogKnob label="R" size="md" value={release} onChange={setRelease} defaultValue={0.4} />
           </div>
           <div className={styles.gateBtnRow}>
+            <Led getValue={getLedValue} color="green" />
             <span className={styles.gateBtnLabel}>GATE</span>
             <button
               className={styles.gateBtn}
@@ -473,8 +516,9 @@ function MultiplesModule() {
 }
 
 // I/O module — oscilloscope display, POWER switch, MASTER VOL knob, and the "io-in" patch jack.
-// getOscData() is passed down from MoogShell → useMoogAudio.getOscilloscopeData.
-function IoModule({ isPowered, onPower, onParamUpdate, getOscData }) {
+// getOscData() — passed down from MoogShell → useMoogAudio.getOscilloscopeData.
+// getLedValue() — stable getter (pre-bound in MoogShell) for the master level meter.
+function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue }) {
   const [masterVol, setMasterVol] = useState(0.7);
 
   useEffect(() => {
@@ -497,6 +541,7 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData }) {
           <Oscilloscope getData={getOscData} />
           <div className={styles.switchRow}>
             <PowerSwitch isPowered={isPowered} onToggle={onPower} />
+            <div className={`${styles.powerLamp} ${isPowered ? styles.powerLampOn : ''}`} />
           </div>
           <div className={styles.knobRow}>
             <MoogKnob
@@ -506,6 +551,7 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData }) {
               onChange={setMasterVol}
               defaultValue={0.7}
             />
+            <Led getValue={getLedValue} color="red" label="PEAK" />
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
@@ -525,7 +571,7 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData }) {
 // state writes in the audio hot path, consistent with the Zero-Re-render Rule.
 function SequencerModule({ onStepsChange, onTempoChange, onSetCallback }) {
   const [steps, setSteps] = useState(() =>
-    Array.from({ length: 8 }, () => ({ voltage: 0.5, gate: true }))
+    Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true }))
   );
   const [tempo, setTempoState] = useState(120);
   const ledRefs    = useRef([]);
@@ -535,7 +581,7 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback }) {
   useEffect(() => { onTempoChange?.(tempo);  }, [tempo,  onTempoChange]);
 
   // Register DOM-mutation callback for LED animation.
-  // The callback receives stepIndex (0–7) or -1 to clear all.
+  // The callback receives stepIndex (0–15) or -1 to clear all.
   useEffect(() => {
     onSetCallback?.((idx) => {
       const prev = prevStepRef.current;
@@ -621,7 +667,11 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback }) {
                   />
                   <button
                     className={`${styles.seqGateBtn} ${step.gate ? styles.seqGateOn : ''}`}
-                    onClick={() => updateStep(i, 'gate', !step.gate)}
+                    onClick={() => setSteps(prev => {
+                      const next = [...prev];
+                      next[i] = { ...next[i], gate: !next[i].gate };
+                      return next;
+                    })}
                   />
                 </div>
               ))}
@@ -636,9 +686,32 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback }) {
 
 // ──────────── Main shell ────────────
 
-export default function MoogShell({ onNavigateHome }) {
+// onBusReady(getter) — called once on mount to hand the Workstation a function
+// that returns the live Tone.Gain moogBus node for recording.
+export default function MoogShell({ onNavigateHome, onBusReady }) {
   const audio      = useMoogAudio();
   const cabinetRef = useRef(null);
+
+  // Register the bus getter with Root.js so the Workstation can tap Moog audio.
+  // audio.getMoogBusNode is a stable useCallback ref — effect fires once.
+  useEffect(() => {
+    onBusReady?.(() => audio.getMoogBusNode());
+  }, [onBusReady, audio.getMoogBusNode]);
+
+  // Stable getValue closures — created once (audio.getMeterValue has empty-dep useCallback,
+  // so its reference never changes). Passing pre-bound getters prevents Led's useEffect
+  // from restarting on every re-render of the parent module component.
+  const getLfoLevel    = useCallback(() => audio.getMeterValue('lfo'),    [audio.getMeterValue]);
+  const getEnv1Level   = useCallback(() => audio.getMeterValue('env1'),   [audio.getMeterValue]);
+  const getEnv2Level   = useCallback(() => audio.getMeterValue('env2'),   [audio.getMeterValue]);
+  const getMasterLevel = useCallback(() => audio.getMeterValue('master'), [audio.getMeterValue]);
+
+  // Toggle: powerOn when off, powerOff when on. Both functions guard internally via
+  // isPoweredRef so rapid double-clicks are safe even before the async powerOn resolves.
+  const handlePowerToggle = useCallback(() => {
+    if (audio.isPowered) audio.powerOff();
+    else audio.powerOn();
+  }, [audio.isPowered, audio.powerOff, audio.powerOn]);
 
   useEffect(() => {
     const el = cabinetRef.current;
@@ -709,18 +782,19 @@ export default function MoogShell({ onNavigateHome }) {
               <NoiseModule />
             </div>
 
-            {/* Row 2: Mixer → Filter → LFO */}
+            {/* Row 2: Mixer → Filter → LFO → Reverb */}
             <div className={`${styles.tier} ${styles.tierRow2}`}>
               <Cp3MixerModule />
               <VcfModule onParamUpdate={audio.updateVcfParams} />
-              <LfoModule onParamUpdate={audio.updateLfoParams} />
+              <LfoModule onParamUpdate={audio.updateLfoParams} getLedValue={getLfoLevel} />
+              <ReverbModule onParamUpdate={audio.updateReverbParams} />
             </div>
 
             {/* Row 3: VCA, Envelopes, Multiples */}
             <div className={`${styles.tier} ${styles.tierRow3}`}>
               <VcaModule onParamUpdate={audio.updateVcaParams} />
-              <EnvelopeModule label="ENV 1" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} />
-              <EnvelopeModule label="ENV 2" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} />
+              <EnvelopeModule label="ENV 1" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv1Level} />
+              <EnvelopeModule label="ENV 2" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv2Level} />
               <MultiplesModule />
             </div>
 
@@ -733,9 +807,10 @@ export default function MoogShell({ onNavigateHome }) {
               />
               <IoModule
                 isPowered={audio.isPowered}
-                onPower={audio.powerOn}
+                onPower={handlePowerToggle}
                 onParamUpdate={audio.updateIoParams}
                 getOscData={audio.getOscilloscopeData}
+                getLedValue={getMasterLevel}
               />
             </div>
           </div>

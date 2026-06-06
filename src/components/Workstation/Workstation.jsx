@@ -2,11 +2,18 @@ import { useState } from 'react';
 import styles from './Workstation.module.css';
 import WorkstationShell from './WorkstationShell';
 
-export default function Workstation({ onNavigateHome, isDarkMode, onThemeToggle }) {
+export default function Workstation({ onNavigateHome, isDarkMode, onThemeToggle, getMoogBusNode }) {
   const [view, setView] = useState('warning');
 
   if (view === 'shell') {
-    return <WorkstationShell onNavigateHome={onNavigateHome} isDarkMode={isDarkMode} onThemeToggle={onThemeToggle} />;
+    return (
+      <WorkstationShell
+        onNavigateHome={onNavigateHome}
+        isDarkMode={isDarkMode}
+        onThemeToggle={onThemeToggle}
+        getMoogBusNode={getMoogBusNode}
+      />
+    );
   }
 
   return (

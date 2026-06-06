@@ -54,6 +54,21 @@
   max-width: 1420px;
   flex-shrink: 0; /* prevent flex from shrinking the cabinet before fit() measures it */
   background:
+    /* Vignette — heavy corner/edge darkening to simulate decades of handling & oxidation.
+       Gradient layers stack front-to-back; this is the topmost paint layer on the wood. */
+    radial-gradient(
+      ellipse at 50% 45%,
+      transparent 22%,
+      rgba(0, 0, 0, 0.52) 100%
+    ),
+    /* Noise grain — tight 73° diagonal breaks up the smooth digital wood gradient */
+    repeating-linear-gradient(
+      73deg,
+      transparent 0px,
+      transparent 1px,
+      rgba(0, 0, 0, 0.052) 1px,
+      rgba(0, 0, 0, 0.052) 2px
+    ),
     repeating-linear-gradient(
       180deg,
       transparent 0px,
@@ -171,7 +186,7 @@
 
 /* Row column templates */
 .tierRow1 { grid-template-columns: 1fr 1fr 1fr 0.6fr; }
-.tierRow2 { grid-template-columns: 1.7fr 1.5fr 1fr; }
+.tierRow2 { grid-template-columns: 1.7fr 1.5fr 1fr 0.75fr; }
 .tierRow3 { grid-template-columns: 0.85fr 1fr 1fr 0.7fr; }
 .tierRow4 { grid-template-columns: 3.5fr 1fr; }
 
@@ -188,6 +203,7 @@
 /* ── Faceplate — warm charcoal with stamped-metal micro-texture ── */
 .plate {
   flex: 1;
+  position: relative; /* anchor for ::after faceplate wear overlay */
   background:
     repeating-linear-gradient(
       118deg,
@@ -214,6 +230,20 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
     inset 0 -1px 0 rgba(0, 0, 0, 0.55),
     inset 1px 0 3px rgba(0, 0, 0, 0.3);
+}
+
+/* Simulates oil from thousands of finger turns wearing down the powder coat —
+   a subtle brightening centered where the main knobs sit */
+.plate::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse at 50% 42%,
+    rgba(255, 255, 255, 0.025) 0%,
+    transparent 62%
+  );
+  pointer-events: none;
 }
 
 .moduleBlank .plate {
@@ -699,6 +729,45 @@
 }
 
 /* ══════════════════════════════════════════════════════
+   POWER LAMP — classic jewel indicator light
+   Dark red when off; bright glowing red + flicker when on.
+   Flicker simulates unstable 1960s mains power.
+   ══════════════════════════════════════════════════════ */
+
+@keyframes flicker {
+  0%,  100% { opacity: 1.00; }
+  8%        { opacity: 0.87; }
+  22%       { opacity: 0.95; }
+  39%       { opacity: 0.85; }
+  55%       { opacity: 0.96; }
+  70%       { opacity: 0.88; }
+  84%       { opacity: 0.93; }
+}
+
+.powerLamp {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: radial-gradient(circle at 38% 32%, #2c0a0a, #140404);
+  border: 1px solid #2e1010;
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.95),
+    0 1px 0 rgba(0, 0, 0, 0.5);
+}
+
+.powerLampOn {
+  background: radial-gradient(circle at 38% 28%, #ff7060 0%, #e02020 48%, #8c0a0a 100%);
+  border-color: #881010;
+  box-shadow:
+    0 0 6px  rgba(220, 30, 20, 0.92),
+    0 0 16px rgba(200, 20, 10, 0.55),
+    0 0 30px rgba(180, 10, 10, 0.22),
+    inset 0 1px 0 rgba(255, 160, 140, 0.45);
+  animation: flicker 5.3s ease-in-out infinite;
+}
+
+/* ══════════════════════════════════════════════════════
    960 SEQUENTIAL CONTROLLER
    ══════════════════════════════════════════════════════ */
 
@@ -725,12 +794,14 @@
   width: 100%;
 }
 
-/* 8 step columns — flex row, equal width */
+/* 16 steps in an 8×2 grid — top row steps 1–8, bottom row steps 9–16.
+   flex: 1 tells the parent flex row (.seqLayout) to give this grid all remaining space.
+   Column gap tight enough to keep knobs readable; row gap gives the two rows air. */
 .seqSteps {
-  display: flex;
-  gap: 5px;
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 8px 4px;
   flex: 1;
-  align-items: flex-start;
 }
 
 /* One step column: LED → pitch knob → gate toggle */
@@ -738,8 +809,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  flex: 1;
+  gap: 3px;
   min-width: 0;
 }
 
@@ -767,7 +837,7 @@
 .seqGateBtn {
   appearance: none;
   width: 100%;
-  max-width: 32px;
+  max-width: 24px;
   height: 10px;
   border-radius: 2px;
   border: 1px solid #3a3028;

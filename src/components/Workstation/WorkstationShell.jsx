@@ -10,6 +10,7 @@ import PanKnob from './PanKnob';
 import { serializeProject, deserializeProject, downloadJSON, readJSONFile } from './projectIO';
 import { bounceProject } from './audioBounce';
 import { exportWAV, exportMP3 } from '../../utils/audioExport';
+import { transcribeAudio } from './transcribeAudio';
 
 const PIXELS_PER_BEAT    = 25;
 const PIXELS_PER_MEASURE = PIXELS_PER_BEAT * 4;  // 100px at zoom 1
@@ -116,7 +117,7 @@ export function drawGrid(canvas, { scrollLeft, viewW, viewH, ppm, zoomLevel, lef
   }
 }
 
-export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeToggle }) {
+export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeToggle, getMoogBusNode }) {
   const [isPlaying,      setIsPlaying]      = useState(false);
   const [tracks,         setTracks]         = useState([]);
   const [regions,        setRegions]        = useState([]);
@@ -134,6 +135,18 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [activeTrackId,    setActiveTrackId]    = useState(null);
   const [snapEnabled,      setSnapEnabled]      = useState(true);
   const [advancedMode,     setAdvancedMode]     = useState(false);
+
+  // ── Moog recording ──────────────────────────────────────────────────────────
+  const [moogRecording, setMoogRecording] = useState(false);
+  const [moogRecordSec, setMoogRecordSec] = useState(0);
+  const moogRecorderRef  = useRef(null);  // Tone.Recorder instance while recording
+  const moogBusNodeRef   = useRef(null);  // connected bus node (for cleanup)
+  const moogTimerRef     = useRef(null);  // setInterval id for elapsed-time display
+  const moogRecordingRef = useRef(false); // ref mirror of moogRecording (avoids stale closures)
+
+  // Audio region playback — keyed by regionId
+  const audioBuffersByRegionId = useRef(new Map()); // regionId → native AudioBuffer
+  const audioPlayersRef        = useRef(new Map()); // regionId → Tone.Player (synced to transport)
 
   // ── Undo/redo history (arrangement data only: tracks/regions/notes) ──────────
   const [past,   setPast]   = useState([]);   // [{tracks,regions,notes}, …] oldest→newest
@@ -1732,6 +1745,134 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (timeRef.current)              timeRef.current.textContent                  = '00:00:00';
   }, [silenceAll, recomputeFades]);
 
+  // ── Moog recording ────────────────────────────────────────
+  // Connects a Tone.Recorder to the Moog's moogBus tap node and captures audio.
+  // Toggle: first click = start recording, second click = stop + download .webm.
+  const handleMoogRecord = useCallback(async () => {
+    if (moogRecordingRef.current) {
+      // ── Stop ──
+      clearInterval(moogTimerRef.current);
+      moogTimerRef.current = null;
+      const blob = await moogRecorderRef.current?.stop();
+      try { moogBusNodeRef.current?.disconnect(moogRecorderRef.current); } catch (_) {}
+      moogRecorderRef.current = null;
+      moogBusNodeRef.current  = null;
+      moogRecordingRef.current = false;
+      setMoogRecording(false);
+      setMoogRecordSec(0);
+      if (blob) {
+        // Require exactly one selected region to attach the recording to.
+        const selIds = selectedRegionIdsRef.current;
+        if (selIds.size !== 1) {
+          setToastMessage('Select exactly one region before recording to place the audio in it.');
+          return;
+        }
+        const regionId = [...selIds][0];
+        const region   = regionsRef.current.find(r => r.id === regionId);
+        if (!region) { setToastMessage('Selected region not found.'); return; }
+
+        try {
+          // Decode WebM blob → native AudioBuffer via the live AudioContext.
+          const arrayBuffer = await blob.arrayBuffer();
+          const nativeBuf   = await Tone.context.rawContext.decodeAudioData(arrayBuffer);
+
+          // Dispose any existing player for this region (re-recording support).
+          const existing = audioPlayersRef.current.get(regionId);
+          if (existing) { try { existing.stop(); existing.dispose(); } catch (_) {} }
+
+          // Create a Tone.Player synced to the transport, starting at the region's measure.
+          // player.sync().start(offset) means: every time Transport plays, the audio starts
+          // at this transport position — the same semantics as Tone.Part.start().
+          const player = new Tone.Player(new Tone.ToneAudioBuffer(nativeBuf)).toDestination();
+          player.sync().start(`${region.startMeasure}m`);
+
+          audioBuffersByRegionId.current.set(regionId, nativeBuf);
+          audioPlayersRef.current.set(regionId, player);
+
+          // Mark region so the timeline shows the audio badge.
+          setRegions(prev => prev.map(r => r.id === regionId ? { ...r, hasAudio: true } : r));
+
+          // ── Transcription ──────────────────────────────────────────────────
+          // Run YIN pitch detection on the decoded buffer, extract note events,
+          // and replace any existing notes for this region with the transcription.
+          // The existing piano roll (RegionEditor) and MIDI playback (useWorkstationAudio)
+          // handle display and playback without any additional code.
+          const transcribed = transcribeAudio(nativeBuf, Tone.Transport.bpm.value);
+          setNotes(prev => {
+            const without = prev.filter(n => n.regionId !== regionId);
+            const newNotes = transcribed.map(n => ({
+              id:            `note_${nextNoteIdRef.current++}`,
+              regionId,
+              trackId:       region.trackId,
+              note:          n.note,
+              startBeat:     n.startBeat,
+              durationBeats: n.durationBeats,
+              velocity:      n.velocity,
+            }));
+            return [...without, ...newNotes];
+          });
+
+          const count = transcribed.length;
+          setToastMessage(
+            count > 0
+              ? `Moog recording placed — ${count} note${count !== 1 ? 's' : ''} transcribed. Click [ edit ] to view in piano roll.`
+              : 'Moog recording placed. No pitched notes detected — check signal level or try drier settings.'
+          );
+        } catch (err) {
+          setToastMessage(`Could not decode Moog recording: ${err.message}`);
+        }
+      }
+      return;
+    }
+
+    // ── Start ──
+    const busNode = getMoogBusNode?.();
+    if (!busNode) {
+      setToastMessage('Open the Moog Modular page first to initialise the audio connection.');
+      return;
+    }
+    try {
+      await Tone.start();
+      const recorder = new Tone.Recorder();
+      busNode.connect(recorder);
+      recorder.start();
+      moogRecorderRef.current  = recorder;
+      moogBusNodeRef.current   = busNode;
+      moogRecordingRef.current = true;
+      setMoogRecording(true);
+      setMoogRecordSec(0);
+      moogTimerRef.current = setInterval(() => setMoogRecordSec(s => s + 1), 1000);
+    } catch (err) {
+      setToastMessage(`Moog recording error: ${err.message}`);
+    }
+  }, [getMoogBusNode]);
+
+  // Clean up recorder and audio players on unmount.
+  useEffect(() => {
+    return () => {
+      clearInterval(moogTimerRef.current);
+      if (moogRecorderRef.current) {
+        moogRecorderRef.current.stop().catch(() => {});
+        try { moogBusNodeRef.current?.disconnect(moogRecorderRef.current); } catch (_) {}
+      }
+      for (const [, player] of audioPlayersRef.current) {
+        try { player.stop(); player.dispose(); } catch (_) {}
+      }
+      audioPlayersRef.current.clear();
+    };
+  }, []);
+
+  // Dispose audio players whenever their region is deleted from the arrangement.
+  useEffect(() => {
+    for (const [regionId, player] of audioPlayersRef.current) {
+      if (!regions.find(r => r.id === regionId)) {
+        try { player.stop(); player.dispose(); } catch (_) {}
+        audioPlayersRef.current.delete(regionId);
+        audioBuffersByRegionId.current.delete(regionId);
+      }
+    }
+  }, [regions]);
+
   // ── BPM editing ──────────────────────────────────────────
   function handleBpmCommit() {
     let n = parseInt(tempBpm, 10);
@@ -2515,6 +2656,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                       style={{
                         left:  `${r.startMeasure    * pixelsPerMeasure}px`,
                         width: `${r.durationMeasures * pixelsPerMeasure}px`,
+                        ...(r.hasAudio ? { borderTop: '2px solid #5DCAA5' } : {}),
                       }}
                       onMouseDownCapture={(e) => { capturedRegionStartRef.current = { x: e.clientX, y: e.clientY }; }}
                       onMouseDown={(e) => startRegionDrag(e, r, 'move')}
@@ -2525,6 +2667,17 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                         setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'region', targetId: r.id });
                       }}
                       onDoubleClick={(e) => { e.stopPropagation(); setEditingTrackId(r.trackId); }}>
+                      {r.hasAudio && (
+                        <div style={{
+                          position: 'absolute', top: 3, left: 6,
+                          fontSize: 8, fontWeight: 700, letterSpacing: '0.08em',
+                          color: '#5DCAA5',
+                          textShadow: '0 0 6px rgba(93,202,165,0.55)',
+                          pointerEvents: 'none', userSelect: 'none', zIndex: 2,
+                        }}>
+                          ♪ MOOG
+                        </div>
+                      )}
                       {(r.loopInterval ?? null) !== null && (() => {
                         const total = r.durationMeasures;
                         // Phase-aware cycle boundaries; edges[] = each segment's left edge.
@@ -2736,7 +2889,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           className={isPlaying ? styles.transportBtnActive : styles.transportBtn}
           onClick={handlePlayPause} title="Play / Pause (Space)">▶</button>
         <button className={styles.transportBtn} onClick={handleStop} title="Stop">■</button>
-        <button className={styles.transportBtn} title="Record">●</button>
+        <button
+          className={moogRecording ? styles.transportBtnActive : styles.transportBtn}
+          onClick={handleMoogRecord}
+          title={moogRecording ? 'Stop Moog recording and download' : 'Record from Moog Modular'}
+          style={moogRecording ? { color: '#e04848' } : undefined}
+        >
+          {moogRecording ? `■ ${moogRecordSec}s` : '● MOOG'}
+        </button>
       </div>
       <ContextMenu menu={contextMenu} onClose={closeContextMenu} onCommand={handleContextCommand} />
     </div>

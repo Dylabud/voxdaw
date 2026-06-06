@@ -69,6 +69,135 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-06-06] Moog Phase 18 — Transcription Engine: Audio-to-Editable-Notes
+
+**Files created:**
+- `src/components/Workstation/transcribeAudio.js` — Monophonic pitch detection using `pitchfinder.YIN` (already in the project via `useAutotune.js`). Two-pass algorithm: (1) per-hop-frame (2048-sample window, 512-sample hop) — run YIN with RMS gate (0.01) to skip silence, convert Hz → note name via standard MIDI formula `69 + 12*log2(hz/440)`; (2) merge consecutive same-pitch frames into note events with `startBeat` (relative to region start), `durationBeats`, `velocity` (from peak RMS). Notes shorter than 80 ms are discarded as transients. Pure function, no Tone.js dependency.
+
+**Files modified:**
+- `src/components/Workstation/WorkstationShell.jsx` — Imports `transcribeAudio`. In `handleMoogRecord` stop branch: after the audio is decoded to a native `AudioBuffer`, calls `transcribeAudio(nativeBuf, Tone.Transport.bpm.value)`. Transcribed notes replace existing notes for that region via `setNotes(prev => [...prev.filter(n => n.regionId !== regionId), ...newNotes])` — re-recording overwrites the previous transcription. Note objects match the existing Workstation schema: `{ id, regionId, trackId, note, startBeat, durationBeats, velocity }`. Toast message reports detected count with hint to open piano roll.
+
+**What Gemini thought needed building but already existed:**
+- NoteEditor component → `RegionEditor.jsx` already provides a full piano roll with note drag/resize
+- Data model update → `notes` state `[{ id, regionId, note, startBeat, durationBeats }]` already exists
+- MIDI playback → `useWorkstationAudio` already plays notes through the track's synth via `Tone.Part`
+- Dual-mode playback → both `Tone.Player` (audio) and `Tone.Part` (notes) run simultaneously on `Tone.Transport`
+
+**"MIDI via Moog engine" mode rejected** — would require tight cross-page audio coupling between the Workstation and Moog. The track's own synth (set in the track instrument selector) plays the transcribed notes, which is the correct Workstation architecture.
+
+**Transcription accuracy notes:** Works best with single-note sequencer patterns (monophonic). Chords, heavy reverb, or multi-VCO detuning produce approximate results. The piano roll allows manual correction.
+
+---
+
+### [2026-06-06] Moog Phase 17 — VoxDAW Workstation Recording Integration
+
+**Scope implemented:** simultaneous page mounting + live Moog→Workstation audio bus + Workstation recorder button. Timeline clip integration is Phase 18+.
+
+**Files modified:**
+- `src/Root.js` — Full rewrite. Replaced single-page conditional render with a **visited-based lazy mount** strategy: pages mount on first visit and stay alive in the React tree (audio engines persist). CSS `display: none` hides inactive pages. Uses `useCallback` for stable `navigate` and `getMoogBusNode` references. `moogBusGetterRef` (ref, not state) stores the Moog's bus-node getter without causing Root re-renders.
+
+- `src/components/MoogModular/useMoogAudio.js` — Two additions:
+  1. **`n.moogBus = new Tone.Gain(1)`** in node creation block; hardwired `n.seqMasterGate.connect(n.moogBus)` as a dead-end side tap. Not connected to Destination — solely for the Workstation's `Tone.Recorder`.
+  2. **`getMoogBusNode()`** (`useCallback`, `[]` deps) — returns `nodesRef.current?.moogBus ?? null`. Available immediately after MoogShell mounts (the node exists from creation, not from `powerOn`).
+
+- `src/components/MoogModular/MoogShell.jsx` — Accepts `onBusReady(getter)` prop. A `useEffect([onBusReady, audio.getMoogBusNode])` registers `() => audio.getMoogBusNode()` with Root.js once on mount.
+
+- `src/components/Workstation/Workstation.jsx` — Accepts and passes `getMoogBusNode` prop through to `WorkstationShell`.
+
+- `src/components/Workstation/WorkstationShell.jsx` — Four additions:
+  1. Accepts `getMoogBusNode` prop.
+  2. `moogRecording` / `moogRecordSec` state + `moogRecorderRef` / `moogBusNodeRef` / `moogTimerRef` / `moogRecordingRef` refs.
+  3. **`handleMoogRecord`** (`useCallback`, `[getMoogBusNode]` dep) — toggle start/stop: calls `getMoogBusNode()`, connects a `Tone.Recorder` to the bus, starts recording + 1-second interval counter. Stop: `recorder.stop()` → Blob → triggers download as `.webm`. Uses `moogRecordingRef` (not `moogRecording` state) inside the callback to avoid stale closures. `setToastMessage` for error states.
+  4. Replaces the no-op `●` button with a live `● MOOG` / `■ Ns` toggle button.
+
+**How to use:**
+1. Visit Moog Modular, set up a patch, power on. Audio flows through `seqMasterGate → moogBus`.
+2. Navigate to Workstation (Moog stays alive, audio continues).
+3. Click **● MOOG** in the bottom transport bar. Recording starts (button shows elapsed seconds in red).
+4. Click **■ Ns** to stop. A `.webm` audio file downloads automatically.
+
+**Gemini plan corrections:**
+- `export const moogGlobalBus = new Tone.Gain(1)` at module level rejected — creates Tone.js nodes before AudioContext initialization. Used `useEffect` node creation instead.
+- "Always mount all pages unconditionally" rejected — VoxTool's getUserMedia, Workstation's audio engine, and Moog's Tone.js nodes would all initialize on app load before the user visits those pages. Visited-based lazy mount is correct.
+- "MoogPatchContext expose" rejected (7th time).
+
+---
+
+### [2026-06-05] Moog Phase 16 — Studio Reverb Module
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Three additions:
+  1. **`n.reverb`** — `new Tone.Freeverb({ roomSize: 0.7, dampening: 3000, wet: 0.0 })` in the `useEffect` node creation block. Uses `Tone.Freeverb` (not Gemini's `Tone.JCReverb`) because `Tone.Freeverb` is already proven in this codebase (VoxTool `arpReverbRef`). `wet: 0.0` on init so patching the reverb in is transparent until the user raises MIX.
+  2. **`'reverb-in'` / `'reverb-out'` jacks** — added to `buildJackMap(n)` after VCA jacks. `reverb-in: { type: 'in', dest: n.reverb }`, `reverb-out: { type: 'out', node: n.reverb }`. Same dual-reference pattern as `vcf-in`/`vcf-out`.
+  3. **`updateReverbParams({ roomSize, wet })`** — `useCallback`, empty deps, uses `safeRamp` on `n.reverb.roomSize` and `n.reverb.wet`. Returned from hook.
+
+- `src/components/MoogModular/MoogShell.jsx` — Added `ReverbModule` function component co-located in MoogShell.jsx (same pattern as all other modules). State: `roomSize=0.7`, `wet=0.0`. `useEffect([roomSize, wet])` → `onParamUpdate(...)`. Two `MoogKnob` elements (ROOM md, MIX md) + `Jack` pair (`reverb-in`, `reverb-out`). Mounted in Row 2 after `LfoModule`: `<ReverbModule onParamUpdate={audio.updateReverbParams} />`.
+
+- `src/components/MoogModular/MoogShell.module.css` — `.tierRow2` updated from `1.7fr 1.5fr 1fr` to `1.7fr 1.5fr 1fr 0.75fr` to accommodate the fourth module in Row 2.
+
+**Patch path for reverb insert:**
+`vca-out → reverb-in` → `reverb-out → io-in` (reverb replaces the direct vca→io connection)
+
+**Gemini plan corrections:**
+- `Tone.JCReverb` → `Tone.Freeverb` (proven in this codebase; same parameters, no API risk).
+- `useRef(new Tone.Freeverb(...))` at hook call site rejected — moved to `useEffect` node creation block.
+- "Expose via MoogPatchContext" rejected — prop-drilled from MoogShell.
+- "ReverbModule.jsx" rejected — all modules co-located in MoogShell.jsx.
+
+---
+
+### [2026-06-05] Moog Phase 15 — Reactive LED Feedback
+
+**Files created:**
+- `src/components/MoogModular/Led.jsx` — Zero-re-render analog level LED. Props: `getValue` (fn → 0–1), `color` (`'green'`|`'yellow'`|`'red'`), `label` (optional string). `useEffect` starts a `requestAnimationFrame` loop that writes `el.style.opacity = 0.12 + val * 0.88` directly to the DOM ref — zero React state. `will-change: opacity` on the LED element keeps the animation on the GPU compositing layer (no layout/paint cost per frame). Cleanup: `cancelAnimationFrame` on unmount.
+- `src/components/MoogModular/Led.module.css` — Single-element LED design. Full glow state (radial gradient + two-layer box-shadow) always in CSS; `opacity` fades between `0.12` (authentic off-state dim dot) and `1.0` (fully lit with ambient glow). Green (ENV activity), yellow (LFO rate), red (master level indicator).
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Three additions:
+  1. **4 `Tone.Meter` nodes** added to the `useEffect` node creation block (`lfoMeter`, `env1Meter`, `env2Meter`, `masterMeter`). Each has `normalRange: true` (returns 0–1, not dB) and tuned `smoothing` values: LFO `0.7` (averaged oscillating signal), ENV `0.25` (fast enough to track ADSR shape), master `0.2` (responsive to transients).
+  2. **Meter connections** — all dead-end side taps. `n.lfo → n.lfoMeter`; `n.env1 → n.env1Meter`; `n.env2 → n.env2Meter`; `n.vca → n.masterMeter`. Master meter taps from `n.vca` (pre-master Volume) not `n.master` — after the -14 dB master attenuation, levels are too low (~0.07) to produce visible LED activity at default settings; tapping from VCA gives useful signal-present feedback.
+  3. **`getMeterValue(id)`** (`useCallback`, empty deps) — looks up `n[${id}Meter]`, calls `.getValue()`, clamps to [0,1] with `isFinite` guard.
+
+- `src/components/MoogModular/MoogShell.jsx` — Four additions:
+  1. `useCallback` added to React imports; `Led` imported.
+  2. Four stable getter closures created in `MoogShell` via `useCallback(() => audio.getMeterValue(id), [audio.getMeterValue])` — pre-bound so `Led`'s `useEffect` dep array never changes, preventing unnecessary rAF restarts on module re-renders.
+  3. `LfoModule`, `EnvelopeModule`, `IoModule` signatures updated to accept `getLedValue` prop. `LfoModule`: LED in knobRow (yellow, before RATE). `EnvelopeModule`: LED in gateBtnRow (green, before GATE label). `IoModule`: LED in knobRow (red, after MASTER, labeled "PEAK").
+  4. Stable getters wired at call sites: `getLedValue={getLfoLevel}`, `getLedValue={getEnv1Level}`, `getLedValue={getEnv2Level}`, `getLedValue={getMasterLevel}`.
+
+**Gemini plan corrections:**
+- `useRef(new Tone.Meter(...))` at hook call site — same bug documented in phases 3, 8, 9, 11, 13. Moved to `useEffect` node creation block.
+- "Open `LfoModule.jsx`" — no such file. All modules co-located in `MoogShell.jsx` (documented since phase 8).
+- "Expose via MoogPatchContext" — wrong abstraction rejected every phase. Prop-drilled from MoogShell.
+- "`lfo.current.connect(lfoMeter.current)`" — wrong. Nodes at `n.lfo`, not `lfo.current`.
+- Master meter tap moved from `n.master` to `n.vca` — at -14 dB master attenuation, `n.master` output is too attenuated for useful LED feedback at default settings.
+- Inline arrow prop `() => getMeterValue(id)` rejected — new function reference every render causes LED's `useEffect` to restart. Replaced with stable `useCallback` closures in MoogShell.
+
+---
+
+### [2026-06-05] Moog Phase 14 — Vintage Studio Polish Pass
+
+**Files modified:**
+- `src/components/MoogModular/MoogShell.module.css` — Four additions:
+  1. **Cabinet vignette + noise grain**: Two new background layers prepended to `.cabinet`'s existing 3-layer gradient. A `radial-gradient` vignette darkens corner/edges to simulate decades of oxidation. A tight 73° `repeating-linear-gradient` noise grain breaks up the smooth digital wood texture. No SVG data URIs or pseudo-elements — gradient layers are zero-overhead and avoid z-index collisions with patch cables (z-index: 50) and `will-change: transform` knobs.
+  2. **Faceplate wear overlay**: Added `position: relative` to `.plate` and a `::after` pseudo-element — a subtle `radial-gradient` centered at 50% 42% (where main knobs sit) at ~2.5% white opacity. Simulates oil from thousands of finger turns wearing down the powder coat. `pointer-events: none` keeps all interactions intact.
+  3. **`@keyframes flicker`**: 7-keyframe opacity oscillation (0.85–1.0 range) over a 5.3s loop. Keyframe positions are irregular to avoid a mechanical rhythm.
+  4. **`.powerLamp` / `.powerLampOn`**: 10px jewel indicator light (dark red when off; bright red radial-gradient with 3-layer red glow when on). `.powerLampOn` applies `flicker` animation. Glow uses three stacked `box-shadow` layers at 6/16/30px blur to simulate lamp light bleeding onto the surrounding faceplate.
+
+- `src/components/MoogModular/MoogShell.jsx` — Added `<div className={styles.powerLamp} …/>` sibling to `<PowerSwitch>` inside `IoModule`'s `.switchRow`. Class list toggles `powerLampOn` based on `isPowered` prop (already available in scope).
+
+- `src/components/MoogModular/Oscilloscope.module.css` — Three additions:
+  1. `position: relative` on `.screen` — anchors the `::after` scanline overlay.
+  2. Curved screen vignette via `radial-gradient` prepended to `.screen`'s background stack — sits behind the canvas but shows through cleared transparent pixels, darkening the corners to simulate CRT tube curvature.
+  3. `.screen::after` — `repeating-linear-gradient` scanlines (1px dark / 2px transparent, 14% opacity, `pointer-events: none`). Paints above the canvas as a final CRT layer without affecting waveform interaction.
+  4. Phosphor ambient glow added to `box-shadow` — `0 0 14px rgba(80, 180, 120, 0.30)` simulates green phosphor light bleeding onto the surrounding dark metal faceplate.
+
+**Gemini plan corrections:**
+- SVG data-URI noise texture rejected — gradient-layer approach achieves equivalent grain with zero encoding overhead and cleaner CSS.
+- Pseudo-element vignette on `.cabinet` rejected — avoids z-index collisions with `PatchCableOverlay` (z:50) and `will-change: transform` stacking contexts on knobs. Background gradient is the correct containment boundary.
+- Two oscilloscope pseudo-elements reduced to one — the curved-screen vignette belongs in the background stack (shows through transparent canvas), not a `::before`.
+
+---
+
 ### [2026-06-05] Moog Phase 13 — 953 Keyboard Controller
 
 **Files created:**

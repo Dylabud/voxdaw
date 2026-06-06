@@ -73,7 +73,10 @@ function buildJackMap(n) {
     // ── VCA ──
     'vca-in':  { type: 'in',  dest: n.vca },
     'vca-cv':  { type: 'in',  dest: n.vca.gain },
-    'vca-out': { type: 'out', node: n.vca },
+    'vca-out': { type: 'out', node: n.seqGateNode }, // seqGateNode is the gated tap — Loop controls gain
+    // ── Reverb ──
+    'reverb-in':  { type: 'in',  dest: n.reverb },
+    'reverb-out': { type: 'out', node: n.reverb },
     // ── ENV 1 ── gate jack wired to gateActionsRef by connect(); trig deferred
     'env1-gate': { type: 'in', dest: null, isGate: true, envId: 'env1' },
     'env1-trig': { type: 'in', dest: null },
@@ -114,7 +117,7 @@ export default function useMoogAudio() {
   const jackMapRef        = useRef(null);
   const connectionsRef    = useRef(new Map()); // key: "fromId→toId" → { node, dest }
   const seqLoopRef        = useRef(null);
-  const seqStepsRef       = useRef(Array.from({ length: 8 }, () => ({ voltage: 0.5, gate: true })));
+  const seqStepsRef       = useRef(Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true })));
   const seqCurrentStepRef = useRef(-1);
   const seqStepCbRef      = useRef(null);   // UI callback for LED animation
   const gateActionsRef    = useRef(new Map()); // toJackId → Tone.Envelope
@@ -136,10 +139,32 @@ export default function useMoogAudio() {
       env1:        new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
       env2:        new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
       lfo:         new Tone.LFO({ frequency: 0.5, type: 'sine', min: -1, max: 1 }),
-      master:      new Tone.Volume(-14).toDestination(),
+      master:      new Tone.Volume(-14),             // no longer goes direct to Destination
+      seqMasterGate: new Tone.Gain(1).toDestination(), // sole gateway to speakers — Loop gates here
       analyser:    new Tone.Analyser('waveform', 512),
       seqPitchOut: new Tone.Signal(SEQ_HZ_MIN), // never init to 0 — exponential ramps from 0 are undefined
       kbdPitchOut: new Tone.Signal(SEQ_HZ_MIN), // keyboard pitch CV out — same non-zero init rule
+
+      // Studio reverb — Freeverb (proven in this codebase via VoxTool arpReverb).
+      // wet starts at 0 so patching in the reverb doesn't colour sound until MIX is raised.
+      reverb: new Tone.Freeverb({ roomSize: 0.7, dampening: 3000, wet: 0.0 }),
+
+      // Sequencer hardware gate — sits between n.vca and the vca-out jack.
+      // Tone.Loop is the sole writer: gain=1 (gate on) / gain=0 (gate off).
+      // Because it lives on the vca-out side, it gates any downstream patch
+      // (vca-out → io-in, etc.) without requiring an envelope cable.
+      seqGateNode: new Tone.Gain(1),
+
+      // Recording tap — side connection from seqMasterGate so the Workstation's
+      // Tone.Recorder can capture Moog audio without touching the speaker path.
+      moogBus: new Tone.Gain(1),
+
+      // Level meters — dead-end side taps for LED feedback (no effect on audio routing).
+      // smoothing controls the RMS window: higher = more averaged, lower = more transient-responsive.
+      lfoMeter:    new Tone.Meter({ normalRange: true, smoothing: 0.7  }),
+      env1Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.25 }),
+      env2Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.25 }),
+      masterMeter: new Tone.Meter({ normalRange: true, smoothing: 0.2  }),
 
       // CV input scalers — LFO outputs -1..+1 which adds ±1 Hz directly to frequency
       // params: completely inaudible. These Gain nodes sit between a patch cable's source
@@ -176,16 +201,33 @@ export default function useMoogAudio() {
     n.vcfcv2.connect(n.vcf.frequency);
     n.vcfenv.connect(n.vcf.frequency);
 
-    // Oscilloscope tap — side connection after master volume, dead-end (no further output).
-    // Tone.Analyser wraps a native AnalyserNode; connecting to it is additive and does not
-    // affect the master → Destination path.
+    // master → seqMasterGate → Destination: every patch cable that reaches io-in
+    // flows through master, then seqMasterGate. The Loop gates seqMasterGate per step —
+    // this silences ALL audio on gate-off steps regardless of how cables are routed.
+    n.master.connect(n.seqMasterGate);
+
+    // moogBus: side tap after the master gate, feeds the Workstation's Tone.Recorder.
+    // Does not connect to Destination — purely a recording tap.
+    n.seqMasterGate.connect(n.moogBus);
+
+    // Oscilloscope and masterMeter tap from master (pre-gate so the scope still shows
+    // waveform shape even on muted steps — useful for debugging patches).
     n.master.connect(n.analyser);
+
+    // seqGateNode sits between VCA and the vca-out jack — secondary gate for vca-out path.
+    n.vca.connect(n.seqGateNode);
+
+    // Level meter taps — all dead-end side connections, do not affect audio routing.
+    n.lfo.connect(n.lfoMeter);
+    n.env1.connect(n.env1Meter);
+    n.env2.connect(n.env2Meter);
+    n.seqGateNode.connect(n.masterMeter);
 
     // Sequencer loop — 8th-note clock driven by Tone.Transport.
     // Advances step, sets seqPitchOut Hz, fires connected envelope gates,
     // and calls the UI LED callback (all on the main thread — safe per Tone.js design).
     const loop = new Tone.Loop((time) => {
-      seqCurrentStepRef.current = (seqCurrentStepRef.current + 1) % 8;
+      seqCurrentStepRef.current = (seqCurrentStepRef.current + 1) % 16;
       const idx  = seqCurrentStepRef.current;
       const step = seqStepsRef.current[idx];
 
@@ -193,15 +235,28 @@ export default function useMoogAudio() {
       const hz = SEQ_HZ_MIN * Math.pow(SEQ_HZ_MAX / SEQ_HZ_MIN, step.voltage);
       n.seqPitchOut.setValueAtTime(hz, time);
 
-      // Gate — trigger envelopes connected to seq-gate-out specifically.
-      // gateActionsRef is keyed by cable key ("fromId→toId") so keyboard and
-      // sequencer gates don't interfere even if both are patched to the same env.
-      if (step.gate && gateActionsRef.current.size > 0) {
-        const stepDur = Tone.Time('8n').toSeconds();
+      // Hardware gate — sample-accurate silence on gate-off steps.
+      // seqMasterGate sits between master volume and Destination, blocking ALL audio
+      // regardless of how patch cables are routed. seqGateNode gates vca-out specifically.
+      const gateVal = step.gate ? 1 : 0;
+      n.seqMasterGate.gain.setValueAtTime(gateVal, time);
+      n.seqGateNode.gain.setValueAtTime(gateVal, time);
+
+      // Gate — trigger or release envelopes connected to seq-gate-out.
+      // Gate OFF: explicitly fire triggerRelease so the previous note is
+      // never left open (hanging note bug). Gate ON: attack + pre-scheduled
+      // release at 80% of step duration gives clear note articulation.
+      // gateActionsRef keyed by cable key so keyboard gates don't interfere.
+      if (gateActionsRef.current.size > 0) {
+        const stepDur = step.gate ? Tone.Time('8n').toSeconds() : 0;
         for (const [, { env, fromId }] of gateActionsRef.current) {
           if (fromId !== 'seq-gate-out') continue;
-          env.triggerAttack(time);
-          env.triggerRelease(time + stepDur * 0.8);
+          if (step.gate) {
+            env.triggerAttack(time);
+            env.triggerRelease(time + stepDur * 0.8);
+          } else {
+            env.triggerRelease(time);
+          }
         }
       }
 
@@ -267,6 +322,11 @@ export default function useMoogAudio() {
     seqCurrentStepRef.current = -1;
     if (seqStepCbRef.current) seqStepCbRef.current(-1); // signal LEDs to clear
     Tone.Transport.stop();
+
+    // Re-open both gates so keyboard / manual playing is audible after sequencer stops.
+    // Last gate-off step may have left them closed.
+    n.seqMasterGate.gain.value = 1;
+    n.seqGateNode.gain.value   = 1;
 
     setIsPowered(false);
   }, []);
@@ -412,6 +472,16 @@ export default function useMoogAudio() {
     if (type  !== undefined) n.lfo.type = type;
   }, []);
 
+  // Update reverb parameters — single writer on n.reverb.
+  // roomSize (0–1): 0 = small/tight, 1 = large/diffuse.
+  // wet      (0–1): dry/wet mix crossfade.
+  const updateReverbParams = useCallback(({ roomSize, wet } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (roomSize !== undefined) safeRamp(n.reverb.roomSize, roomSize);
+    if (wet      !== undefined) safeRamp(n.reverb.wet,      wet);
+  }, []);
+
   // Update master output volume — single writer on n.master.volume.
   // volume (0–1) → -60 dB to +6 dB  (linear dB scale; 0.75 ≈ -13.5 dB, matching init)
   const updateIoParams = useCallback(({ volume } = {}) => {
@@ -420,12 +490,31 @@ export default function useMoogAudio() {
     if (volume !== undefined) safeRamp(n.master.volume, -60 + volume * 66);
   }, []);
 
+  // Returns the Moog recording bus node (Tone.Gain) for the Workstation's Tone.Recorder.
+  // Returns null until the audio engine has initialised (before POWER is first clicked is fine —
+  // the bus node exists from creation, not from powerOn).
+  const getMoogBusNode = useCallback(() => nodesRef.current?.moogBus ?? null, []);
+
   // Returns the current waveform snapshot from the oscilloscope analyser tap.
   // Returns Float32Array of 512 samples in [-1, 1], or null before nodes are created.
   const getOscilloscopeData = useCallback(() => {
     const n = nodesRef.current;
     if (!n) return null;
     return n.analyser.getValue();
+  }, []);
+
+  // Returns the normalised level [0, 1] from a named meter tap.
+  // id: 'lfo' | 'env1' | 'env2' | 'master'
+  // Returns 0 if nodes not yet created or id is unknown. Handles -Infinity (silence)
+  // and NaN gracefully — Tone.Meter can return -Infinity in dB mode, but with
+  // normalRange:true it returns 0 for silence, so isFinite is a safety net.
+  const getMeterValue = useCallback((id) => {
+    const n = nodesRef.current;
+    if (!n) return 0;
+    const meter = n[`${id}Meter`];
+    if (!meter) return 0;
+    const v = meter.getValue();
+    return isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
   }, []);
 
   // Sequencer BPM — ramps Transport tempo so the change is click-free.
@@ -462,7 +551,8 @@ export default function useMoogAudio() {
   return {
     powerOn, powerOff, connect, disconnect, isPowered,
     updateVcoParams, updateVcfParams, updateEnvParams, triggerGate, updateVcaParams,
-    updateLfoParams, updateIoParams, getOscilloscopeData,
+    updateLfoParams, updateIoParams, updateReverbParams, getMoogBusNode,
+    getOscilloscopeData, getMeterValue,
     setTempo, updateSequencerSteps, setSeqStepCallback, updateKeyboard,
   };
 }
