@@ -98,7 +98,8 @@ const RANGE_LABELS = { '-2': "32'", '-1': "16'", '0': "8'", '1': "4'", '2': "2'"
 
 // number prop (1/2/3) drives the display label and jack ID prefixes.
 // onParamUpdate(vcoId, { hz, detune, type }) is the audio update callback from useMoogAudio.
-function VcoModule({ number, onParamUpdate }) {
+// onSyncChange(enabled) — only provided for VCO2; enables/disables the hard sync slave output.
+function VcoModule({ number, onParamUpdate, onSyncChange }) {
   // VCO2/VCO3 start slightly detuned for classic analog thickness
   const defaultFine = number === 2 ? 0.52 : number === 3 ? 0.48 : 0.5;
 
@@ -106,6 +107,7 @@ function VcoModule({ number, onParamUpdate }) {
   const [fineTune,    setFineTune]    = useState(defaultFine);
   const [waveType,    setWaveType]    = useState('sawtooth');
   const [rangeOctave, setRangeOctave] = useState(0);
+  const [syncOn,      setSyncOn]      = useState(false);
 
   const vcoId = `vco${number}`;
   const p     = vcoId;
@@ -125,6 +127,12 @@ function VcoModule({ number, onParamUpdate }) {
 
   const cycleRange = () =>
     setRangeOctave(prev => RANGE_STEPS[(RANGE_STEPS.indexOf(prev) + 1) % RANGE_STEPS.length]);
+
+  const handleSyncToggle = () => {
+    const next = !syncOn;
+    setSyncOn(next);
+    onSyncChange?.(next);
+  };
 
   return (
     <div className={styles.module}>
@@ -152,6 +160,18 @@ function VcoModule({ number, onParamUpdate }) {
               <span className={styles.selectorLabel}>RANGE</span>
               <span className={styles.selectorValue}>{RANGE_LABELS[String(rangeOctave)]}</span>
             </div>
+            {onSyncChange && (
+              <div
+                className={styles.selectorGroup}
+                onClick={handleSyncToggle}
+                title="Hard Sync: patch VCO1-SAW → SYNC↓ then enable. Slave phase resets each master cycle."
+              >
+                <span className={styles.selectorLabel}>HARD SYNC</span>
+                <span className={styles.selectorValue} style={{ color: syncOn ? '#5DCAA5' : undefined }}>
+                  {syncOn ? 'ON' : 'OFF'}
+                </span>
+              </div>
+            )}
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
@@ -162,6 +182,12 @@ function VcoModule({ number, onParamUpdate }) {
             <Jack id={`${p}-saw`} label="SAW" />
             <Jack id={`${p}-sqr`} label="SQR" />
           </div>
+          {onSyncChange && (
+            <div className={styles.jackRow}>
+              <Jack id={`${p}-sync-in`}  label="SYNC↓" />
+              <Jack id={`${p}-sync-out`} label="SYNC↑" />
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -563,6 +589,151 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue }
   );
 }
 
+// ──────────── Musical CV Quantizer ────────────
+
+const SCALE_KEYS   = ['CHR', 'MAJ', 'MIN', 'PMAJ', 'PMIN'];
+const SCALE_LABELS = { CHR: 'CHROMATIC', MAJ: 'MAJOR', MIN: 'MINOR', PMAJ: 'PENT MAJ', PMIN: 'PENT MIN' };
+const ROOT_NAMES   = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+// true = chromatic black key (accidental) — used for LED coloring
+const IS_BLACK_KEY = [false,true,false,true,false,false,true,false,true,false,true,false];
+const OCT_STEPS    = [-3, -2, -1, 0, 1, 2, 3];
+
+// onParamUpdate({ scale, root }) — sends new config to the AudioWorklet.
+// onSetCallback(fn|null)         — registers/deregisters the note-class LED callback.
+// LED array is 12 DOM nodes mutated directly (Zero-Re-render Rule):
+// the worklet posts { noteClass } via port; the callback activates the matching LED.
+function QuantizerModule({ onParamUpdate, onSetCallback }) {
+  const [scale,    setScale]    = useState('MAJ');
+  const [root,     setRoot]     = useState(0);   // 0 = C
+  const [octShift, setOctShift] = useState(0);   // −3 to +3 octaves
+  const [bypass,   setBypass]   = useState(false);
+
+  const ledRefs    = useRef([]);   // 12 LED DOM elements
+  const activeLed  = useRef(-1);   // currently lit LED index
+  const displayRef = useRef(null); // note name + Hz text element
+  const inLedRef   = useRef(null); // IN presence LED
+
+  useEffect(() => {
+    onParamUpdate?.({ scale, root, octShift, bypass });
+  }, [scale, root, octShift, bypass, onParamUpdate]);
+
+  useEffect(() => {
+    // Callback signature: (noteClass: 0–11 | null, midiNote: int | null, hasSignal: bool | undefined)
+    // noteClass===null → signal-state-only message; skip LED/display updates.
+    onSetCallback?.((noteClass, midiNote, hasSignal) => {
+      // IN LED: lights when a cable is connected and the source is active.
+      if (hasSignal !== undefined && inLedRef.current) {
+        inLedRef.current.style.background = hasSignal
+          ? '#5DCAA5' : 'rgba(93,202,165,0.15)';
+        inLedRef.current.style.boxShadow  = hasSignal
+          ? '0 0 4px #5DCAA5' : 'none';
+      }
+      if (noteClass === null) return; // signal-state-only — nothing else to update
+
+      // Dim the previously active note LED
+      if (activeLed.current >= 0 && ledRefs.current[activeLed.current]) {
+        const prev = ledRefs.current[activeLed.current];
+        prev.style.background = IS_BLACK_KEY[activeLed.current]
+          ? 'rgba(93,202,165,0.07)'
+          : 'rgba(93,202,165,0.12)';
+        prev.style.boxShadow = 'none';
+      }
+      // Light the new note LED
+      if (noteClass >= 0 && noteClass < 12 && ledRefs.current[noteClass]) {
+        const el = ledRefs.current[noteClass];
+        el.style.background = '#5DCAA5';
+        el.style.boxShadow  = '0 0 5px #5DCAA5, 0 0 2px rgba(93,202,165,0.9)';
+        activeLed.current = noteClass;
+      }
+      // Update Hz/note display. In BYPASS mode the display reflects the raw input pitch.
+      if (displayRef.current && midiNote !== undefined) {
+        const hz     = (440 * Math.pow(2, (midiNote - 69) / 12)).toFixed(1);
+        const octave = Math.floor(midiNote / 12) - 1;
+        displayRef.current.textContent = `${ROOT_NAMES[noteClass]}${octave}  ${hz} Hz`;
+      }
+    });
+    return () => onSetCallback?.(null);
+  }, [onSetCallback]);
+
+  const cycleScale  = () =>
+    setScale(prev => SCALE_KEYS[(SCALE_KEYS.indexOf(prev) + 1) % SCALE_KEYS.length]);
+  const cycleRoot   = () =>
+    setRoot(prev => (prev + 1) % 12);
+  const cycleOct    = () =>
+    setOctShift(prev => OCT_STEPS[(OCT_STEPS.indexOf(prev) + 1) % OCT_STEPS.length]);
+  const toggleBypass = () =>
+    setBypass(prev => !prev);
+
+  return (
+    <div className={styles.module}>
+      <Screw pos="screwTL" /><Screw pos="screwTR" />
+      <Screw pos="screwBL" /><Screw pos="screwBR" />
+      <div className={styles.plate}>
+        <div className={styles.plateHeader}>
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>QNT</span>
+            <span className={styles.plateSub}>CV QUANTIZER · SCALE LOCK</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          {/* 12-LED chromatic display — one per semitone, lit on note output */}
+          <div className={styles.qntLeds}>
+            {ROOT_NAMES.map((name, i) => (
+              <div key={i} className={styles.qntLedGroup}>
+                <div
+                  ref={el => { ledRefs.current[i] = el; }}
+                  className={`${styles.qntLed} ${IS_BLACK_KEY[i] ? styles.qntLedBlack : ''}`}
+                />
+                <span className={styles.qntLedLabel}>{name}</span>
+              </div>
+            ))}
+          </div>
+          {/* IN/OUT signal monitor row */}
+          <div className={styles.qntMonitorRow}>
+            <div className={styles.qntMonitorItem}>
+              <div ref={inLedRef} className={styles.qntInLed} />
+              <span className={styles.qntMonitorLabel}>IN</span>
+            </div>
+            {/* Note name + Hz display — written directly via DOM ref (no React state) */}
+            <div ref={displayRef} className={styles.qntDisplay}>--</div>
+          </div>
+          <div className={styles.selectorRow}>
+            <div className={styles.selectorGroup} onClick={cycleScale} title="Click to cycle scale">
+              <span className={styles.selectorLabel}>SCALE</span>
+              <span className={styles.selectorValue}>{SCALE_LABELS[scale]}</span>
+            </div>
+            <div className={styles.selectorGroup} onClick={cycleRoot} title="Click to cycle root note">
+              <span className={styles.selectorLabel}>ROOT</span>
+              <span className={styles.selectorValue}>{ROOT_NAMES[root]}</span>
+            </div>
+            <div className={styles.selectorGroup} onClick={cycleOct} title="Click to shift output by ±1 octave">
+              <span className={styles.selectorLabel}>OCT</span>
+              <span className={styles.selectorValue}>{octShift > 0 ? `+${octShift}` : String(octShift)}</span>
+            </div>
+          </div>
+          <div className={styles.selectorRow}>
+            <div
+              className={styles.selectorGroup}
+              onClick={toggleBypass}
+              title="BYPASS: passes CV input directly to output — use to confirm cables without quantizing"
+            >
+              <span className={styles.selectorLabel}>BYPASS</span>
+              <span className={styles.selectorValue} style={{ color: bypass ? '#ff9040' : undefined }}>
+                {bypass ? 'ON' : 'OFF'}
+              </span>
+            </div>
+          </div>
+          <PlateDivider />
+          <div className={styles.jackRow}>
+            <Jack id="qnt-cv-in"  label="CV IN" />
+            <Jack id="qnt-cv-out" label="OUT" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ──────────── 960 Sequential Controller ────────────
 // onStepsChange(steps[]) — pushes step data to the audio engine ref (no re-render path).
 // onTempoChange(bpm)     — ramps Tone.Transport.bpm.
@@ -777,7 +948,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
             {/* Row 1: VCO bank + Noise source */}
             <div className={`${styles.tier} ${styles.tierRow1}`}>
               <VcoModule number={1} onParamUpdate={audio.updateVcoParams} />
-              <VcoModule number={2} onParamUpdate={audio.updateVcoParams} />
+              <VcoModule number={2} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco2SyncEnabled} />
               <VcoModule number={3} onParamUpdate={audio.updateVcoParams} />
               <NoiseModule />
             </div>
@@ -798,12 +969,16 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
               <MultiplesModule />
             </div>
 
-            {/* Row 4: 960 Sequencer + I/O */}
+            {/* Row 4: 960 Sequencer + Quantizer + I/O */}
             <div className={`${styles.tier} ${styles.tierRow4}`}>
               <SequencerModule
                 onStepsChange={audio.updateSequencerSteps}
                 onTempoChange={audio.setTempo}
                 onSetCallback={audio.setSeqStepCallback}
+              />
+              <QuantizerModule
+                onParamUpdate={audio.updateQuantizerParams}
+                onSetCallback={audio.setQuantizerCallback}
               />
               <IoModule
                 isPowered={audio.isPowered}

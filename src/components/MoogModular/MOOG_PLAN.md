@@ -69,6 +69,105 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-06-07] Quantizer + AudioWorklet Bug Fixes
+
+Multiple bugs discovered and fixed through systematic code tracing:
+
+**1. SAC Compatibility — root cause of "no sound from quantizer":**
+Tone.js uses `standardized-audio-context` (SAC) internally. `Tone.context.rawContext` is a SAC `stdAudioContext`, not a native `AudioContext`. All Tone.js nodes (including `Tone.Gain._gainNode`) are SAC-wrapped. SAC's `connect()` explicitly throws `InvalidAccessError` when connecting TO any native (non-SAC) AudioNode. Our `new AudioWorkletNode(rawCtx, name)` created native nodes, so every patch cable connection to `qnt-cv-in` silently threw inside the `try/catch` → cable drawn on screen, no audio. Fix: `Tone.context.createAudioWorkletNode(name)` creates SAC-wrapped AudioWorkletNodes accepted by the rest of the graph. Applied to both quantizer and hard sync worklets.
+
+**2. React StrictMode race condition:**
+StrictMode double-invokes `useEffect`. Cleanup sets `nodesRef.current = null`, then second mount sets `n2`. First mount's worklet `.then()` fired with `nodesRef.current = n2` (not null) — old guard `if (!nodesRef.current)` passed but `n` in closure was disposed first-mount nodes. If it fired after second mount's `.then()`, it overwrote `jackMapRef.current` with dead node references → all patches no-op. Fix: `if (nodesRef.current !== n) return` ensures only the current mount's closure proceeds.
+
+**3. MIDI note delta check (octave changes missed):**
+Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = class 0) sent no port message → display/LEDs froze. Also broke OCT SHIFT feedback. Fix: compare full `midiOut` integer (includes octave) so any pitch change fires the update.
+
+**4. Phase 19 hard sync routing clarification:**
+`hardSyncNode.connect(n.vco2syncOut.input)` — with SAC nodes (fix #1), `n.vco2syncOut.input` is a SAC GainNode, making `sacWorkletNode.connect(sacGainNode)` fully compatible.
+
+---
+
+### [2026-06-07] Moog Phase 22 — Quantizer Improvements + VCO UI Cleanup
+
+**VCO modules (`MoogShell.jsx`):** Removed `cvMode` state, `cycleCvMode`, `handleTune`, `onTune` prop, and CV MODE/TUNE selectorRow. Reverted to original minimalist design (WAVE, RANGE, HARD SYNC for VCO2, jacks only).
+
+**Quantizer additions (`useMoogAudio.js` + `public/quantizer-worklet.js` + `MoogShell.jsx` + `.module.css`):**
+- **BYPASS toggle** — when ON, worklet copies `inputCh[i]` directly to `outputCh[i]` without quantizing. Orange accent when active. Useful to confirm cable patching without quantization.
+- **IN LED** — worklet detects `hasSignal` (cable connected/disconnected) and posts `{ hasSignal }` on transitions only. DOM-mutated round LED in the Quantizer panel lights when a source is connected to `qnt-cv-in`.
+- **OCT SHIFT** — click-to-cycle selector (−3..+3 octaves). Applied in worklet as `bestMidi + octShift * 12` before Hz conversion. Solves additive VCO pitch alignment without touching VCO FREQ knob extensively.
+- **Note display** — DOM-ref `<div>` shows `G3  196.0 Hz` (computed from `midiNote` sent in port message). Updated only on note change — zero React state.
+- `quantizerParamsRef` gains `bypass` and `octShift` fields, flushed on worklet load.
+- LED callback extended to `(noteClass, midiNote, hasSignal)` — `noteClass === null` → signal-state-only message, skip LED/display.
+
+**Usage note:** VCO `cv-in` is additive (Moog standard). Set VCO FREQ to minimum + use OCT SHIFT on the Quantizer to place output in the right octave range.
+
+---
+
+### [2026-06-07] Moog Phase 20 — Musical CV Quantizer
+
+**Files created:**
+- `public/quantizer-worklet.js` — `QuantizerProcessor` AudioWorkletProcessor. Per-sample Hz→nearest-scale-note→Hz mapping. Algorithm: convert input Hz to fractional MIDI, iterate scale degrees, find nearest `12k + root + degree` to input MIDI, convert winner back to Hz. Delta-checked `port.postMessage({ noteClass })` fires only when the quantized note class changes — limits main-thread LED update traffic to ≤1 message per 128-sample block. Default scale: MAJ / C on construction; scale+root received via `port.onmessage`.
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Six additions:
+  1. **`SCALE_DEFS`** — module-level constant (CHR/MAJ/MIN/PMAJ/PMIN arrays).
+  2. **`quantizerStepCbRef`** — UI LED callback ref (same pattern as `seqStepCbRef`).
+  3. **`quantizerParamsRef`** — buffers latest `{scale, root}` so config changes made before worklet loads are flushed correctly on load.
+  4. **`n.quantizerOut`** — `new Tone.Gain(1)` created synchronously. Tone.Gain wrapper so downstream Tone.js nodes (`vco.frequency`) can receive the quantized Hz via `Tone.js.connect()`. Connected via `quantizerNode.connect(n.quantizerOut.input)` (native AudioNode → native GainNode — same `.input` pattern from Phase 19 fix).
+  5. **`'qnt-cv-in'` / `'qnt-cv-out'` jacks** — added to `buildJackMap`. `qnt-cv-in.dest = n.quantizerNode ?? null` (deferred until worklet loads; jackMap rebuilt after). `qnt-cv-out.node = n.quantizerOut` (always live).
+  6. **`updateQuantizerParams({scale, root})`** and **`setQuantizerCallback(fn)`** — matching the existing sequencer callback pattern. `updateQuantizerParams` buffers in `quantizerParamsRef` first, then posts to worklet (no-op if worklet not yet loaded).
+
+- `src/components/MoogModular/MoogShell.jsx` — `QuantizerModule` component co-located. State: `scale` ('MAJ'), `root` (0). `selectorRow` with SCALE and ROOT click-to-cycle selectors. 12-LED chromatic note display: DOM refs array + LED callback from `onSetCallback` — active LED `background/#5DCAA5 box-shadow` set directly (no React state). Two jacks: `qnt-cv-in`, `qnt-cv-out`. Mounted in Row 4 between Sequencer and I/O.
+
+- `src/components/MoogModular/MoogShell.module.css` — `tierRow4` updated `3.5fr 1fr → 3.5fr 0.9fr 1fr`. Added `.qntLeds`, `.qntLedGroup`, `.qntLed`, `.qntLedBlack`, `.qntLedLabel` LED display styles.
+
+**Classic patch:**
+`seq-pitch-out → qnt-cv-in` → `qnt-cv-out → vco1-cv`. Sequencer steps are forced to the scale; notes outside the scale (step voltage knobs in between) snap to nearest scale degree. Set VCO1 FREQ to minimum for pure sequencer pitch control.
+
+**Gemini plan corrections:**
+- `Tone.Signal` bridge for real-time processing — impossible; `Tone.Signal` is a constant-value source, not a processor. AudioWorklet is the correct tool.
+- `Tone.Analyser` / `setInterval` for audio-rate processing — `Tone.Analyser` is read-only FFT display; `setInterval` runs on main thread at ~60fps with no audio-rate timing. AudioWorklet runs at 44100 Hz in the audio rendering thread.
+- `QuantizerModule.jsx` — all modules co-located in `MoogShell.jsx`. Documented since Phase 3.
+- `<MoogKnob>` for SCALE — click-to-cycle selector is correct for discrete options (same as WAVE/RANGE in VcoModule).
+
+---
+
+### [2026-06-06] Moog Phase 19 — True Hard Sync via AudioWorklet
+
+**Files created:**
+- `public/hard-sync-worklet.js` — `HardSyncProcessor` AudioWorkletProcessor. Phase-accumulator master tracking + slave reset on detected sawtooth discontinuities (`prev > 0 && m < prev - 0.5` threshold — robust for sawtooth and square master waveforms, immune to smooth waveforms). AudioParams: `slaveFreq` (k-rate, Hz), `slaveDetune` (k-rate, cents). Always outputs slave sawtooth; phase-resets to 0 on each master cycle boundary. Runs entirely in the audio rendering thread — zero main-thread overhead.
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Five additions:
+  1. **`n.vco2syncOut`** — `new Tone.Gain(0)` created synchronously with other nodes. Acts as the gain-gate wrapper: gain=0 when HARD SYNC is off, ramps to 1 when on.
+  2. **Async worklet load** — `rawCtx.audioWorklet.addModule('/hard-sync-worklet.js').then()` runs after node creation. On load: creates `AudioWorkletNode('hard-sync-processor')`, assigns to `n.hardSyncNode`; connects `n.vco2fm → hardSyncNode.parameters.get('slaveFreq')` (additive — FM/envelope modulation on vco2-fm now drives both VCO2.frequency AND the worklet slave, no extra cables needed); connects `hardSyncNode → n.vco2syncOut`; rebuilds jackMap. Race condition guard: `nodesRef.current = null` is set first in cleanup, so any in-flight `.then()` aborts on `if (!nodesRef.current) return`.
+  3. **`vco2-sync-in` / `vco2-sync-out` jacks** — added to `buildJackMap`. `vco2-sync-in: { type:'in', dest: n.hardSyncNode ?? null }` (deferred to null before worklet loads; jackMap rebuilt after load). `vco2-sync-out: { type:'out', node: n.vco2syncOut }` (always live; outputs silence until toggle enables gain and worklet connects).
+  4. **`updateVcoParams` dual-write** — when `vcoId === 'vco2'` and `n.hardSyncNode` exists, also calls `setTargetAtTime` on `slaveFreq` / `slaveDetune` AudioParams to keep the worklet's base frequency in sync with the FREQ/FINE knobs.
+  5. **`setVco2SyncEnabled(enabled)`** — `safeRamp(n.vco2syncOut.gain, enabled ? 1 : 0, 0.01)`. 10ms click-free ramp. Returned from hook.
+
+- `src/components/MoogModular/MoogShell.jsx` — Two additions:
+  1. **`VcoModule`** gains `onSyncChange` prop and `syncOn` state. When provided, renders a HARD SYNC selectorGroup (click to toggle, value green when ON) and a second `jackRow` with SYNC↓ (sync-in) and SYNC↑ (sync-out) jacks.
+  2. **VCO2 call site** — `onSyncChange={audio.setVco2SyncEnabled}` wired.
+
+**Houdini patch (the "Houdini" sound):**
+1. Power ON
+2. VCO1: FREQ ≈ 0.3 (E2 range), WAVE = SAW
+3. VCO2: FREQ ≈ 0.35, WAVE = SAW, HARD SYNC toggle ON
+4. Patch `vco1-saw → vco2-sync-in` (VCO1 is master, VCO2 is slave)
+5. Patch `env1-out → vco2-fm` (envelope sweeps slave pitch 0→500Hz above base)
+6. Patch `vco2-sync-out → cp3-in1` (synced slave is the audio output)
+7. Patch `cp3-out → vcf-in → vca-in → io-in`
+8. Patch `seq-gate-out → env1-gate` (sequencer triggers envelope per step)
+9. Each note: envelope attack sweeps VCO2 upward while phase-locked to VCO1 → tearing hard sync timbre.
+
+**Gemini plan corrections:**
+- `Tone.Signal` / `Tone.Waveform` for sync — architecturally incorrect. Web Audio OscillatorNode has no phase-reset input. AudioWorkletProcessor is the only correct implementation.
+- `setTargetAtTime` "for sync modulation performance" — confused the concept; the correct use is the standard `setTargetAtTime` already in `updateVcoParams` for click-free parameter changes.
+- Both oscillators in worklet (Gemini's implicit suggestion) — rejected. Slave-only worklet is simpler, keeps VCO2's controls and FM/CV patch infrastructure intact, and doesn't duplicate the master oscillator.
+- "SYNC IN overrides internal master routing" — the jack-based system IS the routing; no internal routing needed. Patching VCO1 to SYNC IN IS enabling the sync.
+
+---
+
 ### [2026-06-06] Moog Phase 18 — Transcription Engine: Audio-to-Editable-Notes
 
 **Files created:**

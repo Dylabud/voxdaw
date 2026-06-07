@@ -188,7 +188,7 @@
 .tierRow1 { grid-template-columns: 1fr 1fr 1fr 0.6fr; }
 .tierRow2 { grid-template-columns: 1.7fr 1.5fr 1fr 0.75fr; }
 .tierRow3 { grid-template-columns: 0.85fr 1fr 1fr 0.7fr; }
-.tierRow4 { grid-template-columns: 3.5fr 1fr; }
+.tierRow4 { grid-template-columns: 3.5fr 0.9fr 1fr; }
 
 /* ══════════════════════════════════════════════════════
    MODULE PANEL
@@ -864,4 +864,92 @@
 .seqGateOn:hover {
   background: radial-gradient(ellipse at 50% 30%, #70d8b8 0%, #38a880 55%, #206855 100%);
   border-color: #4aaa88;
+}
+
+/* ══════════════════════════════════════════════════════
+   QUANTIZER MODULE — 12-LED chromatic note display
+   ══════════════════════════════════════════════════════ */
+
+.qntLeds {
+  display: flex;
+  gap: 2px;
+  justify-content: center;
+  padding: 4px 0 6px;
+  flex-wrap: wrap;
+}
+
+.qntLedGroup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Base LED: slightly taller rect to read as a note indicator.
+   background/box-shadow are written directly by the LED callback
+   (DOM mutation, no React state). The initial values here are the
+   inactive state that the cleanup branch restores. */
+.qntLed {
+  width: 7px;
+  height: 10px;
+  border-radius: 1.5px;
+  background: rgba(93, 202, 165, 0.12);
+  box-shadow: none;
+}
+
+/* Black key (accidental) LEDs — dim slightly more to visually echo a piano keyboard */
+.qntLedBlack {
+  background: rgba(93, 202, 165, 0.07);
+}
+
+.qntLedLabel {
+  font-size: 4px;
+  letter-spacing: 0;
+  color: #4a4540;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* IN LED + display row */
+.qntMonitorRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 2px 3px;
+}
+
+.qntMonitorItem {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.qntMonitorLabel {
+  font-size: 4.5px;
+  letter-spacing: 0.1em;
+  color: #4a4540;
+  text-transform: uppercase;
+}
+
+/* IN LED: round signal-presence indicator — DOM-mutated on cable connect/disconnect */
+.qntInLed {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(93, 202, 165, 0.15);
+  box-shadow: none;
+  flex-shrink: 0;
+}
+
+/* Note name + Hz text display — DOM-mutated directly, no React state */
+.qntDisplay {
+  font-size: 6px;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.04em;
+  color: #5DCAA5;
+  flex: 1;
+  text-align: center;
+  min-height: 9px;
+  opacity: 0.85;
 }

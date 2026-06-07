@@ -5,6 +5,16 @@ import { useRef, useState, useCallback, useEffect } from 'react';
 const SEQ_HZ_MIN = 32.703;
 const SEQ_HZ_MAX = 1046.502;
 
+// Quantizer scale definitions (semitone offsets from root).
+// Sent to the quantizer AudioWorklet via port.postMessage.
+const SCALE_DEFS = {
+  CHR:  [0,1,2,3,4,5,6,7,8,9,10,11],
+  MAJ:  [0,2,4,5,7,9,11],
+  MIN:  [0,2,3,5,7,8,10],
+  PMAJ: [0,2,4,7,9],
+  PMIN: [0,3,5,7,10],
+};
+
 // Safe parameter ramp.
 //
 // Problem: Tone.js Param.rampTo() calls assertRange(value, param.minValue, param.maxValue).
@@ -46,6 +56,11 @@ function buildJackMap(n) {
     'vco2-tri': { type: 'out', node: n.vco2, waveform: 'triangle'  },
     'vco2-saw': { type: 'out', node: n.vco2, waveform: 'sawtooth'  },
     'vco2-sqr': { type: 'out', node: n.vco2, waveform: 'square'    },
+    // Hard sync jacks — dest/node null until the AudioWorklet module loads.
+    // connect() silently no-ops on null, so cables patched before worklet is
+    // ready are harmless; jackMap is rebuilt once the worklet finishes loading.
+    'vco2-sync-in':  { type: 'in',  dest: n.hardSyncNode ?? null },
+    'vco2-sync-out': { type: 'out', node: n.vco2syncOut ?? null  },
     // ── VCO 3 ──
     'vco3-cv':  { type: 'in',  dest: n.vco3.frequency },
     'vco3-fm':  { type: 'in',  dest: n.vco3fm },
@@ -104,6 +119,11 @@ function buildJackMap(n) {
     // ── Keyboard ──
     'kbd-pitch-out': { type: 'out', node: n.kbdPitchOut },
     'kbd-gate-out':  { type: 'out', node: null, isGate: true },
+    // ── Quantizer ──
+    // qnt-cv-in  → AudioWorkletNode audio input (Hz-range signal; null until worklet loads)
+    // qnt-cv-out → Tone.Gain wrapper (always live; outputs silence until worklet connects)
+    'qnt-cv-in':  { type: 'in',  dest: n.quantizerNode ?? null },
+    'qnt-cv-out': { type: 'out', node: n.quantizerOut          },
     // ── I/O ── audio signal enters the I/O module here and exits to Destination
     'io-in': { type: 'in', dest: n.master },
   };
@@ -112,15 +132,19 @@ function buildJackMap(n) {
 export default function useMoogAudio() {
   const [isPowered, setIsPowered] = useState(false);
 
-  const isPoweredRef      = useRef(false);
-  const nodesRef          = useRef(null);
-  const jackMapRef        = useRef(null);
-  const connectionsRef    = useRef(new Map()); // key: "fromId→toId" → { node, dest }
-  const seqLoopRef        = useRef(null);
-  const seqStepsRef       = useRef(Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true })));
-  const seqCurrentStepRef = useRef(-1);
-  const seqStepCbRef      = useRef(null);   // UI callback for LED animation
-  const gateActionsRef    = useRef(new Map()); // toJackId → Tone.Envelope
+  const isPoweredRef        = useRef(false);
+  const nodesRef            = useRef(null);
+  const jackMapRef          = useRef(null);
+  const connectionsRef      = useRef(new Map()); // key: "fromId→toId" → { node, dest }
+  const seqLoopRef          = useRef(null);
+  const seqStepsRef         = useRef(Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true })));
+  const seqCurrentStepRef   = useRef(-1);
+  const seqStepCbRef        = useRef(null);   // UI callback for sequencer LED animation
+  const gateActionsRef      = useRef(new Map()); // toJackId → Tone.Envelope
+  const quantizerStepCbRef    = useRef(null);   // UI callback for quantizer LED animation
+  const lastQuantizedMidiRef  = useRef(69);     // A4 default — updated on each note change
+  // Persists latest quantizer config so it can be flushed when the worklet finishes loading.
+  const quantizerParamsRef    = useRef({ scale: SCALE_DEFS.MAJ, root: 0, octShift: 0, bypass: false });
 
   useEffect(() => {
     const n = {
@@ -158,6 +182,16 @@ export default function useMoogAudio() {
       // Recording tap — side connection from seqMasterGate so the Workstation's
       // Tone.Recorder can capture Moog audio without touching the speaker path.
       moogBus: new Tone.Gain(1),
+
+      // Hard sync output wrapper — gain 0 until user enables HARD SYNC toggle.
+      // AudioWorkletNode (hardSyncNode) connects here after the worklet loads.
+      // Sits outside the jackMap initially (null); jackMap is rebuilt after load.
+      vco2syncOut: new Tone.Gain(0),
+
+      // Quantizer output wrapper — gain 1 (always pass-through).
+      // AudioWorkletNode (quantizerNode) connects to .input after worklet loads.
+      // Tone.Gain so that downstream Tone.js nodes (vco.frequency) can receive it.
+      quantizerOut: new Tone.Gain(1),
 
       // Level meters — dead-end side taps for LED feedback (no effect on audio routing).
       // smoothing controls the RMS window: higher = more averaged, lower = more transient-responsive.
@@ -269,7 +303,85 @@ export default function useMoogAudio() {
     nodesRef.current   = n;
     jackMapRef.current = buildJackMap(n);
 
+    // rawCtx must be declared before either worklet load block — both share it.
+    const rawCtx = Tone.context.rawContext;
+
+    // Load the quantizer AudioWorklet asynchronously (parallel to hard sync load).
+    let quantizerNode = null;
+    rawCtx.audioWorklet.addModule('/quantizer-worklet.js').then(() => {
+      if (nodesRef.current !== n) return;
+      // Use Tone.context.createAudioWorkletNode() — NOT `new AudioWorkletNode(rawCtx, ...)`.
+      // Tone.js wraps all nodes in standardized-audio-context (SAC). SAC's connect() throws
+      // InvalidAccessError when connecting TO any node created outside its own registry
+      // (i.e. native AudioWorkletNode). Tone.context.createAudioWorkletNode() creates a
+      // SAC-wrapped node that is accepted by every SAC connect() call in the graph.
+      quantizerNode = Tone.context.createAudioWorkletNode('quantizer-processor');
+      n.quantizerNode = quantizerNode;
+
+      // Connect worklet output to the Tone.Gain wrapper via its native GainNode.
+      // (Same pattern as hard sync: native AudioWorkletNode.connect() needs native AudioNode.)
+      quantizerNode.connect(n.quantizerOut.input);
+
+      // Flush the latest scale/root config that may have been set before the worklet loaded.
+      quantizerNode.port.postMessage(quantizerParamsRef.current);
+
+      // Route port messages to the UI callback (delta-checked inside the worklet).
+      // noteClass/midiNote → LED + display update.
+      // hasSignal → IN LED update (fires only on cable connect/disconnect).
+      // The callback signature is (noteClass, midiNote, hasSignal); null noteClass
+      // means "signal-state-only update — skip LED/display logic."
+      quantizerNode.port.onmessage = ({ data }) => {
+        if (data.midiNote !== undefined) lastQuantizedMidiRef.current = data.midiNote;
+        if (quantizerStepCbRef.current) {
+          if (data.noteClass !== undefined) {
+            quantizerStepCbRef.current(data.noteClass, data.midiNote, undefined);
+          }
+          if (data.hasSignal !== undefined) {
+            quantizerStepCbRef.current(null, null, data.hasSignal);
+          }
+        }
+      };
+
+      // Rebuild jackMap so qnt-cv-in is now live (was dest:null before worklet loaded).
+      jackMapRef.current = buildJackMap(n);
+    }).catch(err => {
+      console.warn('[MoogAudio] Quantizer worklet unavailable:', err);
+    });
+
+    // Load the hard sync AudioWorklet asynchronously.
+    // All Tone.js nodes above are already live; this just adds the worklet-backed
+    // slave oscillator. If the load fails (unsupported browser, etc.), the sync
+    // jacks remain no-ops and everything else works normally.
+    let hardSyncNode = null;
+    rawCtx.audioWorklet.addModule('/hard-sync-worklet.js').then(() => {
+      if (nodesRef.current !== n) return; // same guard as quantizer block above
+      hardSyncNode = Tone.context.createAudioWorkletNode('hard-sync-processor'); // same SAC-wrap reason
+      n.hardSyncNode = hardSyncNode;
+
+      // Route VCO2's FM scaler to the worklet's slaveFreq AudioParam (additive).
+      // Envelope or LFO patched to vco2-fm will now modulate both VCO2.frequency
+      // AND the worklet slave — no extra cables needed for the Houdini patch.
+      n.vco2fm.connect(hardSyncNode.parameters.get('slaveFreq'));
+
+      // Wire worklet output to the sync output wrapper.
+      // n.vco2syncOut is a Tone.Gain — its .input property is the underlying native
+      // GainNode (confirmed: Tone.Gain.input = this._gainNode = context.createGain()).
+      // Native AudioWorkletNode.connect() only accepts native AudioNode, NOT Tone.js
+      // wrappers, so we must pass .input explicitly. Connecting to n.vco2syncOut directly
+      // would throw TypeError and abort the .then() before jackMapRef is rebuilt.
+      // vco2syncOut gain is 0 until the user enables the HARD SYNC toggle.
+      hardSyncNode.connect(n.vco2syncOut.input);
+
+      // Rebuild jackMap so vco2-sync-in and vco2-sync-out are now live.
+      jackMapRef.current = buildJackMap(n);
+    }).catch(err => {
+      console.warn('[MoogAudio] Hard sync worklet unavailable:', err);
+    });
+
     return () => {
+      // Null out nodesRef first so any in-flight worklet Promise .then() bails immediately.
+      nodesRef.current = null;
+      jackMapRef.current = null;
       [n.vco1, n.vco2, n.vco3, n.noiseW, n.noiseP, n.lfo].forEach(node => {
         try { node.stop(); } catch (_) {}
       });
@@ -279,6 +391,9 @@ export default function useMoogAudio() {
         seqLoopRef.current = null;
       }
       try { Tone.Transport.stop(); } catch (_) {}
+      // Disconnect AudioWorkletNodes (not Tone.js nodes — no .dispose()).
+      if (hardSyncNode)   { try { hardSyncNode.disconnect();   } catch (_) {} }
+      if (quantizerNode)  { try { quantizerNode.disconnect();  } catch (_) {} }
       Object.values(n).forEach(node => {
         try { node.dispose(); } catch (_) {}
       });
@@ -404,9 +519,23 @@ export default function useMoogAudio() {
     if (!n) return;
     const vco = n[vcoId];
     if (!vco) return;
-    if (hz     !== undefined) vco.frequency.setTargetAtTime(Math.max(0.1, hz), Tone.now(), 0.02);
-    if (detune !== undefined) vco.detune.setTargetAtTime(detune, Tone.now(), 0.02);
-    if (type   !== undefined) vco.type = type;
+    if (hz !== undefined) {
+      const safeHz = Math.max(0.1, hz);
+      vco.frequency.setTargetAtTime(safeHz, Tone.now(), 0.02);
+      // Mirror to hard sync slave frequency so the FREQ knob controls both oscillators.
+      // The vco2fm scaler also additively connects to slaveFreq (handles CV modulation),
+      // so this only needs to set the base value — not the CV offset.
+      if (vcoId === 'vco2' && n.hardSyncNode) {
+        n.hardSyncNode.parameters.get('slaveFreq').setTargetAtTime(safeHz, Tone.now(), 0.02);
+      }
+    }
+    if (detune !== undefined) {
+      vco.detune.setTargetAtTime(detune, Tone.now(), 0.02);
+      if (vcoId === 'vco2' && n.hardSyncNode) {
+        n.hardSyncNode.parameters.get('slaveDetune').setTargetAtTime(detune, Tone.now(), 0.02);
+      }
+    }
+    if (type !== undefined) vco.type = type;
   }, []);
 
   // Update VCF audio parameters — single writer per node.
@@ -533,6 +662,42 @@ export default function useMoogAudio() {
     seqStepCbRef.current = fn;
   }, []);
 
+  // Update quantizer scale and/or root note.
+  // scale (string key: 'CHR' | 'MAJ' | 'MIN' | 'PMAJ' | 'PMIN')
+  // root  (0–11: 0=C, 1=C#, …, 11=B)
+  // Params are buffered in quantizerParamsRef so they are sent correctly even if
+  // called before the AudioWorklet finishes loading.
+  const updateQuantizerParams = useCallback(({ scale, root, octShift, bypass } = {}) => {
+    if (scale    !== undefined) quantizerParamsRef.current.scale    = SCALE_DEFS[scale] ?? SCALE_DEFS.MAJ;
+    if (root     !== undefined) quantizerParamsRef.current.root     = root;
+    if (octShift !== undefined) quantizerParamsRef.current.octShift = octShift;
+    if (bypass   !== undefined) quantizerParamsRef.current.bypass   = bypass;
+    const n = nodesRef.current;
+    if (!n?.quantizerNode) return;
+    n.quantizerNode.port.postMessage(quantizerParamsRef.current);
+  }, []);
+
+  // Register the quantizer LED callback (called from quantizer port.onmessage, main thread).
+  // The callback receives: (noteClass: 0–11, midiNote: int) when the quantized note changes.
+  const setQuantizerCallback = useCallback((fn) => {
+    quantizerStepCbRef.current = fn;
+  }, []);
+
+  // Returns the last quantized frequency in Hz (defaults to A4 = 440 Hz on startup).
+  // Used by VcoModule's TUNE button to back-compute the correct FREQ knob position.
+  const getLastQuantizedHz = useCallback(() => {
+    return 440 * Math.pow(2, (lastQuantizedMidiRef.current - 69) / 12);
+  }, []);
+
+  // Enable or disable the VCO2 hard sync output path.
+  // Ramps vco2syncOut.gain 0→1 (enable) or 1→0 (disable) over 10 ms — click-free.
+  // The worklet continues running in both states; the gain gate controls audibility.
+  const setVco2SyncEnabled = useCallback((enabled) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    safeRamp(n.vco2syncOut.gain, enabled ? 1 : 0, 0.01);
+  }, []);
+
   // Keyboard pitch + gate control.
   // hz: the note frequency in Hz (e.g. Tone.Frequency("C4").toFrequency()).
   // isGateDown: true = note on (triggerAttack), false = note off (triggerRelease).
@@ -554,5 +719,7 @@ export default function useMoogAudio() {
     updateLfoParams, updateIoParams, updateReverbParams, getMoogBusNode,
     getOscilloscopeData, getMeterValue,
     setTempo, updateSequencerSteps, setSeqStepCallback, updateKeyboard,
+    setVco2SyncEnabled,
+    updateQuantizerParams, setQuantizerCallback,
   };
 }
