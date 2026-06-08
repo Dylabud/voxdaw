@@ -12,11 +12,18 @@ export default function Oscilloscope({ getData }) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
-    const W   = canvas.width;
-    const H   = canvas.height;
 
     function draw() {
       rafRef.current = requestAnimationFrame(draw);
+
+      // Sync buffer width to CSS display width each frame so the waveform always
+      // fills the full visualizer regardless of module/cabinet layout changes.
+      // canvas.width assignment clears the buffer but we redraw every frame anyway.
+      const cssW = canvas.offsetWidth;
+      if (cssW && canvas.width !== cssW) canvas.width = cssW;
+
+      const W = canvas.width;
+      const H = canvas.height;
 
       ctx.clearRect(0, 0, W, H);
 

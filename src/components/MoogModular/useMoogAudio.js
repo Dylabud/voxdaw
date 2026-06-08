@@ -13,7 +13,22 @@ const SCALE_DEFS = {
   MIN:  [0,2,3,5,7,8,10],
   PMAJ: [0,2,4,7,9],
   PMIN: [0,3,5,7,10],
+  // Chord intervals — used by chord-aware quantization (ChordSeqModule → Quantizer).
+  // When the chord sequencer fires, it sets root AND scale to one of these interval arrays;
+  // the quantizer then snaps incoming melody notes to chord tones only.
+  CMAJ:  [0,4,7],
+  CMIN:  [0,3,7],
+  CDOM:  [0,4,7,10],
+  CMAJ7: [0,4,7,11],
+  CMIN7: [0,3,7,10],
+  CSUS4: [0,5,7],
+  CDIM:  [0,3,6],
 };
+
+// Base Hz for chord sequencer root CV output — C3 (MIDI 48).
+// rootClass 0→11 maps to C3→B3 (130.81–246.94 Hz).
+// All values > 10 Hz so the qnt-transpose-in analyser threshold correctly detects them.
+const CHORD_BASE_HZ = 130.81;
 
 // Safe parameter ramp.
 //
@@ -106,26 +121,31 @@ function buildJackMap(n) {
     'lfo-tri':  { type: 'out', node: n.lfo, waveform: 'triangle'  },
     'lfo-sqr':  { type: 'out', node: n.lfo, waveform: 'square'    },
     'lfo-saw':  { type: 'out', node: n.lfo, waveform: 'sawtooth'  },
-    // ── Multiples (passive routing — deferred to Phase 7 audio wiring) ──
-    'mult-a1': { type: 'in', dest: null }, 'mult-a2': { type: 'in', dest: null },
-    'mult-a3': { type: 'in', dest: null }, 'mult-a4': { type: 'in', dest: null },
-    'mult-b1': { type: 'in', dest: null }, 'mult-b2': { type: 'in', dest: null },
-    'mult-b3': { type: 'in', dest: null }, 'mult-b4': { type: 'in', dest: null },
     // ── Sequencer ──
     'seq-pitch-out': { type: 'out', node: n.seqPitchOut },
     'seq-gate-out':  { type: 'out', node: null, isGate: true },
     'seq-clk-in':    { type: 'in',  dest: null },
     'seq-clk-out':   { type: 'out', node: null },
+    // ── Chord Sequencer ──
+    'chordseq-cv-out': { type: 'out', node: n.chordSeqPitchOut },
     // ── Keyboard ──
     'kbd-pitch-out': { type: 'out', node: n.kbdPitchOut },
     'kbd-gate-out':  { type: 'out', node: null, isGate: true },
     // ── Quantizer ──
-    // qnt-cv-in  → AudioWorkletNode audio input (Hz-range signal; null until worklet loads)
-    // qnt-cv-out → Tone.Gain wrapper (always live; outputs silence until worklet connects)
-    'qnt-cv-in':  { type: 'in',  dest: n.quantizerNode ?? null },
-    'qnt-cv-out': { type: 'out', node: n.quantizerOut          },
+    // qnt-cv-in        → AudioWorkletNode audio input (null until worklet loads)
+    // qnt-cv-out       → Tone.Gain wrapper (always live)
+    // qnt-transpose-in → waveform analyser; rAF loop in QuantizerModule reads Hz → note class
+    'qnt-cv-in':        { type: 'in',  dest: n.quantizerNode ?? null   },
+    'qnt-cv-out':       { type: 'out', node: n.quantizerOut             },
+    'qnt-transpose-in': { type: 'in',  dest: n.qntTransposeAnalyser    },
     // ── I/O ── audio signal enters the I/O module here and exits to Destination
-    'io-in': { type: 'in', dest: n.master },
+    // io-in routes directly to master (legacy single-input path, kept for patch compat).
+    // io-in1–4 each route through independent channel gain nodes → master.
+    'io-in':  { type: 'in', dest: n.master },
+    'io-in1': { type: 'in', dest: n.ioCh1  },
+    'io-in2': { type: 'in', dest: n.ioCh2  },
+    'io-in3': { type: 'in', dest: n.ioCh3  },
+    'io-in4': { type: 'in', dest: n.ioCh4  },
   };
 }
 
@@ -141,6 +161,22 @@ export default function useMoogAudio() {
   const seqCurrentStepRef   = useRef(-1);
   const seqStepCbRef        = useRef(null);   // UI callback for sequencer LED animation
   const gateActionsRef      = useRef(new Map()); // toJackId → Tone.Envelope
+
+  // Chord sequencer — separate slower-clocked 8-step pitch CV source.
+  // Each step stores { rootClass: 0-11, chordType: keyof SCALE_DEFS }.
+  // On step fire: outputs root Hz via chordSeqPitchOut AND calls chordSeqChordCbRef
+  // with (rootClass, chordType) so MoogShell can sync the quantizer scale.
+  const chordSeqLoopRef        = useRef(null);
+  const chordSeqStepsRef       = useRef(
+    Array.from({ length: 8 }, (_, i) => ({
+      rootClass: [0, 0, 5, 5, 7, 7, 0, 0][i], // I IV V I default (C, C, F, F, G, G, C, C)
+      chordType: 'CMAJ',
+    }))
+  );
+  const chordSeqCurrentStepRef = useRef(-1);
+  const chordSeqStepCbRef      = useRef(null);
+  const chordSeqChordCbRef     = useRef(null); // fn(rootClass, chordType) — called on each step
+  const chordSeqDivisionRef    = useRef('1m'); // default: advance every 1 bar
   const quantizerStepCbRef    = useRef(null);   // UI callback for quantizer LED animation
   const lastQuantizedMidiRef  = useRef(69);     // A4 default — updated on each note change
   // Persists latest quantizer config so it can be flushed when the worklet finishes loading.
@@ -166,8 +202,9 @@ export default function useMoogAudio() {
       master:      new Tone.Volume(-14),             // no longer goes direct to Destination
       seqMasterGate: new Tone.Gain(1).toDestination(), // sole gateway to speakers — Loop gates here
       analyser:    new Tone.Analyser('waveform', 512),
-      seqPitchOut: new Tone.Signal(SEQ_HZ_MIN), // never init to 0 — exponential ramps from 0 are undefined
-      kbdPitchOut: new Tone.Signal(SEQ_HZ_MIN), // keyboard pitch CV out — same non-zero init rule
+      seqPitchOut:       new Tone.Signal(SEQ_HZ_MIN), // never init to 0 — exponential ramps from 0 are undefined
+      kbdPitchOut:       new Tone.Signal(SEQ_HZ_MIN), // keyboard pitch CV out — same non-zero init rule
+      chordSeqPitchOut:  new Tone.Signal(SEQ_HZ_MIN), // chord sequencer root CV out — same rule
 
       // Studio reverb — Freeverb (proven in this codebase via VoxTool arpReverb).
       // wet starts at 0 so patching in the reverb doesn't colour sound until MIX is raised.
@@ -183,6 +220,18 @@ export default function useMoogAudio() {
       // Tone.Recorder can capture Moog audio without touching the speaker path.
       moogBus: new Tone.Gain(1),
 
+      // I/O 4-channel input gains — each sums independently into n.master.
+      // Single writer per node: updateIoChannelVol owns these gain params.
+      // Meters tap post-gain so LEDs show each channel's actual contribution.
+      ioCh1: new Tone.Gain(0.8),
+      ioCh2: new Tone.Gain(0.8),
+      ioCh3: new Tone.Gain(0.8),
+      ioCh4: new Tone.Gain(0.8),
+      ioCh1Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
+      ioCh2Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
+      ioCh3Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
+      ioCh4Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
+
       // Hard sync output wrapper — gain 0 until user enables HARD SYNC toggle.
       // AudioWorkletNode (hardSyncNode) connects here after the worklet loads.
       // Sits outside the jackMap initially (null); jackMap is rebuilt after load.
@@ -192,6 +241,13 @@ export default function useMoogAudio() {
       // AudioWorkletNode (quantizerNode) connects to .input after worklet loads.
       // Tone.Gain so that downstream Tone.js nodes (vco.frequency) can receive it.
       quantizerOut: new Tone.Gain(1),
+
+      // Transposition CV analyser — taps the incoming TRANSPOSE CV signal so the
+      // QuantizerModule's rAF loop can read the current Hz value and derive a note class.
+      // Tone.Analyser with 'waveform' type calls getFloatTimeDomainData, which returns
+      // the actual float values (Hz) from the ConstantSourceNode inside Tone.Signal.
+      // When nothing is connected the analyser returns all zeros → avgHz = 0 < 10 → inactive.
+      qntTransposeAnalyser: new Tone.Analyser('waveform', 256),
 
       // Level meters — dead-end side taps for LED feedback (no effect on audio routing).
       // smoothing controls the RMS window: higher = more averaged, lower = more transient-responsive.
@@ -235,9 +291,21 @@ export default function useMoogAudio() {
     n.vcfcv2.connect(n.vcf.frequency);
     n.vcfenv.connect(n.vcf.frequency);
 
+    // I/O channel gains → master: each channel has its own Gain node so the
+    // 4-channel mixer faders are independent. Meters tap from the channel output
+    // (post-gain) so LEDs reflect the actual contribution of each channel.
+    n.ioCh1.connect(n.master);
+    n.ioCh2.connect(n.master);
+    n.ioCh3.connect(n.master);
+    n.ioCh4.connect(n.master);
+    n.ioCh1.connect(n.ioCh1Meter);
+    n.ioCh2.connect(n.ioCh2Meter);
+    n.ioCh3.connect(n.ioCh3Meter);
+    n.ioCh4.connect(n.ioCh4Meter);
+
     // master → seqMasterGate → Destination: every patch cable that reaches io-in
-    // flows through master, then seqMasterGate. The Loop gates seqMasterGate per step —
-    // this silences ALL audio on gate-off steps regardless of how cables are routed.
+    // or any io-inN channel flows through master, then seqMasterGate. The Loop gates
+    // seqMasterGate per step — silences ALL audio on gate-off steps regardless of routing.
     n.master.connect(n.seqMasterGate);
 
     // moogBus: side tap after the master gate, feeds the Workstation's Tone.Recorder.
@@ -299,6 +367,22 @@ export default function useMoogAudio() {
     }, '8n');
 
     seqLoopRef.current = loop;
+
+    // Chord sequencer loop — advances every chordSeqDivisionRef bars/beats.
+    // step.rootClass (0-11) → Hz via CHORD_BASE_HZ (C3 * 2^(semitones/12)).
+    // Also fires chordSeqChordCbRef so MoogShell can update the quantizer scale
+    // to use this chord's interval set (chord-aware melody snapping).
+    const chordLoop = new Tone.Loop((time) => {
+      chordSeqCurrentStepRef.current = (chordSeqCurrentStepRef.current + 1) % 8;
+      const idx  = chordSeqCurrentStepRef.current;
+      const step = chordSeqStepsRef.current[idx];
+      const hz   = CHORD_BASE_HZ * Math.pow(2, step.rootClass / 12);
+      n.chordSeqPitchOut.setValueAtTime(hz, time);
+      if (chordSeqStepCbRef.current) chordSeqStepCbRef.current(idx);
+      if (chordSeqChordCbRef.current) chordSeqChordCbRef.current(step.rootClass, step.chordType);
+    }, chordSeqDivisionRef.current);
+
+    chordSeqLoopRef.current = chordLoop;
 
     nodesRef.current   = n;
     jackMapRef.current = buildJackMap(n);
@@ -390,6 +474,11 @@ export default function useMoogAudio() {
         try { seqLoopRef.current.dispose(); } catch (_) {}
         seqLoopRef.current = null;
       }
+      if (chordSeqLoopRef.current) {
+        try { chordSeqLoopRef.current.stop(); } catch (_) {}
+        try { chordSeqLoopRef.current.dispose(); } catch (_) {}
+        chordSeqLoopRef.current = null;
+      }
       try { Tone.Transport.stop(); } catch (_) {}
       // Disconnect AudioWorkletNodes (not Tone.js nodes — no .dispose()).
       if (hardSyncNode)   { try { hardSyncNode.disconnect();   } catch (_) {} }
@@ -414,10 +503,12 @@ export default function useMoogAudio() {
       try { node.start(); } catch (_) {}
     });
 
-    // Start sequencer clock — reset step so first tick lands on step 0
-    seqCurrentStepRef.current = -1;
+    // Start sequencer clocks — reset steps so first tick lands on step 0
+    seqCurrentStepRef.current      = -1;
+    chordSeqCurrentStepRef.current = -1;
     Tone.Transport.start();
     seqLoopRef.current?.start(0);
+    chordSeqLoopRef.current?.start(0);
 
     setIsPowered(true);
   }, []);
@@ -432,10 +523,13 @@ export default function useMoogAudio() {
       try { node.stop(); } catch (_) {}
     });
 
-    // Stop sequencer loop and clear active LED
+    // Stop sequencer loops and clear active LEDs
     seqLoopRef.current?.stop();
     seqCurrentStepRef.current = -1;
-    if (seqStepCbRef.current) seqStepCbRef.current(-1); // signal LEDs to clear
+    if (seqStepCbRef.current) seqStepCbRef.current(-1);
+    chordSeqLoopRef.current?.stop();
+    chordSeqCurrentStepRef.current = -1;
+    if (chordSeqStepCbRef.current) chordSeqStepCbRef.current(-1);
     Tone.Transport.stop();
 
     // Re-open both gates so keyboard / manual playing is audible after sequencer stops.
@@ -611,6 +705,17 @@ export default function useMoogAudio() {
     if (wet      !== undefined) safeRamp(n.reverb.wet,      wet);
   }, []);
 
+  // Update per-channel mixer volume for the 4-channel I/O input stage.
+  // channelIndex: 1–4  value: 0–1 linear gain (0 = muted, 1 = unity gain).
+  // Single writer per node — this is the only function that touches ioCh1–ioCh4.gain.
+  const updateIoChannelVol = useCallback((channelIndex, value) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    const node = n[`ioCh${channelIndex}`];
+    if (!node) return;
+    safeRamp(node.gain, value);
+  }, []);
+
   // Update master output volume — single writer on n.master.volume.
   // volume (0–1) → -60 dB to +6 dB  (linear dB scale; 0.75 ≈ -13.5 dB, matching init)
   const updateIoParams = useCallback(({ volume } = {}) => {
@@ -630,6 +735,15 @@ export default function useMoogAudio() {
     const n = nodesRef.current;
     if (!n) return null;
     return n.analyser.getValue();
+  }, []);
+
+  // Returns the raw waveform data from the TRANSPOSE CV analyser.
+  // The average absolute value of these samples is the DC level = Hz from the patched source.
+  // Returns Float32Array of 256 samples, or null before nodes are created.
+  const getQntTransposeData = useCallback(() => {
+    const n = nodesRef.current;
+    if (!n) return null;
+    return n.qntTransposeAnalyser.getValue();
   }, []);
 
   // Returns the normalised level [0, 1] from a named meter tap.
@@ -677,6 +791,30 @@ export default function useMoogAudio() {
     n.quantizerNode.port.postMessage(quantizerParamsRef.current);
   }, []);
 
+  // Chord sequencer step data — push new { rootClass, chordType } steps without touching React state.
+  const updateChordSeqSteps = useCallback((steps) => {
+    chordSeqStepsRef.current = steps;
+  }, []);
+
+  // Register the chord sequencer LED step callback (same pattern as setSeqStepCallback).
+  const setChordSeqStepCallback = useCallback((fn) => {
+    chordSeqStepCbRef.current = fn;
+  }, []);
+
+  // Register a callback fired on each chord step advance: fn(rootClass: 0-11, chordType: string).
+  // MoogShell uses this to call updateQuantizerParams({ root, scale: chordType }) so the
+  // quantizer snaps the melody to the current chord's interval set.
+  const setChordSeqChordCallback = useCallback((fn) => {
+    chordSeqChordCbRef.current = fn;
+  }, []);
+
+  // Change the chord sequencer clock division — takes effect immediately.
+  // interval: Tone.js time string ('2n' | '1m' | '2m' | '4m')
+  const setChordSeqDivision = useCallback((interval) => {
+    chordSeqDivisionRef.current = interval;
+    if (chordSeqLoopRef.current) chordSeqLoopRef.current.interval = interval;
+  }, []);
+
   // Register the quantizer LED callback (called from quantizer port.onmessage, main thread).
   // The callback receives: (noteClass: 0–11, midiNote: int) when the quantized note changes.
   const setQuantizerCallback = useCallback((fn) => {
@@ -716,9 +854,10 @@ export default function useMoogAudio() {
   return {
     powerOn, powerOff, connect, disconnect, isPowered,
     updateVcoParams, updateVcfParams, updateEnvParams, triggerGate, updateVcaParams,
-    updateLfoParams, updateIoParams, updateReverbParams, getMoogBusNode,
-    getOscilloscopeData, getMeterValue,
+    updateLfoParams, updateIoParams, updateIoChannelVol, updateReverbParams, getMoogBusNode,
+    getOscilloscopeData, getQntTransposeData, getMeterValue,
     setTempo, updateSequencerSteps, setSeqStepCallback, updateKeyboard,
+    updateChordSeqSteps, setChordSeqStepCallback, setChordSeqDivision, setChordSeqChordCallback,
     setVco2SyncEnabled,
     updateQuantizerParams, setQuantizerCallback,
   };

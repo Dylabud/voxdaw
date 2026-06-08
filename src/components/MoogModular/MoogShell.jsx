@@ -506,51 +506,32 @@ function EnvelopeModule({ label, onParamUpdate, onGate, getLedValue }) {
   );
 }
 
-function MultiplesModule() {
-  return (
-    <div className={styles.module}>
-      <Screw pos="screwTL" /><Screw pos="screwTR" />
-      <Screw pos="screwBL" /><Screw pos="screwBR" />
-      <div className={styles.plate}>
-        <div className={styles.plateHeader}>
-          <div className={styles.plateTitles}>
-            <span className={styles.plateTitle}>MULT</span>
-            <span className={styles.plateSub}>PASSIVE MULTIPLES — 2 × 4</span>
-          </div>
-        </div>
-        <div className={styles.plateBody}>
-          <div className={styles.multiplesGrid}>
-            <div className={styles.multBank}>
-              <span className={styles.multBankLabel}>A</span>
-              <Jack id="mult-a1" label="A1" />
-              <Jack id="mult-a2" label="A2" />
-              <Jack id="mult-a3" label="A3" />
-              <Jack id="mult-a4" label="A4" />
-            </div>
-            <div className={styles.multBank}>
-              <span className={styles.multBankLabel}>B</span>
-              <Jack id="mult-b1" label="B1" />
-              <Jack id="mult-b2" label="B2" />
-              <Jack id="mult-b3" label="B3" />
-              <Jack id="mult-b4" label="B4" />
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
-// I/O module — oscilloscope display, POWER switch, MASTER VOL knob, and the "io-in" patch jack.
-// getOscData() — passed down from MoogShell → useMoogAudio.getOscilloscopeData.
-// getLedValue() — stable getter (pre-bound in MoogShell) for the master level meter.
-function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue }) {
+// Stable zero-value getter used as a fallback for LEDs when no meter is wired.
+// Module-level constant so its reference never changes — Led's useEffect won't restart.
+const ZERO_GETTER = () => 0;
+
+// I/O module — oscilloscope, POWER, MASTER VOL, 4-channel mixer input, and legacy io-in.
+// getOscData()    — stable getter for oscilloscope waveform data.
+// getLedValue()   — stable getter for master level meter (PEAK LED).
+// getChLevels     — array of 4 stable getters for per-channel activity LEDs.
+// onChannelVolChange(channelIndex, value) — single writer for ioCh1–ioCh4.gain.
+function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue, getChLevels, onChannelVolChange }) {
   const [masterVol, setMasterVol] = useState(0.7);
+  const [chVols, setChVols] = useState([0.8, 0.8, 0.8, 0.8]);
 
   useEffect(() => {
     if (!onParamUpdate) return;
     onParamUpdate({ volume: masterVol });
   }, [masterVol, onParamUpdate]);
+
+  useEffect(() => {
+    if (!onChannelVolChange) return;
+    chVols.forEach((v, i) => onChannelVolChange(i + 1, v));
+  }, [chVols, onChannelVolChange]);
+
+  const handleChVol = (i, v) =>
+    setChVols(prev => { const next = [...prev]; next[i] = v; return next; });
 
   return (
     <div className={styles.module}>
@@ -560,7 +541,7 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue }
         <div className={styles.plateHeader}>
           <div className={styles.plateTitles}>
             <span className={styles.plateTitle}>I/O</span>
-            <span className={styles.plateSub}>INPUT · OUTPUT · POWER</span>
+            <span className={styles.plateSub}>4-CH MIXER · OUTPUT · POWER</span>
           </div>
         </div>
         <div className={styles.plateBody}>
@@ -580,8 +561,22 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue }
             <Led getValue={getLedValue} color="red" label="PEAK" />
           </div>
           <PlateDivider />
+          {[1, 2, 3, 4].map((ch, i) => (
+            <div key={ch} className={styles.ioChRow}>
+              <Led getValue={getChLevels?.[i] ?? ZERO_GETTER} color="green" />
+              <MoogKnob
+                label={`CH ${ch}`}
+                size="sm"
+                value={chVols[i]}
+                onChange={v => handleChVol(i, v)}
+                defaultValue={0.8}
+              />
+              <Jack id={`io-in${ch}`} label={`IN ${ch}`} />
+            </div>
+          ))}
+          <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id="io-in" label="IN" />
+            <Jack id="io-in" label="IN ✦" />
           </div>
         </div>
       </div>
@@ -598,11 +593,15 @@ const ROOT_NAMES   = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const IS_BLACK_KEY = [false,true,false,true,false,false,true,false,true,false,true,false];
 const OCT_STEPS    = [-3, -2, -1, 0, 1, 2, 3];
 
-// onParamUpdate({ scale, root }) — sends new config to the AudioWorklet.
-// onSetCallback(fn|null)         — registers/deregisters the note-class LED callback.
-// LED array is 12 DOM nodes mutated directly (Zero-Re-render Rule):
-// the worklet posts { noteClass } via port; the callback activates the matching LED.
-function QuantizerModule({ onParamUpdate, onSetCallback }) {
+// onParamUpdate({ scale, root, octShift, bypass }) — sends config to the AudioWorklet.
+// onSetCallback(fn|null)   — registers/deregisters the note-class LED callback.
+// getTransposeData()       — returns Float32Array from the TRANSPOSE CV analyser.
+//                            avgAbsValue > 10 → cable connected; value → note class.
+//                            When active, overrides the ROOT knob in the worklet.
+// chordMapRef              — React ref owned by MoogShell; points to the chord type span
+//                            in the EXT row. The chord callback writes the type label here.
+// LED array is 12 DOM nodes mutated directly (Zero-Re-render Rule).
+function QuantizerModule({ onParamUpdate, onSetCallback, getTransposeData, chordMapRef }) {
   const [scale,    setScale]    = useState('MAJ');
   const [root,     setRoot]     = useState(0);   // 0 = C
   const [octShift, setOctShift] = useState(0);   // −3 to +3 octaves
@@ -613,9 +612,79 @@ function QuantizerModule({ onParamUpdate, onSetCallback }) {
   const displayRef = useRef(null); // note name + Hz text element
   const inLedRef   = useRef(null); // IN presence LED
 
+  // Transposition CV state
+  const transposeActiveRef   = useRef(false); // true when EXT cable is detected
+  const rootRef              = useRef(0);     // always-current knob root for rAF closure
+  const lastExtNoteClassRef  = useRef(-1);    // delta check — avoids spamming worklet
+  const extLedRef            = useRef(null);
+  const extRootRef           = useRef(null);  // EXT ROOT note name text
+  const extRowRef            = useRef(null);  // EXT status row (show/hide)
+
+  // Keep rootRef in sync with knob state (safe for rAF closure reads)
+  useEffect(() => { rootRef.current = root; }, [root]);
+
+  // Send worklet params. When EXT transpose is active, skip root so the rAF loop owns it.
   useEffect(() => {
-    onParamUpdate?.({ scale, root, octShift, bypass });
+    if (!onParamUpdate) return;
+    if (transposeActiveRef.current) {
+      onParamUpdate({ scale, octShift, bypass });
+    } else {
+      onParamUpdate({ scale, root, octShift, bypass });
+    }
   }, [scale, root, octShift, bypass, onParamUpdate]);
+
+  // rAF loop: reads TRANSPOSE CV analyser, derives note class, overrides worklet root.
+  // avgAbsValue of waveform samples = DC level = Hz from the patched chordSeqPitchOut.
+  // Threshold 10 Hz cleanly separates "no cable" (0) from "connected" (32+ Hz minimum).
+  useEffect(() => {
+    if (!getTransposeData) return;
+    let rafId;
+    const tick = () => {
+      rafId = requestAnimationFrame(tick);
+      const data = getTransposeData();
+      if (!data || !data.length) return;
+
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += Math.abs(data[i]);
+      const avgHz   = sum / data.length;
+      const isActive = avgHz > 10;
+      const wasActive = transposeActiveRef.current;
+
+      if (wasActive && !isActive) {
+        // Cable removed — restore knob root, hide EXT row
+        transposeActiveRef.current = false;
+        lastExtNoteClassRef.current = -1;
+        if (extRowRef.current)  extRowRef.current.style.display  = 'none';
+        if (extLedRef.current) {
+          extLedRef.current.style.background = 'rgba(93,202,165,0.12)';
+          extLedRef.current.style.boxShadow  = 'none';
+        }
+        onParamUpdate?.({ root: rootRef.current });
+      }
+
+      if (!wasActive && isActive) {
+        // Cable connected — show EXT row
+        transposeActiveRef.current = true;
+        if (extRowRef.current) extRowRef.current.style.display = 'flex';
+        if (extLedRef.current) {
+          extLedRef.current.style.background = '#5DCAA5';
+          extLedRef.current.style.boxShadow  = '0 0 4px #5DCAA5';
+        }
+      }
+
+      if (isActive) {
+        const midi      = 69 + 12 * Math.log2(Math.max(0.001, avgHz) / 440);
+        const noteClass = ((Math.round(midi) % 12) + 12) % 12;
+        if (noteClass !== lastExtNoteClassRef.current) {
+          lastExtNoteClassRef.current = noteClass;
+          onParamUpdate?.({ root: noteClass });
+          if (extRootRef.current) extRootRef.current.textContent = ROOT_NAMES[noteClass];
+        }
+      }
+    };
+    tick();
+    return () => cancelAnimationFrame(rafId);
+  }, [getTransposeData, onParamUpdate]);
 
   useEffect(() => {
     // Callback signature: (noteClass: 0–11 | null, midiNote: int | null, hasSignal: bool | undefined)
@@ -697,6 +766,13 @@ function QuantizerModule({ onParamUpdate, onSetCallback }) {
             {/* Note name + Hz display — written directly via DOM ref (no React state) */}
             <div ref={displayRef} className={styles.qntDisplay}>--</div>
           </div>
+          {/* EXT transpose status — DOM-mutated by rAF (root) and chord callback (type) */}
+          <div ref={extRowRef} className={styles.qntExtRow}>
+            <div ref={extLedRef} className={styles.qntExtLed} />
+            <span className={styles.qntExtLabel}>EXT</span>
+            <span ref={extRootRef} className={styles.qntExtDisplay} />
+            <span ref={chordMapRef} className={styles.qntExtChordType} />
+          </div>
           <div className={styles.selectorRow}>
             <div className={styles.selectorGroup} onClick={cycleScale} title="Click to cycle scale">
               <span className={styles.selectorLabel}>SCALE</span>
@@ -725,8 +801,135 @@ function QuantizerModule({ onParamUpdate, onSetCallback }) {
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id="qnt-cv-in"  label="CV IN" />
-            <Jack id="qnt-cv-out" label="OUT" />
+            <Jack id="qnt-cv-in"        label="CV IN" />
+            <Jack id="qnt-cv-out"       label="OUT" />
+            <Jack id="qnt-transpose-in" label="TRP" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────── Chord Sequencer ────────────
+
+const CHORD_DIVS   = ['2n', '1m', '2m', '4m'];
+const CHORD_LABELS = { '2n': '½ BAR', '1m': '1 BAR', '2m': '2 BAR', '4m': '4 BAR' };
+
+// Chord types mirror the CHORD_* entries added to SCALE_DEFS in useMoogAudio.js.
+// When a step fires, its chordType is sent to updateQuantizerParams({ scale: chordType })
+// so the quantizer snaps melody notes to chord tones instead of a diatonic scale.
+const CHORD_TYPES = ['CMAJ', 'CMIN', 'CDOM', 'CMAJ7', 'CMIN7', 'CSUS4', 'CDIM'];
+const CHORD_TYPE_LABELS = {
+  CMAJ: 'MAJ', CMIN: 'min', CDOM: 'dom7',
+  CMAJ7: 'maj7', CMIN7: 'min7', CSUS4: 'sus4', CDIM: 'dim',
+};
+
+// 8-step chord sequencer — each step stores { rootClass, chordType }.
+// rootClass cycles through the 12 chromatic notes; chordType selects the chord quality.
+// On step fire: chordseq-cv-out outputs root Hz AND chordSeqChordCallback syncs the quantizer.
+function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback }) {
+  const [steps, setSteps] = useState(() =>
+    Array.from({ length: 8 }, (_, i) => ({
+      rootClass: [0, 0, 5, 5, 7, 7, 0, 0][i],
+      chordType: 'CMAJ',
+    }))
+  );
+  const [division, setDivision] = useState('1m');
+
+  const ledRefs     = useRef([]);
+  const prevStepRef = useRef(-1);
+
+  useEffect(() => { onStepsChange?.(steps); },        [steps,    onStepsChange]);
+  useEffect(() => { onDivisionChange?.(division); },  [division, onDivisionChange]);
+
+  useEffect(() => {
+    onSetCallback?.((idx) => {
+      const prev = prevStepRef.current;
+      if (prev >= 0 && ledRefs.current[prev]) {
+        ledRefs.current[prev].classList.remove(styles.seqLedActive);
+      }
+      if (idx >= 0) {
+        if (ledRefs.current[idx]) ledRefs.current[idx].classList.add(styles.seqLedActive);
+        prevStepRef.current = idx;
+      } else {
+        prevStepRef.current = -1;
+      }
+    });
+    return () => {
+      onSetCallback?.(null);
+      const prev = prevStepRef.current;
+      if (prev >= 0 && ledRefs.current[prev]) {
+        ledRefs.current[prev].classList.remove(styles.seqLedActive);
+      }
+    };
+  }, [onSetCallback]);
+
+  const cycleDiv  = () =>
+    setDivision(prev => CHORD_DIVS[(CHORD_DIVS.indexOf(prev) + 1) % CHORD_DIVS.length]);
+
+  const cycleRoot = (i) =>
+    setSteps(prev => {
+      const next = [...prev];
+      next[i] = { ...next[i], rootClass: (next[i].rootClass + 1) % 12 };
+      return next;
+    });
+
+  const cycleType = (i) =>
+    setSteps(prev => {
+      const next = [...prev];
+      next[i] = {
+        ...next[i],
+        chordType: CHORD_TYPES[(CHORD_TYPES.indexOf(next[i].chordType) + 1) % CHORD_TYPES.length],
+      };
+      return next;
+    });
+
+  return (
+    <div className={styles.module}>
+      <Screw pos="screwTL" /><Screw pos="screwTR" />
+      <Screw pos="screwBL" /><Screw pos="screwBR" />
+      <div className={styles.plate}>
+        <div className={styles.plateHeader}>
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>CHORD</span>
+            <span className={styles.plateSub}>CHORD SEQUENCER · 8-STEP EDITOR</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          <div className={styles.chordSeqGrid}>
+            {steps.map((step, i) => (
+              <div key={i} className={styles.chordSeqStep}>
+                <div
+                  ref={el => { ledRefs.current[i] = el; }}
+                  className={styles.seqLed}
+                />
+                <button
+                  className={styles.chordSeqRoot}
+                  onClick={() => cycleRoot(i)}
+                  title="Click to cycle root note"
+                >
+                  {ROOT_NAMES[step.rootClass]}
+                </button>
+                <button
+                  className={styles.chordSeqType}
+                  onClick={() => cycleType(i)}
+                  title="Click to cycle chord type"
+                >
+                  {CHORD_TYPE_LABELS[step.chordType]}
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className={styles.selectorRow}>
+            <div className={styles.selectorGroup} onClick={cycleDiv} title="Click to cycle clock division">
+              <span className={styles.selectorLabel}>CLOCK DIV</span>
+              <span className={styles.selectorValue}>{CHORD_LABELS[division]}</span>
+            </div>
+          </div>
+          <PlateDivider />
+          <div className={styles.jackRow}>
+            <Jack id="chordseq-cv-out" label="ROOT CV" />
           </div>
         </div>
       </div>
@@ -869,6 +1072,23 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
     onBusReady?.(() => audio.getMoogBusNode());
   }, [onBusReady, audio.getMoogBusNode]);
 
+  // Chord map ref — DOM ref to the chord type span inside QuantizerModule's EXT row.
+  // The chord callback writes here directly (no React re-render).
+  const chordMapRef = useRef(null);
+
+  // Chord callback: fires on each chord sequencer step advance.
+  // 1. Syncs quantizer scale to chord intervals (chord-aware melody snapping).
+  // 2. Updates the chord type display in the quantizer's EXT row.
+  useEffect(() => {
+    audio.setChordSeqChordCallback((rootClass, chordType) => {
+      audio.updateQuantizerParams({ root: rootClass, scale: chordType });
+      if (chordMapRef.current) {
+        chordMapRef.current.textContent = CHORD_TYPE_LABELS[chordType] ?? chordType;
+      }
+    });
+    return () => audio.setChordSeqChordCallback(null);
+  }, [audio.setChordSeqChordCallback, audio.updateQuantizerParams]);
+
   // Stable getValue closures — created once (audio.getMeterValue has empty-dep useCallback,
   // so its reference never changes). Passing pre-bound getters prevents Led's useEffect
   // from restarting on every re-render of the parent module component.
@@ -876,6 +1096,10 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
   const getEnv1Level   = useCallback(() => audio.getMeterValue('env1'),   [audio.getMeterValue]);
   const getEnv2Level   = useCallback(() => audio.getMeterValue('env2'),   [audio.getMeterValue]);
   const getMasterLevel = useCallback(() => audio.getMeterValue('master'), [audio.getMeterValue]);
+  const getIoCh1Level  = useCallback(() => audio.getMeterValue('ioCh1'),  [audio.getMeterValue]);
+  const getIoCh2Level  = useCallback(() => audio.getMeterValue('ioCh2'),  [audio.getMeterValue]);
+  const getIoCh3Level  = useCallback(() => audio.getMeterValue('ioCh3'),  [audio.getMeterValue]);
+  const getIoCh4Level  = useCallback(() => audio.getMeterValue('ioCh4'),  [audio.getMeterValue]);
 
   // Toggle: powerOn when off, powerOff when on. Both functions guard internally via
   // isPoweredRef so rapid double-clicks are safe even before the async powerOn resolves.
@@ -888,42 +1112,54 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
     const el = cabinetRef.current;
     if (!el) return;
 
+    // scheduleFit debounce — multiple rapid ResizeObserver callbacks (e.g. from fit()'s
+    // own DOM writes) are collapsed into a single deferred fit() call, preventing loops.
+    let fitTimer = null;
+    const scheduleFit = () => {
+      clearTimeout(fitTimer);
+      fitTimer = setTimeout(fit, 0);
+    };
+
     const fit = () => {
-      // Reset to natural size so we can measure it accurately
+      // Clear transform so offsetHeight reflects the true layout height (transform is
+      // visual-only and doesn't affect layout, but clearing ensures a clean measurement).
       el.style.transform    = 'none';
       el.style.marginBottom = '0px';
 
-      const natW = el.offsetWidth;
       const natH = el.offsetHeight;
-      if (!natW || !natH) return;
+      if (!natH) return; // hidden (display:none) — ResizeObserver fires when it becomes visible
 
-      // Available space inside the shell's padding (16px sides, 44px top, 16px bottom)
+      // Available space (shell padding: 16px sides, 44px top + 16px bottom).
       const availW = window.innerWidth  - 32;
       const availH = window.innerHeight - 60;
-      const scale  = Math.min(availW / natW, availH / natH, 1);
+      const scale  = Math.min(availH / natH, 1);
 
       el.style.transformOrigin = 'top center';
 
       if (scale < 1) {
+        // Width compensation: widen the layout box so that after scale(), the visual
+        // width equals availW — no blank side margins from transform shrinking the width.
+        // Guard: only assign if the value differs to avoid unnecessary ResizeObserver triggers.
+        const newW = `${Math.ceil(availW / scale)}px`;
+        if (el.style.width !== newW) el.style.width = newW;
         el.style.transform    = `scale(${scale})`;
-        // transform: scale() is visual-only — the layout footprint stays at natH.
-        // A negative marginBottom collapses the unused layout space so the flex
-        // container never overflows its 100vh boundary.
         el.style.marginBottom = `${Math.round(natH * (scale - 1))}px`;
       } else {
-        el.style.transform    = 'none';
-        el.style.marginBottom = '0px';
+        if (el.style.width !== '') el.style.width = '';
       }
     };
 
-    fit();
+    fit(); // immediate on mount
+    document.fonts.ready.then(scheduleFit);
 
-    // Re-fit if the cabinet's own content height ever changes (e.g. after fonts load)
-    const ro = new ResizeObserver(fit);
+    // ResizeObserver catches: late font loads, page becoming visible after display:none
+    // (navigation back to Moog page), and any content height changes at runtime.
+    const ro = new ResizeObserver(scheduleFit);
     ro.observe(el);
 
     window.addEventListener('resize', fit);
     return () => {
+      clearTimeout(fitTimer);
       ro.disconnect();
       window.removeEventListener('resize', fit);
     };
@@ -961,24 +1197,30 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
               <ReverbModule onParamUpdate={audio.updateReverbParams} />
             </div>
 
-            {/* Row 3: VCA, Envelopes, Multiples */}
+            {/* Row 3: VCA, Envelopes */}
             <div className={`${styles.tier} ${styles.tierRow3}`}>
               <VcaModule onParamUpdate={audio.updateVcaParams} />
               <EnvelopeModule label="ENV 1" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv1Level} />
               <EnvelopeModule label="ENV 2" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv2Level} />
-              <MultiplesModule />
             </div>
 
-            {/* Row 4: 960 Sequencer + Quantizer + I/O */}
+            {/* Row 4: 960 Sequencer + Chord Sequencer + Quantizer + I/O */}
             <div className={`${styles.tier} ${styles.tierRow4}`}>
               <SequencerModule
                 onStepsChange={audio.updateSequencerSteps}
                 onTempoChange={audio.setTempo}
                 onSetCallback={audio.setSeqStepCallback}
               />
+              <ChordSeqModule
+                onStepsChange={audio.updateChordSeqSteps}
+                onDivisionChange={audio.setChordSeqDivision}
+                onSetCallback={audio.setChordSeqStepCallback}
+              />
               <QuantizerModule
                 onParamUpdate={audio.updateQuantizerParams}
                 onSetCallback={audio.setQuantizerCallback}
+                getTransposeData={audio.getQntTransposeData}
+                chordMapRef={chordMapRef}
               />
               <IoModule
                 isPowered={audio.isPowered}
@@ -986,6 +1228,8 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
                 onParamUpdate={audio.updateIoParams}
                 getOscData={audio.getOscilloscopeData}
                 getLedValue={getMasterLevel}
+                getChLevels={[getIoCh1Level, getIoCh2Level, getIoCh3Level, getIoCh4Level]}
+                onChannelVolChange={audio.updateIoChannelVol}
               />
             </div>
           </div>

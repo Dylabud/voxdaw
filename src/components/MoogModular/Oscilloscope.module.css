@@ -63,5 +63,7 @@
 
 .canvas {
   display: block;
-  /* canvas background is transparent so the .screen gradient shows through */
+  width: 100%;   /* fill the .screen container so the waveform spans the full width */
+  height: 64px;  /* explicit height — prevents canvas from maintaining 200:64 aspect ratio
+                    when width:100% is set, which would make it proportionally taller */
 }

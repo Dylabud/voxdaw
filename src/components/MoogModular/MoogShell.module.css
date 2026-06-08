@@ -51,7 +51,6 @@
 .cabinet {
   position: relative; /* anchor for PatchCableOverlay (position:absolute inset:0) */
   width: 100%;
-  max-width: 1420px;
   flex-shrink: 0; /* prevent flex from shrinking the cabinet before fit() measures it */
   background:
     /* Vignette — heavy corner/edge darkening to simulate decades of handling & oxidation.
@@ -157,11 +156,11 @@
 .rack {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   background: #0a0908;
 }
 
-/* Dead class — kept for reference, no longer rendered in JSX */
+/* Dead class — no longer rendered in JSX */
 .tierSep {
   height: 4px;
   background: linear-gradient(
@@ -187,8 +186,8 @@
 /* Row column templates */
 .tierRow1 { grid-template-columns: 1fr 1fr 1fr 0.6fr; }
 .tierRow2 { grid-template-columns: 1.7fr 1.5fr 1fr 0.75fr; }
-.tierRow3 { grid-template-columns: 0.85fr 1fr 1fr 0.7fr; }
-.tierRow4 { grid-template-columns: 3.5fr 0.9fr 1fr; }
+.tierRow3 { grid-template-columns: 0.85fr 1fr 1fr; }
+.tierRow4 { grid-template-columns: 2.5fr 1fr 0.9fr 1fr; }
 
 /* ══════════════════════════════════════════════════════
    MODULE PANEL
@@ -220,10 +219,10 @@
       rgba(0, 0, 0, 0.014) 3px
     ),
     linear-gradient(155deg, #181716 0%, #141312 45%, #111010 100%);
-  padding: 10px;
+  padding: 11px;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
   /* Right edge line defines module boundary against the dark rack gap */
   border-right: 1px solid #1c1a18;
   box-shadow:
@@ -320,9 +319,9 @@
 }
 
 .plateTitle {
-  font-size: 12px;
+  font-size: 16px;
   font-weight: 700;
-  letter-spacing: 0.3em;
+  letter-spacing: 0.26em;
   /* More ivory — vintage silkscreen on stamped aluminum */
   color: #cec5a2;
   text-transform: uppercase;
@@ -330,8 +329,8 @@
 }
 
 .plateSub {
-  font-size: 5.5px;
-  letter-spacing: 0.22em;
+  font-size: 7.5px;
+  letter-spacing: 0.18em;
   color: #625a4e;
   text-transform: uppercase;
 }
@@ -341,7 +340,7 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 
 .plateDivider {
@@ -363,7 +362,7 @@
 .knobRow {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
   padding: 2px 2px 0;
   flex-wrap: wrap;
 }
@@ -439,7 +438,7 @@
 
 .switchRow {
   display: flex;
-  gap: 10px;
+  gap: 12px;
   padding: 0 2px;
   align-items: center;
 }
@@ -452,8 +451,8 @@
 }
 
 .toggleLabel {
-  font-size: 6px;
-  letter-spacing: 0.18em;
+  font-size: 7.5px;
+  letter-spacing: 0.16em;
   color: #6a6052;
   text-transform: uppercase;
 }
@@ -489,7 +488,7 @@
 
 .selectorRow {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   padding: 0 2px;
   align-items: center;
 }
@@ -504,15 +503,15 @@
 }
 
 .selectorLabel {
-  font-size: 6px;
-  letter-spacing: 0.18em;
+  font-size: 7.5px;
+  letter-spacing: 0.16em;
   color: #6a6052;
   text-transform: uppercase;
 }
 
 .selectorValue {
-  font-size: 9px;
-  letter-spacing: 0.16em;
+  font-size: 12px;
+  letter-spacing: 0.13em;
   color: #c8b890;
   text-transform: uppercase;
   background: linear-gradient(to bottom, #1e1c18, #161412);
@@ -544,13 +543,13 @@
 .gateBtnRow {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   padding: 0 2px;
 }
 
 .gateBtnLabel {
-  font-size: 6px;
-  letter-spacing: 0.18em;
+  font-size: 7.5px;
+  letter-spacing: 0.16em;
   color: #6a6052;
   text-transform: uppercase;
 }
@@ -597,7 +596,7 @@
 
 .jackRow {
   display: flex;
-  gap: 6px;
+  gap: 10px;
   flex-wrap: wrap;
   padding: 0 2px;
   align-items: flex-end;
@@ -618,8 +617,8 @@
 }
 
 .jack {
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   flex-shrink: 0;
   position: relative;
@@ -630,7 +629,7 @@
     #020100 100%
   );
   /* Warmer silver ring with top-left light hit */
-  border: 2.5px solid #888078;
+  border: 3px solid #888078;
   box-shadow:
     /* directional mount shadow */
     0 3px 8px rgba(0, 0, 0, 0.92),
@@ -650,17 +649,17 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 7px;
-  height: 7px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: radial-gradient(circle at 40% 35%, #141210, #010000);
   box-shadow: inset 0 1px 4px rgba(0, 0, 0, 1);
 }
 
 .jackLabel {
-  font-size: 5.5px;
-  letter-spacing: 0.16em;
-  color: #666058;
+  font-size: 8.5px;
+  letter-spacing: 0.12em;
+  color: #706860;
   text-transform: uppercase;
   text-align: center;
   white-space: nowrap;
@@ -671,34 +670,6 @@
   height: 8px;
 }
 
-/* ══════════════════════════════════════════════════════
-   MULTIPLES MODULE
-   ══════════════════════════════════════════════════════ */
-
-.multiplesGrid {
-  display: flex;
-  gap: 16px;
-  justify-content: center;
-  padding: 4px 3px;
-  flex: 1;
-  align-items: flex-start;
-}
-
-.multBank {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 7px;
-}
-
-.multBankLabel {
-  font-size: 8px;
-  letter-spacing: 0.3em;
-  color: #cec5a2;
-  font-weight: 700;
-  text-transform: uppercase;
-  margin-bottom: 1px;
-}
 
 /* ══════════════════════════════════════════════════════
    BLANK PANEL
@@ -785,7 +756,7 @@
   align-items: flex-start;
   gap: 5px;
   flex-shrink: 0;
-  min-width: 76px;
+  min-width: 86px;
 }
 
 .seqBpmDisplay {
@@ -811,6 +782,89 @@
   align-items: center;
   gap: 3px;
   min-width: 0;
+}
+
+/* Chord sequencer step: LED → root button only (no gate, no knob) */
+.chordSeqStep {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* ══════════════════════════════════════════════════════
+   CHORD SEQUENCER — step editor buttons
+   ══════════════════════════════════════════════════════ */
+
+/* 8-column step grid — tighter gaps than 960 seq since there are no gate buttons */
+.chordSeqGrid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 3px 3px;
+}
+
+/* Root note button — shows note name (C, C#, D …); click cycles through 12 chromatic notes */
+.chordSeqRoot {
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  height: 18px;
+  background: linear-gradient(to bottom, #1e1c18, #161412);
+  border: 1px solid #38342c;
+  border-radius: 2px;
+  color: #c8b890;
+  font-size: 7px;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  text-align: center;
+  cursor: pointer;
+  padding: 0;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.7);
+  transition: background 0.08s, border-color 0.08s, color 0.08s;
+}
+
+.chordSeqRoot:hover {
+  background: linear-gradient(to bottom, #28261c, #201e18);
+  border-color: #58503c;
+  color: #e8d4a0;
+}
+
+.chordSeqRoot:active {
+  color: #5DCAA5;
+  border-color: #3a9070;
+  background: linear-gradient(to bottom, #181612, #1c1a14);
+}
+
+/* Chord type button — shows quality abbreviation (MAJ, min, dom7 …); click cycles types */
+.chordSeqType {
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  height: 13px;
+  background: linear-gradient(to bottom, #161412, #111010);
+  border: 1px solid #2c2820;
+  border-radius: 2px;
+  color: #6a6052;
+  font-size: 5px;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  text-align: center;
+  cursor: pointer;
+  padding: 0;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.7);
+  transition: background 0.08s, border-color 0.08s, color 0.08s;
+}
+
+.chordSeqType:hover {
+  background: linear-gradient(to bottom, #1e1c18, #181614);
+  border-color: #484038;
+  color: #a89880;
+}
+
+.chordSeqType:active {
+  color: #5DCAA5;
+  border-color: #3a9070;
 }
 
 /* Step position LED */
@@ -952,4 +1006,59 @@
   text-align: center;
   min-height: 9px;
   opacity: 0.85;
+}
+
+/* EXT transpose status row — hidden by default; shown via rAF DOM mutation */
+.qntExtRow {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 2px 2px;
+}
+
+/* EXT presence LED — round dot; lit green when TRANSPOSE CV is detected */
+.qntExtLed {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: rgba(93, 202, 165, 0.12);
+  box-shadow: none;
+}
+
+.qntExtLabel {
+  font-size: 4.5px;
+  letter-spacing: 0.1em;
+  color: #4a4540;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+/* Active root note derived from EXT CV — DOM-mutated by Hz analyser rAF */
+.qntExtDisplay {
+  font-size: 7px;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.06em;
+  color: #5DCAA5;
+  font-weight: 700;
+}
+
+/* Chord quality label — DOM-mutated by chord sequencer callback (not by rAF) */
+.qntExtChordType {
+  font-size: 6px;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.04em;
+  color: rgba(93, 202, 165, 0.7);
+}
+
+/* ══════════════════════════════════════════════════════
+   I/O MODULE — 4-channel mixer input rows
+   Each row: activity LED | CH n VOL knob | IN n jack
+   ══════════════════════════════════════════════════════ */
+
+.ioChRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 2px;
 }

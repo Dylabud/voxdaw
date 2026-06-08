@@ -62,10 +62,10 @@
     inset 0 -1px 2px rgba(0, 0, 0, 0.25);
 }
 
-.knob_xl { width: 44px; height: 44px; }
-.knob_lg { width: 34px; height: 34px; }
-.knob_md { width: 26px; height: 26px; }
-.knob_sm { width: 20px; height: 20px; }
+.knob_xl { width: 54px; height: 54px; }
+.knob_lg { width: 42px; height: 42px; }
+.knob_md { width: 32px; height: 32px; }
+.knob_sm { width: 25px; height: 25px; }
 
 /* ── Indicator pointer — dark line on silver face ── */
 .knobCap {
@@ -83,14 +83,14 @@
   box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
 }
 
-.knob_xl .knobCap { width: 3.5px; height: 38%; }
-.knob_lg .knobCap { width: 3px;   height: 37%; }
-.knob_md .knobCap { width: 2.5px; height: 36%; top: 12%; }
-.knob_sm .knobCap { width: 2px;   height: 35%; top: 12%; }
+.knob_xl .knobCap { width: 4.5px; height: 38%; }
+.knob_lg .knobCap { width: 4px;   height: 37%; }
+.knob_md .knobCap { width: 3px;   height: 36%; top: 12%; }
+.knob_sm .knobCap { width: 2.5px; height: 35%; top: 12%; }
 
 .knobLabel {
-  font-size: 6px;
-  letter-spacing: 0.24em;
+  font-size: 9px;
+  letter-spacing: 0.2em;
   color: #7a7260;
   text-transform: uppercase;
   text-align: center;

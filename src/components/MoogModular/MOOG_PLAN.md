@@ -69,6 +69,166 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-06-08] Bug Fix — Oscilloscope Waveform + Viewport Overflow
+
+**Oscilloscope waveform not reaching edge (`Oscilloscope.jsx` + `Oscilloscope.module.css`):**
+The `<canvas>` element (200×64 attribute) had `display: block; width: 100%` CSS but no explicit `height`. Replaced elements maintain their intrinsic aspect ratio when only width is constrained — on a ~350px-wide I/O module the canvas rendered at ~112px tall (350 × 64/200) instead of 64px. Added `height: 64px` to `.canvas` to lock it to its intended height regardless of display width. The waveform width was also fixed by syncing `canvas.width = canvas.offsetWidth` each rAF frame so drawing always spans the full CSS display width.
+
+**Rack rendering outside viewport (two-pass fix, `MoogShell.jsx`):**
+- **Root cause 1** (oscilloscope): the oversized canvas nearly doubled the I/O module height, making total rack height ~1490px+ and forcing an extreme scale factor.
+- **Root cause 2** (fit() loop instability): the `fitting` boolean + `setTimeout(0)` reset had a race condition — `setTimeout` could fire before the ResizeObserver callback on some browsers, allowing re-entrant fit() calls with stale state.
+- **Root cause 3** (display:none to block): `fit()` was not re-running when the Moog page was navigated back to (Root.js sets inactive pages to `display:none`).
+
+**Final fit() implementation:** `scheduleFit = () => { clearTimeout(fitTimer); fitTimer = setTimeout(fit, 0) }` — rapid ResizeObserver callbacks (from fit()'s own DOM writes) collapse into a single deferred call, self-terminating the loop. Width guard `if (el.style.width !== newW) el.style.width = newW` prevents unnecessary ResizeObserver triggers on stable iterations. ResizeObserver on cabinet catches `display:none → display:block` transitions. `fit()` called immediately on mount + via `document.fonts.ready.then(scheduleFit)` + `window.resize`.
+
+---
+
+### [2026-06-08] Phases 27–29 — UI Scaling & Readability Overhaul
+
+**Phase 27 — Responsive Rack UI Refactor:**
+- Removed `max-width: 1420px` from `.cabinet` — cabinet now fills `width: 100%` of the shell on all display sizes, eliminating blank side margins on wide monitors.
+- Rack gap: 2px → 3px. Plate padding: 10px → 11px. Plate/body gaps, row gaps slightly increased.
+- Typography: `plateTitle` 12px → 13px, `plateSub` 5.5px → 6px, `knobLabel` 6px → 7px, `jackLabel` 5.5px → 6.5px, `selectorValue` 9px → 10px.
+- Knobs (body/wrap): xl 44/76 → 48/83, lg 34/62 → 37/67, md 26/48 → 28/52, sm 20/38 → 22/41.
+- Jacks: 18px → 21px, border 2.5px → 3px, hole 7px → 8px.
+
+**Phase 28 — Fluid Rack Scaling & Viewport Maximization:**
+- fit() width compensation: when height-based scale < 1, sets `el.style.width = ceil(availW / scale)` so the visual width after `transform: scale()` equals `availW` exactly — no blank side margins from the scale shrinking the visual width.
+
+**Phase 29 — Typography & Readability Scalability:**
+- Knobs (body/wrap): xl 48/83 → 54/94, lg 37/67 → 42/76, md 28/52 → 32/58, sm 22/41 → 25/46. Indicator cap widths increased proportionally.
+- `knobLabel` 7px → 9px, `plateTitle` 13px → 16px, `plateSub` 6px → 7.5px, `selectorValue` 10px → 12px, `selectorLabel/toggleLabel` 6px → 7.5px, `jackLabel` 6.5px → 8.5px, `gateBtnLabel` 6px → 7.5px.
+- Jacks: 21px → 24px, hole 8px → 10px.
+- `.seqCtrl min-width` updated to 86px to match new lg knob wrap.
+- Row gaps: knobRow 12→14px, jackRow 8→10px, selectorRow 9→10px, switchRow 10→12px, gateBtnRow 8→10px.
+
+**MULT module removal:** `MultiplesModule` component, `<MultiplesModule />` from Row 3, 8 mult jacks from jackMap, `.tierRow3` 4th column, and `.multiplesGrid/.multBank/.multBankLabel` CSS all removed. Row 3 now: VCA + ENV 1 + ENV 2.
+
+---
+
+### [2026-06-07] Moog Phase 26 — Chord Step-Editor Implementation
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js`:
+  1. **SCALE_DEFS extended** with 7 chord type interval arrays: `CMAJ [0,4,7]`, `CMIN [0,3,7]`, `CDOM [0,4,7,10]`, `CMAJ7 [0,4,7,11]`, `CMIN7 [0,3,7,10]`, `CSUS4 [0,5,7]`, `CDIM [0,3,6]`. The quantizer worklet already accepts arbitrary interval arrays — no worklet changes needed.
+  2. **`CHORD_BASE_HZ = 130.81`** (C3) — root Hz base. `rootClass 0-11 → C3…B3` (130–247 Hz). All values > 10 Hz so qnt-transpose-in analyser threshold correctly detects them.
+  3. **`chordSeqStepsRef`** now stores `{ rootClass: 0-11, chordType: string }` per step. Default: I-IV-V-I (C, C, F, F, G, G, C, C).
+  4. **`chordSeqChordCbRef`** + **`setChordSeqChordCallback`** — fires `fn(rootClass, chordType)` on each chord step advance.
+  5. **Chord loop** updated: Hz from `CHORD_BASE_HZ * 2^(rootClass/12)`; fires both step LED callback and chord callback.
+
+- `src/components/MoogModular/MoogShell.jsx`:
+  1. **`CHORD_TYPES` / `CHORD_TYPE_LABELS`** — module-level constants; used in ChordSeqModule AND MoogShell's chord callback (separate data planes: UI display vs postMessage).
+  2. **`ChordSeqModule` rewritten**: steps have `{ rootClass, chordType }`; 8-column `.chordSeqGrid`; each step column: LED + `.chordSeqRoot` button (cycles 12 notes on click) + `.chordSeqType` button (cycles 7 chord types on click). Clock div selector and ROOT CV jack preserved.
+  3. **MoogShell** adds `chordMapRef` (useRef) and a `useEffect` registering the chord callback: calls `updateQuantizerParams({ root, scale: chordType })` AND writes chord type label to `chordMapRef.current.textContent`. Both are DOM mutations — no React re-render.
+  4. **`QuantizerModule`** accepts `chordMapRef` prop; attaches it to a new `.qntExtChordType` span in the EXT row. Root note span (rAF) and chord type span (chord callback) are separate DOM elements — no write conflicts.
+
+- `src/components/MoogModular/MoogShell.module.css`: `.chordSeqGrid`, `.chordSeqRoot`, `.chordSeqType`, `.qntExtChordType`.
+
+**Data flow:**
+```
+ChordSeqModule step click → setSteps (React state) → onStepsChange → chordSeqStepsRef
+Tone.Loop tick → rootClass → CHORD_BASE_HZ * 2^(rc/12) → chordSeqPitchOut (Hz, audio domain)
+             → chordSeqChordCbRef → MoogShell callback:
+                 → updateQuantizerParams({ root, scale: chordType }) → worklet postMessage
+                 → chordMapRef.current.textContent = "maj7" (DOM mutation)
+```
+
+**Chord-aware quantization:** When chord seq advances to "G CMIN7", the quantizer's scale becomes `[0,3,7,10]` with root=7 → snaps melody to G, Bb, D, F only.
+
+**Gemini plan corrections:**
+- `ChordSeqModule.jsx` — rejected. Co-located in MoogShell.jsx.
+- `{ root, type, notes }` — `notes[]` redundant (derived). Correct: `{ rootClass, chordType }`.
+- "CHORD CV = Chord Program" — audio signals carry one float; chord type travels via postMessage, not CV.
+- Quantizer worklet changes — not needed; SCALE_DEFS extension + existing postMessage protocol suffices.
+
+---
+
+### [2026-06-07] Moog Phase 25 — Intelligent Patch-Sensing Transposition
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js`:
+  1. **`qntTransposeAnalyser`** — `new Tone.Analyser('waveform', 256)` in node creation. `Tone.Analyser` with waveform type calls `getFloatTimeDomainData`, which returns actual float values. A patched `chordSeqPitchOut` (ConstantSourceNode, offset = Hz) returns ~Hz in every sample; no cable returns zeros.
+  2. **`'qnt-transpose-in'`** jack added to `buildJackMap` pointing to `n.qntTransposeAnalyser`.
+  3. **`getQntTransposeData()`** — `useCallback`, returns `n.qntTransposeAnalyser.getValue()` (Float32Array of 256 samples).
+
+- `src/components/MoogModular/MoogShell.jsx` — `QuantizerModule` extended:
+  1. `getTransposeData` prop added.
+  2. `transposeActiveRef`, `rootRef`, `lastExtNoteClassRef`, `extLedRef`, `extRootRef`, `extRowRef` refs.
+  3. `useEffect([root])` keeps `rootRef` current for rAF closure reads.
+  4. Param `useEffect` checks `transposeActiveRef.current`: if EXT active, skips `root` so the rAF loop owns it; otherwise sends full params including knob root.
+  5. rAF `useEffect`: computes `avgHz = avg(|samples|)`; threshold 10 Hz distinguishes "cable present" (>10) from "no cable" (~0). On transition: shows/hides EXT row, lights/dims EXT LED, restores knob root on disconnect. While active: Hz → MIDI → note class (delta-checked to avoid spamming worklet), calls `onParamUpdate({ root: noteClass })`, updates `extRootRef` text.
+  6. EXT status row (hidden by CSS `display: none`; shown via `extRowRef.current.style.display = 'flex'` in rAF). EXT LED + "EXT ROOT" label + current root note text — all DOM-mutated, zero React state.
+  7. `qnt-transpose-in` (TRP) jack added alongside CV IN and OUT.
+
+- `src/components/MoogModular/MoogShell.module.css`: `.qntExtRow`, `.qntExtLed`, `.qntExtLabel`, `.qntExtDisplay`.
+
+**Why no worklet changes:** Root overrides happen at chord-change rate (~1–2 Hz at 120 BPM / 1 bar). Sending `port.postMessage` at 60 fps → delta check reduces actual messages to ≤ chord-change rate. No audio-rate accuracy needed; worklet already handles dynamic root updates.
+
+**Gemini plan corrections:**
+- `QuantizerModule.jsx` — rejected. Co-located in `MoogShell.jsx`.
+- `rawCV * 12 + baseRoot` — wrong. CV is Hz (32–1046 Hz), not 0–1. Correct: `midi = 69 + 12 * log2(hz / 440)`, then `noteClass = round(midi) % 12`.
+- "null check or patch-cable state tracker" — the analyser's zero-output with no input IS the cable detector. No separate tracking needed.
+- "Modify quantizer AudioWorklet" — not needed. Root updates via `port.postMessage` are adequate for musical tempo.
+
+---
+
+### [2026-06-07] Moog Phase 24 — Chord & Note Transposition Sequencer
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js`:
+  1. **`chordSeqPitchOut`** — `new Tone.Signal(SEQ_HZ_MIN)` in node creation; exposes `chordseq-cv-out` jack (same type as `seq-pitch-out`).
+  2. **`chordSeqLoop`** — `new Tone.Loop` at configurable interval (default `'1m'`); advances 8 steps, sets Hz via `setValueAtTime`, fires LED callback.
+  3. **`chordSeqLoopRef` / `chordSeqStepsRef` / `chordSeqCurrentStepRef` / `chordSeqStepCbRef` / `chordSeqDivisionRef`** — parallel to the 960 sequencer refs.
+  4. **`powerOn` / `powerOff`** — chord loop started/stopped alongside the main seq loop; LEDs cleared on powerOff.
+  5. **`updateChordSeqSteps`** / **`setChordSeqStepCallback`** / **`setChordSeqDivision`** — matching the existing sequencer export pattern. `setChordSeqDivision` writes `chordSeqLoopRef.current.interval` for immediate effect.
+
+- `src/components/MoogModular/MoogShell.jsx`:
+  - `CHORD_DIVS` / `CHORD_LABELS` module-level constants.
+  - `ChordSeqModule` co-located function component: 8-step `chordSeqStep` columns (LED + sm knob), clock division selector (½ BAR / 1 BAR / 2 BAR / 4 BAR), `chordseq-cv-out` jack. LED animation via DOM `classList` — same pattern as `SequencerModule`.
+  - Row 4 grid: `3.5fr 0.9fr 1fr` → `2.5fr 1fr 0.9fr 1fr` (960 Seq | Chord Seq | Quantizer | I/O).
+
+- `src/components/MoogModular/MoogShell.module.css`:
+  - `.chordSeqStep` — identical to `.seqStep` without the gate button space.
+  - `.tierRow4` updated to 4 columns.
+
+**Killer patch:** `chordseq-cv-out → qnt-cv-in` → `qnt-cv-out → vco1-cv` with `seq-pitch-out → vco1-fm`. Chord seq sets root every bar; quantizer snaps it to scale; 960 seq plays melodic variation on top via FM modulation.
+
+**Gemini plan corrections:**
+- `ChordSeqModule.jsx` — rejected. Co-located in MoogShell.jsx.
+- "patches into Base Frequency or Transposition input" — no special input needed; `vco-cv` is additive by design.
+- "Clock Division knob" — selector is correct for discrete musical values; a continuous knob can't map to `'2n'`/`'1m'`/`'2m'`/`'4m'` meaningfully.
+
+---
+
+### [2026-06-07] Moog Phase 23 — Multi-Channel Master Mixer
+
+**Files modified:**
+- `src/components/MoogModular/useMoogAudio.js` — Three additions:
+  1. **`ioCh1`–`ioCh4`** — `new Tone.Gain(0.8)` in node creation block. Each connects to `n.master` (summing) and to a dedicated `Tone.Meter` tap (post-gain, so LEDs reflect actual contribution).
+  2. **`ioCh1Meter`–`ioCh4Meter`** — `new Tone.Meter({ normalRange: true, smoothing: 0.2 })`. Dead-end side taps after each channel gain. `getMeterValue('ioCh1')` etc. already works via the existing `n[${id}Meter]` lookup convention.
+  3. **`'io-in1'`–`'io-in4'` jacks** added to `buildJackMap` pointing to `n.ioCh1`–`n.ioCh4` as destinations. Legacy `'io-in'` → `n.master` preserved for patch compatibility.
+  4. **`updateIoChannelVol(channelIndex, value)`** — single writer for ioCh1–ioCh4 gain params; uses `safeRamp` consistently with all other param writers.
+
+- `src/components/MoogModular/MoogShell.jsx` — Three additions:
+  1. **`ZERO_GETTER`** — module-level `() => 0` constant; used as stable fallback for `Led.getValue` to prevent rAF restarts on render if `getChLevels` is ever undefined.
+  2. **`getIoCh1Level`–`getIoCh4Level`** — four stable `useCallback` getters in `MoogShell` (same pattern as `getLfoLevel`, `getEnv1Level` etc.).
+  3. **`IoModule`** — extended with `getChLevels` (array of 4) and `onChannelVolChange` props. New `chVols` state (`[0.8,0.8,0.8,0.8]`); `useEffect([chVols])` fires `onChannelVolChange(i+1, v)` for each channel. Four `.ioChRow` divs replace the single jack row: each row is `[activity LED] [CH n VOL sm-knob] [IN n jack]`. Legacy `io-in` kept at bottom below a divider (labeled "IN ✦" to distinguish it from the channel inputs).
+
+- `src/components/MoogModular/MoogShell.module.css` — Added `.ioChRow` (flex row, align-items center, gap 6px).
+
+**Architecture notes:**
+- Single-writer rule preserved: `ioCh1–4.gain` owned exclusively by `updateIoChannelVol`; `master.volume` owned by `updateIoParams`; no overlap.
+- Disposal: all new Gain/Meter nodes are in the `n` object and disposed automatically by the existing `Object.values(n).forEach(node => node.dispose())` cleanup.
+- Backward compat: `io-in` → `n.master` stays in jackMap and UI; existing patches using it continue to work.
+
+**Gemini plan corrections:**
+- `masterIn`/`masterOut` naming — invented, doesn't exist. Real node is `n.master` (Tone.Volume).
+- `MasterMixerModule.jsx` — rejected (recurring error since Phase 3). All modules co-located in `MoogShell.jsx`.
+- Meter tap location: Gemini unspecified; tapped post-gain (from ioCh output) so LEDs show channel contribution, not raw input.
+- Stable `ZERO_GETTER` for `Led` fallback — inline `() => 0` would restart rAF on every render.
+
+---
+
 ### [2026-06-07] Quantizer + AudioWorklet Bug Fixes
 
 Multiple bugs discovered and fixed through systematic code tracing:
