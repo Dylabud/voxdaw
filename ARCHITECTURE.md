@@ -302,6 +302,34 @@ Custom right-click menu (`position: fixed; z-index: 500`, styled after `.exportM
 ### Region mute (`region.isMuted`)
 Boolean on the region shape (default false). **Audio:** `buildRegionEvents` early-returns `[]` when muted, so the region schedules no Part events — covering both the live engine and `audioBounce` (which reuses the same pure function); `isMuted` is part of `computePartKey` so a toggle rebuilds. **Visual:** a single `.regionMuted` class (`opacity: 0.5; filter: grayscale(0.85)`) applies when `r.isMuted || t.isMuted`, covering both region mute and **cascading track mute** (a muted track grays every region in its lane). Persisted additively in `projectIO.js`. Track master-mute audio is still the existing `trackMuteGain` writer; `isMuted` only adds the per-region gate + the unified visual.
 
+### Effects rack (skeleton) — per-track insert effects
+**State/UI skeleton only; no DSP wired yet.** Each track carries an `effects` array (default `[]`),
+each entry `{ id, type, bypass, params }` where **array order = signal-chain order** (no separate
+`order` field — array position is the source of truth, matching notes/regions). Available types,
+labels, and default params live in one registry, **`src/components/Workstation/effectDefs.js`**
+(`EFFECT_DEFS` = `filter`/`delay`/`reverb`, `EFFECT_TYPES`, `effectLabel()`), consumed by the
+CRUD defaults and both UIs.
+
+- **CRUD** (`WorkstationShell.jsx`): `addEffect` / `removeEffect` / `toggleBypassEffect` /
+  `updateEffectSettings` are `useCallback`s using the same immutable nested-map pattern as the
+  other track mutators, so they inherit the **passive undo/redo recorder for free**. Effect IDs
+  come from `nextEffectIdRef` (`e<N>`), restored on load from `deserializeProject().nextEffectId`.
+- **Two synced views of `track.effects`** (single source of truth, threaded on the existing
+  `track` prop): a compact list in the RegionEditor left inspector
+  (`RegionEditor/EffectsList.jsx` — bypass dot, name, expand caret → placeholder, `No Effects`
+  empty state) and a full horizontal module grid on the **effects tab**
+  (`RegionEditor/EffectsRack.jsx` — empty state with *+ add effect*; populated → module panels
+  with a header bar `bypass / title / × delete` + placeholder body, bypassed panels dim). The
+  effects tab now renders `<EffectsRack>`; the placeholder overlay is scoped to the *instrument*
+  tab only.
+- **Persistence** (`projectIO.js`): `effects` is serialized/deserialized additively with guards
+  (old projects → `[]`). **`SCHEMA_VERSION` is intentionally not bumped** — the version check is
+  strict-equality, so a bump would reject every existing `.voxdaw` file; an additive defaulted
+  field is backward-compatible.
+- **Deferred audio (future):** the chosen shape slots into the per-track chain at
+  `trackPan → [effects] → trackMute` in `useWorkstationAudio.js` (per-track node Maps, delta-check
+  pattern) and mirrored in `audioBounce.js`. Not implemented in this phase.
+
 ### Undo/redo history (Phase 139, `WorkstationShell.jsx`)
 Tracks **arrangement data only** (`tracks`/`regions`/`notes` — mute/solo/volume/pan/instrument live on those objects); UI state (zoom/scroll/playhead/selection) is not tracked. A **passive recorder** `useEffect([tracks, regions, notes])` records history *after* React commits, so React 18 batching coalesces a multi-setter action (e.g. split = `setRegions`+`setNotes`) into one entry — **zero changes to the ~46 mutation sites**. **Leading-edge burst coalescing** (push the pre-change snapshot on the first change of a burst, suppress further pushes for ~200ms) folds a drag's mid-flight commits + continuous volume/pan slider commits into one entry. Snapshots store array **references** (state is updated immutably). `undo`/`redo` swap snapshots between `past`/`future`/`latestRef` under a `timeTravelingRef` guard, then `silenceAll()` + `recomputeFades()` (no forced pause); capped at `MAX_HISTORY = 100`. Toolbar ↶/↷ (disabled via `canUndo`/`canRedo`) + Cmd/Ctrl+Z / Cmd/Ctrl+Shift+Z / Cmd/Ctrl+Y, input-guarded. **Gotcha (fixed):** the `setFuture`/`setPast` updater closures must capture the present (`const current = latestRef.current`) *before* `latestRef` is reassigned — reading it inside the updater (which runs later) grabbed the post-mutation value, making the first redo a no-op.
 
@@ -332,7 +360,7 @@ Play/pause and stop buttons live in `.bottomTransport` (border-top panel, `justi
 | `isPlaying` (state) | drives play-button active class; gates the rAF loop |
 | `bpm` (state) | current tempo (default 120); replaces former `BPM` constant — drives `pxPerSec` and `Tone.Transport` |
 | `editingBpm` / `tempBpm` (state) | in-place BPM editor toggle + draft string value |
-| `tracks` (state) | `[{ id, name, instrument, color, isMuted, isSolo }]` — `color` is a hex string from `TRACK_COLORS` |
+| `tracks` (state) | `[{ id, name, instrument, color, isMuted, isSolo, volume, pan, effects }]` — `color` is a hex string from `TRACK_COLORS`; `effects` is the per-track insert-effect rack (see *Effects rack* below) |
 | `regions` (state) | `[{ id, trackId, startMeasure, durationMeasures, clipOffset, fadeIn, fadeOut }]` — `clipOffset` is in measures, can be negative (left padding). `fadeIn`/`fadeOut` are measure-valued visual envelopes (Phase 98), `fadeIn + fadeOut ≤ durationMeasures` enforced by push logic |
 | `notes` (state) | `[{ id, trackId, note, startBeat, durationBeats, regionId }]` — `startBeat` is **bottle-local** (offset from the region's bottle origin = `startMeasure − clipOffset` measures), filtered by `trackId` for the active editor |
 | `editingTrackId` (state) | non-null = bottom editor panel visible |

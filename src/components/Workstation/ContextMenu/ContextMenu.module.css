@@ -58,7 +58,8 @@
 .submenu {
   position: absolute;
   left: 100%;
-  top: -4px;
+  top: 50%;
+  transform: translateY(-50%);
   margin-left: 2px;
   display: flex;
   flex-direction: column;
@@ -72,6 +73,9 @@
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
   z-index: 501;
 }
+.submenu::-webkit-scrollbar { width: 4px; }
+.submenu::-webkit-scrollbar-track { background: transparent; }
+.submenu::-webkit-scrollbar-thumb { background: rgba(93, 202, 165, 0.2); border-radius: 2px; }
 .submenuLeft {
   left: auto;
   right: 100%;

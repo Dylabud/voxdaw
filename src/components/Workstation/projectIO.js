@@ -12,6 +12,9 @@ export function serializeProject({ bpm, totalMeasures, tracks, regions, notes })
     tracks:  tracks.map(t => ({
       id: t.id, name: t.name, instrument: t.instrument, color: t.color,
       isMuted: !!t.isMuted, isSolo: !!t.isSolo, volume: t.volume ?? 75, pan: t.pan ?? 0,
+      effects: Array.isArray(t.effects)
+        ? t.effects.map(e => ({ id: e.id, type: e.type, bypass: !!e.bypass, params: { ...e.params } }))
+        : [],
     })),
     regions: regions.map(r => ({
       id: r.id, trackId: r.trackId,
@@ -53,6 +56,7 @@ export function deserializeProject(raw) {
       isSolo:  !!t.isSolo,
       volume:  typeof t.volume === 'number' ? t.volume : 75,
       pan:     typeof t.pan    === 'number' ? Math.max(-1, Math.min(1, t.pan)) : 0,
+      effects: deserializeEffects(t.effects),
     })),
     regions: regions.map(r => ({
       id: String(r.id),
@@ -78,7 +82,23 @@ export function deserializeProject(raw) {
     })),
     nextId:       nextSuffix(tracks),
     nextRegionId: nextSuffix(regions),
+    nextEffectId: nextSuffix(tracks.flatMap(t => (Array.isArray(t.effects) ? t.effects : []))),
   };
+}
+
+// Rebuild a track's effects array defensively (old projects have no `effects` field;
+// missing/invalid → []). Mirrors the additive, backward-compatible field policy: the
+// SCHEMA_VERSION is intentionally NOT bumped for this field.
+function deserializeEffects(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(e => e && typeof e === 'object' && e.type != null)
+    .map(e => ({
+      id: String(e.id),
+      type: String(e.type),
+      bypass: !!e.bypass,
+      params: (e.params && typeof e.params === 'object') ? { ...e.params } : {},
+    }));
 }
 
 function nextSuffix(items) {

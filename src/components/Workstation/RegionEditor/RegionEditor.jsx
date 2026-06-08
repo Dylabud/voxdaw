@@ -5,6 +5,8 @@ import { drawGrid, getSnapIncrement } from '../WorkstationShell';
 import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
 import { firstLoopOffsetMeasures } from '../loopMath';
 import { SYNTH_INSTRUMENTS, SAMPLED_INSTRUMENT_NAMES, makeSynth } from '../synthFactory';
+import EffectsList from './EffectsList';
+import EffectsRack from './EffectsRack';
 
 // Process-wide preview-synth cache, keyed by instrument name. Keeps sampler
 // buffers warm across editor opens / instrument switches so we don't pay a
@@ -60,6 +62,10 @@ export default function RegionEditor({
   scrollMemoryRef,
   magnetOn,
   onInstrumentChange,
+  onEffectAdd,
+  onEffectRemove,
+  onEffectToggleBypass,
+  onEffectUpdate,
   isDarkMode,
 }) {
   const [instrument,        setInstrument]        = useState(track?.instrument ?? 'fm pluck');
@@ -390,8 +396,15 @@ export default function RegionEditor({
       // Drag path
       const dD = noteDragRef.current;
       if (dD) {
-        const dx = e.clientX - dD.startX;
-        const dy = e.clientY - dD.startY;
+        // Compensate for auto-scroll: while the cursor holds still at an edge, the
+        // grid content scrolls underneath it, so the lane/beat under the cursor
+        // changes even though clientX/Y don't. Adding the scroll delta makes dx/dy
+        // grid-content-relative so the note tracks the cursor during auto-scroll.
+        const sc = pianoScrollRef.current;
+        const sdx = (sc?.scrollLeft ?? 0) - dD.startScrollLeft;
+        const sdy = (sc?.scrollTop  ?? 0) - dD.startScrollTop;
+        const dx = (e.clientX - dD.startX) + sdx;
+        const dy = (e.clientY - dD.startY) + sdy;
         if (!dD.dragStarted && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
         if (!dD.dragStarted) {
           dD.dragStarted = true;
@@ -587,6 +600,10 @@ export default function RegionEditor({
       mode,
       startX: e.clientX,
       startY: e.clientY,
+      // Scroll origin so onMove can keep the drag delta grid-content-relative
+      // (the note follows the cursor while auto-scroll moves the content).
+      startScrollLeft: pianoScrollRef.current?.scrollLeft ?? 0,
+      startScrollTop:  pianoScrollRef.current?.scrollTop  ?? 0,
       dragStarted: false,
       clusterIds: [...nextSelection],
       initByID,
@@ -705,6 +722,14 @@ export default function RegionEditor({
             </optgroup>
           </select>
         </div>
+
+        <EffectsList
+          effects={track?.effects ?? []}
+          trackId={track?.id}
+          onAdd={onEffectAdd}
+          onRemove={onEffectRemove}
+          onToggleBypass={onEffectToggleBypass}
+        />
       </div>
 
       {/* Left-column resizer */}
@@ -845,12 +870,23 @@ export default function RegionEditor({
         )}
       </div>
 
+      {/* Effects rack — full modular grid for the effects tab. Overlays the grid
+          (outside the scroll container so it never affects scrollWidth, bug 12). */}
+      {activeTab === 'effects' && (
+        <EffectsRack
+          effects={track?.effects ?? []}
+          trackId={track?.id}
+          onAdd={onEffectAdd}
+          onRemove={onEffectRemove}
+          onToggleBypass={onEffectToggleBypass}
+          onUpdate={onEffectUpdate}
+        />
+      )}
+
       {/* Placeholder overlay — outside the scroll container so it never affects scrollWidth (bug 12) */}
-      {activeTab !== 'notes' && (
+      {activeTab === 'instrument' && (
         <div className={styles.placeholderOverlay}>
-          <span className={styles.placeholderText}>
-            {activeTab === 'instrument' ? 'instrument — coming soon' : 'effects — coming soon'}
-          </span>
+          <span className={styles.placeholderText}>instrument — coming soon</span>
         </div>
       )}
 

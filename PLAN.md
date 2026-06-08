@@ -25,6 +25,43 @@ VoxDaw is actively under development. Core gesture engine, audio DSP chain, arpe
 
 ## Completed Steps Log
 
+* **[2026-06-08] Context-Menu Polish Series + Piano-Roll Drag Fix + Effects Rack Skeleton:**
+
+  **Context menu (`ContextMenu/`):** curated Pitch submenu to 14 musical intervals
+  `[±12,±7,±5,±4,±3,±2,±1]`; **viewport clamp** — submenu measured in a `useLayoutEffect` and its
+  `top` shifted (bidirectional) so it never runs off the top/bottom edge (mirrors the horizontal
+  `flipLeft`); thin mint webkit scrollbar; **zero-line separator** (reused `.divider`) between
+  `+1`/`-1`; **center-on-cursor** via CSS `top:50%; translateY(-50%)` folded into the clamp effect
+  (`calc(50% + shift)`); **mouse-leave auto-close** of the whole menu (subtree-aware `onMouseLeave`
+  + debounce; submenu is a direct child, so no `isHoveringSubmenu` flag). Release timers later
+  doubled (auto-close 300ms, submenu hover-close 360ms).
+
+  **Piano-roll vertical-drag tracking (`RegionEditor.jsx`):** notes "stuck at the edge" during
+  auto-scroll were **not** a CSS clip (notes are always clamped to valid lanes inside the
+  full-height grid). Real cause: `onMove` deltas were viewport-relative (`dy = clientY - startY`),
+  so during auto-scroll the cursor holds still while content scrolls and `dKey` stops advancing.
+  Fix (~6 lines): store `startScrollLeft/Top` in `noteDragRef`, add the live scroll delta to
+  `dx`/`dy` so they're grid-content-relative. Fixes both pitch (Y) and time (X). Rejected Gemini's
+  Portal "ghost" rewrite (solved a non-existent clip; would break the zero-re-render cluster drag).
+
+  **Per-track effects rack — state + UI skeleton (no DSP):** new `effectDefs.js` registry
+  (`filter`/`delay`/`reverb`); `track.effects` array `{ id, type, bypass, params }` with
+  **array-order = signal order** (rejected Gemini's redundant `order` field); four CRUD `useCallback`s
+  in `WorkstationShell` (undo/redo free via the passive recorder); `nextEffectIdRef` + load restore;
+  `projectIO` serialize/deserialize **without bumping `SCHEMA_VERSION`** (strict version check would
+  reject old saves). Two synced views of `track.effects`: inspector `EffectsList.jsx` (compact rows:
+  bypass dot, name, expand caret, `No Effects`) and main-tab `EffectsRack.jsx` (empty state + add
+  dropdown; horizontal module panels with `bypass / title / × delete` header + placeholder body).
+  Effects tab renders `<EffectsRack>`; placeholder overlay scoped to *instrument* tab. Deferred audio
+  insertion point documented: `trackPan → effects → trackMute` (mirrored in `audioBounce`).
+
+  **Critique of Gemini across the series:** (context-menu) his max-height/overflow "fix" already
+  existed and missed the real vertical-positioning bug; his `top:50%` centering would have been
+  clobbered by the existing clamp effect (folded together instead). (Piano roll) misdiagnosed a
+  scroll-tracking math bug as CSS clipping and proposed an unnecessary Portal ghost. (Effects)
+  structurally sound but missed the `projectIO` whitelist + strict version check, proposed a
+  redundant `order` field, and didn't account for the existing prop threading / free undo-redo.
+
 * **[2026-06-06] Moog Phases 14–18 + Root Architecture Overhaul:**
 
   **Phase 14 — Vintage Studio Polish (`MoogShell.module.css`, `MoogShell.jsx`, `Oscilloscope.module.css`):** Cabinet vignette + noise grain via gradient layers (no z-index collisions); faceplate wear `::after` overlay (2.5% opacity, `pointer-events: none`); jewel power lamp with `@keyframes flicker` (5.3s, 7 irregular keyframes); CRT oscilloscope with scanline `::after`, curved screen vignette, phosphor ambient glow.

@@ -8,6 +8,7 @@ import { firstLoopOffsetMeasures, loopBoundaries } from './loopMath';
 import useWorkstationAudio from '../../hooks/useWorkstationAudio';
 import PanKnob from './PanKnob';
 import { serializeProject, deserializeProject, downloadJSON, readJSONFile } from './projectIO';
+import { EFFECT_DEFS } from './effectDefs';
 import { bounceProject } from './audioBounce';
 import { exportWAV, exportMP3 } from '../../utils/audioExport';
 import { transcribeAudio } from './transcribeAudio';
@@ -170,6 +171,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const nextIdRef            = useRef(1);
   const nextRegionIdRef      = useRef(1);
   const nextNoteIdRef        = useRef(0);
+  const nextEffectIdRef      = useRef(1);
   const ghostRefs            = useRef({});
   const hoverRef             = useRef({ trackId: null, measure: 0 });
   const dragRef              = useRef(null);
@@ -273,6 +275,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       isSolo: false,
       volume: 75,
       pan: 0,
+      effects: [],   // per-track insert-effect rack (see effectDefs.js); audio wiring deferred
     }]);
   }, []);
 
@@ -327,6 +330,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       setNotes(data.notes);
       nextIdRef.current       = data.nextId;
       nextRegionIdRef.current = data.nextRegionId;
+      nextEffectIdRef.current = data.nextEffectId ?? 1;
       showToast(`loaded ${file.name}`);
     } catch (e) {
       console.error('load project failed', e);
@@ -363,6 +367,28 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     prev.map(t => t.id === id ? { ...t, isSolo: !t.isSolo } : t));
   const handleInstrumentChange = useCallback((trackId, instrument) => setTracks(prev =>
     prev.map(t => t.id === trackId ? { ...t, instrument } : t)), []);
+
+  // ── Per-track effects rack CRUD ──────────────────────────────────────────────
+  // Effects live on the track object (track.effects), so they ride existing prop
+  // threading and the passive undo/redo recorder for free. Array order = signal
+  // order. Audio is not wired yet — this is the state/UI skeleton.
+  const addEffect = useCallback((trackId, fxType) => {
+    const def = EFFECT_DEFS[fxType];
+    if (!def) return;
+    const fx = { id: `e${nextEffectIdRef.current++}`, type: fxType, bypass: false, params: { ...def.params } };
+    setTracks(prev => prev.map(t =>
+      t.id === trackId ? { ...t, effects: [...(t.effects ?? []), fx] } : t));
+  }, []);
+  const removeEffect = useCallback((trackId, fxId) => setTracks(prev => prev.map(t =>
+    t.id === trackId ? { ...t, effects: (t.effects ?? []).filter(e => e.id !== fxId) } : t)), []);
+  const toggleBypassEffect = useCallback((trackId, fxId) => setTracks(prev => prev.map(t =>
+    t.id === trackId
+      ? { ...t, effects: (t.effects ?? []).map(e => e.id === fxId ? { ...e, bypass: !e.bypass } : e) }
+      : t)), []);
+  const updateEffectSettings = useCallback((trackId, fxId, newParams) => setTracks(prev => prev.map(t =>
+    t.id === trackId
+      ? { ...t, effects: (t.effects ?? []).map(e => e.id === fxId ? { ...e, params: { ...e.params, ...newParams } } : e) }
+      : t)), []);
 
   // Workstation audio engine — reconciles synths/gains/parts against tracks/regions/notes.
   // Does NOT call Tone.start(); the user-gesture path (handlePlayPause, RegionEditor preview)
@@ -2878,6 +2904,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onClose={() => setEditingTrackId(null)}
               scrollMemoryRef={lastPianoScrollTopRef}
               onInstrumentChange={handleInstrumentChange}
+              onEffectAdd={addEffect}
+              onEffectRemove={removeEffect}
+              onEffectToggleBypass={toggleBypassEffect}
+              onEffectUpdate={updateEffectSettings}
               isDarkMode={isDarkMode}
             />
           </div>

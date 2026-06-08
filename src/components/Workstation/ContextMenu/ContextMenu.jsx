@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import styles from './ContextMenu.module.css';
 
 // Approximate dimensions used to clamp the menu inside the viewport before the
@@ -7,8 +7,10 @@ const MENU_W = 168;
 const MENU_H = 240;
 const SUBMENU_W = 96;
 
-// Semitone options for the Pitch submenu: +12 … −12 excluding 0 (descending).
-const PITCH_STEPS = Array.from({ length: 25 }, (_, i) => 12 - i).filter(n => n !== 0);
+// Semitone options for the Pitch submenu: curated musical intervals, descending
+// (octave, P5, P4, M3, m3, M2, m2 up and down). Drops tritone/6ths/7ths to keep
+// the menu short.
+const PITCH_STEPS = [12, 7, 5, 4, 3, 2, 1, -1, -2, -3, -4, -5, -7, -12];
 
 // Command sets per target type. Item kinds:
 //   { action, label }        — plain command
@@ -45,8 +47,10 @@ const ITEMS = {
  */
 export default function ContextMenu({ menu, onClose, onCommand }) {
   const menuRef = useRef(null);
+  const submenuRef = useRef(null);
   const [submenuOpen, setSubmenuOpen] = useState(false);
-  const closeTimerRef = useRef(null);
+  const closeTimerRef = useRef(null);       // submenu open/close delay
+  const menuCloseTimerRef = useRef(null);   // whole-menu mouse-leave auto-close
 
   // Open/close lifecycle: any interaction outside a menu item dismisses it.
   useEffect(() => {
@@ -86,7 +90,31 @@ export default function ContextMenu({ menu, onClose, onCommand }) {
     el.style.top  = `${Math.max(4, top)}px`;
   }, [menu]);
 
-  useEffect(() => () => clearTimeout(closeTimerRef.current), []);
+  // Clamp the submenu into the viewport once it opens. Its resting position is
+  // CSS top:50% + translateY(-50%) — centered on the PITCH row so the zero-line
+  // separator sits across from the cursor. Centering means it can overflow the
+  // top OR bottom edge near either end of the screen, and the inner
+  // max-height/overflow scrollbar can't pull the container back into view. So
+  // measure, compute a bidirectional shift, and re-apply it relative to the
+  // centered position via calc(50% + …) — keeping the translateY(-50%) transform
+  // intact (a raw px `top` would fight it). max-height:60vh guarantees it fits,
+  // so at most one edge overflows.
+  useLayoutEffect(() => {
+    const el = submenuRef.current;
+    if (!submenuOpen || !el) return;
+    el.style.top = '';                 // back to CSS top:50% + translateY(-50%)
+    const rect = el.getBoundingClientRect();
+    const pad = 4;
+    let shift = 0;
+    if (rect.bottom > window.innerHeight - pad) shift = (window.innerHeight - pad) - rect.bottom;
+    else if (rect.top < pad)                    shift = pad - rect.top;
+    if (shift !== 0) el.style.top = `calc(50% + ${Math.round(shift)}px)`;
+  }, [submenuOpen, menu]);
+
+  useEffect(() => () => {
+    clearTimeout(closeTimerRef.current);
+    clearTimeout(menuCloseTimerRef.current);
+  }, []);
 
   if (!menu) return null;
 
@@ -97,7 +125,13 @@ export default function ContextMenu({ menu, onClose, onCommand }) {
   const flipLeft = menu.x + MENU_W + SUBMENU_W > window.innerWidth;
 
   const openSub  = () => { clearTimeout(closeTimerRef.current); setSubmenuOpen(true); };
-  const closeSub = () => { closeTimerRef.current = setTimeout(() => setSubmenuOpen(false), 180); };
+  const closeSub = () => { closeTimerRef.current = setTimeout(() => setSubmenuOpen(false), 360); };
+
+  // Auto-close the whole menu shortly after the cursor leaves it. onMouseLeave is
+  // subtree-aware, so moving into the (descendant) Pitch submenu doesn't fire it;
+  // the 300ms debounce covers the 2px gap between the menu and the offset submenu.
+  const onMenuEnter = () => clearTimeout(menuCloseTimerRef.current);
+  const onMenuLeave = () => { menuCloseTimerRef.current = setTimeout(() => onClose(), 300); };
 
   return (
     <div
@@ -106,6 +140,8 @@ export default function ContextMenu({ menu, onClose, onCommand }) {
       style={{ left: `${Math.max(4, left)}px`, top: `${Math.max(4, top)}px` }}
       onMouseDown={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}
+      onMouseEnter={onMenuEnter}
+      onMouseLeave={onMenuLeave}
     >
       {items.map((it, i) => {
         if (it === 'divider') return <div key={`d${i}`} className={styles.divider} />;
@@ -128,17 +164,19 @@ export default function ContextMenu({ menu, onClose, onCommand }) {
                 <span className={styles.chevron}>▸</span>
               </button>
               {submenuOpen && (
-                <div className={`${styles.submenu} ${flipLeft ? styles.submenuLeft : ''}`}>
+                <div ref={submenuRef} className={`${styles.submenu} ${flipLeft ? styles.submenuLeft : ''}`}>
                   {PITCH_STEPS.map(n => (
-                    <button
-                      key={n}
-                      type="button"
-                      className={styles.item}
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onClick={() => { onCommand('pitch', menu.targetType, menu.targetId, n); onClose(); }}
-                    >
-                      {n > 0 ? `+${n}` : n}
-                    </button>
+                    <React.Fragment key={n}>
+                      <button
+                        type="button"
+                        className={styles.item}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={() => { onCommand('pitch', menu.targetType, menu.targetId, n); onClose(); }}
+                      >
+                        {n > 0 ? `+${n}` : n}
+                      </button>
+                      {n === 1 && <div className={styles.divider} />}
+                    </React.Fragment>
                   ))}
                 </div>
               )}
