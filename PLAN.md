@@ -25,6 +25,20 @@ VoxDaw is actively under development. Core gesture engine, audio DSP chain, arpe
 
 ## Completed Steps Log
 
+* **[2026-06-09] Hard Sync Bug Fixes — 6 cascading root causes resolved (`useMoogAudio.js`, `public/hard-sync-worklet.js` unchanged):**
+
+  **Bug 1 — Cable direction:** `connect()` enforced `from.type === 'out'` with a hard guard; patching from an input jack (e.g. vco2-sync-in) to an output jack (vco1-saw) silently no-oped. Fix: normalize `in→out` to `out→in` at the top of both `connect()` and `disconnect()` so cable direction is irrelevant to the user.
+
+  **Bug 2 — jackMapRef never rebuilt:** `n.vco2fm.connect(hardSyncNode.parameters.get('slaveFreq'))` threw inside the worklet `.then()` block (SAC AudioParam/Tone.js boundary), causing `.catch()` to fire before `jackMapRef.current = buildJackMap(n)`. The sync jacks stayed `dest: null` forever. Fix: moved `hardSyncNode.connect(n.vco2syncOut.input)` and `jackMapRef` rebuild before the FM connection, wrapped FM in its own try-catch.
+
+  **Bug 3 — Tone.js `isAudioNode()` silently fails:** Tone.js's `connectSignal()` guards with `instanceof AudioNode` (native class). SAC-wrapped AudioWorkletNodes fail that check, so `n.vco1.connect(n.hardSyncNode)` did nothing — no error, no audio in worklet `inputs[0][0]`. Fix: added `vco2syncIn: new Tone.Gain(1)` as a Tone→Tone intermediate buffer; Tone.Oscillator connects into the gain (reliable), then `vco2syncIn.output.connect(hardSyncNode)` is SAC-GainNode→SAC-AWN (native→native internally, always works).
+
+  **Bug 4 — Synced signal only on SYNC↑ jack, not vco2-saw:** The slave worklet output was on a separate SYNC↑ jack; the user correctly patched vco2-saw expecting hard sync to affect VCO2's output (matching real Moog behaviour). Fix: added `vco2normalGain: Tone.Gain(1)` + `vco2bus: Tone.Gain(1)` crossfade. All vco2-*/out jacks now route through `vco2bus`. `setVco2SyncEnabled` crossfades: `vco2normalGain.gain` 1→0 and `vco2syncOut.gain` 0→1, so vco2-saw carries the synced slave transparently. Added `waveformTarget` field to VCO2 jack descriptors so waveform-setting still targets `n.vco2` while audio routing uses `n.vco2bus`.
+
+  **Bug 5 — Left speaker only:** Chrome defaults AudioWorkletNode output to 2 channels; worklet wrote only to `output[0][0]` (left), leaving right silent. Fix: `{ outputChannelCount: [1] }` at construction — 1-channel output upmixes to stereo correctly downstream.
+
+  **Bug 6 — Sound when powered off:** `AudioWorkletProcessor` returns `true` indefinitely, so the slave oscillator kept running after `powerOff()`. With `vco2syncOut.gain = 1` and `seqMasterGate` re-opened by powerOff, the worklet sawtooth reached the speakers. Fix: `powerOff()` sets `vco2syncOut.gain = 0` and `vco2normalGain.gain = 1`; `powerOn()` restores both from `vco2SyncEnabledRef` (a new `useRef(false)` tracking the toggle state across power cycles).
+
 * **[2026-06-08] Context-Menu Polish Series + Piano-Roll Drag Fix + Effects Rack Skeleton:**
 
   **Context menu (`ContextMenu/`):** curated Pitch submenu to 14 musical intervals

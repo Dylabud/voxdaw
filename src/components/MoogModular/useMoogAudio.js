@@ -67,15 +67,19 @@ function buildJackMap(n) {
     // ── VCO 2 ──
     'vco2-cv':  { type: 'in',  dest: n.vco2.frequency },
     'vco2-fm':  { type: 'in',  dest: n.vco2fm },
-    'vco2-sin': { type: 'out', node: n.vco2, waveform: 'sine'      },
-    'vco2-tri': { type: 'out', node: n.vco2, waveform: 'triangle'  },
-    'vco2-saw': { type: 'out', node: n.vco2, waveform: 'sawtooth'  },
-    'vco2-sqr': { type: 'out', node: n.vco2, waveform: 'square'    },
-    // Hard sync jacks — dest/node null until the AudioWorklet module loads.
-    // connect() silently no-ops on null, so cables patched before worklet is
-    // ready are harmless; jackMap is rebuilt once the worklet finishes loading.
-    'vco2-sync-in':  { type: 'in',  dest: n.hardSyncNode ?? null },
-    'vco2-sync-out': { type: 'out', node: n.vco2syncOut ?? null  },
+    // Output jacks route through vco2bus so the HARD SYNC crossfade is transparent.
+    // waveformTarget separates waveform-setting (n.vco2) from audio routing (n.vco2bus).
+    'vco2-sin': { type: 'out', node: n.vco2bus, waveform: 'sine',      waveformTarget: n.vco2 },
+    'vco2-tri': { type: 'out', node: n.vco2bus, waveform: 'triangle',  waveformTarget: n.vco2 },
+    'vco2-saw': { type: 'out', node: n.vco2bus, waveform: 'sawtooth',  waveformTarget: n.vco2 },
+    'vco2-sqr': { type: 'out', node: n.vco2bus, waveform: 'square',    waveformTarget: n.vco2 },
+    // Hard sync jacks — both are always live from initial jackMap build.
+    // vco2syncIn (Tone.Gain) receives the master signal via normal Tone connect().
+    // vco2syncOut (Tone.Gain) passes the worklet's slave output downstream.
+    // The SAC-level bridge (vco2syncIn.output → worklet → vco2syncOut.input) is
+    // wired once in the worklet .then() block after the AudioWorkletNode is ready.
+    'vco2-sync-in':  { type: 'in',  dest: n.vco2syncIn  },
+    'vco2-sync-out': { type: 'out', node: n.vco2syncOut },
     // ── VCO 3 ──
     'vco3-cv':  { type: 'in',  dest: n.vco3.frequency },
     'vco3-fm':  { type: 'in',  dest: n.vco3fm },
@@ -156,6 +160,7 @@ export default function useMoogAudio() {
   const nodesRef            = useRef(null);
   const jackMapRef          = useRef(null);
   const connectionsRef      = useRef(new Map()); // key: "fromId→toId" → { node, dest }
+  const vco2SyncEnabledRef  = useRef(false);     // tracks HARD SYNC toggle state across power cycles
   const seqLoopRef          = useRef(null);
   const seqStepsRef         = useRef(Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true })));
   const seqCurrentStepRef   = useRef(-1);
@@ -232,10 +237,25 @@ export default function useMoogAudio() {
       ioCh3Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
       ioCh4Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
 
-      // Hard sync output wrapper — gain 0 until user enables HARD SYNC toggle.
-      // AudioWorkletNode (hardSyncNode) connects here after the worklet loads.
-      // Sits outside the jackMap initially (null); jackMap is rebuilt after load.
-      vco2syncOut: new Tone.Gain(0),
+      // Hard sync signal path.
+      //
+      // Tone.js's connectSignal() uses `instanceof AudioNode` which returns false for
+      // SAC-wrapped AudioWorkletNodes — direct Tone→worklet connect() silently no-ops.
+      // Fix: Tone.Gain buffers on both sides of the worklet boundary.
+      //
+      //   vco2syncIn  (gain 1) — receives master VCO via Tone→Tone connect (always works).
+      //                          vco2syncIn.output → worklet is SAC-GainNode→SAC-AWN,
+      //                          which goes native→native internally and always succeeds.
+      //   vco2syncOut (gain 0) — receives worklet output; gain crossfades to 1 on HARD SYNC ON.
+      //
+      // VCO2 output bus — crossfades between normal VCO2 and synced slave.
+      //   vco2normalGain (gain 1) — gates regular VCO2 into vco2bus; fades to 0 when HARD SYNC ON.
+      //   vco2bus        (gain 1) — the node all vco2-* output jacks connect from.
+      //                             Receives vco2normalGain + vco2syncOut; exactly one is non-zero.
+      vco2syncIn:     new Tone.Gain(1),
+      vco2syncOut:    new Tone.Gain(0),
+      vco2normalGain: new Tone.Gain(1),
+      vco2bus:        new Tone.Gain(1),
 
       // Quantizer output wrapper — gain 1 (always pass-through).
       // AudioWorkletNode (quantizerNode) connects to .input after worklet loads.
@@ -280,6 +300,15 @@ export default function useMoogAudio() {
     n.cp3ch2.connect(n.cp3bus);
     n.cp3ch3.connect(n.cp3bus);
     n.cp3ch4.connect(n.cp3bus);
+
+    // VCO2 output bus — permanent crossfade between regular oscillator and sync slave.
+    // vco2normalGain gates regular VCO2 (gain 1 normally, fades to 0 when HARD SYNC ON).
+    // vco2syncOut feeds the worklet slave (gain 0 normally, fades to 1 when HARD SYNC ON).
+    // Both feed vco2bus, which is what all vco2-* output jacks connect from.
+    // Only one is non-zero at a time, so there is never signal bleed between modes.
+    n.vco2.connect(n.vco2normalGain);
+    n.vco2normalGain.connect(n.vco2bus);
+    n.vco2syncOut.connect(n.vco2bus);
 
     // CV scaler hardwires — permanent front-doors for modulation inputs.
     // Sources patched to the FM / CV1 / CV2 / ENV jacks flow through these gains
@@ -438,26 +467,34 @@ export default function useMoogAudio() {
     // jacks remain no-ops and everything else works normally.
     let hardSyncNode = null;
     rawCtx.audioWorklet.addModule('/hard-sync-worklet.js').then(() => {
-      if (nodesRef.current !== n) return; // same guard as quantizer block above
-      hardSyncNode = Tone.context.createAudioWorkletNode('hard-sync-processor'); // same SAC-wrap reason
+      if (nodesRef.current !== n) return;
+      // outputChannelCount: [1] forces mono output — Chrome defaults the output channel
+      // count to 2 (matching the AudioContext destination), leaving output[0][1] (right)
+      // permanently silent. A 1-channel output upmixes to stereo correctly downstream.
+      hardSyncNode = Tone.context.createAudioWorkletNode('hard-sync-processor', { outputChannelCount: [1] });
       n.hardSyncNode = hardSyncNode;
 
-      // Route VCO2's FM scaler to the worklet's slaveFreq AudioParam (additive).
-      // Envelope or LFO patched to vco2-fm will now modulate both VCO2.frequency
-      // AND the worklet slave — no extra cables needed for the Houdini patch.
-      n.vco2fm.connect(hardSyncNode.parameters.get('slaveFreq'));
-
-      // Wire worklet output to the sync output wrapper.
-      // n.vco2syncOut is a Tone.Gain — its .input property is the underlying native
-      // GainNode (confirmed: Tone.Gain.input = this._gainNode = context.createGain()).
-      // Native AudioWorkletNode.connect() only accepts native AudioNode, NOT Tone.js
-      // wrappers, so we must pass .input explicitly. Connecting to n.vco2syncOut directly
-      // would throw TypeError and abort the .then() before jackMapRef is rebuilt.
-      // vco2syncOut gain is 0 until the user enables the HARD SYNC toggle.
+      // SAC-level bridge — both calls are SAC-node to SAC-node, which translates to
+      // native-to-native internally and is always reliable.
+      //
+      // IN:  vco2syncIn.output (SAC GainNode) → worklet audio input[0]
+      //      Tone.Oscillator → vco2syncIn is Tone→Tone (works fine via Tone.connect()).
+      //      Tone.Oscillator → worklet directly would silent-fail (Tone.js isAudioNode()
+      //      returns false for SAC AudioWorkletNodes, so connectSignal() does nothing).
+      //
+      // OUT: worklet output → vco2syncOut.input (SAC GainNode)
+      //      vco2syncOut.gain is 0 until user enables HARD SYNC toggle.
+      n.vco2syncIn.output.connect(hardSyncNode);
       hardSyncNode.connect(n.vco2syncOut.input);
 
-      // Rebuild jackMap so vco2-sync-in and vco2-sync-out are now live.
-      jackMapRef.current = buildJackMap(n);
+      // FM modulation: vco2fm additively drives slaveFreq so envelopes/LFOs patched
+      // to vco2-fm modulate both VCO2.frequency and the slave. Non-critical — wrapped
+      // in its own try-catch so a failure here cannot affect the core sync path.
+      try {
+        n.vco2fm.connect(hardSyncNode.parameters.get('slaveFreq'));
+      } catch (e) {
+        console.warn('[MoogAudio] vco2fm→slaveFreq unavailable:', e.message);
+      }
     }).catch(err => {
       console.warn('[MoogAudio] Hard sync worklet unavailable:', err);
     });
@@ -503,6 +540,13 @@ export default function useMoogAudio() {
       try { node.start(); } catch (_) {}
     });
 
+    // Restore the hard sync crossfade to whatever state the toggle was left in.
+    // vco2syncOut was forced to 0 on powerOff to prevent the always-running worklet
+    // from producing audio while the synth is off.
+    const se = vco2SyncEnabledRef.current;
+    n.vco2normalGain.gain.value = se ? 0 : 1;
+    n.vco2syncOut.gain.value    = se ? 1 : 0;
+
     // Start sequencer clocks — reset steps so first tick lands on step 0
     seqCurrentStepRef.current      = -1;
     chordSeqCurrentStepRef.current = -1;
@@ -532,6 +576,13 @@ export default function useMoogAudio() {
     if (chordSeqStepCbRef.current) chordSeqStepCbRef.current(-1);
     Tone.Transport.stop();
 
+    // Gate the hard sync slave to silence. The AudioWorkletProcessor returns true so
+    // it keeps running indefinitely — stopping oscillators is not enough. Without this,
+    // vco2syncOut (gain=1 when HARD SYNC is ON) lets the worklet sawtooth flow through
+    // vco2bus → master → seqMasterGate (which is re-opened below) → speakers.
+    n.vco2syncOut.gain.value    = 0;
+    n.vco2normalGain.gain.value = 1; // restore normal path (VCO2 is stopped, so silent)
+
     // Re-open both gates so keyboard / manual playing is audible after sequencer stops.
     // Last gate-off step may have left them closed.
     n.seqMasterGate.gain.value = 1;
@@ -545,11 +596,20 @@ export default function useMoogAudio() {
     const n  = nodesRef.current;
     if (!jm || !n) return;
 
-    const from = jm[fromId];
-    const to   = jm[toId];
+    let from = jm[fromId];
+    let to   = jm[toId];
     if (!from || !to) return;
 
-    const key = `${fromId}→${toId}`;
+    // Normalize cable direction: audio always flows out→in.
+    // If the user dragged from an 'in' jack to an 'out' jack, swap so the key
+    // and audio wiring are consistent regardless of which end the drag started from.
+    let effFrom = fromId, effTo = toId;
+    if (from.type === 'in' && to.type === 'out') {
+      [effFrom, effTo] = [toId, fromId];
+      [from, to] = [to, from];
+    }
+
+    const key = `${effFrom}→${effTo}`;
     if (connectionsRef.current.has(key)) return;
 
     // Gate cable: any isGate out → env?-gate — register programmatic trigger.
@@ -558,8 +618,8 @@ export default function useMoogAudio() {
     if (from.isGate && to.isGate) {
       const env = n[to.envId];
       if (env) {
-        gateActionsRef.current.set(key, { env, fromId });
-        connectionsRef.current.set(key, { isGate: true, toId });
+        gateActionsRef.current.set(key, { env, fromId: effFrom });
+        connectionsRef.current.set(key, { isGate: true, toId: effTo });
       }
       return;
     }
@@ -568,8 +628,11 @@ export default function useMoogAudio() {
     if (to.dest === null) return;   // deferred jack — silently no-op
     if (from.node === null) return; // unimplemented output (e.g. seq-clk-out)
 
-    // Set VCO or LFO waveform to match the specific output jack patched
-    if (from.waveform) from.node.type = from.waveform;
+    // Set VCO or LFO waveform to match the specific output jack patched.
+    // waveformTarget separates the waveform-setting node (e.g. n.vco2) from the
+    // routing node (e.g. n.vco2bus) when they differ.
+    const waveformNode = from.waveformTarget ?? from.node;
+    if (from.waveform) waveformNode.type = from.waveform;
 
     try {
       from.node.connect(to.dest);
@@ -580,7 +643,17 @@ export default function useMoogAudio() {
   }, []);
 
   const disconnect = useCallback((fromId, toId) => {
-    const key  = `${fromId}→${toId}`;
+    // Mirror the same direction normalization as connect() so the key matches.
+    const jm = jackMapRef.current;
+    let effFrom = fromId, effTo = toId;
+    if (jm) {
+      const f = jm[fromId], t = jm[toId];
+      if (f?.type === 'in' && t?.type === 'out') {
+        [effFrom, effTo] = [toId, fromId];
+      }
+    }
+
+    const key  = `${effFrom}→${effTo}`;
     const conn = connectionsRef.current.get(key);
     if (!conn) return;
 
@@ -827,13 +900,17 @@ export default function useMoogAudio() {
     return 440 * Math.pow(2, (lastQuantizedMidiRef.current - 69) / 12);
   }, []);
 
-  // Enable or disable the VCO2 hard sync output path.
-  // Ramps vco2syncOut.gain 0→1 (enable) or 1→0 (disable) over 10 ms — click-free.
-  // The worklet continues running in both states; the gain gate controls audibility.
+  // Enable or disable VCO2 hard sync.
+  // Crossfades vco2normalGain (regular VCO2) and vco2syncOut (worklet slave) over 10 ms.
+  // Because both feed vco2bus, the transition is click-free and vco2-saw/sqr/etc. jacks
+  // automatically carry the synced signal when ON — no extra patch cables required.
+  // State is persisted in vco2SyncEnabledRef so powerOff/powerOn can gate and restore it.
   const setVco2SyncEnabled = useCallback((enabled) => {
     const n = nodesRef.current;
     if (!n) return;
-    safeRamp(n.vco2syncOut.gain, enabled ? 1 : 0, 0.01);
+    vco2SyncEnabledRef.current = enabled;
+    safeRamp(n.vco2normalGain.gain, enabled ? 0 : 1, 0.01);
+    safeRamp(n.vco2syncOut.gain,    enabled ? 1 : 0, 0.01);
   }, []);
 
   // Keyboard pitch + gate control.
