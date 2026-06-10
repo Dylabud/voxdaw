@@ -30,6 +30,26 @@ const SCALE_DEFS = {
 // All values > 10 Hz so the qnt-transpose-in analyser threshold correctly detects them.
 const CHORD_BASE_HZ = 130.81;
 
+// Snap an input Hz to the nearest chord tone across all musical octaves.
+// intervals: semitone array from SCALE_DEFS (e.g. [0,4,7] for major triad).
+// Returns the chord-tone Hz closest in semitone distance to the input.
+function snapToChordHz(inputHz, rootClass, chordType) {
+  const intervals = SCALE_DEFS[chordType] ?? SCALE_DEFS.CMAJ;
+  const rootHz    = CHORD_BASE_HZ * Math.pow(2, rootClass / 12);
+  const inputMidi = 69 + 12 * Math.log2(Math.max(0.001, inputHz) / 440);
+  let bestHz   = rootHz;
+  let bestDist = Infinity;
+  for (let oct = -3; oct <= 4; oct++) {
+    for (const semitone of intervals) {
+      const noteHz = rootHz * Math.pow(2, oct + semitone / 12);
+      if (noteHz < 20 || noteHz > 20000) continue;
+      const dist = Math.abs(inputMidi - (69 + 12 * Math.log2(noteHz / 440)));
+      if (dist < bestDist) { bestDist = dist; bestHz = noteHz; }
+    }
+  }
+  return bestHz;
+}
+
 // Safe parameter ramp.
 //
 // Problem: Tone.js Param.rampTo() calls assertRange(value, param.minValue, param.maxValue).
@@ -87,15 +107,19 @@ function buildJackMap(n) {
     'vco3-tri': { type: 'out', node: n.vco3, waveform: 'triangle'  },
     'vco3-saw': { type: 'out', node: n.vco3, waveform: 'sawtooth'  },
     'vco3-sqr': { type: 'out', node: n.vco3, waveform: 'square'    },
+    'vco4-cv':  { type: 'in',  dest: n.vco4.frequency },
+    'vco4-fm':  { type: 'in',  dest: n.vco4fm },
+    'vco4-sin': { type: 'out', node: n.vco4, waveform: 'sine'      },
+    'vco4-tri': { type: 'out', node: n.vco4, waveform: 'triangle'  },
+    'vco4-saw': { type: 'out', node: n.vco4, waveform: 'sawtooth'  },
+    'vco4-sqr': { type: 'out', node: n.vco4, waveform: 'square'    },
     // ── Noise ──
-    'noise-wht': { type: 'out', node: n.noiseW },
-    'noise-pnk': { type: 'out', node: n.noiseP },
-    // ── CP3 Mixer ──
-    'cp3-in1': { type: 'in',  dest: n.cp3ch1 },
-    'cp3-in2': { type: 'in',  dest: n.cp3ch2 },
-    'cp3-in3': { type: 'in',  dest: n.cp3ch3 },
-    'cp3-in4': { type: 'in',  dest: n.cp3ch4 },
-    'cp3-out': { type: 'out', node: n.cp3bus },
+    'noise-wht':  { type: 'out', node: n.noiseW },
+    'noise-pnk':  { type: 'out', node: n.noiseP },
+    'noise2-wht': { type: 'out', node: n.noise2W },
+    'noise2-pnk': { type: 'out', node: n.noise2P },
+    'noise3-wht': { type: 'out', node: n.noise3W },
+    'noise3-pnk': { type: 'out', node: n.noise3P },
     // ── VCF ──
     // cv1/cv2 → vcfcv1/vcfcv2 Gain(5000): LFO ±1 → ±5000 Hz — sweeps full audible spectrum
     // env     → vcfenv Gain(1000):         env  0→1 →  0→1000 Hz lift above base cutoff
@@ -108,9 +132,17 @@ function buildJackMap(n) {
     'vca-in':  { type: 'in',  dest: n.vca },
     'vca-cv':  { type: 'in',  dest: n.vca.gain },
     'vca-out': { type: 'out', node: n.seqGateNode }, // seqGateNode is the gated tap — Loop controls gain
+    'vca2-in':  { type: 'in',  dest: n.vca2 },
+    'vca2-cv':  { type: 'in',  dest: n.vca2.gain },
+    'vca2-out': { type: 'out', node: n.vca2 },
+    'vca3-in':  { type: 'in',  dest: n.vca3 },
+    'vca3-cv':  { type: 'in',  dest: n.vca3.gain },
+    'vca3-out': { type: 'out', node: n.vca3 },
     // ── Reverb ──
-    'reverb-in':  { type: 'in',  dest: n.reverb },
-    'reverb-out': { type: 'out', node: n.reverb },
+    'reverb-in':   { type: 'in',  dest: n.reverb  },
+    'reverb-out':  { type: 'out', node: n.reverb  },
+    'reverb2-in':  { type: 'in',  dest: n.reverb2 },
+    'reverb2-out': { type: 'out', node: n.reverb2 },
     // ── ENV 1 ── gate jack wired to gateActionsRef by connect(); trig deferred
     'env1-gate': { type: 'in', dest: null, isGate: true, envId: 'env1' },
     'env1-trig': { type: 'in', dest: null },
@@ -119,19 +151,34 @@ function buildJackMap(n) {
     'env2-gate': { type: 'in', dest: null, isGate: true, envId: 'env2' },
     'env2-trig': { type: 'in', dest: null },
     'env2-out':  { type: 'out', node: n.env2 },
+    'env3-gate': { type: 'in', dest: null, isGate: true, envId: 'env3' },
+    'env3-trig': { type: 'in', dest: null },
+    'env3-out':  { type: 'out', node: n.env3 },
     // ── LFO ──
-    'lfo-sync': { type: 'in',  dest: null },
-    'lfo-sin':  { type: 'out', node: n.lfo, waveform: 'sine'      },
-    'lfo-tri':  { type: 'out', node: n.lfo, waveform: 'triangle'  },
-    'lfo-sqr':  { type: 'out', node: n.lfo, waveform: 'square'    },
-    'lfo-saw':  { type: 'out', node: n.lfo, waveform: 'sawtooth'  },
-    // ── Sequencer ──
+    'lfo-sync':  { type: 'in',  dest: null },
+    'lfo-sin':   { type: 'out', node: n.lfo,  waveform: 'sine'      },
+    'lfo-tri':   { type: 'out', node: n.lfo,  waveform: 'triangle'  },
+    'lfo-sqr':   { type: 'out', node: n.lfo,  waveform: 'square'    },
+    'lfo-saw':   { type: 'out', node: n.lfo,  waveform: 'sawtooth'  },
+    'lfo2-sync': { type: 'in',  dest: null },
+    'lfo2-sin':  { type: 'out', node: n.lfo2, waveform: 'sine'      },
+    'lfo2-tri':  { type: 'out', node: n.lfo2, waveform: 'triangle'  },
+    'lfo2-sqr':  { type: 'out', node: n.lfo2, waveform: 'square'    },
+    'lfo2-saw':  { type: 'out', node: n.lfo2, waveform: 'sawtooth'  },
+    // ── Sequencer 1 ──
     'seq-pitch-out': { type: 'out', node: n.seqPitchOut },
     'seq-gate-out':  { type: 'out', node: null, isGate: true },
     'seq-clk-in':    { type: 'in',  dest: null },
     'seq-clk-out':   { type: 'out', node: null },
+    // ── Sequencer 2 ──
+    'seq2-pitch-out': { type: 'out', node: n.seq2PitchOut },
+    'seq2-gate-out':  { type: 'out', node: null, isGate: true },
+    'seq2-clk-in':    { type: 'in',  dest: null },
+    'seq2-clk-out':   { type: 'out', node: null },
     // ── Chord Sequencer ──
-    'chordseq-cv-out': { type: 'out', node: n.chordSeqPitchOut },
+    'chordseq-cv-in':   { type: 'in',  dest: n.chordSeqInputAnalyser },
+    'chordseq-cv-out':  { type: 'out', node: n.chordSeqPitchOut },
+    'chordseq-root-out': { type: 'out', node: n.chordSeqRootOut },
     // ── Keyboard ──
     'kbd-pitch-out': { type: 'out', node: n.kbdPitchOut },
     'kbd-gate-out':  { type: 'out', node: null, isGate: true },
@@ -165,6 +212,10 @@ export default function useMoogAudio() {
   const seqStepsRef         = useRef(Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true })));
   const seqCurrentStepRef   = useRef(-1);
   const seqStepCbRef        = useRef(null);   // UI callback for sequencer LED animation
+  const seq2LoopRef         = useRef(null);
+  const seq2StepsRef        = useRef(Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true })));
+  const seq2CurrentStepRef  = useRef(-1);
+  const seq2StepCbRef       = useRef(null);
   const gateActionsRef      = useRef(new Map()); // toJackId → Tone.Envelope
 
   // Chord sequencer — separate slower-clocked 8-step pitch CV source.
@@ -174,14 +225,19 @@ export default function useMoogAudio() {
   const chordSeqLoopRef        = useRef(null);
   const chordSeqStepsRef       = useRef(
     Array.from({ length: 8 }, (_, i) => ({
-      rootClass: [0, 0, 5, 5, 7, 7, 0, 0][i], // I IV V I default (C, C, F, F, G, G, C, C)
-      chordType: 'CMAJ',
+      rootClass: [9, 9, 5, 5, 0, 0, 4, 4][i], // Am Am F F C C E E
+      chordType: ['CMIN','CMIN','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ'][i],
     }))
   );
   const chordSeqCurrentStepRef = useRef(-1);
   const chordSeqStepCbRef      = useRef(null);
   const chordSeqChordCbRef     = useRef(null); // fn(rootClass, chordType) — called on each step
   const chordSeqDivisionRef    = useRef('1m'); // default: advance every 1 bar
+  const chordSeqRootOctaveRef  = useRef(0);   // octave offset for chordseq-root-out (-3..+3)
+  const chordSeqInputActiveRef  = useRef(false); // true when a CV source is patched to chordseq-cv-in
+  const qntChordOverrideRef    = useRef(false); // true when chordseq-cv-out → qnt-transpose-in is patched
+  // Stores the last Hz value from each VCO knob so it can be restored when a CV cable is removed.
+  const vcoKnobHzRef = useRef({ vco1: null, vco2: null, vco3: null, vco4: null });
   const quantizerStepCbRef    = useRef(null);   // UI callback for quantizer LED animation
   const lastQuantizedMidiRef  = useRef(69);     // A4 default — updated on each note change
   // Persists latest quantizer config so it can be flushed when the worklet finishes loading.
@@ -192,28 +248,36 @@ export default function useMoogAudio() {
       vco1:        new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
       vco2:        new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
       vco3:        new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
+      vco4:        new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
       noiseW:      new Tone.Noise({ type: 'white' }),
       noiseP:      new Tone.Noise({ type: 'pink'  }),
-      cp3ch1:      new Tone.Gain(0.8),
-      cp3ch2:      new Tone.Gain(0.8),
-      cp3ch3:      new Tone.Gain(0.8),
-      cp3ch4:      new Tone.Gain(0.8),
-      cp3bus:      new Tone.Gain(0.7),
+      noise2W:     new Tone.Noise({ type: 'white' }),
+      noise2P:     new Tone.Noise({ type: 'pink'  }),
+      noise3W:     new Tone.Noise({ type: 'white' }),
+      noise3P:     new Tone.Noise({ type: 'pink'  }),
       vcf:         new Tone.Filter({ frequency: 20000, type: 'lowpass', rolloff: -24 }),
       vca:         new Tone.Gain(1.0),
+      vca2:        new Tone.Gain(1.0),
+      vca3:        new Tone.Gain(1.0),
       env1:        new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
       env2:        new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
+      env3:        new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
       lfo:         new Tone.LFO({ frequency: 0.5, type: 'sine', min: -1, max: 1 }),
+      lfo2:        new Tone.LFO({ frequency: 0.5, type: 'sine', min: -1, max: 1 }),
       master:      new Tone.Volume(-14),             // no longer goes direct to Destination
       seqMasterGate: new Tone.Gain(1).toDestination(), // sole gateway to speakers — Loop gates here
       analyser:    new Tone.Analyser('waveform', 512),
       seqPitchOut:       new Tone.Signal(SEQ_HZ_MIN), // never init to 0 — exponential ramps from 0 are undefined
+      seq2PitchOut:      new Tone.Signal(SEQ_HZ_MIN), // second sequencer pitch CV — same non-zero init rule
       kbdPitchOut:       new Tone.Signal(SEQ_HZ_MIN), // keyboard pitch CV out — same non-zero init rule
-      chordSeqPitchOut:  new Tone.Signal(SEQ_HZ_MIN), // chord sequencer root CV out — same rule
+      chordSeqPitchOut:      new Tone.Signal(SEQ_HZ_MIN), // chord sequencer root CV out — same rule
+      chordSeqRootOut:       new Tone.Signal(SEQ_HZ_MIN), // independent root-note CV out (octave-shifted)
+      chordSeqInputAnalyser: new Tone.Analyser('waveform', 256), // detects patched pitch CV input
 
       // Studio reverb — Freeverb (proven in this codebase via VoxTool arpReverb).
       // wet starts at 0 so patching in the reverb doesn't colour sound until MIX is raised.
-      reverb: new Tone.Freeverb({ roomSize: 0.7, dampening: 3000, wet: 0.0 }),
+      reverb:  new Tone.Freeverb({ roomSize: 0.7, dampening: 3000, wet: 0.0 }),
+      reverb2: new Tone.Freeverb({ roomSize: 0.7, dampening: 3000, wet: 0.0 }),
 
       // Sequencer hardware gate — sits between n.vca and the vca-out jack.
       // Tone.Loop is the sole writer: gain=1 (gate on) / gain=0 (gate off).
@@ -272,8 +336,10 @@ export default function useMoogAudio() {
       // Level meters — dead-end side taps for LED feedback (no effect on audio routing).
       // smoothing controls the RMS window: higher = more averaged, lower = more transient-responsive.
       lfoMeter:    new Tone.Meter({ normalRange: true, smoothing: 0.7  }),
+      lfo2Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.7  }),
       env1Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.25 }),
       env2Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.25 }),
+      env3Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.25 }),
       masterMeter: new Tone.Meter({ normalRange: true, smoothing: 0.2  }),
 
       // CV input scalers — LFO outputs -1..+1 which adds ±1 Hz directly to frequency
@@ -289,17 +355,11 @@ export default function useMoogAudio() {
       vco1fm: new Tone.Gain(500),
       vco2fm: new Tone.Gain(500),
       vco3fm: new Tone.Gain(500),
+      vco4fm: new Tone.Gain(500),
       vcfcv1: new Tone.Gain(5000),
       vcfcv2: new Tone.Gain(5000),
       vcfenv: new Tone.Gain(1000),
     };
-
-    // CP3 internal summing — channels always sum to bus (internal mixer architecture,
-    // not a patch cable concern). Everything else starts fully disconnected.
-    n.cp3ch1.connect(n.cp3bus);
-    n.cp3ch2.connect(n.cp3bus);
-    n.cp3ch3.connect(n.cp3bus);
-    n.cp3ch4.connect(n.cp3bus);
 
     // VCO2 output bus — permanent crossfade between regular oscillator and sync slave.
     // vco2normalGain gates regular VCO2 (gain 1 normally, fades to 0 when HARD SYNC ON).
@@ -316,6 +376,7 @@ export default function useMoogAudio() {
     n.vco1fm.connect(n.vco1.frequency);
     n.vco2fm.connect(n.vco2.frequency);
     n.vco3fm.connect(n.vco3.frequency);
+    n.vco4fm.connect(n.vco4.frequency);
     n.vcfcv1.connect(n.vcf.frequency);
     n.vcfcv2.connect(n.vcf.frequency);
     n.vcfenv.connect(n.vcf.frequency);
@@ -350,8 +411,10 @@ export default function useMoogAudio() {
 
     // Level meter taps — all dead-end side connections, do not affect audio routing.
     n.lfo.connect(n.lfoMeter);
+    n.lfo2.connect(n.lfo2Meter);
     n.env1.connect(n.env1Meter);
     n.env2.connect(n.env2Meter);
+    n.env3.connect(n.env3Meter);
     n.seqGateNode.connect(n.masterMeter);
 
     // Sequencer loop — 8th-note clock driven by Tone.Transport.
@@ -397,6 +460,29 @@ export default function useMoogAudio() {
 
     seqLoopRef.current = loop;
 
+    // Sequencer 2 loop — independent pitch CV + gate, does not gate seqMasterGate.
+    const loop2 = new Tone.Loop((time) => {
+      seq2CurrentStepRef.current = (seq2CurrentStepRef.current + 1) % 16;
+      const idx2  = seq2CurrentStepRef.current;
+      const step2 = seq2StepsRef.current[idx2];
+      const hz2   = SEQ_HZ_MIN * Math.pow(SEQ_HZ_MAX / SEQ_HZ_MIN, step2.voltage);
+      n.seq2PitchOut.setValueAtTime(hz2, time);
+      if (gateActionsRef.current.size > 0) {
+        const stepDur2 = step2.gate ? Tone.Time('8n').toSeconds() : 0;
+        for (const [, { env, fromId }] of gateActionsRef.current) {
+          if (fromId !== 'seq2-gate-out') continue;
+          if (step2.gate) {
+            env.triggerAttack(time);
+            env.triggerRelease(time + stepDur2 * 0.8);
+          } else {
+            env.triggerRelease(time);
+          }
+        }
+      }
+      if (seq2StepCbRef.current) seq2StepCbRef.current(idx2);
+    }, '8n');
+    seq2LoopRef.current = loop2;
+
     // Chord sequencer loop — advances every chordSeqDivisionRef bars/beats.
     // step.rootClass (0-11) → Hz via CHORD_BASE_HZ (C3 * 2^(semitones/12)).
     // Also fires chordSeqChordCbRef so MoogShell can update the quantizer scale
@@ -405,13 +491,79 @@ export default function useMoogAudio() {
       chordSeqCurrentStepRef.current = (chordSeqCurrentStepRef.current + 1) % 8;
       const idx  = chordSeqCurrentStepRef.current;
       const step = chordSeqStepsRef.current[idx];
-      const hz   = CHORD_BASE_HZ * Math.pow(2, step.rootClass / 12);
-      n.chordSeqPitchOut.setValueAtTime(hz, time);
+      // Only write root Hz when no CV source is patched — the rAF snapper owns
+      // chordSeqPitchOut while an input is active (single-writer rule).
+      if (!chordSeqInputActiveRef.current) {
+        const hz = CHORD_BASE_HZ * Math.pow(2, step.rootClass / 12);
+        n.chordSeqPitchOut.setValueAtTime(hz, time);
+      }
+      // Root-note output — always the chord root, octave-shifted by the knob, never affected
+      // by the CV-in snapping path.  VCO set to minimum + patch this for pure chord root bass.
+      const rootHz = CHORD_BASE_HZ * Math.pow(2, step.rootClass / 12);
+      n.chordSeqRootOut.setValueAtTime(rootHz * Math.pow(2, chordSeqRootOctaveRef.current), time);
+
       if (chordSeqStepCbRef.current) chordSeqStepCbRef.current(idx);
       if (chordSeqChordCbRef.current) chordSeqChordCbRef.current(step.rootClass, step.chordType);
+      // When chordseq-cv-out → qnt-transpose-in is patched, push the chord's root AND
+      // scale directly into the quantizer worklet, overriding the manual QNT selectors.
+      // This runs in the Tone.Loop (main thread) so postMessage is safe.
+      if (qntChordOverrideRef.current && n.quantizerNode) {
+        quantizerParamsRef.current.root  = step.rootClass;
+        quantizerParamsRef.current.scale = SCALE_DEFS[step.chordType] ?? SCALE_DEFS.CMAJ;
+        n.quantizerNode.port.postMessage(quantizerParamsRef.current);
+      }
     }, chordSeqDivisionRef.current);
 
     chordSeqLoopRef.current = chordLoop;
+
+    // Pitch-snapping rAF — reads chordseq-cv-in, snaps incoming Hz to current chord tones,
+    // writes snapped pitch to chordSeqPitchOut so a downstream VCO always plays in tune.
+    // When no cable is patched the analyser returns ~0 Hz (below 10 Hz threshold) so this
+    // loop is a cheap no-op and the chord Tone.Loop resumes ownership of chordSeqPitchOut.
+    let chordSnapRafId;
+    const chordSnapTick = () => {
+      chordSnapRafId = requestAnimationFrame(chordSnapTick);
+      const data = n.chordSeqInputAnalyser.getValue();
+      if (!data || !data.length) return;
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += Math.abs(data[i]);
+      const avgHz   = sum / data.length;
+      const isActive = avgHz > 10;
+      chordSeqInputActiveRef.current = isActive;
+      if (isActive && Tone.context.state === 'running') {
+        const stepIdx = chordSeqCurrentStepRef.current;
+        const step    = chordSeqStepsRef.current[Math.max(0, stepIdx)];
+        const snapped = snapToChordHz(avgHz, step.rootClass, step.chordType);
+        // Use value setter (immediate) — setValueAtTime with a future-scheduled chord
+        // loop tick would otherwise fight this write in the same block.
+        n.chordSeqPitchOut.value = snapped;
+      }
+    };
+    chordSnapTick();
+
+    // Quantizer chord-override rAF — continuously holds the quantizer's root+scale to the
+    // current chord step at 60fps while qntChordOverrideRef is true.  Running continuously
+    // means nothing (QuantizerModule rAF, React effects, manual knob writes) can overwrite
+    // the chord seq's chord for more than one frame.  Delta-checked so postMessage only fires
+    // when the chord actually changes — not every frame.
+    let qntOverrideRafId;
+    let lastOverrideRoot  = -1;
+    let lastOverrideScale = null;
+    const qntOverrideTick = () => {
+      qntOverrideRafId = requestAnimationFrame(qntOverrideTick);
+      if (!qntChordOverrideRef.current || !n.quantizerNode) return;
+      const stepIdx  = chordSeqCurrentStepRef.current;
+      const step     = chordSeqStepsRef.current[Math.max(0, stepIdx)];
+      const newRoot  = step.rootClass;
+      const newScale = SCALE_DEFS[step.chordType] ?? SCALE_DEFS.CMAJ;
+      if (newRoot === lastOverrideRoot && newScale === lastOverrideScale) return;
+      lastOverrideRoot  = newRoot;
+      lastOverrideScale = newScale;
+      quantizerParamsRef.current.root  = newRoot;
+      quantizerParamsRef.current.scale = newScale;
+      n.quantizerNode.port.postMessage(quantizerParamsRef.current);
+    };
+    qntOverrideTick();
 
     nodesRef.current   = n;
     jackMapRef.current = buildJackMap(n);
@@ -500,16 +652,23 @@ export default function useMoogAudio() {
     });
 
     return () => {
+      cancelAnimationFrame(chordSnapRafId);
+      cancelAnimationFrame(qntOverrideRafId);
       // Null out nodesRef first so any in-flight worklet Promise .then() bails immediately.
       nodesRef.current = null;
       jackMapRef.current = null;
-      [n.vco1, n.vco2, n.vco3, n.noiseW, n.noiseP, n.lfo].forEach(node => {
+      [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2].forEach(node => {
         try { node.stop(); } catch (_) {}
       });
       if (seqLoopRef.current) {
         try { seqLoopRef.current.stop(); } catch (_) {}
         try { seqLoopRef.current.dispose(); } catch (_) {}
         seqLoopRef.current = null;
+      }
+      if (seq2LoopRef.current) {
+        try { seq2LoopRef.current.stop(); } catch (_) {}
+        try { seq2LoopRef.current.dispose(); } catch (_) {}
+        seq2LoopRef.current = null;
       }
       if (chordSeqLoopRef.current) {
         try { chordSeqLoopRef.current.stop(); } catch (_) {}
@@ -536,7 +695,7 @@ export default function useMoogAudio() {
 
     const n = nodesRef.current;
     if (!n) return;
-    [n.vco1, n.vco2, n.vco3, n.noiseW, n.noiseP, n.lfo].forEach(node => {
+    [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2].forEach(node => {
       try { node.start(); } catch (_) {}
     });
 
@@ -549,9 +708,11 @@ export default function useMoogAudio() {
 
     // Start sequencer clocks — reset steps so first tick lands on step 0
     seqCurrentStepRef.current      = -1;
+    seq2CurrentStepRef.current     = -1;
     chordSeqCurrentStepRef.current = -1;
     Tone.Transport.start();
     seqLoopRef.current?.start(0);
+    seq2LoopRef.current?.start(0);
     chordSeqLoopRef.current?.start(0);
 
     setIsPowered(true);
@@ -563,7 +724,7 @@ export default function useMoogAudio() {
 
     const n = nodesRef.current;
     if (!n) return;
-    [n.vco1, n.vco2, n.vco3, n.noiseW, n.noiseP, n.lfo].forEach(node => {
+    [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2].forEach(node => {
       try { node.stop(); } catch (_) {}
     });
 
@@ -571,6 +732,9 @@ export default function useMoogAudio() {
     seqLoopRef.current?.stop();
     seqCurrentStepRef.current = -1;
     if (seqStepCbRef.current) seqStepCbRef.current(-1);
+    seq2LoopRef.current?.stop();
+    seq2CurrentStepRef.current = -1;
+    if (seq2StepCbRef.current) seq2StepCbRef.current(-1);
     chordSeqLoopRef.current?.stop();
     chordSeqCurrentStepRef.current = -1;
     if (chordSeqStepCbRef.current) chordSeqStepCbRef.current(-1);
@@ -634,6 +798,26 @@ export default function useMoogAudio() {
     const waveformNode = from.waveformTarget ?? from.node;
     if (from.waveform) waveformNode.type = from.waveform;
 
+    // Chord-seq → quantizer scale override: when chordseq-cv-out is patched to
+    // qnt-transpose-in, the chord loop takes ownership of the quantizer's root+scale.
+    // Apply the current chord immediately so the quantizer is correct right away —
+    // don't wait for the next bar boundary.
+    if (effFrom === 'chordseq-cv-out' && effTo === 'qnt-transpose-in') {
+      qntChordOverrideRef.current = true;
+      const stepIdx = chordSeqCurrentStepRef.current;
+      const step    = chordSeqStepsRef.current[Math.max(0, stepIdx)];
+      quantizerParamsRef.current.root  = step.rootClass;
+      quantizerParamsRef.current.scale = SCALE_DEFS[step.chordType] ?? SCALE_DEFS.CMAJ;
+      n.quantizerNode?.port.postMessage(quantizerParamsRef.current);
+    }
+
+    // VCO cv-in override: zero the AudioParam base value so the source provides the
+    // full pitch Hz. Without this, VCO freq = knob_hz + cv_hz = always wrong.
+    if (/^vco\d+-cv$/.test(effTo)) {
+      const vcoId = effTo.replace('-cv', '');
+      if (n[vcoId]) n[vcoId].frequency.value = 0;
+    }
+
     try {
       from.node.connect(to.dest);
       connectionsRef.current.set(key, { node: from.node, dest: to.dest });
@@ -669,6 +853,23 @@ export default function useMoogAudio() {
       console.warn(`[MoogAudio] disconnect ${key}:`, e.message);
     }
     connectionsRef.current.delete(key);
+
+    // Chord-seq → quantizer override: clear when cable is removed.
+    if (effFrom === 'chordseq-cv-out' && effTo === 'qnt-transpose-in') {
+      qntChordOverrideRef.current = false;
+    }
+
+    // VCO cv-in: restore the knob frequency once no CV source remains connected,
+    // so the user gets back manual pitch control without re-touching the knob.
+    if (/^vco\d+-cv$/.test(effTo)) {
+      const n = nodesRef.current;
+      const stillActive = [...connectionsRef.current.keys()].some(k => k.endsWith(`→${effTo}`));
+      if (!stillActive && n) {
+        const vcoId  = effTo.replace('-cv', '');
+        const kHz    = vcoKnobHzRef.current[vcoId];
+        if (n[vcoId] && kHz != null) n[vcoId].frequency.value = kHz;
+      }
+    }
   }, []);
 
   // Update VCO audio parameters — single writer per node.
@@ -688,12 +889,16 @@ export default function useMoogAudio() {
     if (!vco) return;
     if (hz !== undefined) {
       const safeHz = Math.max(0.1, hz);
-      vco.frequency.setTargetAtTime(safeHz, Tone.now(), 0.02);
-      // Mirror to hard sync slave frequency so the FREQ knob controls both oscillators.
-      // The vco2fm scaler also additively connects to slaveFreq (handles CV modulation),
-      // so this only needs to set the base value — not the CV offset.
-      if (vcoId === 'vco2' && n.hardSyncNode) {
-        n.hardSyncNode.parameters.get('slaveFreq').setTargetAtTime(safeHz, Tone.now(), 0.02);
+      // Always persist the knob value so it can be restored on CV disconnect.
+      vcoKnobHzRef.current[vcoId] = safeHz;
+      // Suppress the frequency write while a CV source is connected — the source owns
+      // the pitch (base is zeroed in connect()), and the knob must not fight it.
+      const hasCv = [...connectionsRef.current.keys()].some(k => k.endsWith(`→${vcoId}-cv`));
+      if (!hasCv) {
+        vco.frequency.setTargetAtTime(safeHz, Tone.now(), 0.02);
+        if (vcoId === 'vco2' && n.hardSyncNode) {
+          n.hardSyncNode.parameters.get('slaveFreq').setTargetAtTime(safeHz, Tone.now(), 0.02);
+        }
       }
     }
     if (detune !== undefined) {
@@ -755,6 +960,18 @@ export default function useMoogAudio() {
     if (gain !== undefined) safeRamp(n.vca.gain, gain);
   }, []);
 
+  const updateVca2Params = useCallback(({ gain } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (gain !== undefined) safeRamp(n.vca2.gain, gain);
+  }, []);
+
+  const updateVca3Params = useCallback(({ gain } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (gain !== undefined) safeRamp(n.vca3.gain, gain);
+  }, []);
+
   // Update LFO parameters.
   // rate  (0–1) → exponential 0.1 Hz–30 Hz  (0.1 * 300^rate)
   // depth (0–1) → lfo.amplitude 0–1 (scales the ±1 output swing)
@@ -768,6 +985,14 @@ export default function useMoogAudio() {
     if (type  !== undefined) n.lfo.type = type;
   }, []);
 
+  const updateLfo2Params = useCallback(({ rate, depth, type } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (rate  !== undefined) safeRamp(n.lfo2.frequency, 0.1 * Math.pow(300, rate));
+    if (depth !== undefined) safeRamp(n.lfo2.amplitude, depth);
+    if (type  !== undefined) n.lfo2.type = type;
+  }, []);
+
   // Update reverb parameters — single writer on n.reverb.
   // roomSize (0–1): 0 = small/tight, 1 = large/diffuse.
   // wet      (0–1): dry/wet mix crossfade.
@@ -776,6 +1001,13 @@ export default function useMoogAudio() {
     if (!n) return;
     if (roomSize !== undefined) safeRamp(n.reverb.roomSize, roomSize);
     if (wet      !== undefined) safeRamp(n.reverb.wet,      wet);
+  }, []);
+
+  const updateReverb2Params = useCallback(({ roomSize, wet } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (roomSize !== undefined) safeRamp(n.reverb2.roomSize, roomSize);
+    if (wet      !== undefined) safeRamp(n.reverb2.wet,      wet);
   }, []);
 
   // Update per-channel mixer volume for the 4-channel I/O input stage.
@@ -849,6 +1081,14 @@ export default function useMoogAudio() {
     seqStepCbRef.current = fn;
   }, []);
 
+  const updateSeq2Steps = useCallback((steps) => {
+    seq2StepsRef.current = steps;
+  }, []);
+
+  const setSeq2StepCallback = useCallback((fn) => {
+    seq2StepCbRef.current = fn;
+  }, []);
+
   // Update quantizer scale and/or root note.
   // scale (string key: 'CHR' | 'MAJ' | 'MIN' | 'PMAJ' | 'PMIN')
   // root  (0–11: 0=C, 1=C#, …, 11=B)
@@ -879,6 +1119,12 @@ export default function useMoogAudio() {
   // quantizer snaps the melody to the current chord's interval set.
   const setChordSeqChordCallback = useCallback((fn) => {
     chordSeqChordCbRef.current = fn;
+  }, []);
+
+  // Set the octave offset for the independent chord root output (chordseq-root-out).
+  // octave: integer -3..+3
+  const setChordSeqRootOctave = useCallback((octave) => {
+    chordSeqRootOctaveRef.current = octave;
   }, []);
 
   // Change the chord sequencer clock division — takes effect immediately.
@@ -930,11 +1176,15 @@ export default function useMoogAudio() {
 
   return {
     powerOn, powerOff, connect, disconnect, isPowered,
-    updateVcoParams, updateVcfParams, updateEnvParams, triggerGate, updateVcaParams,
-    updateLfoParams, updateIoParams, updateIoChannelVol, updateReverbParams, getMoogBusNode,
+    updateVcoParams, updateVcfParams, updateEnvParams, triggerGate,
+    updateVcaParams, updateVca2Params, updateVca3Params,
+    updateLfoParams, updateLfo2Params, updateIoParams, updateIoChannelVol,
+    updateReverbParams, updateReverb2Params, getMoogBusNode,
     getOscilloscopeData, getQntTransposeData, getMeterValue,
-    setTempo, updateSequencerSteps, setSeqStepCallback, updateKeyboard,
-    updateChordSeqSteps, setChordSeqStepCallback, setChordSeqDivision, setChordSeqChordCallback,
+    setTempo, updateSequencerSteps, setSeqStepCallback,
+    updateSeq2Steps, setSeq2StepCallback, updateKeyboard,
+    updateChordSeqSteps, setChordSeqStepCallback, setChordSeqDivision,
+    setChordSeqChordCallback, setChordSeqRootOctave,
     setVco2SyncEnabled,
     updateQuantizerParams, setQuantizerCallback,
   };

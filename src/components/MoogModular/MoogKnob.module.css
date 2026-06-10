@@ -89,7 +89,7 @@
 .knob_sm .knobCap { width: 2.5px; height: 35%; top: 12%; }
 
 .knobLabel {
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.2em;
   color: #7a7260;
   text-transform: uppercase;
@@ -141,7 +141,7 @@
   position: absolute;
   top: -7px;
   left: 50%;
-  font-size: 5px;
+  font-size: 7px;
   line-height: 1;
   color: rgba(190, 178, 145, 0.7);
   letter-spacing: 0;

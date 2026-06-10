@@ -25,49 +25,60 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Future Phases
 
-### Moog Phase 7 (audio wiring) — Wire Patch Cables to `useMoogAudio.js`
-- Prerequisite: Phase 3 (audio architecture) must be complete first
-- In `MoogPatchContext.completeDrag` / `removeCable`: call `useMoogAudio.connect(fromJackId, toJackId)` / `disconnect(cableId)`
-- Jack IDs already match the architecture signal-type system — the visual graph already models the correct connection data, just needs an audio back-end
-
-### Moog Phase 5 — VCF Panel Wiring ✅ (see Completed Phases Log)
-
-### Moog Phase 6 — Envelope + VCA Wiring ✅ (see Completed Phases Log)
-
-### Moog Phase 11 — Oscilloscope Visualization ✅ (see Completed Phases Log)
-
-### Moog Phase 10 — Master I/O & True Modular Routing ✅ (see Completed Phases Log)
-
-### Moog Phase 7 — Patch Cable Simulation
-- Visual patch cables as SVG bezier curves between jacks
-- Drag from one jack to another to create a connection
-- Store connections as `[{ srcModuleId, srcJack, destModuleId, destJack }]`
-- Color-coded cables (random per patch)
-- Dynamic `connect()` / `disconnect()` to `useMoogAudio.js`
-
-### Moog Phase 8 — LFO Module (Audio Wiring) ✅ (see Completed Phases Log)
-
-### Moog Phase 8a — CP3 Mixer Audio Wiring
-- Prerequisite: Phase 3 (audio architecture) complete
-- Four `Tone.Gain` channel nodes + summing master `Tone.Gain` bus in `useMoogAudio.js`
-- Wire CH1–CH4 gain knobs + MASTER knob → node params via `.rampTo()`
-- Optional soft-clipping `WaveShaperNode` on the summing bus output for drive character
-
 ### Moog Phase 8b — Noise Generator Audio Wiring
-- Two `Tone.Noise` instances (white + pink) each through a `Tone.Gain` in `useMoogAudio.js`
-- Wire LEVEL knob → gain node
+- Three `Tone.Noise` pairs (noiseW/P, noise2W/P, noise3W/P) each through a `Tone.Gain` in `useMoogAudio.js`
+- Wire LEVEL knob → gain node per instance
 - Separate output refs for WHITE and PINK jacks for patch cable routing
 
 ### Moog Phase 12 — Visual Polish
-- Animated indicator LEDs (env activity, VCO trigger)
 - Knob tooltip labels on hover
 - Module-level bypass switches
-- Cabinet aging effects (subtle vignette, worn edges)
 - Mobile / narrow viewport fallback
 
 ---
 
 ## Completed Phases Log
+
+### [2026-06-10] Rack Expansion, UI Polish, Pitch Architecture Overhaul & Chord-Seq Routing
+
+**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.module.css`, `useMoogAudio.js`
+
+**Global font size pass (~30% bump):** All module labels, jack labels, knob labels, selector values, plate titles, nameplates, and quantizer display text bumped across `MoogShell.module.css` and `MoogKnob.module.css`. Chord seq root buttons 7→14px, chord type buttons 5→10px; button heights increased to match.
+
+**CP3 Mixer removed:** Component, 5 `Tone.Gain` nodes (`cp3ch1–4`, `cp3bus`), 5 jacks, and 4 internal `connect()` calls all deleted. Row 2 grid updated from 4 to 3 columns.
+
+**Chord sequencer grid:** Switched from `repeat(8, 1fr)` to `repeat(4, 1fr)` — 8 steps now display as 4×2.
+
+**Rack expansion — new modules:**
+- Row 1: VCO 4 + Noise 2 + Noise 3 (all modules parameterized with `number` prop for unique jack IDs)
+- Row 2: LFO 2 (`lfo2-*` jacks, `lfo2Meter`, `updateLfo2Params`) + Reverb 2 (`reverb2-*` jacks, `updateReverb2Params`)
+- Row 3: VCA 2 + VCA 3 (`vca2/3-in/cv/out` jacks, `updateVca2/3Params`) + ENV 3 (`env3-*` jacks, `env3Meter`, full gate routing)
+- Row 4: Second 960 Sequencer stacked under first (`.seqStack` flex column, `flex: 1` on `.module` fills height); `seq2-*` jacks (`seq2-pitch-out`, `seq2-gate-out`, etc.), `seq2Loop`, `updateSeq2Steps`, `setSeq2StepCallback`
+
+**Bug fix — sequencer jack ID collision:** Both `SequencerModule` instances were registering identical jack IDs (`seq-pitch-out` etc.), causing the second to overwrite the first in `MoogPatchContext.jackRefs`. `SequencerModule` now accepts `number` prop; jack prefix is `seq` or `seq2`.
+
+**VCO CV-in override architecture:** `connect()` now zeroes `vco.frequency.value` when any source is patched to `vco*-cv`, making the source the sole pitch provider (base=0 + source = correct Hz). `updateVcoParams` suppresses the frequency write while CV is connected (via `connectionsRef` scan); `vcoKnobHzRef` stores the last knob Hz for restoration on disconnect. Fixes pitch being wrong for ALL CV paths (sequencer, quantizer, chord seq).
+
+**Chord sequencer as inline chord quantizer (`chordseq-cv-in` → snap → `chordseq-cv-out`):**
+- New `chordSeqInputAnalyser: Tone.Analyser('waveform', 256)` tap on `chordseq-cv-in`
+- `snapToChordHz(inputHz, rootClass, chordType)` module-level helper: finds nearest chord tone in semitone distance across octaves −3..+4
+- `chordSnapTick` rAF reads analyser Hz, snaps to current chord step's tones, writes to `chordSeqPitchOut`; chord loop skips its own pitch write while input is active (single-writer rule)
+- Patch `seq-pitch-out → chordseq-cv-in → chordseq-cv-out → vco-cv` for chord-locked melody
+
+**Chord seq → Quantizer full override (`chordseq-cv-out → qnt-transpose-in`):**
+- `qntChordOverrideRef` set in `connect()` / cleared in `disconnect()` for that specific cable
+- `qntOverrideTick` 60fps rAF continuously holds the quantizer's root+scale to the current chord step (delta-checked — only posts when chord changes). Bulletproof against any other writer (TRP analyser, React effects, manual knob clicks)
+- Immediate apply fires in `connect()` so quantizer is correct the moment the cable is drawn
+- Chord loop also pushes root+scale on each step advance as belt-and-suspenders
+
+**Independent chord root output (`chordseq-root-out`):**
+- New `chordSeqRootOut: Tone.Signal` node, always outputs root Hz of current step × octave offset
+- ROOT OCT click-to-cycle selector (−3..+3) in ChordSeqModule UI; `chordSeqRootOctaveRef` + `setChordSeqRootOctave` callback
+- Completely independent of the CV-in snapping path — patch to a bass VCO with FREQ at minimum
+
+**Default chords changed:** Am · Am · F · F · C · C · E · E (rootClass `[9,9,5,5,0,0,4,4]`, chordType `[CMIN,CMIN,CMAJ,CMAJ,CMAJ,CMAJ,CMAJ,CMAJ]`) in both `ChordSeqModule` state and `chordSeqStepsRef`.
+
+---
 
 ### [2026-06-08] Bug Fix — Oscilloscope Waveform + Viewport Overflow
 

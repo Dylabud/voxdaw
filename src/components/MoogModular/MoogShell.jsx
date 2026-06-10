@@ -194,8 +194,9 @@ function VcoModule({ number, onParamUpdate, onSyncChange }) {
   );
 }
 
-function NoiseModule() {
+function NoiseModule({ number = 1 }) {
   const [level, setLevel] = useState(0.7);
+  const prefix = number === 1 ? 'noise' : `noise${number}`;
   return (
     <div className={styles.module}>
       <Screw pos="screwTL" /><Screw pos="screwTR" />
@@ -213,47 +214,8 @@ function NoiseModule() {
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id="noise-wht" label="WHT" />
-            <Jack id="noise-pnk" label="PNK" />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Cp3MixerModule() {
-  const [ch1, setCh1]       = useState(0.5);
-  const [ch2, setCh2]       = useState(0.5);
-  const [ch3, setCh3]       = useState(0.5);
-  const [ch4, setCh4]       = useState(0.5);
-  const [master, setMaster] = useState(0.75);
-  return (
-    <div className={styles.module}>
-      <Screw pos="screwTL" /><Screw pos="screwTR" />
-      <Screw pos="screwBL" /><Screw pos="screwBR" />
-      <div className={styles.plate}>
-        <div className={styles.plateHeader}>
-          <div className={styles.plateTitles}>
-            <span className={styles.plateTitle}>CP3</span>
-            <span className={styles.plateSub}>MIXER — 4 CH · SIGNAL COMBINER</span>
-          </div>
-        </div>
-        <div className={styles.plateBody}>
-          <div className={styles.knobRow}>
-            <MoogKnob label="CH 1"   size="sm" value={ch1}    onChange={setCh1}    defaultValue={0.5} />
-            <MoogKnob label="CH 2"   size="sm" value={ch2}    onChange={setCh2}    defaultValue={0.5} />
-            <MoogKnob label="CH 3"   size="sm" value={ch3}    onChange={setCh3}    defaultValue={0.5} />
-            <MoogKnob label="CH 4"   size="sm" value={ch4}    onChange={setCh4}    defaultValue={0.5} />
-            <MoogKnob label="MASTER" size="lg" value={master} onChange={setMaster} defaultValue={0.75} />
-          </div>
-          <PlateDivider />
-          <div className={styles.jackRow}>
-            <Jack id="cp3-in1" label="IN 1" />
-            <Jack id="cp3-in2" label="IN 2" />
-            <Jack id="cp3-in3" label="IN 3" />
-            <Jack id="cp3-in4" label="IN 4" />
-            <Jack id="cp3-out" label="OUT" />
+            <Jack id={`${prefix}-wht`} label="WHT" />
+            <Jack id={`${prefix}-pnk`} label="PNK" />
           </div>
         </div>
       </div>
@@ -315,10 +277,11 @@ const LFO_WAVE_LABELS = { sine: 'SIN', triangle: 'TRI', square: 'SQR', sawtooth:
 
 // onParamUpdate({ rate, depth, type }) wires knobs and wave selector to useMoogAudio.
 // getLedValue() — stable getter (pre-bound in MoogShell) for the LFO level meter.
-function LfoModule({ onParamUpdate, getLedValue }) {
+function LfoModule({ onParamUpdate, getLedValue, number = 1 }) {
   const [rate,     setRate]     = useState(0.3);
   const [depth,    setDepth]    = useState(0.5);
   const [waveType, setWaveType] = useState('sine');
+  const p = number === 1 ? 'lfo' : `lfo${number}`;
 
   useEffect(() => {
     if (!onParamUpdate) return;
@@ -354,11 +317,11 @@ function LfoModule({ onParamUpdate, getLedValue }) {
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id="lfo-sync" label="SYNC" />
-            <Jack id="lfo-sin"  label="SIN" />
-            <Jack id="lfo-tri"  label="TRI" />
-            <Jack id="lfo-sqr"  label="SQR" />
-            <Jack id="lfo-saw"  label="SAW" />
+            <Jack id={`${p}-sync`} label="SYNC" />
+            <Jack id={`${p}-sin`}  label="SIN" />
+            <Jack id={`${p}-tri`}  label="TRI" />
+            <Jack id={`${p}-sqr`}  label="SQR" />
+            <Jack id={`${p}-saw`}  label="SAW" />
           </div>
         </div>
       </div>
@@ -368,9 +331,10 @@ function LfoModule({ onParamUpdate, getLedValue }) {
 
 // onParamUpdate({ roomSize, wet }) wires ROOM and MIX knobs to n.reverb.
 // wet=0 on mount so the module is transparent until the user raises MIX.
-function ReverbModule({ onParamUpdate }) {
+function ReverbModule({ onParamUpdate, number = 1 }) {
   const [roomSize, setRoomSize] = useState(0.7);
   const [wet,      setWet]      = useState(0.0);
+  const p = number === 1 ? 'reverb' : `reverb${number}`;
 
   useEffect(() => {
     if (!onParamUpdate) return;
@@ -395,8 +359,8 @@ function ReverbModule({ onParamUpdate }) {
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id="reverb-in"  label="IN" />
-            <Jack id="reverb-out" label="OUT" />
+            <Jack id={`${p}-in`}  label="IN" />
+            <Jack id={`${p}-out`} label="OUT" />
           </div>
         </div>
       </div>
@@ -408,9 +372,10 @@ function ReverbModule({ onParamUpdate }) {
 // GAIN is the initial/bias level (0=closed, 1=fully open).
 // Set GAIN=0 and patch an envelope to vca-cv for full gating behavior.
 // ENV AMT knob is visual-only this phase.
-function VcaModule({ onParamUpdate }) {
+function VcaModule({ onParamUpdate, number = 1 }) {
   const [gain, setGain]     = useState(0.5);
   const [envAmt, setEnvAmt] = useState(1.0); // visual only
+  const p = number === 1 ? 'vca' : `vca${number}`;
 
   useEffect(() => {
     if (!onParamUpdate) return;
@@ -438,9 +403,9 @@ function VcaModule({ onParamUpdate }) {
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id="vca-in"  label="IN" />
-            <Jack id="vca-cv"  label="CV" />
-            <Jack id="vca-out" label="OUT" />
+            <Jack id={`${p}-in`}  label="IN" />
+            <Jack id={`${p}-cv`}  label="CV" />
+            <Jack id={`${p}-out`} label="OUT" />
           </div>
         </div>
       </div>
@@ -828,20 +793,25 @@ const CHORD_TYPE_LABELS = {
 // 8-step chord sequencer — each step stores { rootClass, chordType }.
 // rootClass cycles through the 12 chromatic notes; chordType selects the chord quality.
 // On step fire: chordseq-cv-out outputs root Hz AND chordSeqChordCallback syncs the quantizer.
-function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback }) {
+const ROOT_OCT_STEPS  = [-3, -2, -1, 0, 1, 2, 3];
+const ROOT_OCT_LABELS = { '-3': '-3', '-2': '-2', '-1': '-1', '0': '0', '1': '+1', '2': '+2', '3': '+3' };
+
+function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback, onRootOctaveChange }) {
   const [steps, setSteps] = useState(() =>
     Array.from({ length: 8 }, (_, i) => ({
-      rootClass: [0, 0, 5, 5, 7, 7, 0, 0][i],
-      chordType: 'CMAJ',
+      rootClass: [9, 9, 5, 5, 0, 0, 4, 4][i],
+      chordType: ['CMIN','CMIN','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ'][i],
     }))
   );
-  const [division, setDivision] = useState('1m');
+  const [division,   setDivision]   = useState('1m');
+  const [rootOctave, setRootOctave] = useState(0);
 
   const ledRefs     = useRef([]);
   const prevStepRef = useRef(-1);
 
-  useEffect(() => { onStepsChange?.(steps); },        [steps,    onStepsChange]);
-  useEffect(() => { onDivisionChange?.(division); },  [division, onDivisionChange]);
+  useEffect(() => { onStepsChange?.(steps); },             [steps,       onStepsChange]);
+  useEffect(() => { onDivisionChange?.(division); },       [division,    onDivisionChange]);
+  useEffect(() => { onRootOctaveChange?.(rootOctave); },   [rootOctave,  onRootOctaveChange]);
 
   useEffect(() => {
     onSetCallback?.((idx) => {
@@ -865,8 +835,10 @@ function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback }) {
     };
   }, [onSetCallback]);
 
-  const cycleDiv  = () =>
+  const cycleDiv     = () =>
     setDivision(prev => CHORD_DIVS[(CHORD_DIVS.indexOf(prev) + 1) % CHORD_DIVS.length]);
+  const cycleRootOct = () =>
+    setRootOctave(prev => ROOT_OCT_STEPS[(ROOT_OCT_STEPS.indexOf(prev) + 1) % ROOT_OCT_STEPS.length]);
 
   const cycleRoot = (i) =>
     setSteps(prev => {
@@ -926,10 +898,16 @@ function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback }) {
               <span className={styles.selectorLabel}>CLOCK DIV</span>
               <span className={styles.selectorValue}>{CHORD_LABELS[division]}</span>
             </div>
+            <div className={styles.selectorGroup} onClick={cycleRootOct} title="Root note octave offset">
+              <span className={styles.selectorLabel}>ROOT OCT</span>
+              <span className={styles.selectorValue}>{ROOT_OCT_LABELS[String(rootOctave)]}</span>
+            </div>
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id="chordseq-cv-out" label="ROOT CV" />
+            <Jack id="chordseq-cv-in"   label="SEQ IN" />
+            <Jack id="chordseq-cv-out"  label="OUT" />
+            <Jack id="chordseq-root-out" label="ROOT" />
           </div>
         </div>
       </div>
@@ -943,7 +921,8 @@ function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback }) {
 // onSetCallback(fn|null) — registers/deregisters the step-advance LED callback.
 // LEDs are driven by direct DOM classList mutation from inside Tone.Loop — zero React
 // state writes in the audio hot path, consistent with the Zero-Re-render Rule.
-function SequencerModule({ onStepsChange, onTempoChange, onSetCallback }) {
+function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, number = 1 }) {
+  const p = number === 1 ? 'seq' : `seq${number}`;
   const [steps, setSteps] = useState(() =>
     Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true }))
   );
@@ -1017,10 +996,10 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback }) {
               </div>
               <PlateDivider />
               <div className={styles.jackRow}>
-                <Jack id="seq-pitch-out" label="PITCH" />
-                <Jack id="seq-gate-out"  label="GATE" />
-                <Jack id="seq-clk-in"    label="CLK↓" />
-                <Jack id="seq-clk-out"   label="CLK↑" />
+                <Jack id={`${p}-pitch-out`} label="PITCH" />
+                <Jack id={`${p}-gate-out`}  label="GATE" />
+                <Jack id={`${p}-clk-in`}    label="CLK↓" />
+                <Jack id={`${p}-clk-out`}   label="CLK↑" />
               </div>
             </div>
 
@@ -1081,20 +1060,21 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
   // 2. Updates the chord type display in the quantizer's EXT row.
   useEffect(() => {
     audio.setChordSeqChordCallback((rootClass, chordType) => {
-      audio.updateQuantizerParams({ root: rootClass, scale: chordType });
       if (chordMapRef.current) {
         chordMapRef.current.textContent = CHORD_TYPE_LABELS[chordType] ?? chordType;
       }
     });
     return () => audio.setChordSeqChordCallback(null);
-  }, [audio.setChordSeqChordCallback, audio.updateQuantizerParams]);
+  }, [audio.setChordSeqChordCallback]);
 
   // Stable getValue closures — created once (audio.getMeterValue has empty-dep useCallback,
   // so its reference never changes). Passing pre-bound getters prevents Led's useEffect
   // from restarting on every re-render of the parent module component.
   const getLfoLevel    = useCallback(() => audio.getMeterValue('lfo'),    [audio.getMeterValue]);
+  const getLfo2Level   = useCallback(() => audio.getMeterValue('lfo2'),   [audio.getMeterValue]);
   const getEnv1Level   = useCallback(() => audio.getMeterValue('env1'),   [audio.getMeterValue]);
   const getEnv2Level   = useCallback(() => audio.getMeterValue('env2'),   [audio.getMeterValue]);
+  const getEnv3Level   = useCallback(() => audio.getMeterValue('env3'),   [audio.getMeterValue]);
   const getMasterLevel = useCallback(() => audio.getMeterValue('master'), [audio.getMeterValue]);
   const getIoCh1Level  = useCallback(() => audio.getMeterValue('ioCh1'),  [audio.getMeterValue]);
   const getIoCh2Level  = useCallback(() => audio.getMeterValue('ioCh2'),  [audio.getMeterValue]);
@@ -1186,35 +1166,52 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
               <VcoModule number={1} onParamUpdate={audio.updateVcoParams} />
               <VcoModule number={2} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco2SyncEnabled} />
               <VcoModule number={3} onParamUpdate={audio.updateVcoParams} />
-              <NoiseModule />
+              <VcoModule number={4} onParamUpdate={audio.updateVcoParams} />
+              <NoiseModule number={1} />
+              <NoiseModule number={2} />
+              <NoiseModule number={3} />
             </div>
 
-            {/* Row 2: Mixer → Filter → LFO → Reverb */}
+            {/* Row 2: Filter → LFO × 2 → Reverb × 2 */}
             <div className={`${styles.tier} ${styles.tierRow2}`}>
-              <Cp3MixerModule />
               <VcfModule onParamUpdate={audio.updateVcfParams} />
-              <LfoModule onParamUpdate={audio.updateLfoParams} getLedValue={getLfoLevel} />
-              <ReverbModule onParamUpdate={audio.updateReverbParams} />
+              <LfoModule    number={1} onParamUpdate={audio.updateLfoParams}    getLedValue={getLfoLevel} />
+              <LfoModule    number={2} onParamUpdate={audio.updateLfo2Params}   getLedValue={getLfo2Level} />
+              <ReverbModule number={1} onParamUpdate={audio.updateReverbParams} />
+              <ReverbModule number={2} onParamUpdate={audio.updateReverb2Params} />
             </div>
 
-            {/* Row 3: VCA, Envelopes */}
+            {/* Row 3: VCA × 3, Envelopes */}
             <div className={`${styles.tier} ${styles.tierRow3}`}>
-              <VcaModule onParamUpdate={audio.updateVcaParams} />
+              <VcaModule number={1} onParamUpdate={audio.updateVcaParams} />
+              <VcaModule number={2} onParamUpdate={audio.updateVca2Params} />
+              <VcaModule number={3} onParamUpdate={audio.updateVca3Params} />
               <EnvelopeModule label="ENV 1" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv1Level} />
               <EnvelopeModule label="ENV 2" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv2Level} />
+              <EnvelopeModule label="ENV 3" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv3Level} />
             </div>
 
-            {/* Row 4: 960 Sequencer + Chord Sequencer + Quantizer + I/O */}
+            {/* Row 4: 960 Sequencer (×2 stacked) + Chord Sequencer + Quantizer + I/O */}
             <div className={`${styles.tier} ${styles.tierRow4}`}>
-              <SequencerModule
-                onStepsChange={audio.updateSequencerSteps}
-                onTempoChange={audio.setTempo}
-                onSetCallback={audio.setSeqStepCallback}
-              />
+              <div className={styles.seqStack}>
+                <SequencerModule
+                  number={1}
+                  onStepsChange={audio.updateSequencerSteps}
+                  onTempoChange={audio.setTempo}
+                  onSetCallback={audio.setSeqStepCallback}
+                />
+                <SequencerModule
+                  number={2}
+                  onStepsChange={audio.updateSeq2Steps}
+                  onTempoChange={audio.setTempo}
+                  onSetCallback={audio.setSeq2StepCallback}
+                />
+              </div>
               <ChordSeqModule
                 onStepsChange={audio.updateChordSeqSteps}
                 onDivisionChange={audio.setChordSeqDivision}
                 onSetCallback={audio.setChordSeqStepCallback}
+                onRootOctaveChange={audio.setChordSeqRootOctave}
               />
               <QuantizerModule
                 onParamUpdate={audio.updateQuantizerParams}

@@ -126,7 +126,7 @@
 }
 
 .nameplateModel {
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.28em;
   color: #3a2808;
   font-weight: 700;
@@ -134,7 +134,7 @@
 }
 
 .nameplateBrand {
-  font-size: 12px;
+  font-size: 15px;
   letter-spacing: 0.42em;
   color: #18100a;
   font-weight: 700;
@@ -142,7 +142,7 @@
 }
 
 .nameplateSerial {
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.2em;
   color: #3a2808;
   opacity: 0.55;
@@ -184,10 +184,22 @@
 }
 
 /* Row column templates */
-.tierRow1 { grid-template-columns: 1fr 1fr 1fr 0.6fr; }
-.tierRow2 { grid-template-columns: 1.7fr 1.5fr 1fr 0.75fr; }
-.tierRow3 { grid-template-columns: 0.85fr 1fr 1fr; }
+.tierRow1 { grid-template-columns: 1fr 1fr 1fr 1fr 0.6fr 0.6fr 0.6fr; }
+.tierRow2 { grid-template-columns: 1.5fr 1fr 1fr 0.75fr 0.75fr; }
+.tierRow3 { grid-template-columns: 0.85fr 0.85fr 0.85fr 1fr 1fr 1fr; }
 .tierRow4 { grid-template-columns: 2.5fr 1fr 0.9fr 1fr; }
+/* Stacks two sequencer modules vertically inside a single grid cell */
+.seqStack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-self: stretch;
+}
+
+.seqStack .module {
+  flex: 1;
+  min-height: 0;
+}
 
 /* ══════════════════════════════════════════════════════
    MODULE PANEL
@@ -319,7 +331,7 @@
 }
 
 .plateTitle {
-  font-size: 16px;
+  font-size: 20px;
   font-weight: 700;
   letter-spacing: 0.26em;
   /* More ivory — vintage silkscreen on stamped aluminum */
@@ -329,7 +341,7 @@
 }
 
 .plateSub {
-  font-size: 7.5px;
+  font-size: 10px;
   letter-spacing: 0.18em;
   color: #625a4e;
   text-transform: uppercase;
@@ -388,7 +400,7 @@
 .knobWrap_sm { width: 38px; height: 38px; }
 
 .knobLabel {
-  font-size: 6px;
+  font-size: 8px;
   letter-spacing: 0.24em;
   color: #7a7260;
   text-transform: uppercase;
@@ -427,7 +439,7 @@
 .tickNum {
   position: absolute;
   top: -7px; left: 50%;
-  font-size: 5px; line-height: 1;
+  font-size: 7px; line-height: 1;
   color: rgba(190, 178, 145, 0.7);
   letter-spacing: 0; white-space: nowrap; text-align: center;
 }
@@ -451,7 +463,7 @@
 }
 
 .toggleLabel {
-  font-size: 7.5px;
+  font-size: 10px;
   letter-spacing: 0.16em;
   color: #6a6052;
   text-transform: uppercase;
@@ -503,14 +515,14 @@
 }
 
 .selectorLabel {
-  font-size: 7.5px;
+  font-size: 10px;
   letter-spacing: 0.16em;
   color: #6a6052;
   text-transform: uppercase;
 }
 
 .selectorValue {
-  font-size: 12px;
+  font-size: 15px;
   letter-spacing: 0.13em;
   color: #c8b890;
   text-transform: uppercase;
@@ -548,7 +560,7 @@
 }
 
 .gateBtnLabel {
-  font-size: 7.5px;
+  font-size: 10px;
   letter-spacing: 0.16em;
   color: #6a6052;
   text-transform: uppercase;
@@ -657,7 +669,7 @@
 }
 
 .jackLabel {
-  font-size: 8.5px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   color: #706860;
   text-transform: uppercase;
@@ -686,14 +698,14 @@
 }
 
 .blankLabel {
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.55em;
   color: #6a6050;
   text-transform: uppercase;
 }
 
 .blankSub {
-  font-size: 6px;
+  font-size: 8px;
   letter-spacing: 0.5em;
   color: #4a4238;
   text-transform: uppercase;
@@ -800,7 +812,7 @@
 /* 8-column step grid — tighter gaps than 960 seq since there are no gate buttons */
 .chordSeqGrid {
   display: grid;
-  grid-template-columns: repeat(8, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 3px 3px;
 }
 
@@ -809,12 +821,12 @@
   appearance: none;
   width: 100%;
   min-width: 0;
-  height: 18px;
+  height: 26px;
   background: linear-gradient(to bottom, #1e1c18, #161412);
   border: 1px solid #38342c;
   border-radius: 2px;
   color: #c8b890;
-  font-size: 7px;
+  font-size: 14px;
   font-family: inherit;
   letter-spacing: 0.04em;
   text-align: center;
@@ -841,12 +853,12 @@
   appearance: none;
   width: 100%;
   min-width: 0;
-  height: 13px;
+  height: 18px;
   background: linear-gradient(to bottom, #161412, #111010);
   border: 1px solid #2c2820;
   border-radius: 2px;
   color: #6a6052;
-  font-size: 5px;
+  font-size: 10px;
   font-family: inherit;
   letter-spacing: 0.04em;
   text-align: center;
@@ -957,7 +969,7 @@
 }
 
 .qntLedLabel {
-  font-size: 4px;
+  font-size: 6px;
   letter-spacing: 0;
   color: #4a4540;
   text-align: center;
@@ -980,7 +992,7 @@
 }
 
 .qntMonitorLabel {
-  font-size: 4.5px;
+  font-size: 6px;
   letter-spacing: 0.1em;
   color: #4a4540;
   text-transform: uppercase;
@@ -998,7 +1010,7 @@
 
 /* Note name + Hz text display — DOM-mutated directly, no React state */
 .qntDisplay {
-  font-size: 6px;
+  font-size: 8px;
   font-family: 'Courier New', monospace;
   letter-spacing: 0.04em;
   color: #5DCAA5;
@@ -1027,7 +1039,7 @@
 }
 
 .qntExtLabel {
-  font-size: 4.5px;
+  font-size: 6px;
   letter-spacing: 0.1em;
   color: #4a4540;
   text-transform: uppercase;
@@ -1036,7 +1048,7 @@
 
 /* Active root note derived from EXT CV — DOM-mutated by Hz analyser rAF */
 .qntExtDisplay {
-  font-size: 7px;
+  font-size: 9px;
   font-family: 'Courier New', monospace;
   letter-spacing: 0.06em;
   color: #5DCAA5;
@@ -1045,7 +1057,7 @@
 
 /* Chord quality label — DOM-mutated by chord sequencer callback (not by rAF) */
 .qntExtChordType {
-  font-size: 6px;
+  font-size: 8px;
   font-family: 'Courier New', monospace;
   letter-spacing: 0.04em;
   color: rgba(93, 202, 165, 0.7);
