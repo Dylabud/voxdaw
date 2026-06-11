@@ -53,12 +53,11 @@
   width: 100%;
   flex-shrink: 0; /* prevent flex from shrinking the cabinet before fit() measures it */
   background:
-    /* Vignette — heavy corner/edge darkening to simulate decades of handling & oxidation.
-       Gradient layers stack front-to-back; this is the topmost paint layer on the wood. */
+    /* Vignette — edge darkening; reduced opacity so brighter wood base shows through */
     radial-gradient(
       ellipse at 50% 45%,
       transparent 22%,
-      rgba(0, 0, 0, 0.52) 100%
+      rgba(0, 0, 0, 0.32) 100%
     ),
     /* Noise grain — tight 73° diagonal breaks up the smooth digital wood gradient */
     repeating-linear-gradient(
@@ -84,21 +83,21 @@
     ),
     linear-gradient(
       to bottom,
-      #1c0c04 0%,
-      #3a1c0a 12%,
-      #301408 30%,
-      #472010 50%,
-      #301408 70%,
-      #261008 88%,
-      #1c0c04 100%
+      #7a3a14 0%,
+      #a85828 12%,
+      #944e20 30%,
+      #c06c34 50%,
+      #944e20 70%,
+      #8a4418 88%,
+      #7a3a14 100%
     );
-  border-radius: 10px;
+  border-radius: 14px;
   /* Walnut visible only at the outer frame edges */
-  padding: 8px 10px 10px;
+  padding: 18px 22px 22px;
   box-shadow:
-    0 0 0 2px #7a4820,
-    0 0 0 4px #261202,
-    0 0 0 5px #4a2c10,
+    0 0 0 2px #c06c34,
+    0 0 0 4px #4a2010,
+    0 0 0 5px #8a4418,
     0 28px 80px rgba(0, 0, 0, 0.95),
     0 10px 28px rgba(0, 0, 0, 0.7),
     inset 0 1px 0 rgba(255, 255, 255, 0.06),
@@ -128,15 +127,15 @@
 .nameplateModel {
   font-size: 11px;
   letter-spacing: 0.28em;
-  color: #3a2808;
+  color: #1a1008;
   font-weight: 700;
-  opacity: 0.65;
+  opacity: 0.75;
 }
 
 .nameplateBrand {
   font-size: 15px;
   letter-spacing: 0.42em;
-  color: #18100a;
+  color: #0e0804;
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -144,8 +143,8 @@
 .nameplateSerial {
   font-size: 10px;
   letter-spacing: 0.2em;
-  color: #3a2808;
-  opacity: 0.55;
+  color: #1a1008;
+  opacity: 0.65;
   font-style: italic;
 }
 
@@ -185,7 +184,7 @@
 
 /* Row column templates */
 .tierRow1 { grid-template-columns: 1fr 1fr 1fr 1fr 0.6fr 0.6fr 0.6fr; }
-.tierRow2 { grid-template-columns: 1.5fr 1fr 1fr 0.75fr 0.75fr; }
+.tierRow2 { grid-template-columns: 1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr 0.8fr; }
 .tierRow3 { grid-template-columns: 0.85fr 0.85fr 0.85fr 1fr 1fr 1fr; }
 .tierRow4 { grid-template-columns: 2.5fr 1fr 0.9fr 1fr; }
 /* Stacks two sequencer modules vertically inside a single grid cell */
@@ -211,47 +210,42 @@
   flex-direction: column;
 }
 
-/* ── Faceplate — warm charcoal with stamped-metal micro-texture ── */
+/* ── Faceplate — glossy piano-black, lit from upper-right ── */
 .plate {
   flex: 1;
-  position: relative; /* anchor for ::after faceplate wear overlay */
+  position: relative; /* anchor for ::after specular */
   background:
-    repeating-linear-gradient(
-      118deg,
-      transparent 0px,
-      transparent 2px,
-      rgba(255, 255, 255, 0.008) 2px,
-      rgba(255, 255, 255, 0.008) 3px
+    /* Diffuse ambient — right edge picks up more light from the lamp */
+    linear-gradient(
+      to left,
+      rgba(255, 255, 255, 0.025) 0%,
+      transparent 55%
     ),
-    repeating-linear-gradient(
-      208deg,
-      transparent 0px,
-      transparent 2px,
-      rgba(0, 0, 0, 0.014) 2px,
-      rgba(0, 0, 0, 0.014) 3px
-    ),
-    linear-gradient(155deg, #181716 0%, #141312 45%, #111010 100%);
+    /* Piano-black base */
+    #080808;
   padding: 11px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  /* Right edge line defines module boundary against the dark rack gap */
-  border-right: 1px solid #1c1a18;
+  border-right: 1px solid #1a1a1a;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.55),
-    inset 1px 0 3px rgba(0, 0, 0, 0.3);
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.90),
+    inset 1px 0 3px rgba(0, 0, 0, 0.4);
 }
 
-/* Simulates oil from thousands of finger turns wearing down the powder coat —
-   a subtle brightening centered where the main knobs sit */
+/* Directional specular — upper-right to lower-left, matching the studio lamp at 78% 18%.
+   A glossy black surface reflects the lamp most strongly at the corner nearest the source.
+   The intensity here is low; the .lightOverlay provides the position-based variation
+   so right-side modules get a stronger combined result than left-side modules. */
 .plate::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: radial-gradient(
-    ellipse at 50% 42%,
-    rgba(255, 255, 255, 0.025) 0%,
+  background: linear-gradient(
+    to bottom left,
+    rgba(255, 255, 255, 0.07) 0%,
+    rgba(255, 255, 255, 0.02) 32%,
     transparent 62%
   );
   pointer-events: none;
@@ -259,15 +253,9 @@
 
 .moduleBlank .plate {
   background:
-    repeating-linear-gradient(
-      118deg,
-      transparent 0px,
-      transparent 2px,
-      rgba(255, 255, 255, 0.005) 2px,
-      rgba(255, 255, 255, 0.005) 3px
-    ),
-    linear-gradient(to bottom, #0f0e0d, #0c0b0a);
-  border-right: 1px solid #1a1816;
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.01) 12%, transparent 40%),
+    #060606;
+  border-right: 1px solid #181818;
 }
 
 /* ── Corner screws — Phillips cross ──
@@ -319,7 +307,7 @@
 .plateNum {
   font-size: 18px;
   font-weight: 200;
-  color: rgba(200, 188, 155, 0.13);
+  color: rgba(255, 255, 255, 0.45);
   line-height: 1;
   flex-shrink: 0;
 }
@@ -334,8 +322,7 @@
   font-size: 20px;
   font-weight: 700;
   letter-spacing: 0.26em;
-  /* More ivory — vintage silkscreen on stamped aluminum */
-  color: #cec5a2;
+  color: #ffffff;
   text-transform: uppercase;
   line-height: 1;
 }
@@ -343,7 +330,7 @@
 .plateSub {
   font-size: 10px;
   letter-spacing: 0.18em;
-  color: #625a4e;
+  color: rgba(255, 255, 255, 0.50);
   text-transform: uppercase;
 }
 
@@ -465,7 +452,7 @@
 .toggleLabel {
   font-size: 10px;
   letter-spacing: 0.16em;
-  color: #6a6052;
+  color: rgba(255, 255, 255, 0.60);
   text-transform: uppercase;
 }
 
@@ -517,14 +504,14 @@
 .selectorLabel {
   font-size: 10px;
   letter-spacing: 0.16em;
-  color: #6a6052;
+  color: rgba(255, 255, 255, 0.60);
   text-transform: uppercase;
 }
 
 .selectorValue {
   font-size: 15px;
   letter-spacing: 0.13em;
-  color: #c8b890;
+  color: #ffffff;
   text-transform: uppercase;
   background: linear-gradient(to bottom, #1e1c18, #161412);
   border: 1px solid #38342c;
@@ -539,12 +526,12 @@
 }
 
 .selectorGroup:hover .selectorValue {
-  color: #e8d4a0;
+  color: rgba(255, 255, 255, 0.90);
   border-color: #58503c;
 }
 
 .selectorGroup:active .selectorValue {
-  color: #f0e8b8;
+  color: #ffffff;
   background: linear-gradient(to bottom, #181612, #1c1a14);
 }
 
@@ -562,7 +549,7 @@
 .gateBtnLabel {
   font-size: 10px;
   letter-spacing: 0.16em;
-  color: #6a6052;
+  color: rgba(255, 255, 255, 0.60);
   text-transform: uppercase;
 }
 
@@ -634,44 +621,81 @@
   border-radius: 50%;
   flex-shrink: 0;
   position: relative;
-  background: radial-gradient(
-    circle at 38% 32%,
-    #1a1816 0%,
-    #080604 50%,
-    #020100 100%
-  );
-  /* Warmer silver ring with top-left light hit */
-  border: 3px solid #888078;
+  /* Conic gradient: 360° directional shading on the chrome ring.
+     Bright peak at ~52° (2 o'clock) matches the studio lamp at upper-right.
+     Darkest at ~228° (7-8 o'clock) on the shadow side.
+     Radial gradient on top adds the crisp specular hot spot. */
+  background:
+    radial-gradient(
+      ellipse at 68% 22%,
+      rgba(255, 255, 255, 0.45) 0%,
+      rgba(255, 255, 255, 0.14) 18%,
+      transparent 38%
+    ),
+    conic-gradient(
+      from 0deg,
+      #888882 0deg,
+      #b0aca6 28deg,
+      #cac6c0 52deg,
+      #bab6b0 78deg,
+      #9a9892 130deg,
+      #686862 180deg,
+      #484844 212deg,
+      #3e3e3a 228deg,
+      #484844 260deg,
+      #686864 310deg,
+      #888882 360deg
+    );
   box-shadow:
-    /* directional mount shadow */
-    0 3px 8px rgba(0, 0, 0, 0.92),
-    0 1px 3px rgba(0, 0, 0, 0.75),
-    /* silver ring specular — top-left lamp */
-    0 0 0 1px rgba(185, 178, 162, 0.22),
-    /* top edge light on ring */
-    inset 0 1px 0 rgba(168, 162, 150, 0.32),
-    /* deep plug hole */
-    inset 0 2px 6px rgba(0, 0, 0, 0.98),
-    inset 0 -1px 0 rgba(160, 154, 140, 0.10);
+    0 3px 10px rgba(0, 0, 0, 0.95),
+    0 1px 3px  rgba(0, 0, 0, 0.75),
+    /* outer edge definition */
+    0 0 0 1px rgba(0, 0, 0, 0.60);
 }
 
+/* Inner socket body — recessed concave area between ring and hole */
+.jack::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 58% 32%,
+    #2e2c2a 0%,
+    #181614 38%,
+    #060504 100%
+  );
+  box-shadow:
+    inset 0 2px 6px rgba(0, 0, 0, 0.98),
+    inset 0 0 4px rgba(0, 0, 0, 0.80),
+    /* rim catching a sliver of light from the ring */
+    0 0 0 1px rgba(50, 48, 42, 0.45);
+}
+
+/* Plug hole — the dark central socket */
 .jack::after {
   content: '';
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: radial-gradient(circle at 40% 35%, #141210, #010000);
-  box-shadow: inset 0 1px 4px rgba(0, 0, 0, 1);
+  background: radial-gradient(circle at 42% 38%, #0e0c0a, #000000);
+  box-shadow:
+    inset 0 1px 4px rgba(0, 0, 0, 1),
+    inset 0 0 6px rgba(0, 0, 0, 1);
 }
 
 .jackLabel {
   font-size: 11px;
   letter-spacing: 0.12em;
-  color: #706860;
+  color: rgba(255, 255, 255, 0.70);
   text-transform: uppercase;
   text-align: center;
   white-space: nowrap;
@@ -700,14 +724,14 @@
 .blankLabel {
   font-size: 10px;
   letter-spacing: 0.55em;
-  color: #6a6050;
+  color: rgba(255, 255, 255, 0.60);
   text-transform: uppercase;
 }
 
 .blankSub {
   font-size: 8px;
   letter-spacing: 0.5em;
-  color: #4a4238;
+  color: rgba(255, 255, 255, 0.40);
   text-transform: uppercase;
 }
 
@@ -825,7 +849,7 @@
   background: linear-gradient(to bottom, #1e1c18, #161412);
   border: 1px solid #38342c;
   border-radius: 2px;
-  color: #c8b890;
+  color: #ffffff;
   font-size: 14px;
   font-family: inherit;
   letter-spacing: 0.04em;
@@ -839,7 +863,7 @@
 .chordSeqRoot:hover {
   background: linear-gradient(to bottom, #28261c, #201e18);
   border-color: #58503c;
-  color: #e8d4a0;
+  color: rgba(255, 255, 255, 0.90);
 }
 
 .chordSeqRoot:active {
@@ -857,7 +881,7 @@
   background: linear-gradient(to bottom, #161412, #111010);
   border: 1px solid #2c2820;
   border-radius: 2px;
-  color: #6a6052;
+  color: rgba(255, 255, 255, 0.60);
   font-size: 10px;
   font-family: inherit;
   letter-spacing: 0.04em;
@@ -871,7 +895,7 @@
 .chordSeqType:hover {
   background: linear-gradient(to bottom, #1e1c18, #181614);
   border-color: #484038;
-  color: #a89880;
+  color: rgba(255, 255, 255, 0.85);
 }
 
 .chordSeqType:active {
@@ -971,7 +995,7 @@
 .qntLedLabel {
   font-size: 6px;
   letter-spacing: 0;
-  color: #4a4540;
+  color: rgba(255, 255, 255, 0.50);
   text-align: center;
   white-space: nowrap;
 }
@@ -994,7 +1018,7 @@
 .qntMonitorLabel {
   font-size: 6px;
   letter-spacing: 0.1em;
-  color: #4a4540;
+  color: rgba(255, 255, 255, 0.50);
   text-transform: uppercase;
 }
 
@@ -1041,7 +1065,7 @@
 .qntExtLabel {
   font-size: 6px;
   letter-spacing: 0.1em;
-  color: #4a4540;
+  color: rgba(255, 255, 255, 0.50);
   text-transform: uppercase;
   flex-shrink: 0;
 }
@@ -1073,4 +1097,60 @@
   align-items: center;
   gap: 6px;
   padding: 1px 2px;
+}
+
+/* ══════════════════════════════════════════════════════
+   KEYBOARD BARRIER — walnut rail between rack and keys
+   ══════════════════════════════════════════════════════ */
+.kbdBarrier {
+  height: 20px;
+  background:
+    /* Horizontal wood grain lines */
+    repeating-linear-gradient(
+      90deg,
+      transparent 0px, transparent 36px,
+      rgba(0, 0, 0, 0.06) 36px, rgba(0, 0, 0, 0.06) 37px
+    ),
+    /* Subtle vertical variation */
+    repeating-linear-gradient(
+      180deg,
+      transparent 0px, transparent 5px,
+      rgba(0, 0, 0, 0.03) 5px, rgba(0, 0, 0, 0.03) 6px
+    ),
+    linear-gradient(
+      to bottom,
+      #b86830 0%,
+      #c87038 35%,
+      #b46030 65%,
+      #8a4418 100%
+    );
+  border-top:    1px solid rgba(255, 255, 255, 0.12);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.55);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 3px 8px rgba(0, 0, 0, 0.45);
+}
+
+/* ══════════════════════════════════════════════════════
+   UNIFIED STUDIO LAMP — single light source overlay
+   Sits at z-index:49 (above all module content, below
+   patch cables at z-index:50). mix-blend-mode:screen
+   brightens what's below proportionally — knobs, jacks,
+   and labels all receive the same directional light
+   instead of each module having its own hotspot.
+   ══════════════════════════════════════════════════════ */
+.lightOverlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 49;
+  border-radius: inherit;
+  mix-blend-mode: screen;
+  background: radial-gradient(
+    ellipse at 78% 18%,
+    rgba(255, 255, 255, 0.10) 0%,
+    rgba(255, 255, 255, 0.04) 28%,
+    rgba(255, 255, 255, 0.01) 52%,
+    transparent 70%
+  );
 }

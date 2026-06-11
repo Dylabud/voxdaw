@@ -43,7 +43,7 @@
 .kbdModel {
   font-size: 18px;
   font-weight: 200;
-  color: rgba(200, 188, 155, 0.15);
+  color: rgba(255, 255, 255, 0.40);
   line-height: 1;
   flex-shrink: 0;
 }
@@ -58,7 +58,7 @@
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.3em;
-  color: #cec5a2;
+  color: #ffffff;
   text-transform: uppercase;
   line-height: 1;
 }
@@ -66,8 +66,34 @@
 .kbdSub {
   font-size: 5.5px;
   letter-spacing: 0.22em;
-  color: #625a4e;
+  color: rgba(255, 255, 255, 0.50);
   text-transform: uppercase;
+}
+
+.midiLinkGroup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+/* Initial appearance set by CSS; live state overwritten via DOM ref */
+.midiLed {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(93, 202, 165, 0.10);
+  box-shadow: none;
+  flex-shrink: 0;
+}
+
+.midiLinkLabel {
+  font-size: 5px;
+  letter-spacing: 0.16em;
+  color: rgba(255, 255, 255, 0.45);
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .jackRow {
@@ -117,7 +143,7 @@
 .jackLabel {
   font-size: 5.5px;
   letter-spacing: 0.16em;
-  color: #666058;
+  color: rgba(255, 255, 255, 0.60);
   text-transform: uppercase;
   text-align: center;
   white-space: nowrap;
@@ -132,7 +158,7 @@
 .kbdHintText {
   font-size: 5px;
   letter-spacing: 0.14em;
-  color: #4a4238;
+  color: rgba(255, 255, 255, 0.35);
   text-transform: uppercase;
   font-style: italic;
   white-space: nowrap;
@@ -158,7 +184,7 @@
 /* ── White keys ── */
 .whiteKey {
   flex-shrink: 0;
-  width: 28px;
+  width: 20px;
   box-sizing: border-box;
   border-left: 1px solid #8c8070;
   border-right: none;

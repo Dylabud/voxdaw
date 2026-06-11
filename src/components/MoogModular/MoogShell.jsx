@@ -225,11 +225,13 @@ function NoiseModule({ number = 1 }) {
 
 // onParamUpdate({ cutoff, resonance }) is the audio update callback from useMoogAudio.
 // envAmt and kbdTracking are visual-only in this phase (Phase 6 will wire them).
-function VcfModule({ onParamUpdate }) {
+function VcfModule({ onParamUpdate, number = 1 }) {
   const [cutoff, setCutoff] = useState(1.0);   // fully open — matches vcf init at 20kHz
   const [res, setRes]       = useState(0.0);
   const [envAmt, setEnvAmt] = useState(0.5);   // visual only
   const [kbd, setKbd]       = useState(0.0);   // visual only
+
+  const p = number === 1 ? 'vcf' : `vcf${number}`;
 
   useEffect(() => {
     if (!onParamUpdate) return;
@@ -242,6 +244,7 @@ function VcfModule({ onParamUpdate }) {
       <Screw pos="screwBL" /><Screw pos="screwBR" />
       <div className={styles.plate}>
         <div className={styles.plateHeader}>
+          <span className={styles.plateNum}>{number}</span>
           <div className={styles.plateTitles}>
             <span className={styles.plateTitle}>VCF</span>
             <span className={styles.plateSub}>VOLTAGE CONTROLLED FILTER — 24 dB/OCT LADDER</span>
@@ -256,11 +259,11 @@ function VcfModule({ onParamUpdate }) {
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id="vcf-in"  label="IN" />
-            <Jack id="vcf-cv1" label="CV 1" />
-            <Jack id="vcf-cv2" label="CV 2" />
-            <Jack id="vcf-env" label="ENV" />
-            <Jack id="vcf-out" label="OUT" />
+            <Jack id={`${p}-in`}  label="IN" />
+            <Jack id={`${p}-cv1`} label="CV 1" />
+            <Jack id={`${p}-cv2`} label="CV 2" />
+            <Jack id={`${p}-env`} label="ENV" />
+            <Jack id={`${p}-out`} label="OUT" />
           </div>
         </div>
       </div>
@@ -280,13 +283,14 @@ const LFO_WAVE_LABELS = { sine: 'SIN', triangle: 'TRI', square: 'SQR', sawtooth:
 function LfoModule({ onParamUpdate, getLedValue, number = 1 }) {
   const [rate,     setRate]     = useState(0.3);
   const [depth,    setDepth]    = useState(0.5);
+  const [modDepth, setModDepth] = useState(0.0);
   const [waveType, setWaveType] = useState('sine');
   const p = number === 1 ? 'lfo' : `lfo${number}`;
 
   useEffect(() => {
     if (!onParamUpdate) return;
-    onParamUpdate({ rate, depth, type: waveType });
-  }, [rate, depth, waveType, onParamUpdate]);
+    onParamUpdate({ rate, depth, modDepth, type: waveType });
+  }, [rate, depth, modDepth, waveType, onParamUpdate]);
 
   const cycleWave = () =>
     setWaveType(prev => LFO_WAVE_TYPES[(LFO_WAVE_TYPES.indexOf(prev) + 1) % LFO_WAVE_TYPES.length]);
@@ -305,8 +309,9 @@ function LfoModule({ onParamUpdate, getLedValue, number = 1 }) {
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
             <Led getValue={getLedValue} color="yellow" />
-            <MoogKnob label="RATE"  size="lg" value={rate}  onChange={setRate}  defaultValue={0.3} />
-            <MoogKnob label="DEPTH" size="md" value={depth} onChange={setDepth} defaultValue={0.5} />
+            <MoogKnob label="RATE"  size="lg" value={rate}     onChange={setRate}     defaultValue={0.3} />
+            <MoogKnob label="DEPTH" size="md" value={depth}    onChange={setDepth}    defaultValue={0.5} />
+            <MoogKnob label="MOD"   size="sm" value={modDepth} onChange={setModDepth} defaultValue={0.0} />
           </div>
           <div className={styles.selectorRow}>
             <div className={styles.selectorGroup} onClick={cycleWave} title="Click to cycle waveform">
@@ -316,8 +321,13 @@ function LfoModule({ onParamUpdate, getLedValue, number = 1 }) {
             <ToggleSwitch labels={['FREE', 'SYNC']} />
           </div>
           <PlateDivider />
+          {/* Input jacks: SYNC (deferred) + FM (rate modulation CV) */}
           <div className={styles.jackRow}>
             <Jack id={`${p}-sync`} label="SYNC" />
+            <Jack id={`${p}-fm`}   label="FM" />
+          </div>
+          {/* Output jacks: waveform taps */}
+          <div className={styles.jackRow}>
             <Jack id={`${p}-sin`}  label="SIN" />
             <Jack id={`${p}-tri`}  label="TRI" />
             <Jack id={`${p}-sqr`}  label="SQR" />
@@ -1037,6 +1047,56 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, number =
   );
 }
 
+// ──────────── BBD Chorus ────────────
+
+// Rate LED pulses at the same frequency as the chorus LFO by reading rateHzRef
+// in a stable getter closure — no React state writes in the rAF loop.
+function ChorusModule({ onParamUpdate }) {
+  const [rate,  setRate]  = useState(0.3);
+  const [depth, setDepth] = useState(0.5);
+  const [wet,   setWet]   = useState(0.0);
+
+  const rateHzRef = useRef(0.1 * Math.pow(50, 0.3));
+
+  useEffect(() => {
+    rateHzRef.current = 0.1 * Math.pow(50, rate);
+    onParamUpdate?.({ rate, depth, wet });
+  }, [rate, depth, wet, onParamUpdate]);
+
+  // Stable getter — reads ref each frame, never changes reference so Led's rAF never restarts.
+  const getRateFlash = useCallback(() =>
+    (Math.sin(Date.now() * 0.001 * rateHzRef.current * Math.PI * 2) + 1) / 2
+  , []);
+
+  return (
+    <div className={styles.module}>
+      <Screw pos="screwTL" /><Screw pos="screwTR" />
+      <Screw pos="screwBL" /><Screw pos="screwBR" />
+      <div className={styles.plate}>
+        <div className={styles.plateHeader}>
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>BBD</span>
+            <span className={styles.plateSub}>BUCKET BRIGADE CHORUS</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          <div className={styles.knobRow}>
+            <Led getValue={getRateFlash} color="yellow" />
+            <MoogKnob label="RATE"  size="md" value={rate}  onChange={setRate}  defaultValue={0.3} />
+            <MoogKnob label="DEPTH" size="md" value={depth} onChange={setDepth} defaultValue={0.5} />
+            <MoogKnob label="MIX"   size="md" value={wet}   onChange={setWet}   defaultValue={0.0} />
+          </div>
+          <PlateDivider />
+          <div className={styles.jackRow}>
+            <Jack id="chorus-in"  label="IN" />
+            <Jack id="chorus-out" label="OUT" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ──────────── Main shell ────────────
 
 // onBusReady(getter) — called once on mount to hand the Workstation a function
@@ -1072,6 +1132,10 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
   // from restarting on every re-render of the parent module component.
   const getLfoLevel    = useCallback(() => audio.getMeterValue('lfo'),    [audio.getMeterValue]);
   const getLfo2Level   = useCallback(() => audio.getMeterValue('lfo2'),   [audio.getMeterValue]);
+  // Instantaneous LFO phase for rate LEDs — pulses at the actual modulated rate
+  // rather than an averaged RMS level. Reads waveform analyser last sample.
+  const getLfoInstant  = useCallback(() => audio.getLfoInstant?.()  ?? 0, [audio.getLfoInstant]);
+  const getLfo2Instant = useCallback(() => audio.getLfo2Instant?.() ?? 0, [audio.getLfo2Instant]);
   const getEnv1Level   = useCallback(() => audio.getMeterValue('env1'),   [audio.getMeterValue]);
   const getEnv2Level   = useCallback(() => audio.getMeterValue('env2'),   [audio.getMeterValue]);
   const getEnv3Level   = useCallback(() => audio.getMeterValue('env3'),   [audio.getMeterValue]);
@@ -1153,6 +1217,10 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
         <div className={styles.cabinet} ref={cabinetRef}>
           {/* SVG patch cable overlay — position:absolute, inset:0, z-index:50 */}
           <PatchCableOverlay />
+          {/* Unified studio lamp — single radial gradient covering the whole rack.
+              mix-blend-mode:screen brightens modules proportionally to their position
+              under the lamp; z-index:49 keeps it above module content, below cables. */}
+          <div className={styles.lightOverlay} />
 
           <div className={styles.nameplate}>
             <span className={styles.nameplateModel}>MODEL 55</span>
@@ -1172,13 +1240,15 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
               <NoiseModule number={3} />
             </div>
 
-            {/* Row 2: Filter → LFO × 2 → Reverb × 2 */}
+            {/* Row 2: Filter × 2 → LFO × 2 → Reverb × 2 → BBD Chorus */}
             <div className={`${styles.tier} ${styles.tierRow2}`}>
-              <VcfModule onParamUpdate={audio.updateVcfParams} />
-              <LfoModule    number={1} onParamUpdate={audio.updateLfoParams}    getLedValue={getLfoLevel} />
-              <LfoModule    number={2} onParamUpdate={audio.updateLfo2Params}   getLedValue={getLfo2Level} />
+              <VcfModule    number={1} onParamUpdate={audio.updateVcfParams} />
+              <VcfModule    number={2} onParamUpdate={audio.updateVcf2Params} />
+              <LfoModule    number={1} onParamUpdate={audio.updateLfoParams}    getLedValue={getLfoInstant} />
+              <LfoModule    number={2} onParamUpdate={audio.updateLfo2Params}   getLedValue={getLfo2Instant} />
               <ReverbModule number={1} onParamUpdate={audio.updateReverbParams} />
               <ReverbModule number={2} onParamUpdate={audio.updateReverb2Params} />
+              <ChorusModule             onParamUpdate={audio.updateChorusParams} />
             </div>
 
             {/* Row 3: VCA × 3, Envelopes */}
@@ -1230,6 +1300,9 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
               />
             </div>
           </div>
+
+          {/* Wooden rail separating the module rack from the keyboard */}
+          <div className={styles.kbdBarrier} />
 
           {/* 953 Keyboard Controller — sits below the rack, spans full cabinet width */}
           <KeyboardModule onUpdate={audio.updateKeyboard} />

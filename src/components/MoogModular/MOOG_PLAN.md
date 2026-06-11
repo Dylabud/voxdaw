@@ -39,6 +39,95 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-06-11] MIDI-to-CV Integration (Phase 34)
+
+**Files modified:** `KeyboardModule.jsx`, `KeyboardModule.module.css`
+
+Internalized Web MIDI API into the 953 Keyboard Controller. Physical USB MIDI keyboard drives existing PITCH OUT and GATE OUT patch jacks with no extra modules or wiring.
+
+- **`navigator.requestMIDIAccess({ sysex: false })`** called on mount; attaches `onmidimessage` to all current inputs; `onstatechange` handles hot-plug connect/disconnect.
+- **`onUpdateRef` pattern** — MIDI handler reads a ref instead of closing over `onUpdate` prop directly; MIDI `useEffect` never re-runs on prop change, so listeners are never torn down mid-performance.
+- **Mono legato (`heldMidiNotesRef` stack)** — all held MIDI note numbers tracked; note-off restores the previous held note (gate stays open) rather than cutting. Enables natural legato on monophonic patches.
+- **`pressedByMouseRef` guard** — `pointerup` release early-returns when `pressedByMouseRef` is false, preventing mouse events from cancelling a MIDI-held gate.
+- **MIDI LED** — DOM-mutated directly via `midiLedRef`. Dim = no device; steady green = connected; 80ms flash on every note-on. `midiConnectedRef` mirrors state for stale-closure-safe timeout callback.
+- Mouse, computer keyboard, and MIDI all work simultaneously; no fallback mode required — all three are always active.
+
+**Gemini corrections:** `953KeyboardController.jsx` rename rejected (breaks imports). `onUpdate` direct closure would tear down listeners on every render — `onUpdateRef` is the correct pattern. `pressedByMouseRef` guard not mentioned by Gemini. Mono legato stack not addressed by Gemini. "Automatic fallback" is not needed since all input methods coexist.
+
+---
+
+### [2026-06-11] 61-Key Keyboard + Wooden Barrier
+
+**Files modified:** `KeyboardModule.jsx`, `KeyboardModule.module.css`, `MoogShell.jsx`, `MoogShell.module.css`
+
+- **61 keys (C2–C7):** `buildKeys()` loops 5 octaves (C2–B6) + appends top C7. `WW` 28→20px, `BW` 17→12px; `SEMI_BLACK` recalculated for new geometry (`[null,14,null,34,null,null,74,null,94,null,114,null]`). All 61 keys share the same `onPointerDown` handler.
+- **Wooden barrier (`kbdBarrier`):** `<div className={styles.kbdBarrier} />` between `.rack` and `<KeyboardModule>`. Horizontal grain via `repeating-linear-gradient(90deg)`, walnut color matching cabinet (`#b46030`–`#c87038`), `border-top`/`border-bottom` for physical depth.
+
+---
+
+### [2026-06-11] Visual Aesthetic Overhaul
+
+**Files modified:** `MoogShell.module.css`, `MoogKnob.jsx`, `MoogKnob.module.css`
+
+**Glossy black faceplates:** `.plate` background replaced from warm charcoal micro-texture with piano-black `#080808` + right-to-left ambient diffuse gradient. `.plate::after` changed from centered hotspot to directional `to bottom left` specular matching lamp at `78% 18%`.
+
+**Unified studio lamp:** `.lightOverlay` div (`position:absolute; inset:0; z-index:49; mix-blend-mode:screen`) inside `.cabinet` replaces per-module specular. Single `radial-gradient(ellipse at 78% 18%)` illuminates modules based on their physical position in the rack. `mix-blend-mode:screen` brightens knobs, jacks, and labels proportionally without obscuring them.
+
+**Chrome jacks with conic ring:** `.jack` background replaced with `conic-gradient` + `radial-gradient` specular. `::before` adds inner socket body (16px); `::after` is the plug hole (8px). Three-layer depth: chrome ring → socket → hole. Ring brightness peaks at 52° (2 o'clock) matching the lamp.
+
+**White knobs with fixed shading:** `.knob` base uses `radial-gradient(circle at 50% 50%)` — rotationally symmetric so it looks the same at any value. Directional specular/shadow lives entirely on `.knobShading` (new counter-rotating `<div>` inside `.knob` with `transform: rotate(${-rotateDeg}deg)`). Inset edge shadows also on `.knobShading` so they never spin. Lamp-matched shading: primary specular `72% 14%`, diffuse lit area `68% 24%`, shadow `22% 82%`, inset `inset -1px 1px` bright / `inset 1px -1px` dark.
+
+**White text + white dials:** All module labels, jack labels, knob labels, selector values, BPM displays, chord/seq buttons, quantizer labels → `#ffffff` or `rgba(255,255,255,X)` with hierarchy preserved. Nameplate text kept dark (black on brass). Knob body → white gradient `#ffffff→#686868`. Tick marks and numbers → `rgba(255,255,255,X)`.
+
+**Brighter wood:** Cabinet base gradient `#1c0c04–#472010` → `#7a3a14–#c06c34`. Vignette opacity `0.52→0.32` to let the brighter base show through. Ring shadow colors updated to match. Cabinet padding `8px 10px 10px` → `18px 22px 22px` (thicker frame). `border-radius` `10px→14px`.
+
+---
+
+### [2026-06-10] LFO Rate Modulation (Cascading LFOs)
+
+**Files modified:** `MoogShell.jsx`, `useMoogAudio.js`
+
+Added rate FM input and MOD DEPTH knob to both LFO modules, plus waveform-analyser-driven LEDs.
+
+- `useMoogAudio.js`: Added `lfo1modGain`/`lfo2modGain` (`Tone.Gain(0)`) — permanent wired to `lfo.frequency`/`lfo2.frequency`; `lfoWaveAnalyser`/`lfo2WaveAnalyser` (`Tone.Analyser('waveform', 32)`) dead-end taps on each LFO; `lfo-fm`/`lfo2-fm` jacks → the mod Gain nodes; `updateLfoParams`/`updateLfo2Params` extended with `modDepth` param → `safeRamp(lfo1modGain.gain, modDepth * 10)` (0–10 Hz swing range); `getLfoInstant`/`getLfo2Instant` callbacks read `data[last]` from each waveform analyser, normalized `(v+1)/2`, guarded by `isPoweredRef` so LED stays dim when off.
+- `MoogShell.jsx`: `LfoModule` gains `modDepth` state + `MOD` sm-knob; jack rows split: inputs (`SYNC`, `FM`) above outputs (`SIN`, `TRI`, `SQR`, `SAW`); `getLfoInstant`/`getLfo2Instant` stable getters added to `MoogShell` and passed as `getLedValue`.
+
+**Gemini corrections:** `LFOModule.jsx` rejected (co-location rule). JS formula for rate calculation is impossible for audio-rate CV — the correct architecture is a `Tone.Gain` scaler node feeding `lfo.frequency` (same as `vcfenv` pattern). Smoothed `Tone.Meter` doesn't pulse at LFO rate; waveform analyser `data[last]` does. `isPoweredRef` guard prevents 50%-brightness LED when synth is off (analyser returns 0 → `(0+1)/2 = 0.5` without the guard).
+
+**Patch: cascading LFOs:** `lfo2-sin → lfo1-fm` with MOD depth raised → LFO 1's rate wobbles at LFO 2's speed.
+
+---
+
+### [2026-06-10] BBD Chorus Module
+
+**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `useMoogAudio.js`
+
+Added a patchable BBD Bucket Brigade Chorus effect module to Row 2.
+
+- `useMoogAudio.js`: `n.chorus = new Tone.Chorus({ frequency:1.5, delayTime:3.5, depth:0.7, wet:0.0 })`; added to `powerOn`/`powerOff`/cleanup start+stop arrays; `chorus-in`/`chorus-out` jacks in buildJackMap; `updateChorusParams({ rate, depth, wet })` — rate uses exponential `0.1*50^rate` mapping (0.1–5 Hz), depth uses direct assignment (plain JS setter, not AudioParam — `safeRamp` would throw), wet uses `safeRamp`.
+- `MoogShell.jsx`: `ChorusModule` co-located; RATE LED uses a `useCallback` getter that computes `Math.abs(sin(Date.now()*hz))` against a `rateHzRef` updated in the param `useEffect` — stable reference so Led's rAF never restarts. Knobs: RATE (md), DEPTH (md), MIX (md). Jacks: IN, OUT.
+- `MoogShell.module.css`: `.tierRow2` updated to `1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr 0.8fr` (7 col).
+
+**Gemini corrections:** `ChorusModule.jsx` rejected (co-location rule). `Tone.Chorus.depth` is a plain JS setter not an AudioParam — `safeRamp` would have thrown. `chorus.start()`/`.stop()` not mentioned by Gemini. "Processor tier" doesn't exist — placed in Row 2. Rate range narrowed to chorus-appropriate 0.1–5 Hz (not LFO's 0.1–30 Hz).
+
+**Patch:** `vco-saw → chorus-in` → `chorus-out → vcf-in` (or I/O directly). MIX at 0 = unity gain (transparent).
+
+---
+
+### [2026-06-10] VCF 2 — Second Voltage Controlled Filter
+
+**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `useMoogAudio.js`
+
+Added a second independent VCF module to Row 2.
+
+- `useMoogAudio.js`: Added `vcf2: Tone.Filter(20kHz, lowpass, -24)` + `vcf2cv1/vcf2cv2/vcf2env` Gain scalers (×5000/×5000/×1000); permanent scaler→frequency connections; `vcf2-in/cv1/cv2/env/out` jacks in buildJackMap; `updateVcf2Params` callback.
+- `MoogShell.jsx`: `VcfModule` gains `number = 1` prop; jack IDs derived as `vcf` (n=1) or `vcf${n}` (n>1); plate header now shows `plateNum`; second instance `<VcfModule number={2} onParamUpdate={audio.updateVcf2Params} />` added to Row 2.
+- `MoogShell.module.css`: `.tierRow2` updated from `1.5fr 1fr 1fr 0.75fr 0.75fr` (5 col) to `1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr` (6 col).
+
+**Row 2 is now:** VCF 1 + VCF 2 + LFO 1 + LFO 2 + Rev 1 + Rev 2
+
+---
+
 ### [2026-06-10] Rack Expansion, UI Polish, Pitch Architecture Overhaul & Chord-Seq Routing
 
 **Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.module.css`, `useMoogAudio.js`

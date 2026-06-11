@@ -128,6 +128,12 @@ function buildJackMap(n) {
     'vcf-cv2': { type: 'in',  dest: n.vcfcv2 },
     'vcf-env': { type: 'in',  dest: n.vcfenv },
     'vcf-out': { type: 'out', node: n.vcf },
+    // ── VCF 2 ──
+    'vcf2-in':  { type: 'in',  dest: n.vcf2 },
+    'vcf2-cv1': { type: 'in',  dest: n.vcf2cv1 },
+    'vcf2-cv2': { type: 'in',  dest: n.vcf2cv2 },
+    'vcf2-env': { type: 'in',  dest: n.vcf2env },
+    'vcf2-out': { type: 'out', node: n.vcf2 },
     // ── VCA ──
     'vca-in':  { type: 'in',  dest: n.vca },
     'vca-cv':  { type: 'in',  dest: n.vca.gain },
@@ -143,6 +149,9 @@ function buildJackMap(n) {
     'reverb-out':  { type: 'out', node: n.reverb  },
     'reverb2-in':  { type: 'in',  dest: n.reverb2 },
     'reverb2-out': { type: 'out', node: n.reverb2 },
+    // ── Chorus ──
+    'chorus-in':  { type: 'in',  dest: n.chorus },
+    'chorus-out': { type: 'out', node: n.chorus },
     // ── ENV 1 ── gate jack wired to gateActionsRef by connect(); trig deferred
     'env1-gate': { type: 'in', dest: null, isGate: true, envId: 'env1' },
     'env1-trig': { type: 'in', dest: null },
@@ -155,12 +164,15 @@ function buildJackMap(n) {
     'env3-trig': { type: 'in', dest: null },
     'env3-out':  { type: 'out', node: n.env3 },
     // ── LFO ──
+    // lfo-fm → lfo1modGain (Gain): patched CV * MOD DEPTH knob gain → lfo.frequency
     'lfo-sync':  { type: 'in',  dest: null },
+    'lfo-fm':    { type: 'in',  dest: n.lfo1modGain },
     'lfo-sin':   { type: 'out', node: n.lfo,  waveform: 'sine'      },
     'lfo-tri':   { type: 'out', node: n.lfo,  waveform: 'triangle'  },
     'lfo-sqr':   { type: 'out', node: n.lfo,  waveform: 'square'    },
     'lfo-saw':   { type: 'out', node: n.lfo,  waveform: 'sawtooth'  },
     'lfo2-sync': { type: 'in',  dest: null },
+    'lfo2-fm':   { type: 'in',  dest: n.lfo2modGain },
     'lfo2-sin':  { type: 'out', node: n.lfo2, waveform: 'sine'      },
     'lfo2-tri':  { type: 'out', node: n.lfo2, waveform: 'triangle'  },
     'lfo2-sqr':  { type: 'out', node: n.lfo2, waveform: 'square'    },
@@ -256,6 +268,7 @@ export default function useMoogAudio() {
       noise3W:     new Tone.Noise({ type: 'white' }),
       noise3P:     new Tone.Noise({ type: 'pink'  }),
       vcf:         new Tone.Filter({ frequency: 20000, type: 'lowpass', rolloff: -24 }),
+      vcf2:        new Tone.Filter({ frequency: 20000, type: 'lowpass', rolloff: -24 }),
       vca:         new Tone.Gain(1.0),
       vca2:        new Tone.Gain(1.0),
       vca3:        new Tone.Gain(1.0),
@@ -264,6 +277,18 @@ export default function useMoogAudio() {
       env3:        new Tone.Envelope({ attack: 0.1, decay: 0.3, sustain: 0.7, release: 0.5 }),
       lfo:         new Tone.LFO({ frequency: 0.5, type: 'sine', min: -1, max: 1 }),
       lfo2:        new Tone.LFO({ frequency: 0.5, type: 'sine', min: -1, max: 1 }),
+
+      // Rate-mod Gain nodes — sit between an incoming CV cable and lfo.frequency.
+      // gain=0 on init so no modulation until the MOD DEPTH knob is raised.
+      // Single writer: updateLfoParams/updateLfo2Params owns these via safeRamp.
+      lfo1modGain: new Tone.Gain(0),
+      lfo2modGain: new Tone.Gain(0),
+
+      // Waveform analyser taps — read last sample each rAF for an instantaneous
+      // phase value that drives the rate LED (pulses at the actual modulated rate).
+      // 32-sample buffer = 0.73ms at 44100Hz — effectively instantaneous at LFO rates.
+      lfoWaveAnalyser:  new Tone.Analyser('waveform', 32),
+      lfo2WaveAnalyser: new Tone.Analyser('waveform', 32),
       master:      new Tone.Volume(-14),             // no longer goes direct to Destination
       seqMasterGate: new Tone.Gain(1).toDestination(), // sole gateway to speakers — Loop gates here
       analyser:    new Tone.Analyser('waveform', 512),
@@ -278,6 +303,10 @@ export default function useMoogAudio() {
       // wet starts at 0 so patching in the reverb doesn't colour sound until MIX is raised.
       reverb:  new Tone.Freeverb({ roomSize: 0.7, dampening: 3000, wet: 0.0 }),
       reverb2: new Tone.Freeverb({ roomSize: 0.7, dampening: 3000, wet: 0.0 }),
+
+      // Bucket Brigade Chorus — internal LFOs require explicit start()/stop() in powerOn/powerOff.
+      // wet:0 on init so patching is transparent until MIX is raised (unity gain at Mix=0).
+      chorus: new Tone.Chorus({ frequency: 1.5, delayTime: 3.5, depth: 0.7, wet: 0.0 }),
 
       // Sequencer hardware gate — sits between n.vca and the vca-out jack.
       // Tone.Loop is the sole writer: gain=1 (gate on) / gain=0 (gate off).
@@ -359,6 +388,9 @@ export default function useMoogAudio() {
       vcfcv1: new Tone.Gain(5000),
       vcfcv2: new Tone.Gain(5000),
       vcfenv: new Tone.Gain(1000),
+      vcf2cv1: new Tone.Gain(5000),
+      vcf2cv2: new Tone.Gain(5000),
+      vcf2env: new Tone.Gain(1000),
     };
 
     // VCO2 output bus — permanent crossfade between regular oscillator and sync slave.
@@ -380,6 +412,9 @@ export default function useMoogAudio() {
     n.vcfcv1.connect(n.vcf.frequency);
     n.vcfcv2.connect(n.vcf.frequency);
     n.vcfenv.connect(n.vcf.frequency);
+    n.vcf2cv1.connect(n.vcf2.frequency);
+    n.vcf2cv2.connect(n.vcf2.frequency);
+    n.vcf2env.connect(n.vcf2.frequency);
 
     // I/O channel gains → master: each channel has its own Gain node so the
     // 4-channel mixer faders are independent. Meters tap from the channel output
@@ -412,6 +447,15 @@ export default function useMoogAudio() {
     // Level meter taps — all dead-end side connections, do not affect audio routing.
     n.lfo.connect(n.lfoMeter);
     n.lfo2.connect(n.lfo2Meter);
+
+    // Rate-mod Gain nodes feed directly into each LFO's frequency AudioParam.
+    // When no cable is patched (gain=0) this adds exactly 0 Hz — fully transparent.
+    n.lfo1modGain.connect(n.lfo.frequency);
+    n.lfo2modGain.connect(n.lfo2.frequency);
+
+    // Waveform analyser taps — dead-end, do not affect audio routing.
+    n.lfo.connect(n.lfoWaveAnalyser);
+    n.lfo2.connect(n.lfo2WaveAnalyser);
     n.env1.connect(n.env1Meter);
     n.env2.connect(n.env2Meter);
     n.env3.connect(n.env3Meter);
@@ -657,7 +701,7 @@ export default function useMoogAudio() {
       // Null out nodesRef first so any in-flight worklet Promise .then() bails immediately.
       nodesRef.current = null;
       jackMapRef.current = null;
-      [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2].forEach(node => {
+      [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2, n.chorus].forEach(node => {
         try { node.stop(); } catch (_) {}
       });
       if (seqLoopRef.current) {
@@ -695,7 +739,7 @@ export default function useMoogAudio() {
 
     const n = nodesRef.current;
     if (!n) return;
-    [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2].forEach(node => {
+    [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2, n.chorus].forEach(node => {
       try { node.start(); } catch (_) {}
     });
 
@@ -724,7 +768,7 @@ export default function useMoogAudio() {
 
     const n = nodesRef.current;
     if (!n) return;
-    [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2].forEach(node => {
+    [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2, n.chorus].forEach(node => {
       try { node.stop(); } catch (_) {}
     });
 
@@ -926,6 +970,15 @@ export default function useMoogAudio() {
     if (resonance !== undefined) safeRamp(n.vcf.Q, Math.max(0.001, resonance * 20));
   }, []);
 
+  const updateVcf2Params = useCallback(({ cutoff, resonance } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (cutoff    !== undefined) n.vcf2.frequency.setTargetAtTime(
+      20 * Math.pow(1000, cutoff), Tone.now(), 0.02
+    );
+    if (resonance !== undefined) safeRamp(n.vcf2.Q, Math.max(0.001, resonance * 20));
+  }, []);
+
   // Update Envelope ADSR params.  envId: 'env1' | 'env2'.
   // All time values use exponential mapping so short/long times feel equally reachable.
   // attack/decay/release: 0–1 → 0.01s–10s   sustain: 0–1 → 0.0–1.0 (linear)
@@ -977,20 +1030,23 @@ export default function useMoogAudio() {
   // depth (0–1) → lfo.amplitude 0–1 (scales the ±1 output swing)
   // type  (string) → lfo.type; UI-driven default, overridden by whichever waveform jack
   //        is patched (the connect() function also sets lfo.type via from.waveform).
-  const updateLfoParams = useCallback(({ rate, depth, type } = {}) => {
+  const updateLfoParams = useCallback(({ rate, depth, type, modDepth } = {}) => {
     const n = nodesRef.current;
     if (!n) return;
-    if (rate  !== undefined) safeRamp(n.lfo.frequency, 0.1 * Math.pow(300, rate));
-    if (depth !== undefined) safeRamp(n.lfo.amplitude, depth);
-    if (type  !== undefined) n.lfo.type = type;
+    if (rate     !== undefined) safeRamp(n.lfo.frequency,  0.1 * Math.pow(300, rate));
+    if (depth    !== undefined) safeRamp(n.lfo.amplitude,  depth);
+    if (type     !== undefined) n.lfo.type = type;
+    // modDepth (0–1) → lfo1modGain.gain (0–10 Hz): incoming CV ±1 swings rate by ±10 Hz max.
+    if (modDepth !== undefined) safeRamp(n.lfo1modGain.gain, modDepth * 10);
   }, []);
 
-  const updateLfo2Params = useCallback(({ rate, depth, type } = {}) => {
+  const updateLfo2Params = useCallback(({ rate, depth, type, modDepth } = {}) => {
     const n = nodesRef.current;
     if (!n) return;
-    if (rate  !== undefined) safeRamp(n.lfo2.frequency, 0.1 * Math.pow(300, rate));
-    if (depth !== undefined) safeRamp(n.lfo2.amplitude, depth);
-    if (type  !== undefined) n.lfo2.type = type;
+    if (rate     !== undefined) safeRamp(n.lfo2.frequency, 0.1 * Math.pow(300, rate));
+    if (depth    !== undefined) safeRamp(n.lfo2.amplitude, depth);
+    if (type     !== undefined) n.lfo2.type = type;
+    if (modDepth !== undefined) safeRamp(n.lfo2modGain.gain, modDepth * 10);
   }, []);
 
   // Update reverb parameters — single writer on n.reverb.
@@ -1008,6 +1064,18 @@ export default function useMoogAudio() {
     if (!n) return;
     if (roomSize !== undefined) safeRamp(n.reverb2.roomSize, roomSize);
     if (wet      !== undefined) safeRamp(n.reverb2.wet,      wet);
+  }, []);
+
+  // Update BBD Chorus parameters.
+  // rate  (0–1) → exponential 0.1–5 Hz  (0.1 * 50^rate) — classic chorus sweep range.
+  // depth (0–1) → Tone.Chorus.depth plain property (JS setter, not AudioParam — no ramp).
+  // wet   (0–1) → dry/wet mix; 0 = unity gain (dry only), transparent when unpatched.
+  const updateChorusParams = useCallback(({ rate, depth, wet } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (rate  !== undefined) safeRamp(n.chorus.frequency, 0.1 * Math.pow(50, rate));
+    if (depth !== undefined) n.chorus.depth = depth; // plain setter — not an AudioParam
+    if (wet   !== undefined) safeRamp(n.chorus.wet, wet);
   }, []);
 
   // Update per-channel mixer volume for the 4-channel I/O input stage.
@@ -1063,6 +1131,28 @@ export default function useMoogAudio() {
     if (!meter) return 0;
     const v = meter.getValue();
     return isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+  }, []);
+
+  // Instantaneous LFO phase value [0, 1] for the rate LED — reads the last sample of
+  // the waveform analyser buffer rather than a smoothed RMS meter, so the LED pulses
+  // at the actual modulated rate (including any incoming FM CV on lfo-fm).
+  // Returns 0 when not powered so the LED stays dim when the synth is off.
+  const getLfoInstant = useCallback(() => {
+    if (!isPoweredRef.current) return 0;
+    const n = nodesRef.current;
+    if (!n) return 0;
+    const data = n.lfoWaveAnalyser.getValue();
+    if (!data || !data.length) return 0;
+    return (data[data.length - 1] + 1) / 2; // [-1,1] → [0,1]
+  }, []);
+
+  const getLfo2Instant = useCallback(() => {
+    if (!isPoweredRef.current) return 0;
+    const n = nodesRef.current;
+    if (!n) return 0;
+    const data = n.lfo2WaveAnalyser.getValue();
+    if (!data || !data.length) return 0;
+    return (data[data.length - 1] + 1) / 2;
   }, []);
 
   // Sequencer BPM — ramps Transport tempo so the change is click-free.
@@ -1176,11 +1266,11 @@ export default function useMoogAudio() {
 
   return {
     powerOn, powerOff, connect, disconnect, isPowered,
-    updateVcoParams, updateVcfParams, updateEnvParams, triggerGate,
+    updateVcoParams, updateVcfParams, updateVcf2Params, updateEnvParams, triggerGate,
     updateVcaParams, updateVca2Params, updateVca3Params,
     updateLfoParams, updateLfo2Params, updateIoParams, updateIoChannelVol,
-    updateReverbParams, updateReverb2Params, getMoogBusNode,
-    getOscilloscopeData, getQntTransposeData, getMeterValue,
+    updateReverbParams, updateReverb2Params, updateChorusParams, getMoogBusNode,
+    getOscilloscopeData, getQntTransposeData, getMeterValue, getLfoInstant, getLfo2Instant,
     setTempo, updateSequencerSteps, setSeqStepCallback,
     updateSeq2Steps, setSeq2StepCallback, updateKeyboard,
     updateChordSeqSteps, setChordSeqStepCallback, setChordSeqDivision,

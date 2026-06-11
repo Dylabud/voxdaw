@@ -21,7 +21,10 @@
   /* width/height set via inline style from WRAP_PX map */
 }
 
-/* ── Knob body — silver brushed-aluminum face, rotates with value ── */
+/* ── Knob body — rotationally symmetric base only ──
+   center at 50% 50% means the gradient varies only with radius, never with angle,
+   so rotating the element has zero visible effect on the base chrome tone.
+   All directional shading (specular, inset bevel, bounce) lives on .knobShading. ── */
 .knob {
   border-radius: 50%;
   flex-shrink: 0;
@@ -31,35 +34,62 @@
   user-select: none;
   touch-action: none;
   will-change: transform;
+  background: radial-gradient(
+    circle at 50% 50%,
+    #ffffff 0%,
+    #f0f0f0 20%,
+    #dedede 42%,
+    #c0c0c0 64%,
+    #949494 83%,
+    #686868 100%
+  );
+  /* Symmetric ring shadows only — these are rotationally invariant */
+  box-shadow:
+    0 0 0 2px #0a0a0a,
+    0 0 0 4px #d8d8d8,
+    0 0 0 5px #161614,
+    0 5px 16px rgba(0, 0, 0, 0.90),
+    0 2px 6px  rgba(0, 0, 0, 0.75);
+}
+
+/* ── Shading overlay — counter-rotates to stay lamp-aligned at all knob positions ──
+   Carries every directional effect so nothing rotates with the knob value.
+   Light source: upper-right at ~72% 16% on the sphere face.
+
+   box-shadow inset direction key for upper-right light:
+     bright upper-right rim → inset -X +Y rgba(white)   (negative X = right, positive Y = top)
+     dark  lower-left  rim  → inset +X -Y rgba(black)   (positive X = left,  negative Y = bottom)  ── */
+.knobShading {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  /* No z-index — DOM order (before .knobCap) keeps it below the indicator dot */
   background:
+    /* 1. Primary specular — sharp lamp reflection on upper-right of sphere face */
     radial-gradient(
-      ellipse at 32% 18%,
-      rgba(255, 255, 255, 0.72) 0%,
-      rgba(255, 255, 255, 0.18) 28%,
-      transparent 55%
+      ellipse at 72% 16%,
+      rgba(255, 255, 255, 0.96) 0%,
+      rgba(255, 255, 255, 0.30) 18%,
+      transparent 40%
     ),
+    /* 2. Broad diffuse — the whole lit hemisphere is brighter, not just the hotspot */
     radial-gradient(
-      ellipse at 60% 72%,
-      rgba(255, 255, 255, 0.10) 0%,
-      transparent 44%
+      ellipse at 68% 24%,
+      rgba(255, 255, 255, 0.18) 0%,
+      transparent 62%
     ),
+    /* 3. Shadow — the unlit hemisphere (lower-left, opposite the lamp) is darker */
     radial-gradient(
-      circle at 40% 36%,
-      #d8d5ce 0%,
-      #ababA2 28%,
-      #888880 52%,
-      #626258 72%,
-      #464640 100%
+      ellipse at 22% 82%,
+      rgba(0, 0, 0, 0.30) 0%,
+      transparent 54%
     );
   box-shadow:
-    0 0 0 2px #141414,
-    0 0 0 4px #888880,
-    0 0 0 5px #1a1a18,
-    0 6px 18px rgba(0, 0, 0, 0.95),
-    0 3px 7px rgba(0, 0, 0, 0.8),
-    0 10px 28px rgba(0, 0, 0, 0.45),
-    inset 0 1px 3px rgba(255, 255, 255, 0.35),
-    inset 0 -1px 2px rgba(0, 0, 0, 0.25);
+    /* Upper-right rim catches the lamp */
+    inset -1px 1px 4px rgba(255, 255, 255, 0.48),
+    /* Lower-left rim is in shadow */
+    inset  1px -1px 3px rgba(0, 0, 0, 0.42);
 }
 
 .knob_xl { width: 54px; height: 54px; }
@@ -91,7 +121,7 @@
 .knobLabel {
   font-size: 11px;
   letter-spacing: 0.2em;
-  color: #7a7260;
+  color: rgba(255, 255, 255, 0.75);
   text-transform: uppercase;
   text-align: center;
   white-space: nowrap;
@@ -127,14 +157,14 @@
   left: 0;
   width: 2px;
   height: 4px;
-  background: rgba(180, 168, 138, 0.52);
+  background: rgba(255, 255, 255, 0.55);
   border-radius: 1px;
 }
 
 .tickMajor {
   top: 1px;
   height: 7px;
-  background: rgba(210, 198, 162, 0.82);
+  background: rgba(255, 255, 255, 0.88);
 }
 
 .tickNum {
@@ -143,7 +173,7 @@
   left: 50%;
   font-size: 7px;
   line-height: 1;
-  color: rgba(190, 178, 145, 0.7);
+  color: rgba(255, 255, 255, 0.78);
   letter-spacing: 0;
   white-space: nowrap;
   text-align: center;

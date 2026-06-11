@@ -83,6 +83,8 @@ export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', de
           onDoubleClick={handleDoubleClick}
           onDragStart={(e) => e.preventDefault()}
         >
+          {/* Counter-rotates so the specular highlight stays fixed on the lamp regardless of knob position */}
+          <div className={styles.knobShading} style={{ transform: `rotate(${-rotateDeg}deg)` }} />
           <div className={styles.knobCap} />
         </div>
       </div>
