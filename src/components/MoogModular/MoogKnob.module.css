@@ -127,6 +127,9 @@
   white-space: nowrap;
 }
 
+/* Lights out: hide knob + label entirely */
+:global([data-lights-out="true"]) .knobGroup { opacity: 0; }
+
 /* ══════════════════════════════════════════════════════
    SCALE MARKS — fixed to the faceplate, do not rotate
    ══════════════════════════════════════════════════════ */

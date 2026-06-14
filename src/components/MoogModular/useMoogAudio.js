@@ -2,8 +2,30 @@ import * as Tone from 'tone';
 import { useRef, useState, useCallback, useEffect } from 'react';
 
 // Sequencer pitch range — same as VCO FREQ knob (C1–C6)
-const SEQ_HZ_MIN = 32.703;
-const SEQ_HZ_MAX = 1046.502;
+const SEQ_HZ_MIN  = 32.703;
+const SEQ_HZ_MAX  = 1046.502;
+const VCO_IDS     = ['vco1', 'vco2', 'vco3', 'vco4', 'vco5'];
+const VCO_IDX_MAP = { vco1: 0, vco2: 1, vco3: 2, vco4: 3, vco5: 4 };
+
+// 914 Fixed Filter Bank — 14 bands: LP shelf + 12 bandpass + HP shelf.
+// Frequencies spaced at √2 intervals (2 bands/octave), authentic to the Moog 914.
+// LP/HP use shelf filters; bandpass uses BiquadFilter(bandpass) → Gain (parallel sum).
+export const FFB_BANDS = [
+  { freq: 100,  type: 'lowpass',  Q: 0.7, label: 'LP'   },
+  { freq: 125,  type: 'bandpass', Q: 2.8, label: '125'  },
+  { freq: 175,  type: 'bandpass', Q: 2.8, label: '175'  },
+  { freq: 250,  type: 'bandpass', Q: 2.8, label: '250'  },
+  { freq: 350,  type: 'bandpass', Q: 2.8, label: '350'  },
+  { freq: 500,  type: 'bandpass', Q: 2.8, label: '500'  },
+  { freq: 700,  type: 'bandpass', Q: 2.8, label: '700'  },
+  { freq: 1000, type: 'bandpass', Q: 2.8, label: '1k'   },
+  { freq: 1400, type: 'bandpass', Q: 2.8, label: '1.4k' },
+  { freq: 2000, type: 'bandpass', Q: 2.8, label: '2k'   },
+  { freq: 2800, type: 'bandpass', Q: 2.8, label: '2.8k' },
+  { freq: 4000, type: 'bandpass', Q: 2.8, label: '4k'   },
+  { freq: 5600, type: 'bandpass', Q: 2.8, label: '5.6k' },
+  { freq: 8000, type: 'highpass', Q: 0.7, label: 'HP'   },
+];
 
 // Quantizer scale definitions (semitone offsets from root).
 // Sent to the quantizer AudioWorklet via port.postMessage.
@@ -23,6 +45,18 @@ const SCALE_DEFS = {
   CMIN7: [0,3,7,10],
   CSUS4: [0,5,7],
   CDIM:  [0,3,6],
+};
+
+// Per-chord-type voice intervals for the polyphonic CV outputs (voices 2–4).
+// Triads get an octave as their 4th voice; 4-note chords use all four tones.
+const CHORD_VOICE_INTERVALS = {
+  CMAJ:  [0, 4,  7, 12],
+  CMIN:  [0, 3,  7, 12],
+  CDOM:  [0, 4,  7, 10],
+  CMAJ7: [0, 4,  7, 11],
+  CMIN7: [0, 3,  7, 10],
+  CSUS4: [0, 5,  7, 12],
+  CDIM:  [0, 3,  6,  9],
 };
 
 // Base Hz for chord sequencer root CV output — C3 (MIDI 48).
@@ -78,14 +112,16 @@ function buildJackMap(n) {
     // ── VCO 1 ──
     // cv  → direct to frequency: Hz-range sources (sequencer, keyboard) patch here
     // fm  → through vco1fm Gain(500): LFO/audio-rate mod — ±1 signal → ±500 Hz
-    'vco1-cv':  { type: 'in',  dest: n.vco1.frequency },
+    'vco1-cv':  { type: 'in',  dest: null, isVcoCv: true },
     'vco1-fm':  { type: 'in',  dest: n.vco1fm },
-    'vco1-sin': { type: 'out', node: n.vco1, waveform: 'sine'      },
-    'vco1-tri': { type: 'out', node: n.vco1, waveform: 'triangle'  },
-    'vco1-saw': { type: 'out', node: n.vco1, waveform: 'sawtooth'  },
-    'vco1-sqr': { type: 'out', node: n.vco1, waveform: 'square'    },
+    'vco1-sin': { type: 'out', node: n.vco1bus, waveform: 'sine',      waveformTarget: n.vco1 },
+    'vco1-tri': { type: 'out', node: n.vco1bus, waveform: 'triangle',  waveformTarget: n.vco1 },
+    'vco1-saw': { type: 'out', node: n.vco1bus, waveform: 'sawtooth',  waveformTarget: n.vco1 },
+    'vco1-sqr': { type: 'out', node: n.vco1bus, waveform: 'square',    waveformTarget: n.vco1 },
+    'vco1-sync-in':  { type: 'in',  dest: n.vco1syncIn  },
+    'vco1-sync-out': { type: 'out', node: n.vco1syncOut },
     // ── VCO 2 ──
-    'vco2-cv':  { type: 'in',  dest: n.vco2.frequency },
+    'vco2-cv':  { type: 'in',  dest: null, isVcoCv: true },
     'vco2-fm':  { type: 'in',  dest: n.vco2fm },
     // Output jacks route through vco2bus so the HARD SYNC crossfade is transparent.
     // waveformTarget separates waveform-setting (n.vco2) from audio routing (n.vco2bus).
@@ -101,18 +137,32 @@ function buildJackMap(n) {
     'vco2-sync-in':  { type: 'in',  dest: n.vco2syncIn  },
     'vco2-sync-out': { type: 'out', node: n.vco2syncOut },
     // ── VCO 3 ──
-    'vco3-cv':  { type: 'in',  dest: n.vco3.frequency },
+    'vco3-cv':  { type: 'in',  dest: null, isVcoCv: true },
     'vco3-fm':  { type: 'in',  dest: n.vco3fm },
-    'vco3-sin': { type: 'out', node: n.vco3, waveform: 'sine'      },
-    'vco3-tri': { type: 'out', node: n.vco3, waveform: 'triangle'  },
-    'vco3-saw': { type: 'out', node: n.vco3, waveform: 'sawtooth'  },
-    'vco3-sqr': { type: 'out', node: n.vco3, waveform: 'square'    },
-    'vco4-cv':  { type: 'in',  dest: n.vco4.frequency },
+    'vco3-sin': { type: 'out', node: n.vco3bus, waveform: 'sine',      waveformTarget: n.vco3 },
+    'vco3-tri': { type: 'out', node: n.vco3bus, waveform: 'triangle',  waveformTarget: n.vco3 },
+    'vco3-saw': { type: 'out', node: n.vco3bus, waveform: 'sawtooth',  waveformTarget: n.vco3 },
+    'vco3-sqr': { type: 'out', node: n.vco3bus, waveform: 'square',    waveformTarget: n.vco3 },
+    'vco3-sync-in':  { type: 'in',  dest: n.vco3syncIn  },
+    'vco3-sync-out': { type: 'out', node: n.vco3syncOut },
+    // ── VCO 4 ──
+    'vco4-cv':  { type: 'in',  dest: null, isVcoCv: true },
     'vco4-fm':  { type: 'in',  dest: n.vco4fm },
-    'vco4-sin': { type: 'out', node: n.vco4, waveform: 'sine'      },
-    'vco4-tri': { type: 'out', node: n.vco4, waveform: 'triangle'  },
-    'vco4-saw': { type: 'out', node: n.vco4, waveform: 'sawtooth'  },
-    'vco4-sqr': { type: 'out', node: n.vco4, waveform: 'square'    },
+    'vco4-sin': { type: 'out', node: n.vco4bus, waveform: 'sine',      waveformTarget: n.vco4 },
+    'vco4-tri': { type: 'out', node: n.vco4bus, waveform: 'triangle',  waveformTarget: n.vco4 },
+    'vco4-saw': { type: 'out', node: n.vco4bus, waveform: 'sawtooth',  waveformTarget: n.vco4 },
+    'vco4-sqr': { type: 'out', node: n.vco4bus, waveform: 'square',    waveformTarget: n.vco4 },
+    'vco4-sync-in':  { type: 'in',  dest: n.vco4syncIn  },
+    'vco4-sync-out': { type: 'out', node: n.vco4syncOut },
+    // ── VCO 5 ──
+    'vco5-cv':  { type: 'in',  dest: null, isVcoCv: true },
+    'vco5-fm':  { type: 'in',  dest: n.vco5fm },
+    'vco5-sin': { type: 'out', node: n.vco5bus, waveform: 'sine',      waveformTarget: n.vco5 },
+    'vco5-tri': { type: 'out', node: n.vco5bus, waveform: 'triangle',  waveformTarget: n.vco5 },
+    'vco5-saw': { type: 'out', node: n.vco5bus, waveform: 'sawtooth',  waveformTarget: n.vco5 },
+    'vco5-sqr': { type: 'out', node: n.vco5bus, waveform: 'square',    waveformTarget: n.vco5 },
+    'vco5-sync-in':  { type: 'in',  dest: n.vco5syncIn  },
+    'vco5-sync-out': { type: 'out', node: n.vco5syncOut },
     // ── Noise ──
     'noise-wht':  { type: 'out', node: n.noiseW },
     'noise-pnk':  { type: 'out', node: n.noiseP },
@@ -120,6 +170,11 @@ function buildJackMap(n) {
     'noise2-pnk': { type: 'out', node: n.noise2P },
     'noise3-wht': { type: 'out', node: n.noise3W },
     'noise3-pnk': { type: 'out', node: n.noise3P },
+    // ── Kick ──
+    'kick-out': { type: 'out', node: n.kickOut },
+    // ── 914 FFB ──
+    'ffb-in':  { type: 'in',  dest: n.ffbIn    },
+    'ffb-out': { type: 'out', node: n.ffbMaster },
     // ── VCF ──
     // cv1/cv2 → vcfcv1/vcfcv2 Gain(5000): LFO ±1 → ±5000 Hz — sweeps full audible spectrum
     // env     → vcfenv Gain(1000):         env  0→1 →  0→1000 Hz lift above base cutoff
@@ -137,7 +192,8 @@ function buildJackMap(n) {
     // ── VCA ──
     'vca-in':  { type: 'in',  dest: n.vca },
     'vca-cv':  { type: 'in',  dest: n.vca.gain },
-    'vca-out': { type: 'out', node: n.seqGateNode }, // seqGateNode is the gated tap — Loop controls gain
+    'vca-out':  { type: 'out', node: n.seqGateNode  }, // seq1-gated VCA tap
+    'vca-out2': { type: 'out', node: n.seq2GateNode }, // seq2-gated VCA tap
     'vca2-in':  { type: 'in',  dest: n.vca2 },
     'vca2-cv':  { type: 'in',  dest: n.vca2.gain },
     'vca2-out': { type: 'out', node: n.vca2 },
@@ -152,6 +208,11 @@ function buildJackMap(n) {
     // ── Chorus ──
     'chorus-in':  { type: 'in',  dest: n.chorus },
     'chorus-out': { type: 'out', node: n.chorus },
+    // ── Kick gate ── fires kickSynth.triggerAttackRelease on each gate-on event.
+    // isKick:true distinguishes it from ENV gates in the loop and connect() handler.
+    'kick-gate-in':  { type: 'in', dest: null, isGate: true, isKick: true },
+    // ── Kick click CV ── audio-rate CV into kickClickGain.gain for accent modulation.
+    'kick-click-in': { type: 'in', dest: n.kickClickGain.gain },
     // ── ENV 1 ── gate jack wired to gateActionsRef by connect(); trig deferred
     'env1-gate': { type: 'in', dest: null, isGate: true, envId: 'env1' },
     'env1-trig': { type: 'in', dest: null },
@@ -189,8 +250,10 @@ function buildJackMap(n) {
     'seq2-clk-out':   { type: 'out', node: null },
     // ── Chord Sequencer ──
     'chordseq-cv-in':   { type: 'in',  dest: n.chordSeqInputAnalyser },
-    'chordseq-cv-out':  { type: 'out', node: n.chordSeqPitchOut },
-    'chordseq-root-out': { type: 'out', node: n.chordSeqRootOut },
+    'chordseq-cv-out':     { type: 'out', node: n.chordSeqPitchOut  },
+    'chordseq-root-out':   { type: 'out', node: n.chordSeqRootOut   },
+    'chordseq-3rd-out':    { type: 'out', node: n.chordSeqThirdOut },
+    'chordseq-5th-out':    { type: 'out', node: n.chordSeqFifthOut },
     // ── Keyboard ──
     'kbd-pitch-out': { type: 'out', node: n.kbdPitchOut },
     'kbd-gate-out':  { type: 'out', node: null, isGate: true },
@@ -219,13 +282,31 @@ export default function useMoogAudio() {
   const nodesRef            = useRef(null);
   const jackMapRef          = useRef(null);
   const connectionsRef      = useRef(new Map()); // key: "fromId→toId" → { node, dest }
+  const vco1SyncEnabledRef  = useRef(false);
   const vco2SyncEnabledRef  = useRef(false);     // tracks HARD SYNC toggle state across power cycles
+  const vco3SyncEnabledRef  = useRef(false);
+  const vco4SyncEnabledRef  = useRef(false);
+  const vco5SyncEnabledRef  = useRef(false);
+  // Glide time in seconds (0 = off). Written by the UI knob, read by the Tone.Loop.
+  const seqGlideRef   = useRef(0);
+  const seq2GlideRef  = useRef(0);
+  const kbdGlideRef   = useRef(0);
+  // Keyboard vibrato — depth in Hz, rate in Hz. Driven by a rAF loop inside useEffect.
+  const kbdVibratoDepthRef = useRef(0);
+  const kbdVibratoRateRef  = useRef(5);
+  const kbdVibratoDelayRef = useRef(0);     // delay ramp time in seconds (0 = instant)
+  const kbdBaseHzRef       = useRef(220);   // last note Hz from keyboard, for vibrato center
+  const kbdNoteOnsetRef    = useRef(null);  // AudioContext time of last note-on (null = no note yet)
+  const kbdVibratoResetRef = useRef(false); // set true on note-on; rAF consumes it with its own `now`
+  const kbdCurrentHzRef    = useRef(220);   // smoothly-interpolated Hz (glide state, base only)
+  const kbdLastOutputHzRef = useRef(220);   // actual last-written Hz including swing — glide seeds from here
+  const kbdPrevRafTimeRef  = useRef(null);  // last rAF AudioContext time for delta-time glide
   const seqLoopRef          = useRef(null);
-  const seqStepsRef         = useRef(Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true })));
+  const seqStepsRef         = useRef(Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true, prob: 1 })));
   const seqCurrentStepRef   = useRef(-1);
   const seqStepCbRef        = useRef(null);   // UI callback for sequencer LED animation
   const seq2LoopRef         = useRef(null);
-  const seq2StepsRef        = useRef(Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true })));
+  const seq2StepsRef        = useRef(Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true, prob: 1 })));
   const seq2CurrentStepRef  = useRef(-1);
   const seq2StepCbRef       = useRef(null);
   const gateActionsRef      = useRef(new Map()); // toJackId → Tone.Envelope
@@ -249,7 +330,10 @@ export default function useMoogAudio() {
   const chordSeqInputActiveRef  = useRef(false); // true when a CV source is patched to chordseq-cv-in
   const qntChordOverrideRef    = useRef(false); // true when chordseq-cv-out → qnt-transpose-in is patched
   // Stores the last Hz value from each VCO knob so it can be restored when a CV cable is removed.
-  const vcoKnobHzRef = useRef({ vco1: null, vco2: null, vco3: null, vco4: null });
+  const vcoKnobHzRef      = useRef({ vco1: null, vco2: null, vco3: null, vco4: null, vco5: null });
+  // Tracks which source jack is actively driving each VCO cv-in (null = knob only).
+  // Written by connect/disconnect; read by step loops and quantizer callback.
+  const vcoActiveCvRef   = useRef({ vco1: null, vco2: null, vco3: null, vco4: null, vco5: null });
   const quantizerStepCbRef    = useRef(null);   // UI callback for quantizer LED animation
   const lastQuantizedMidiRef  = useRef(69);     // A4 default — updated on each note change
   // Persists latest quantizer config so it can be flushed when the worklet finishes loading.
@@ -257,10 +341,24 @@ export default function useMoogAudio() {
 
   useEffect(() => {
     const n = {
-      vco1:        new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
-      vco2:        new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
-      vco3:        new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
-      vco4:        new Tone.Oscillator({ type: 'sawtooth', frequency: 220 }),
+      // frequency: 0 — the glideBus Signal (below) is the sole pitch writer.
+      // This keeps vco.frequency.value permanently at 0 so glideBus + FM add cleanly.
+      vco1:        new Tone.Oscillator({ type: 'sawtooth', frequency: 0 }),
+      vco2:        new Tone.Oscillator({ type: 'sawtooth', frequency: 0 }),
+      vco3:        new Tone.Oscillator({ type: 'sawtooth', frequency: 0 }),
+      vco4:        new Tone.Oscillator({ type: 'sawtooth', frequency: 0 }),
+      vco5:        new Tone.Oscillator({ type: 'sawtooth', frequency: 0 }),
+      // Per-VCO slew bus — sits between any CV source and vco.frequency.
+      // Sole writer to vco.frequency (FM adds on top via vcoNfm).
+      // setValueAtTime → instant pitch; setTargetAtTime(hz, t, τ) → exponential glide.
+      // Init to ~185 Hz (middle of VCO range, matching freqBase=0.5 in VcoModule).
+      // This ensures the oscillator is audible immediately on power-on even if
+      // updateVcoParams fires before nodesRef.current is set (child effects run first).
+      vco1GlideBus: new Tone.Signal(185),
+      vco2GlideBus: new Tone.Signal(185),
+      vco3GlideBus: new Tone.Signal(185),
+      vco4GlideBus: new Tone.Signal(185),
+      vco5GlideBus: new Tone.Signal(185),
       noiseW:      new Tone.Noise({ type: 'white' }),
       noiseP:      new Tone.Noise({ type: 'pink'  }),
       noise2W:     new Tone.Noise({ type: 'white' }),
@@ -297,6 +395,8 @@ export default function useMoogAudio() {
       kbdPitchOut:       new Tone.Signal(SEQ_HZ_MIN), // keyboard pitch CV out — same non-zero init rule
       chordSeqPitchOut:      new Tone.Signal(SEQ_HZ_MIN), // chord sequencer root CV out — same rule
       chordSeqRootOut:       new Tone.Signal(SEQ_HZ_MIN), // independent root-note CV out (octave-shifted)
+      chordSeqThirdOut:      new Tone.Signal(SEQ_HZ_MIN), // 3rd of chord CV
+      chordSeqFifthOut:      new Tone.Signal(SEQ_HZ_MIN), // 5th of chord CV
       chordSeqInputAnalyser: new Tone.Analyser('waveform', 256), // detects patched pitch CV input
 
       // Studio reverb — Freeverb (proven in this codebase via VoxTool arpReverb).
@@ -308,11 +408,11 @@ export default function useMoogAudio() {
       // wet:0 on init so patching is transparent until MIX is raised (unity gain at Mix=0).
       chorus: new Tone.Chorus({ frequency: 1.5, delayTime: 3.5, depth: 0.7, wet: 0.0 }),
 
-      // Sequencer hardware gate — sits between n.vca and the vca-out jack.
-      // Tone.Loop is the sole writer: gain=1 (gate on) / gain=0 (gate off).
-      // Because it lives on the vca-out side, it gates any downstream patch
-      // (vca-out → io-in, etc.) without requiring an envelope cable.
-      seqGateNode: new Tone.Gain(1),
+      // Per-sequencer gate nodes — sit between n.vca and the seq?-vca-out jacks.
+      // Sole writers are the seq1/seq2 Tone.Loop callbacks. Gate-off silences only
+      // signals explicitly routed through seq-vca-out / seq2-vca-out, not global audio.
+      seqGateNode:  new Tone.Gain(1),
+      seq2GateNode: new Tone.Gain(1),
 
       // Recording tap — side connection from seqMasterGate so the Workstation's
       // Tone.Recorder can capture Moog audio without touching the speaker path.
@@ -330,30 +430,40 @@ export default function useMoogAudio() {
       ioCh3Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
       ioCh4Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
 
-      // Hard sync signal path.
-      //
-      // Tone.js's connectSignal() uses `instanceof AudioNode` which returns false for
-      // SAC-wrapped AudioWorkletNodes — direct Tone→worklet connect() silently no-ops.
-      // Fix: Tone.Gain buffers on both sides of the worklet boundary.
-      //
-      //   vco2syncIn  (gain 1) — receives master VCO via Tone→Tone connect (always works).
-      //                          vco2syncIn.output → worklet is SAC-GainNode→SAC-AWN,
-      //                          which goes native→native internally and always succeeds.
-      //   vco2syncOut (gain 0) — receives worklet output; gain crossfades to 1 on HARD SYNC ON.
-      //
-      // VCO2 output bus — crossfades between normal VCO2 and synced slave.
-      //   vco2normalGain (gain 1) — gates regular VCO2 into vco2bus; fades to 0 when HARD SYNC ON.
-      //   vco2bus        (gain 1) — the node all vco2-* output jacks connect from.
-      //                             Receives vco2normalGain + vco2syncOut; exactly one is non-zero.
+      // Hard sync signal path (replicated per VCO).
+      // Each VCO gets an input buffer (syncIn), worklet output buffer (syncOut),
+      // a normal-path gate (normalGain), and a mixing bus (bus). The worklet is
+      // wired syncIn.output → worklet → syncOut.input in the .then() block.
+      // syncOut.gain crossfades 0→1 (normalGain 1→0) when HARD SYNC is enabled.
+      vco1syncIn:     new Tone.Gain(1),
+      vco1syncOut:    new Tone.Gain(0),
+      vco1normalGain: new Tone.Gain(1),
+      vco1bus:        new Tone.Gain(1),
       vco2syncIn:     new Tone.Gain(1),
       vco2syncOut:    new Tone.Gain(0),
       vco2normalGain: new Tone.Gain(1),
       vco2bus:        new Tone.Gain(1),
+      vco3syncIn:     new Tone.Gain(1),
+      vco3syncOut:    new Tone.Gain(0),
+      vco3normalGain: new Tone.Gain(1),
+      vco3bus:        new Tone.Gain(1),
+      vco4syncIn:     new Tone.Gain(1),
+      vco4syncOut:    new Tone.Gain(0),
+      vco4normalGain: new Tone.Gain(1),
+      vco5syncIn:     new Tone.Gain(1),
+      vco5syncOut:    new Tone.Gain(0),
+      vco5normalGain: new Tone.Gain(1),
+      vco5bus:        new Tone.Gain(1),
+      vco4bus:        new Tone.Gain(1),
 
       // Quantizer output wrapper — gain 1 (always pass-through).
       // AudioWorkletNode (quantizerNode) connects to .input after worklet loads.
       // Tone.Gain so that downstream Tone.js nodes (vco.frequency) can receive it.
-      quantizerOut: new Tone.Gain(1),
+      quantizerOut:    new Tone.Gain(1),
+      // Silent keepalive — quantizerOut must stay connected to the audio graph or
+      // Chrome's tail-time optimisation stops calling the worklet's process(), which
+      // silences port.postMessage() and breaks the managed glideBus path.
+      qntKeepAlive: new Tone.Gain(0),
 
       // Transposition CV analyser — taps the incoming TRANSPOSE CV signal so the
       // QuantizerModule's rAF loop can read the current Hz value and derive a note class.
@@ -364,6 +474,11 @@ export default function useMoogAudio() {
 
       // Level meters — dead-end side taps for LED feedback (no effect on audio routing).
       // smoothing controls the RMS window: higher = more averaged, lower = more transient-responsive.
+      vco1Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.15 }),
+      vco2Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.15 }),
+      vco3Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.15 }),
+      vco4Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.15 }),
+      vco5Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.15 }),
       lfoMeter:    new Tone.Meter({ normalRange: true, smoothing: 0.7  }),
       lfo2Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.7  }),
       env1Meter:   new Tone.Meter({ normalRange: true, smoothing: 0.25 }),
@@ -385,22 +500,68 @@ export default function useMoogAudio() {
       vco2fm: new Tone.Gain(500),
       vco3fm: new Tone.Gain(500),
       vco4fm: new Tone.Gain(500),
+      vco5fm: new Tone.Gain(500),
       vcfcv1: new Tone.Gain(5000),
       vcfcv2: new Tone.Gain(5000),
       vcfenv: new Tone.Gain(1000),
       vcf2cv1: new Tone.Gain(5000),
       vcf2cv2: new Tone.Gain(5000),
       vcf2env: new Tone.Gain(1000),
+
+      // 914 Fixed Filter Bank — parallel bandpass architecture.
+      // ffbIn fans out to 14 filters; each filter → Gain (slider-controlled); all Gains → ffbSum → ffbMaster.
+      // LP/HP use shelf filters; bandpass use Tone.Filter(bandpass). The Gain nodes (not filter.gain)
+      // control amplitude — BiquadFilter bandpass type has no gain parameter.
+      // Kick drum engine — MembraneSynth (pitch-drop oscillator + envelope) in parallel
+      // with a NoiseSynth click transient through a 2 kHz highpass.
+      // kickOut is the jack output; kickClickGain scales the transient independently.
+      kickSynth:      new Tone.MembraneSynth({ pitchDecay: 0.05, octaves: 5,
+                          envelope: { attack: 0.001, decay: 0.4, sustain: 0, release: 0.1 } }),
+      kickClickSynth: new Tone.NoiseSynth({ noise: { type: 'white' },
+                          envelope: { attack: 0.001, decay: 0.04, sustain: 0, release: 0.01 } }),
+      kickClickFilter: new Tone.Filter({ frequency: 2000, type: 'highpass', rolloff: -12 }),
+      kickClickGain:   new Tone.Gain(0.25),
+      kickOut:         new Tone.Gain(1),
+
+      // 914 Fixed Filter Bank — parallel bandpass architecture.
+      ffbIn:       new Tone.Gain(1),
+      ffbSum:      new Tone.Gain(1),
+      ffbMaster:   new Tone.Gain(1),
+      ffbAnalyser: new Tone.Analyser('fft', 512),
+      ...Object.fromEntries(FFB_BANDS.map((b, i) => [`ffbFilter${i}`, new Tone.Filter({ type: b.type, frequency: b.freq, Q: b.Q, rolloff: -12 })])),
+      ...Object.fromEntries(FFB_BANDS.map((_, i) => [`ffbGain${i}`,   new Tone.Gain(0.75)])),
     };
 
-    // VCO2 output bus — permanent crossfade between regular oscillator and sync slave.
-    // vco2normalGain gates regular VCO2 (gain 1 normally, fades to 0 when HARD SYNC ON).
-    // vco2syncOut feeds the worklet slave (gain 0 normally, fades to 1 when HARD SYNC ON).
-    // Both feed vco2bus, which is what all vco2-* output jacks connect from.
-    // Only one is non-zero at a time, so there is never signal bleed between modes.
+    // VCO output buses — each VCO routes through its bus so the HARD SYNC crossfade
+    // is transparent. normalGain (1) and syncOut (0) both feed the bus; setVcoNSyncEnabled
+    // crossfades between them so exactly one carries signal at a time.
+    n.vco1.connect(n.vco1normalGain);
+    n.vco1normalGain.connect(n.vco1bus);
+    n.vco1syncOut.connect(n.vco1bus);
+
     n.vco2.connect(n.vco2normalGain);
     n.vco2normalGain.connect(n.vco2bus);
     n.vco2syncOut.connect(n.vco2bus);
+
+    n.vco3.connect(n.vco3normalGain);
+    n.vco3normalGain.connect(n.vco3bus);
+    n.vco3syncOut.connect(n.vco3bus);
+
+    n.vco4.connect(n.vco4normalGain);
+    n.vco4normalGain.connect(n.vco4bus);
+    n.vco4syncOut.connect(n.vco4bus);
+
+    n.vco5.connect(n.vco5normalGain);
+    n.vco5normalGain.connect(n.vco5bus);
+    n.vco5syncOut.connect(n.vco5bus);
+
+    // GlideBus → vco.frequency: the sole pitch writer per VCO.
+    // vco.frequency.value stays 0; glideBus provides the Hz; FM adds on top.
+    n.vco1GlideBus.connect(n.vco1.frequency);
+    n.vco2GlideBus.connect(n.vco2.frequency);
+    n.vco3GlideBus.connect(n.vco3.frequency);
+    n.vco4GlideBus.connect(n.vco4.frequency);
+    n.vco5GlideBus.connect(n.vco5.frequency);
 
     // CV scaler hardwires — permanent front-doors for modulation inputs.
     // Sources patched to the FM / CV1 / CV2 / ENV jacks flow through these gains
@@ -409,6 +570,10 @@ export default function useMoogAudio() {
     n.vco2fm.connect(n.vco2.frequency);
     n.vco3fm.connect(n.vco3.frequency);
     n.vco4fm.connect(n.vco4.frequency);
+    n.vco5fm.connect(n.vco5.frequency);
+
+    // Keyboard vibrato — additive pitch modulation on all VCOs.
+
     n.vcfcv1.connect(n.vcf.frequency);
     n.vcfcv2.connect(n.vcf.frequency);
     n.vcfenv.connect(n.vcf.frequency);
@@ -427,6 +592,11 @@ export default function useMoogAudio() {
     n.ioCh2.connect(n.ioCh2Meter);
     n.ioCh3.connect(n.ioCh3Meter);
     n.ioCh4.connect(n.ioCh4Meter);
+    n.vco1bus.connect(n.vco1Meter);
+    n.vco2bus.connect(n.vco2Meter);
+    n.vco3bus.connect(n.vco3Meter);
+    n.vco4bus.connect(n.vco4Meter);
+    n.vco5bus.connect(n.vco5Meter);
 
     // master → seqMasterGate → Destination: every patch cable that reaches io-in
     // or any io-inN channel flows through master, then seqMasterGate. The Loop gates
@@ -440,9 +610,29 @@ export default function useMoogAudio() {
     // Oscilloscope and masterMeter tap from master (pre-gate so the scope still shows
     // waveform shape even on muted steps — useful for debugging patches).
     n.master.connect(n.analyser);
+    // Quantizer keepalive: gain(0) ensures quantizerOut stays connected to the
+    // audio graph so Chrome never stops calling the worklet's process() callback.
+    n.quantizerOut.connect(n.qntKeepAlive);
+    n.qntKeepAlive.connect(Tone.Destination);
+
+    // Kick engine — MembraneSynth and click transient both feed kickOut
+    n.kickSynth.connect(n.kickOut);
+    n.kickClickSynth.connect(n.kickClickFilter);
+    n.kickClickFilter.connect(n.kickClickGain);
+    n.kickClickGain.connect(n.kickOut);
+
+    // 914 FFB — parallel bandpass sum
+    FFB_BANDS.forEach((_, i) => {
+      n.ffbIn.connect(n[`ffbFilter${i}`]);
+      n[`ffbFilter${i}`].connect(n[`ffbGain${i}`]);
+      n[`ffbGain${i}`].connect(n.ffbSum);
+    });
+    n.ffbSum.connect(n.ffbMaster);
+    n.ffbIn.connect(n.ffbAnalyser);
 
     // seqGateNode sits between VCA and the vca-out jack — secondary gate for vca-out path.
     n.vca.connect(n.seqGateNode);
+    n.vca.connect(n.seq2GateNode);
 
     // Level meter taps — all dead-end side connections, do not affect audio routing.
     n.lfo.connect(n.lfoMeter);
@@ -469,31 +659,51 @@ export default function useMoogAudio() {
       const idx  = seqCurrentStepRef.current;
       const step = seqStepsRef.current[idx];
 
-      // Pitch CV — sample-accurate step change at exact note boundary
-      const hz = SEQ_HZ_MIN * Math.pow(SEQ_HZ_MAX / SEQ_HZ_MIN, step.voltage);
+      // seqPitchOut always jumps instantly — it drives the quantizer and other
+      // non-VCO destinations. Glide is applied at each VCO's glideBus so it
+      // happens AFTER any quantizer in the path, never producing a staircase.
+      const hz    = SEQ_HZ_MIN * Math.pow(SEQ_HZ_MAX / SEQ_HZ_MIN, step.voltage);
+      const glide = seqGlideRef.current;
       n.seqPitchOut.setValueAtTime(hz, time);
+      // Apply glide on every VCO that has seq-pitch-out directly connected to its cv-in.
+      for (const vcoId of VCO_IDS) {
+        if (vcoActiveCvRef.current[vcoId] !== 'seq-pitch-out') continue;
+        const gb = n[`${vcoId}GlideBus`];
+        if (glide < 0.001) gb.setValueAtTime(hz, time);
+        else               gb.rampTo(hz, glide, time);
+        n.hardSyncNodes?.[VCO_IDX_MAP[vcoId]]?.parameters.get('slaveFreq')
+          .setTargetAtTime(hz, time, Math.max(glide / 3, 0.001));
+      }
 
-      // Hardware gate — sample-accurate silence on gate-off steps.
-      // seqMasterGate sits between master volume and Destination, blocking ALL audio
-      // regardless of how patch cables are routed. seqGateNode gates vca-out specifically.
-      const gateVal = step.gate ? 1 : 0;
-      n.seqMasterGate.gain.setValueAtTime(gateVal, time);
-      n.seqGateNode.gain.setValueAtTime(gateVal, time);
+      const fires = step.gate && Math.random() < step.prob;
+      const gateVal = fires ? 1 : 0;
+      // Gate only VCOs connected to seq1's pitch output and the vca-out path.
+      // seqMasterGate is NOT written — it would silence seq2's audio.
+      // Use native AudioParam directly: Tone.Param's setValueAtTime goes through
+      // its own event queue which can conflict with rampTo calls on the same chain.
+      n.seqGateNode.gain._param.setValueAtTime(gateVal, time);
+      for (const vcoId of VCO_IDS) {
+        if (vcoActiveCvRef.current[vcoId] === 'seq-pitch-out')
+          n[`${vcoId}bus`].gain._param.setValueAtTime(gateVal, time);
+      }
 
-      // Gate — trigger or release envelopes connected to seq-gate-out.
-      // Gate OFF: explicitly fire triggerRelease so the previous note is
-      // never left open (hanging note bug). Gate ON: attack + pre-scheduled
-      // release at 80% of step duration gives clear note articulation.
-      // gateActionsRef keyed by cable key so keyboard gates don't interfere.
       if (gateActionsRef.current.size > 0) {
-        const stepDur = step.gate ? Tone.Time('8n').toSeconds() : 0;
-        for (const [, { env, fromId }] of gateActionsRef.current) {
-          if (fromId !== 'seq-gate-out') continue;
-          if (step.gate) {
-            env.triggerAttack(time);
-            env.triggerRelease(time + stepDur * 0.8);
+        const stepDur = fires ? Tone.Time('8n').toSeconds() : 0;
+        for (const [, action] of gateActionsRef.current) {
+          if (action.fromId !== 'seq-gate-out') continue;
+          if (action.isKick) {
+            if (fires) {
+              n.kickSynth.triggerAttackRelease(kickTuneRef.current, kickDecayRef.current, time);
+              n.kickClickSynth.triggerAttackRelease(kickDecayRef.current * 0.1, time);
+              kickTrigCbRef.current?.();
+            }
           } else {
-            env.triggerRelease(time);
+            if (fires) {
+              action.env.triggerAttack(time);
+              action.env.triggerRelease(time + stepDur * 0.8);
+            } else {
+              action.env.triggerRelease(time);
+            }
           }
         }
       }
@@ -509,17 +719,41 @@ export default function useMoogAudio() {
       seq2CurrentStepRef.current = (seq2CurrentStepRef.current + 1) % 16;
       const idx2  = seq2CurrentStepRef.current;
       const step2 = seq2StepsRef.current[idx2];
-      const hz2   = SEQ_HZ_MIN * Math.pow(SEQ_HZ_MAX / SEQ_HZ_MIN, step2.voltage);
+      const hz2    = SEQ_HZ_MIN * Math.pow(SEQ_HZ_MAX / SEQ_HZ_MIN, step2.voltage);
+      const glide2 = seq2GlideRef.current;
       n.seq2PitchOut.setValueAtTime(hz2, time);
+      for (const vcoId of VCO_IDS) {
+        if (vcoActiveCvRef.current[vcoId] !== 'seq2-pitch-out') continue;
+        const gb = n[`${vcoId}GlideBus`];
+        if (glide2 < 0.001) gb.setValueAtTime(hz2, time);
+        else                gb.rampTo(hz2, glide2, time);
+        n.hardSyncNodes?.[VCO_IDX_MAP[vcoId]]?.parameters.get('slaveFreq')
+          .setTargetAtTime(hz2, time, Math.max(glide2 / 3, 0.001));
+      }
+      const fires2 = step2.gate && Math.random() < step2.prob;
+      const gateVal2 = fires2 ? 1 : 0;
+      n.seq2GateNode.gain._param.setValueAtTime(gateVal2, time);
+      for (const vcoId of VCO_IDS) {
+        if (vcoActiveCvRef.current[vcoId] === 'seq2-pitch-out')
+          n[`${vcoId}bus`].gain._param.setValueAtTime(gateVal2, time);
+      }
       if (gateActionsRef.current.size > 0) {
-        const stepDur2 = step2.gate ? Tone.Time('8n').toSeconds() : 0;
-        for (const [, { env, fromId }] of gateActionsRef.current) {
-          if (fromId !== 'seq2-gate-out') continue;
-          if (step2.gate) {
-            env.triggerAttack(time);
-            env.triggerRelease(time + stepDur2 * 0.8);
+        const stepDur2 = fires2 ? Tone.Time('8n').toSeconds() : 0;
+        for (const [, action] of gateActionsRef.current) {
+          if (action.fromId !== 'seq2-gate-out') continue;
+          if (action.isKick) {
+            if (fires2) {
+              n.kickSynth.triggerAttackRelease(kickTuneRef.current, kickDecayRef.current, time);
+              n.kickClickSynth.triggerAttackRelease(kickDecayRef.current * 0.1, time);
+              kickTrigCbRef.current?.();
+            }
           } else {
-            env.triggerRelease(time);
+            if (fires2) {
+              action.env.triggerAttack(time);
+              action.env.triggerRelease(time + stepDur2 * 0.8);
+            } else {
+              action.env.triggerRelease(time);
+            }
           }
         }
       }
@@ -537,14 +771,31 @@ export default function useMoogAudio() {
       const step = chordSeqStepsRef.current[idx];
       // Only write root Hz when no CV source is patched — the rAF snapper owns
       // chordSeqPitchOut while an input is active (single-writer rule).
+      const chordHz = CHORD_BASE_HZ * Math.pow(2, step.rootClass / 12);
       if (!chordSeqInputActiveRef.current) {
-        const hz = CHORD_BASE_HZ * Math.pow(2, step.rootClass / 12);
-        n.chordSeqPitchOut.setValueAtTime(hz, time);
+        n.chordSeqPitchOut.setValueAtTime(chordHz, time);
+        // Drive glideBus for VCOs connected from chordseq-cv-out (no external CV active).
+        // No glide ref for the chord seq itself — instant jumps at the chord boundary.
+        for (const vcoId of VCO_IDS) {
+          if (vcoActiveCvRef.current[vcoId] === 'chordseq-cv-out')
+            n[`${vcoId}GlideBus`]?.setValueAtTime(chordHz, time);
+        }
       }
-      // Root-note output — always the chord root, octave-shifted by the knob, never affected
-      // by the CV-in snapping path.  VCO set to minimum + patch this for pure chord root bass.
-      const rootHz = CHORD_BASE_HZ * Math.pow(2, step.rootClass / 12);
-      n.chordSeqRootOut.setValueAtTime(rootHz * Math.pow(2, chordSeqRootOctaveRef.current), time);
+      // Polyphonic voice outputs — all 4 voices always fire regardless of cv-in state.
+      // Voice intervals come from CHORD_VOICE_INTERVALS, applied relative to shifted root.
+      const oct         = Math.pow(2, chordSeqRootOctaveRef.current);
+      const shiftedRoot = chordHz * oct;
+      const intervals   = CHORD_VOICE_INTERVALS[step.chordType] ?? CHORD_VOICE_INTERVALS.CMAJ;
+      const voiceHz     = intervals.map(st => shiftedRoot * Math.pow(2, st / 12));
+      n.chordSeqRootOut.setValueAtTime(voiceHz[0], time);
+      n.chordSeqThirdOut.setValueAtTime(voiceHz[1], time);
+      n.chordSeqFifthOut.setValueAtTime(voiceHz[2], time);
+      for (const vcoId of VCO_IDS) {
+        const src = vcoActiveCvRef.current[vcoId];
+        if (src === 'chordseq-root-out') n[`${vcoId}GlideBus`]?.setValueAtTime(voiceHz[0], time);
+        if (src === 'chordseq-3rd-out')  n[`${vcoId}GlideBus`]?.setValueAtTime(voiceHz[1], time);
+        if (src === 'chordseq-5th-out')  n[`${vcoId}GlideBus`]?.setValueAtTime(voiceHz[2], time);
+      }
 
       if (chordSeqStepCbRef.current) chordSeqStepCbRef.current(idx);
       if (chordSeqChordCbRef.current) chordSeqChordCbRef.current(step.rootClass, step.chordType);
@@ -565,6 +816,7 @@ export default function useMoogAudio() {
     // When no cable is patched the analyser returns ~0 Hz (below 10 Hz threshold) so this
     // loop is a cheap no-op and the chord Tone.Loop resumes ownership of chordSeqPitchOut.
     let chordSnapRafId;
+    let prevChordSnap = null; // delta gate — only trigger glideBus ramp when pitch changes
     const chordSnapTick = () => {
       chordSnapRafId = requestAnimationFrame(chordSnapTick);
       const data = n.chordSeqInputAnalyser.getValue();
@@ -581,6 +833,25 @@ export default function useMoogAudio() {
         // Use value setter (immediate) — setValueAtTime with a future-scheduled chord
         // loop tick would otherwise fight this write in the same block.
         n.chordSeqPitchOut.value = snapped;
+        // Drive glideBus for VCOs connected from chordseq-cv-out.
+        // Delta-gated so rampTo is only called once per pitch change, not every rAF frame.
+        if (snapped !== prevChordSnap) {
+          prevChordSnap = snapped;
+          // Glide amount: look up the source feeding chordseq-cv-in and use its glide ref.
+          const cvKey = [...connectionsRef.current.keys()].find(k => k.endsWith('→chordseq-cv-in'));
+          const cvSrc = cvKey?.split('→')[0];
+          const cvGlide = cvSrc === 'seq-pitch-out'  ? seqGlideRef.current
+                        : cvSrc === 'seq2-pitch-out' ? seq2GlideRef.current
+                        : cvSrc === 'kbd-pitch-out'  ? kbdGlideRef.current
+                        : 0;
+          for (const vcoId of VCO_IDS) {
+            if (vcoActiveCvRef.current[vcoId] !== 'chordseq-cv-out') continue;
+            const gb = n[`${vcoId}GlideBus`];
+            if (!gb) continue;
+            if (cvGlide < 0.001) gb.setValueAtTime(snapped, Tone.now());
+            else                  gb.rampTo(snapped, cvGlide, Tone.now());
+          }
+        }
       }
     };
     chordSnapTick();
@@ -608,6 +879,62 @@ export default function useMoogAudio() {
       n.quantizerNode.port.postMessage(quantizerParamsRef.current);
     };
     qntOverrideTick();
+
+    // Keyboard vibrato rAF — writes baseHz + depth*sin(2π*rate*t) to the glideBus
+    // of every VCO connected from kbd-pitch-out. Uses the same native _param path
+    // as the glide system — guaranteed to reach the actual AudioParam.
+    let vibratoRafId;
+    // Combined glide + vibrato rAF — the single writer for kbd-connected VCO glideBuses.
+    // Glide is handled here via exponential lerp so setValueAtTime never conflicts with
+    // a scheduled LinearRamp (which any setValueAtTime call would cancel).
+    const vibratoTick = () => {
+      vibratoRafId = requestAnimationFrame(vibratoTick);
+      const now = Tone.context.rawContext.currentTime;
+
+      // Consume note-on reset flag — stamp onset with THIS frame's `now` so elapsed is exactly 0.
+      // Seed kbdCurrentHzRef from kbdLastOutputHzRef (actual pitch including any vibrato swing)
+      // so the glide starts from the true current pitch with zero discontinuity.
+      if (kbdVibratoResetRef.current) {
+        kbdNoteOnsetRef.current  = now;
+        kbdCurrentHzRef.current  = kbdLastOutputHzRef.current;
+        kbdVibratoResetRef.current = false;
+      }
+
+      // Delta time for exponential glide lerp
+      const prev = kbdPrevRafTimeRef.current ?? now;
+      const dt   = Math.min(now - prev, 0.1); // cap at 100ms (e.g. tab backgrounding)
+      kbdPrevRafTimeRef.current = now;
+
+      // Glide: exponentially approach target Hz
+      const glide = kbdGlideRef.current;
+      const targetHz = kbdBaseHzRef.current;
+      if (glide < 0.001) {
+        kbdCurrentHzRef.current = targetHz;
+      } else {
+        const alpha = 1 - Math.exp(-dt / glide);
+        kbdCurrentHzRef.current += alpha * (targetHz - kbdCurrentHzRef.current);
+      }
+
+      // Vibrato swing
+      const depth     = kbdVibratoDepthRef.current;
+      const delayTime = kbdVibratoDelayRef.current;
+      const elapsed   = kbdNoteOnsetRef.current === null ? 0 : now - kbdNoteOnsetRef.current;
+      const effectiveDepth = depth < 0.001 ? 0 : delayTime < 0.01
+        ? depth
+        : depth * Math.min(1, Math.max(0, elapsed / delayTime));
+      const swing = effectiveDepth < 0.001
+        ? 0
+        : effectiveDepth * Math.sin(2 * Math.PI * kbdVibratoRateRef.current * now);
+
+      // Write once per frame — no scheduled events, no conflicts
+      const hz = Math.max(1, kbdCurrentHzRef.current + swing);
+      kbdLastOutputHzRef.current = hz;
+      for (const vcoId of VCO_IDS) {
+        if (vcoActiveCvRef.current[vcoId] !== 'kbd-pitch-out') continue;
+        n[`${vcoId}GlideBus`]?._param.setValueAtTime(hz, now);
+      }
+    };
+    vibratoTick();
 
     nodesRef.current   = n;
     jackMapRef.current = buildJackMap(n);
@@ -649,6 +976,28 @@ export default function useMoogAudio() {
             quantizerStepCbRef.current(null, null, data.hasSignal);
           }
         }
+        // Drive glideBus for any VCO connected from qnt-cv-out — the quantizer
+        // produces an instant quantized target; the glideBus applies the glide
+        // AFTER quantization so the slide is always between two in-scale notes.
+        if (data.midiNote !== undefined && nodesRef.current) {
+          const hz = 440 * Math.pow(2, (data.midiNote - 69) / 12);
+          // Determine glide τ by tracing what drives qnt-cv-in.
+          const qntSource = [...connectionsRef.current.keys()]
+            .find(k => k.endsWith('→qnt-cv-in'))?.split('→')[0];
+          const rawGlide = qntSource === 'seq-pitch-out'  ? seqGlideRef.current
+                         : qntSource === 'seq2-pitch-out' ? seq2GlideRef.current
+                         : qntSource === 'kbd-pitch-out'  ? kbdGlideRef.current
+                         : 0;
+          for (const vcoId of VCO_IDS) {
+            if (vcoActiveCvRef.current[vcoId] !== 'qnt-cv-out') continue;
+            const gb = nodesRef.current[`${vcoId}GlideBus`];
+            if (!gb) continue;
+            if (rawGlide < 0.001) gb.setValueAtTime(hz, Tone.now());
+            else                  gb.rampTo(hz, rawGlide, Tone.now());
+            nodesRef.current.hardSyncNodes?.[VCO_IDX_MAP[vcoId]]
+              ?.parameters.get('slaveFreq').setTargetAtTime(hz, Tone.now(), Math.max(rawGlide / 3, 0.001));
+          }
+        }
       };
 
       // Rebuild jackMap so qnt-cv-in is now live (was dest:null before worklet loaded).
@@ -658,39 +1007,30 @@ export default function useMoogAudio() {
     });
 
     // Load the hard sync AudioWorklet asynchronously.
-    // All Tone.js nodes above are already live; this just adds the worklet-backed
-    // slave oscillator. If the load fails (unsupported browser, etc.), the sync
-    // jacks remain no-ops and everything else works normally.
-    let hardSyncNode = null;
+    // One worklet node is created per VCO. If the load fails the sync jacks remain
+    // no-ops and everything else works normally.
+    // outputChannelCount:[1] forces mono — Chrome defaults to 2ch, leaving the right
+    // channel permanently silent; mono upmixes correctly downstream.
+    const hardSyncNodes = [];
     rawCtx.audioWorklet.addModule('/hard-sync-worklet.js').then(() => {
       if (nodesRef.current !== n) return;
-      // outputChannelCount: [1] forces mono output — Chrome defaults the output channel
-      // count to 2 (matching the AudioContext destination), leaving output[0][1] (right)
-      // permanently silent. A 1-channel output upmixes to stereo correctly downstream.
-      hardSyncNode = Tone.context.createAudioWorkletNode('hard-sync-processor', { outputChannelCount: [1] });
-      n.hardSyncNode = hardSyncNode;
 
-      // SAC-level bridge — both calls are SAC-node to SAC-node, which translates to
-      // native-to-native internally and is always reliable.
-      //
-      // IN:  vco2syncIn.output (SAC GainNode) → worklet audio input[0]
-      //      Tone.Oscillator → vco2syncIn is Tone→Tone (works fine via Tone.connect()).
-      //      Tone.Oscillator → worklet directly would silent-fail (Tone.js isAudioNode()
-      //      returns false for SAC AudioWorkletNodes, so connectSignal() does nothing).
-      //
-      // OUT: worklet output → vco2syncOut.input (SAC GainNode)
-      //      vco2syncOut.gain is 0 until user enables HARD SYNC toggle.
-      n.vco2syncIn.output.connect(hardSyncNode);
-      hardSyncNode.connect(n.vco2syncOut.input);
+      const wire = (syncIn, syncOut, fmGain) => {
+        const node = Tone.context.createAudioWorkletNode('hard-sync-processor', { outputChannelCount: [1] });
+        syncIn.output.connect(node);
+        node.connect(syncOut.input);
+        try { fmGain.connect(node.parameters.get('slaveFreq')); } catch (_) {}
+        return node;
+      };
 
-      // FM modulation: vco2fm additively drives slaveFreq so envelopes/LFOs patched
-      // to vco2-fm modulate both VCO2.frequency and the slave. Non-critical — wrapped
-      // in its own try-catch so a failure here cannot affect the core sync path.
-      try {
-        n.vco2fm.connect(hardSyncNode.parameters.get('slaveFreq'));
-      } catch (e) {
-        console.warn('[MoogAudio] vco2fm→slaveFreq unavailable:', e.message);
-      }
+      hardSyncNodes.push(
+        wire(n.vco1syncIn, n.vco1syncOut, n.vco1fm),
+        wire(n.vco2syncIn, n.vco2syncOut, n.vco2fm),
+        wire(n.vco3syncIn, n.vco3syncOut, n.vco3fm),
+        wire(n.vco4syncIn, n.vco4syncOut, n.vco4fm),
+        wire(n.vco5syncIn, n.vco5syncOut, n.vco5fm),
+      );
+      n.hardSyncNodes = hardSyncNodes;
     }).catch(err => {
       console.warn('[MoogAudio] Hard sync worklet unavailable:', err);
     });
@@ -698,10 +1038,11 @@ export default function useMoogAudio() {
     return () => {
       cancelAnimationFrame(chordSnapRafId);
       cancelAnimationFrame(qntOverrideRafId);
+      cancelAnimationFrame(vibratoRafId);
       // Null out nodesRef first so any in-flight worklet Promise .then() bails immediately.
       nodesRef.current = null;
       jackMapRef.current = null;
-      [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2, n.chorus].forEach(node => {
+      [n.vco1, n.vco2, n.vco3, n.vco4, n.vco5, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2, n.chorus].forEach(node => {
         try { node.stop(); } catch (_) {}
       });
       if (seqLoopRef.current) {
@@ -721,7 +1062,7 @@ export default function useMoogAudio() {
       }
       try { Tone.Transport.stop(); } catch (_) {}
       // Disconnect AudioWorkletNodes (not Tone.js nodes — no .dispose()).
-      if (hardSyncNode)   { try { hardSyncNode.disconnect();   } catch (_) {} }
+      hardSyncNodes.forEach(node => { try { node.disconnect(); } catch (_) {} });
       if (quantizerNode)  { try { quantizerNode.disconnect();  } catch (_) {} }
       Object.values(n).forEach(node => {
         try { node.dispose(); } catch (_) {}
@@ -739,16 +1080,22 @@ export default function useMoogAudio() {
 
     const n = nodesRef.current;
     if (!n) return;
-    [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2, n.chorus].forEach(node => {
+    [n.vco1, n.vco2, n.vco3, n.vco4, n.vco5, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2, n.chorus].forEach(node => {
       try { node.start(); } catch (_) {}
     });
 
-    // Restore the hard sync crossfade to whatever state the toggle was left in.
-    // vco2syncOut was forced to 0 on powerOff to prevent the always-running worklet
-    // from producing audio while the synth is off.
-    const se = vco2SyncEnabledRef.current;
-    n.vco2normalGain.gain.value = se ? 0 : 1;
-    n.vco2syncOut.gain.value    = se ? 1 : 0;
+    // Restore hard sync crossfade for all VCOs. syncOut was forced to 0 on powerOff
+    // to prevent always-running worklets from producing audio while the synth is off.
+    [[n.vco1normalGain, n.vco1syncOut, vco1SyncEnabledRef],
+     [n.vco2normalGain, n.vco2syncOut, vco2SyncEnabledRef],
+     [n.vco3normalGain, n.vco3syncOut, vco3SyncEnabledRef],
+     [n.vco4normalGain, n.vco4syncOut, vco4SyncEnabledRef],
+     [n.vco5normalGain, n.vco5syncOut, vco5SyncEnabledRef],
+    ].forEach(([normalGain, syncOut, ref]) => {
+      const se = ref.current;
+      normalGain.gain.value = se ? 0 : 1;
+      syncOut.gain.value    = se ? 1 : 0;
+    });
 
     // Start sequencer clocks — reset steps so first tick lands on step 0
     seqCurrentStepRef.current      = -1;
@@ -788,13 +1135,14 @@ export default function useMoogAudio() {
     // it keeps running indefinitely — stopping oscillators is not enough. Without this,
     // vco2syncOut (gain=1 when HARD SYNC is ON) lets the worklet sawtooth flow through
     // vco2bus → master → seqMasterGate (which is re-opened below) → speakers.
-    n.vco2syncOut.gain.value    = 0;
-    n.vco2normalGain.gain.value = 1; // restore normal path (VCO2 is stopped, so silent)
+    [n.vco1syncOut, n.vco2syncOut, n.vco3syncOut, n.vco4syncOut, n.vco5syncOut].forEach(g => { g.gain.value = 0; });
+    [n.vco1normalGain, n.vco2normalGain, n.vco3normalGain, n.vco4normalGain, n.vco5normalGain].forEach(g => { g.gain.value = 1; });
 
     // Re-open both gates so keyboard / manual playing is audible after sequencer stops.
     // Last gate-off step may have left them closed.
     n.seqMasterGate.gain.value = 1;
     n.seqGateNode.gain.value   = 1;
+    n.seq2GateNode.gain.value  = 1;
 
     setIsPowered(false);
   }, []);
@@ -824,17 +1172,63 @@ export default function useMoogAudio() {
     // Keyed by full cable key so kbd-gate and seq-gate can both connect to the
     // same env jack independently without overwriting each other.
     if (from.isGate && to.isGate) {
-      const env = n[to.envId];
-      if (env) {
-        gateActionsRef.current.set(key, { env, fromId: effFrom });
+      if (to.isKick) {
+        // Kick gate — store without an env ref; loop handlers detect isKick.
+        gateActionsRef.current.set(key, { isKick: true, fromId: effFrom });
         connectionsRef.current.set(key, { isGate: true, toId: effTo });
+      } else {
+        const env = n[to.envId];
+        if (env) {
+          gateActionsRef.current.set(key, { env, fromId: effFrom });
+          connectionsRef.current.set(key, { isGate: true, toId: effTo });
+        }
       }
       return;
     }
 
     if (from.type !== 'out' || to.type !== 'in') return;
-    if (to.dest === null) return;   // deferred jack — silently no-op
     if (from.node === null) return; // unimplemented output (e.g. seq-clk-out)
+
+    // VCO cv-in — managed by glideBus, never audio-connected directly.
+    // "Managed" sources (seq/kbd/qnt) are written by step loops/callbacks.
+    // "Pass-through" sources (chord seq, other audio) audio-connect to the glideBus
+    // which passes the signal through transparently (offset stays 0).
+    if (to.isVcoCv) {
+      const vcoId     = effTo.replace('-cv', '');
+      const glideBus  = n[`${vcoId}GlideBus`];
+      if (!glideBus) return;
+      vcoActiveCvRef.current[vcoId] = effFrom;
+      // Managed sources: no audio cable — step loops / rAF / port.onmessage write to glideBus.
+      const MANAGED = new Set(['seq-pitch-out','seq2-pitch-out','kbd-pitch-out',
+                               'qnt-cv-out','chordseq-cv-out','chordseq-root-out',
+                               'chordseq-3rd-out','chordseq-5th-out']);
+      if (MANAGED.has(effFrom)) {
+        // No audio cable — step loops/quantizer callback write to glideBus on each event.
+        // Seed the glideBus with the source's current value so there's no jump on connect.
+        const seedHz = effFrom === 'seq-pitch-out'     ? (n.seqPitchOut.value       ?? SEQ_HZ_MIN)
+                     : effFrom === 'seq2-pitch-out'    ? (n.seq2PitchOut.value      ?? SEQ_HZ_MIN)
+                     : effFrom === 'kbd-pitch-out'     ? (n.kbdPitchOut.value       ?? SEQ_HZ_MIN)
+                     : effFrom === 'qnt-cv-out'        ? 440 * Math.pow(2, (lastQuantizedMidiRef.current - 69) / 12)
+                     : effFrom === 'chordseq-cv-out'     ? (n.chordSeqPitchOut.value  ?? SEQ_HZ_MIN)
+                     : effFrom === 'chordseq-root-out'   ? (n.chordSeqRootOut.value   ?? SEQ_HZ_MIN)
+                     : effFrom === 'chordseq-3rd-out'    ? (n.chordSeqThirdOut.value  ?? SEQ_HZ_MIN)
+                     : effFrom === 'chordseq-5th-out'    ? (n.chordSeqFifthOut.value  ?? SEQ_HZ_MIN)
+                     : SEQ_HZ_MIN;
+        glideBus.setValueAtTime(seedHz, Tone.now());
+      } else {
+        // Pass-through: audio-connect so the source flows to the glideBus offset-addition.
+        // Zero the offset so only the source drives the bus (no double-counting).
+        glideBus.setValueAtTime(0, Tone.now());
+        try { from.node.connect(glideBus); } catch (e) {
+          console.warn(`[MoogAudio] vco-cv pass-through connect ${key}:`, e.message);
+        }
+      }
+      connectionsRef.current.set(key, { isVcoCv: true, vcoId, sourceId: effFrom,
+        audioNode: MANAGED.has(effFrom) ? null : from.node });
+      return;
+    }
+
+    if (to.dest === null) return;   // deferred jack — silently no-op
 
     // Set VCO or LFO waveform to match the specific output jack patched.
     // waveformTarget separates the waveform-setting node (e.g. n.vco2) from the
@@ -853,13 +1247,6 @@ export default function useMoogAudio() {
       quantizerParamsRef.current.root  = step.rootClass;
       quantizerParamsRef.current.scale = SCALE_DEFS[step.chordType] ?? SCALE_DEFS.CMAJ;
       n.quantizerNode?.port.postMessage(quantizerParamsRef.current);
-    }
-
-    // VCO cv-in override: zero the AudioParam base value so the source provides the
-    // full pitch Hz. Without this, VCO freq = knob_hz + cv_hz = always wrong.
-    if (/^vco\d+-cv$/.test(effTo)) {
-      const vcoId = effTo.replace('-cv', '');
-      if (n[vcoId]) n[vcoId].frequency.value = 0;
     }
 
     try {
@@ -891,6 +1278,26 @@ export default function useMoogAudio() {
       return;
     }
 
+    // VCO cv-in disconnect — restore glideBus to knob value, clear source tracking.
+    if (conn.isVcoCv) {
+      const n = nodesRef.current;
+      if (!n) { connectionsRef.current.delete(key); return; }
+      const { vcoId, audioNode } = conn;
+      // Disconnect pass-through audio cable if present.
+      if (audioNode) {
+        try { audioNode.disconnect(n[`${vcoId}GlideBus`]); } catch (_) {}
+      }
+      vcoActiveCvRef.current[vcoId] = null;
+      connectionsRef.current.delete(key);
+      // Restore knob Hz to the glideBus (instant — no glide on cable-remove).
+      const kHz = vcoKnobHzRef.current[vcoId];
+      if (kHz != null) {
+        n[`${vcoId}GlideBus`].setValueAtTime(kHz, Tone.now());
+        n.hardSyncNodes?.[VCO_IDX_MAP[vcoId]]?.parameters.get('slaveFreq').setValueAtTime(kHz, Tone.now());
+      }
+      return;
+    }
+
     try {
       conn.node.disconnect(conn.dest);
     } catch (e) {
@@ -901,18 +1308,6 @@ export default function useMoogAudio() {
     // Chord-seq → quantizer override: clear when cable is removed.
     if (effFrom === 'chordseq-cv-out' && effTo === 'qnt-transpose-in') {
       qntChordOverrideRef.current = false;
-    }
-
-    // VCO cv-in: restore the knob frequency once no CV source remains connected,
-    // so the user gets back manual pitch control without re-touching the knob.
-    if (/^vco\d+-cv$/.test(effTo)) {
-      const n = nodesRef.current;
-      const stillActive = [...connectionsRef.current.keys()].some(k => k.endsWith(`→${effTo}`));
-      if (!stillActive && n) {
-        const vcoId  = effTo.replace('-cv', '');
-        const kHz    = vcoKnobHzRef.current[vcoId];
-        if (n[vcoId] && kHz != null) n[vcoId].frequency.value = kHz;
-      }
     }
   }, []);
 
@@ -931,25 +1326,22 @@ export default function useMoogAudio() {
     if (!n) return;
     const vco = n[vcoId];
     if (!vco) return;
+    const syncNode = n.hardSyncNodes?.[VCO_IDX_MAP[vcoId]];
     if (hz !== undefined) {
       const safeHz = Math.max(0.1, hz);
-      // Always persist the knob value so it can be restored on CV disconnect.
       vcoKnobHzRef.current[vcoId] = safeHz;
-      // Suppress the frequency write while a CV source is connected — the source owns
-      // the pitch (base is zeroed in connect()), and the knob must not fight it.
-      const hasCv = [...connectionsRef.current.keys()].some(k => k.endsWith(`→${vcoId}-cv`));
+      // Only write when no CV source is connected — glideBus is the sole pitch writer.
+      const hasCv = vcoActiveCvRef.current[vcoId] != null;
       if (!hasCv) {
-        vco.frequency.setTargetAtTime(safeHz, Tone.now(), 0.02);
-        if (vcoId === 'vco2' && n.hardSyncNode) {
-          n.hardSyncNode.parameters.get('slaveFreq').setTargetAtTime(safeHz, Tone.now(), 0.02);
-        }
+        const gb = n[`${vcoId}GlideBus`];
+        if (Tone.context.state === 'running') gb.rampTo(safeHz, 0.02);
+        else                                  gb.value = safeHz;
+        syncNode?.parameters.get('slaveFreq').setTargetAtTime(safeHz, Tone.now(), 0.02);
       }
     }
     if (detune !== undefined) {
       vco.detune.setTargetAtTime(detune, Tone.now(), 0.02);
-      if (vcoId === 'vco2' && n.hardSyncNode) {
-        n.hardSyncNode.parameters.get('slaveDetune').setTargetAtTime(detune, Tone.now(), 0.02);
-      }
+      syncNode?.parameters.get('slaveDetune').setTargetAtTime(detune, Tone.now(), 0.02);
     }
     if (type !== undefined) vco.type = type;
   }, []);
@@ -1237,16 +1629,96 @@ export default function useMoogAudio() {
   }, []);
 
   // Enable or disable VCO2 hard sync.
-  // Crossfades vco2normalGain (regular VCO2) and vco2syncOut (worklet slave) over 10 ms.
-  // Because both feed vco2bus, the transition is click-free and vco2-saw/sqr/etc. jacks
-  // automatically carry the synced signal when ON — no extra patch cables required.
-  // State is persisted in vco2SyncEnabledRef so powerOff/powerOn can gate and restore it.
-  const setVco2SyncEnabled = useCallback((enabled) => {
+  // Glide setters — single writers for each glide ref. Value is seconds (0 = off).
+  // Kick drum params — single writer, called by KickModule knobs.
+  // tune: Hz (40–200), pitchEnv: octave drop (0–5), decay: seconds (0.05–2), click: gain (0–1).
+  const kickTuneRef   = useRef(55);
+  const kickDecayRef  = useRef(0.4);
+  const kickTrigCbRef = useRef(null); // UI flash callback — registered by KickModule
+
+  const updateKickParams = useCallback(({ tune, pitchEnv, decay, click } = {}) => {
     const n = nodesRef.current;
     if (!n) return;
+    if (tune      !== undefined) kickTuneRef.current  = tune;
+    if (decay     !== undefined) {
+      kickDecayRef.current = decay;
+      n.kickSynth.envelope.decay   = decay;
+      n.kickSynth.envelope.release = decay * 0.25;
+    }
+    if (pitchEnv  !== undefined) n.kickSynth.octaves     = pitchEnv;
+    if (click     !== undefined) safeRamp(n.kickClickGain.gain, click, 0.02);
+  }, []);
+
+  const triggerKick = useCallback((onFlash) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    const now = Tone.now();
+    n.kickSynth.triggerAttackRelease(kickTuneRef.current, kickDecayRef.current, now);
+    n.kickClickSynth.triggerAttackRelease(kickDecayRef.current * 0.1, now);
+    onFlash?.();
+  }, []);
+
+  // Keyboard vibrato — depth in Hz (0–20), rate in Hz, delay bool. Drives the rAF loop refs.
+  const setKbdVibrato = useCallback(({ depth, rate, delay } = {}) => {
+    if (depth !== undefined) kbdVibratoDepthRef.current = depth;
+    if (rate  !== undefined) kbdVibratoRateRef.current  = rate;
+    if (delay !== undefined) kbdVibratoDelayRef.current = delay; // delay = time in seconds
+  }, []);
+
+  const setSeqGlide  = useCallback((v) => { seqGlideRef.current  = v; }, []);
+  const setSeq2Glide = useCallback((v) => { seq2GlideRef.current = v; }, []);
+  const setKbdGlide  = useCallback((v) => { kbdGlideRef.current  = v; }, []);
+
+  // 914 FFB — single writer per band gain node; master owns ffbMaster.gain.
+  const updateFFBParams = useCallback(({ bands, master } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (bands) {
+      bands.forEach((v, i) => {
+        const g = n[`ffbGain${i}`];
+        if (g) safeRamp(g.gain, Math.max(0, Math.min(1.5, v)), 0.02);
+      });
+    }
+    if (master !== undefined) safeRamp(n.ffbMaster.gain, Math.max(0, master), 0.02);
+  }, []);
+
+  const getFFBAnalyserData = useCallback(() => {
+    const n = nodesRef.current;
+    if (!n) return null;
+    return n.ffbAnalyser.getValue();
+  }, []);
+
+  // Crossfades normalGain ↔ syncOut over 10 ms per VCO.
+  // State persisted in ref so powerOff/powerOn can gate and restore it.
+  const setVco1SyncEnabled = useCallback((enabled) => {
+    const n = nodesRef.current; if (!n) return;
+    vco1SyncEnabledRef.current = enabled;
+    safeRamp(n.vco1normalGain.gain, enabled ? 0 : 1, 0.01);
+    safeRamp(n.vco1syncOut.gain,    enabled ? 1 : 0, 0.01);
+  }, []);
+  const setVco2SyncEnabled = useCallback((enabled) => {
+    const n = nodesRef.current; if (!n) return;
     vco2SyncEnabledRef.current = enabled;
     safeRamp(n.vco2normalGain.gain, enabled ? 0 : 1, 0.01);
     safeRamp(n.vco2syncOut.gain,    enabled ? 1 : 0, 0.01);
+  }, []);
+  const setVco3SyncEnabled = useCallback((enabled) => {
+    const n = nodesRef.current; if (!n) return;
+    vco3SyncEnabledRef.current = enabled;
+    safeRamp(n.vco3normalGain.gain, enabled ? 0 : 1, 0.01);
+    safeRamp(n.vco3syncOut.gain,    enabled ? 1 : 0, 0.01);
+  }, []);
+  const setVco4SyncEnabled = useCallback((enabled) => {
+    const n = nodesRef.current; if (!n) return;
+    vco4SyncEnabledRef.current = enabled;
+    safeRamp(n.vco4normalGain.gain, enabled ? 0 : 1, 0.01);
+    safeRamp(n.vco4syncOut.gain,    enabled ? 1 : 0, 0.01);
+  }, []);
+  const setVco5SyncEnabled = useCallback((enabled) => {
+    const n = nodesRef.current; if (!n) return;
+    vco5SyncEnabledRef.current = enabled;
+    safeRamp(n.vco5normalGain.gain, enabled ? 0 : 1, 0.01);
+    safeRamp(n.vco5syncOut.gain,    enabled ? 1 : 0, 0.01);
   }, []);
 
   // Keyboard pitch + gate control.
@@ -1256,6 +1728,10 @@ export default function useMoogAudio() {
   const updateKeyboard = useCallback((hz, isGateDown) => {
     const n = nodesRef.current;
     if (!n) return;
+    // Update refs — the vibratoTick rAF owns all glideBus writes for kbd-connected VCOs.
+    // kbdPitchOut drives quantizer and other non-VCO destinations (instant, no glide needed).
+    kbdBaseHzRef.current = hz;
+    if (isGateDown) kbdVibratoResetRef.current = true; // rAF will stamp its own `now` as onset
     n.kbdPitchOut.setValueAtTime(hz, Tone.now());
     for (const [, { env, fromId }] of gateActionsRef.current) {
       if (fromId !== 'kbd-gate-out') continue;
@@ -1275,7 +1751,11 @@ export default function useMoogAudio() {
     updateSeq2Steps, setSeq2StepCallback, updateKeyboard,
     updateChordSeqSteps, setChordSeqStepCallback, setChordSeqDivision,
     setChordSeqChordCallback, setChordSeqRootOctave,
-    setVco2SyncEnabled,
+    setVco1SyncEnabled, setVco2SyncEnabled, setVco3SyncEnabled, setVco4SyncEnabled, setVco5SyncEnabled,
+    setSeqGlide, setSeq2Glide, setKbdGlide, setKbdVibrato,
+    updateFFBParams, getFFBAnalyserData,
+    updateKickParams, triggerKick,
+    setKickTrigCallback: (fn) => { kickTrigCbRef.current = fn; },
     updateQuantizerParams, setQuantizerCallback,
   };
 }

@@ -25,6 +25,28 @@ VoxDaw is actively under development. Core gesture engine, audio DSP chain, arpe
 
 ## Completed Steps Log
 
+* **[2026-06-14] Moog Modular Session — Phases 37–49 (VCO expansion, sequencer fixes, keyboard effects, new modules):**
+
+  **Lights-Out Mode:** `data-lights-out="true"` attribute on `.cabinet`; CSS attribute selectors hide all faceplates, knobs, text, jacks, cables, keyboard — only LEDs, sequencer active-step indicators, power lamp, oscilloscope, and gate-on buttons remain visible. Toggle button at top-right of shell (`lightsOutBtn` / `lightsOutActive`).
+
+  **VCO Overhaul:** All 5 VCOs (VCO5 added this session) now route through per-VCO bus architecture (`vcoNbus`, `vcoNnormalGain`, `vcoNsyncOut`) enabling clean hard-sync crossfade per VCO. Hard sync extended from VCO2-only to all 5 VCOs — 5 `AudioWorkletNode` instances from a single `addModule` call via `wire()` helper. WAVE selector removed from VcoModule; jack labels replaced with SVG waveform icons (bezier sine, triangle, sawtooth, square — `transform:rotate(-90deg)` → `currentColor` stroke). Output-presence LED (green, `Tone.Meter` on each vcoBus) + hard sync physical lever switch + blue LED per VCO. VCO frequency architecture: `frequency:0` init, `glideBus` (Tone.Signal at 185 Hz) as sole pitch writer to `vco.frequency`. `updateVcoParams` uses `gb.value = safeHz` before context runs, `gb.rampTo` after.
+
+  **GlideBus + Glide/Vibrato Architecture:** All pitch CV routing goes through per-VCO `glideBus` (`Tone.Signal`). `vcoActiveCvRef` tracks which source jack drives each VCO cv-in; MANAGED sources (seq, kbd, qnt, chord seq) write to glideBus directly — no audio cables for these, so the glide + vibrato rAF is the sole writer. Pass-through sources audio-connect to the glideBus. Seq1/seq2 glide: `rampTo` in the Tone.Loop at step boundaries. Keyboard glide+vibrato: single rAF loop (`vibratoTick`) handles both via exponential lerp (`kbdCurrentHzRef += alpha*(target-current)`) + sine swing — zero scheduling conflicts because only `_param.setValueAtTime(hz, now)` is written per frame.
+
+  **Keyboard Controls:** GLIDE knob (0→1.5s), VIBRATO knob (0→20 Hz depth), VIB RATE knob (0.5→10 Hz, default 5 Hz), VIB DLY knob (0→4 s ramp time). Vibrato delay: `kbdVibratoResetRef` flag consumed by rAF with its own `now` (so elapsed=0 exactly on note-on frame). Glide continuity: `kbdLastOutputHzRef` tracks last written Hz including swing; seeds `kbdCurrentHzRef` on note-on to eliminate discontinuities. Vibrato implemented as rAF loop (not Tone.LFO/Oscillator — Tone.js wrapper layers unreliable for modulating frequency params).
+
+  **Sequencer Fixes:** Gate-off now writes `glideBus._param.setValueAtTime(0, time)` and `seqGateNode.gain._param` for VCOs connected to that sequencer only. `seqMasterGate` no longer written from loops (was silencing all audio, both sequencers). Each sequencer gates only its own connected VCOs via `vcoActiveCvRef`. Seq1/seq2 fully independent. Stochastic probability sliders (rotated `<input type="range">`, `transform:rotate(-90deg)` pattern, `min=0 max=1`) per step; audio: `fires = step.gate && Math.random() < step.prob`. Glide knob in seqCtrl (`flex row` with tempo knob).
+
+  **Chord Sequencer Voices:** `chordseq-root-out`, `chordseq-3rd-out`, `chordseq-5th-out` jacks output the 1st/3rd/5th of the current chord type (`CHORD_VOICE_INTERVALS` map). MANAGED sources — loop writes to connected glideBuses. rAF snapper with `prevChordSnap` delta gate handles external CV-in path with glide.
+
+  **Quantizer keepalive:** `qntKeepAlive: Tone.Gain(0)` connected to Destination prevents Chrome's tail-time optimization from stopping the worklet's `process()` when no VCO is directly connected.
+
+  **914 Fixed Filter Bank (`FFBModule`):** 14 bands (LP 100 Hz, 12 bandpass at √2-spaced intervals 125–5600 Hz, HP 8 kHz) in parallel — `ffbIn` fans to 14 `Tone.Filter` + `Tone.Gain` pairs, all summing into `ffbSum → ffbMaster`. Band knobs (`sm` MoogKnob, default 0.75) + MSTR knob in a 7×2 grid with divider column. Per-band activity LEDs driven by FFT analyser rAF (half-octave bin range, dB→opacity). Exported `FFB_BANDS` constant shared between audio engine and UI.
+
+  **Kick Drum Module (`KickModule`):** `Tone.MembraneSynth` (pitch-drop oscillator) + `Tone.NoiseSynth → highpass filter → clickGain` in parallel into `kickOut`. TUNE/P.ENV/DECAY/CLICK knobs, red trigger LED (DOM-ref flash pattern). `kick-gate-in` (isGate+isKick) wired into `gateActionsRef`; both seq loops detect `action.isKick` and call `kickSynth.triggerAttackRelease(tune, decay, time)` sample-accurately. `kickTrigCbRef` registered by KickModule for LED sync. `kick-click-in` CV jack modulates click gain for accent.
+
+  **LFO FM → glideBus:** LFO FM connections still go to `vco.frequency` directly (additive, separate from glideBus) via `vcoNfm Tone.Gain(500)`.
+
 * **[2026-06-09] Hard Sync Bug Fixes — 6 cascading root causes resolved (`useMoogAudio.js`, `public/hard-sync-worklet.js` unchanged):**
 
   **Bug 1 — Cable direction:** `connect()` enforced `from.type === 'out'` with a hard guard; patching from an input jack (e.g. vco2-sync-in) to an output jack (vco1-saw) silently no-oped. Fix: normalize `in→out` to `out→in` at the top of both `connect()` and `disconnect()` so cable direction is irrelevant to the user.

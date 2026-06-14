@@ -43,6 +43,14 @@
     inset 0 1px 0 rgba(255, 160, 140, 0.40);
 }
 
+.blue {
+  background: radial-gradient(circle at 38% 28%, #a8d8ff 0%, #2888e8 48%, #083880 100%);
+  box-shadow:
+    0 0 5px  rgba(40,  130, 230, 0.90),
+    0 0 14px rgba(20,  100, 210, 0.55),
+    inset 0 1px 0 rgba(160, 210, 255, 0.40);
+}
+
 .ledLabel {
   font-size: 5px;
   letter-spacing: 0.18em;

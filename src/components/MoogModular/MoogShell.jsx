@@ -3,7 +3,7 @@ import styles from './MoogShell.module.css';
 import MoogKnob from './MoogKnob';
 import { MoogPatchProvider, useMoogPatch } from './MoogPatchContext';
 import PatchCableOverlay from './PatchCableOverlay';
-import useMoogAudio from './useMoogAudio';
+import useMoogAudio, { FFB_BANDS } from './useMoogAudio';
 import Oscilloscope from './Oscilloscope';
 import KeyboardModule from './KeyboardModule';
 import Led from './Led';
@@ -91,39 +91,82 @@ function PowerSwitch({ isPowered, onToggle }) {
 // Exponential frequency mapping: C1 (32.703 Hz) → C6 (1046.502 Hz)
 const VCO_FREQ_MIN = 32.703;
 const VCO_FREQ_MAX = 1046.502;
-const WAVE_TYPES   = ['sine', 'triangle', 'sawtooth', 'square'];
-const WAVE_LABELS  = { sine: 'SIN', triangle: 'TRI', sawtooth: 'SAW', square: 'SQR' };
 const RANGE_STEPS  = [-2, -1, 0, 1, 2];
 const RANGE_LABELS = { '-2': "32'", '-1': "16'", '0': "8'", '1': "4'", '2': "2'" };
 
-// number prop (1/2/3) drives the display label and jack ID prefixes.
-// onParamUpdate(vcoId, { hz, detune, type }) is the audio update callback from useMoogAudio.
+// SVG waveform icons for VCO jack labels.
+// stroke="currentColor" inherits the .jackLabel color so they match the text labels.
+const WAVE_PATHS = {
+  sine:     'M 0,5 C 2,2.4 4,0 6,0 C 8,0 10,2.4 12,5 C 14,7.6 16,10 18,10 C 20,10 22,7.6 24,5',
+  triangle: 'M 0,5 L 6,0 L 18,10 L 24,5',
+  sawtooth: 'M 0,9 L 11,1 L 11,9 L 22,1',
+  square:   'M 0,2 H 10 V 8 H 22 V 2',
+};
+
+function WaveIcon({ type }) {
+  return (
+    <svg viewBox="0 0 24 10" width="22" height="9" fill="none"
+      stroke="currentColor" strokeWidth="1.6"
+      strokeLinecap="round" strokeLinejoin="round"
+      style={{ display: 'block' }}
+    >
+      <path d={WAVE_PATHS[type]} />
+    </svg>
+  );
+}
+
+// Physical toggle switch for Hard Sync — lever moves up (ON) / down (OFF).
+// Reuses the existing .toggle/.toggleLever CSS from the hardware aesthetic.
+function HardSyncSwitch({ isOn, onToggle }) {
+  return (
+    <div
+      className={styles.hardSyncSwitch}
+      onClick={onToggle}
+      title="Hard Sync: patch VCO1-SAW → SYNC↓ then enable. Slave phase resets each master cycle."
+    >
+      <span className={styles.toggleLabel}>ON</span>
+      <div className={styles.toggle}>
+        <div
+          className={styles.toggleLever}
+          style={{
+            marginTop: isOn ? '0px' : '10px',
+            transition: 'margin-top 0.12s ease',
+          }}
+        />
+      </div>
+      <span className={styles.toggleLabel}>OFF</span>
+    </div>
+  );
+}
+
+// number prop (1/2/3/4) drives the display label and jack ID prefixes.
+// onParamUpdate(vcoId, { hz, detune }) is the audio update callback from useMoogAudio.
 // onSyncChange(enabled) — only provided for VCO2; enables/disables the hard sync slave output.
-function VcoModule({ number, onParamUpdate, onSyncChange }) {
+// getLedValue() — stable getter for the VCO output-presence meter.
+function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue }) {
   // VCO2/VCO3 start slightly detuned for classic analog thickness
-  const defaultFine = number === 2 ? 0.52 : number === 3 ? 0.48 : 0.5;
+  const defaultFine = number === 2 ? 0.52 : number === 3 ? 0.48 : number === 5 ? 0.51 : 0.5;
 
   const [freqBase,    setFreqBase]    = useState(0.5);
   const [fineTune,    setFineTune]    = useState(defaultFine);
-  const [waveType,    setWaveType]    = useState('sawtooth');
   const [rangeOctave, setRangeOctave] = useState(0);
   const [syncOn,      setSyncOn]      = useState(false);
+
+  // Sync LED getter — ref-backed so the stable useCallback never stale-captures syncOn.
+  const syncOnRef = useRef(false);
+  useEffect(() => { syncOnRef.current = syncOn; }, [syncOn]);
+  const getSyncLed = useCallback(() => syncOnRef.current ? 1 : 0, []);
 
   const vcoId = `vco${number}`;
   const p     = vcoId;
 
   useEffect(() => {
     if (!onParamUpdate) return;
-    // Exponential Hz: freqBase 0→1 maps C1→C6
     const baseHz  = VCO_FREQ_MIN * Math.pow(VCO_FREQ_MAX / VCO_FREQ_MIN, freqBase);
     const finalHz = baseHz * Math.pow(2, rangeOctave);
-    // Fine tune: 0–1 → ±100 cents
     const detune  = (fineTune - 0.5) * 200;
-    onParamUpdate(vcoId, { hz: finalHz, detune, type: waveType });
-  }, [freqBase, fineTune, waveType, rangeOctave, vcoId, onParamUpdate]);
-
-  const cycleWave = () =>
-    setWaveType(prev => WAVE_TYPES[(WAVE_TYPES.indexOf(prev) + 1) % WAVE_TYPES.length]);
+    onParamUpdate(vcoId, { hz: finalHz, detune });
+  }, [freqBase, fineTune, rangeOctave, vcoId, onParamUpdate]);
 
   const cycleRange = () =>
     setRangeOctave(prev => RANGE_STEPS[(RANGE_STEPS.indexOf(prev) + 1) % RANGE_STEPS.length]);
@@ -150,26 +193,22 @@ function VcoModule({ number, onParamUpdate, onSyncChange }) {
           <div className={styles.knobRow}>
             <MoogKnob label="FREQ" size="xl" value={freqBase} onChange={setFreqBase} defaultValue={0.5} />
             <MoogKnob label="FINE" size="sm" value={fineTune} onChange={setFineTune} defaultValue={defaultFine} />
+            <Led getValue={getLedValue} color="green" />
           </div>
-          <div className={styles.selectorRow}>
-            <div className={styles.selectorGroup} onClick={cycleWave} title="Click to cycle waveform">
-              <span className={styles.selectorLabel}>WAVE</span>
-              <span className={styles.selectorValue}>{WAVE_LABELS[waveType]}</span>
-            </div>
-            <div className={styles.selectorGroup} onClick={cycleRange} title="Click to cycle range">
-              <span className={styles.selectorLabel}>RANGE</span>
-              <span className={styles.selectorValue}>{RANGE_LABELS[String(rangeOctave)]}</span>
+          <div className={styles.vcoControlRow}>
+            <div className={styles.selectorRow}>
+              <div className={styles.selectorGroup} onClick={cycleRange} title="Click to cycle range">
+                <span className={styles.selectorLabel}>RANGE</span>
+                <span className={styles.selectorValue}>{RANGE_LABELS[String(rangeOctave)]}</span>
+              </div>
             </div>
             {onSyncChange && (
-              <div
-                className={styles.selectorGroup}
-                onClick={handleSyncToggle}
-                title="Hard Sync: patch VCO1-SAW → SYNC↓ then enable. Slave phase resets each master cycle."
-              >
-                <span className={styles.selectorLabel}>HARD SYNC</span>
-                <span className={styles.selectorValue} style={{ color: syncOn ? '#5DCAA5' : undefined }}>
-                  {syncOn ? 'ON' : 'OFF'}
-                </span>
+              <div className={styles.vcoSyncRow}>
+                <HardSyncSwitch isOn={syncOn} onToggle={handleSyncToggle} />
+                <div className={styles.vcoSyncLed}>
+                  <Led getValue={getSyncLed} color="blue" />
+                  <span className={styles.toggleLabel}>SYNC</span>
+                </div>
               </div>
             )}
           </div>
@@ -177,10 +216,10 @@ function VcoModule({ number, onParamUpdate, onSyncChange }) {
           <div className={styles.jackRow}>
             <Jack id={`${p}-cv`}  label="CV" />
             <Jack id={`${p}-fm`}  label="FM" />
-            <Jack id={`${p}-sin`} label="SIN" />
-            <Jack id={`${p}-tri`} label="TRI" />
-            <Jack id={`${p}-saw`} label="SAW" />
-            <Jack id={`${p}-sqr`} label="SQR" />
+            <Jack id={`${p}-sin`} label={<WaveIcon type="sine" />} />
+            <Jack id={`${p}-tri`} label={<WaveIcon type="triangle" />} />
+            <Jack id={`${p}-saw`} label={<WaveIcon type="sawtooth" />} />
+            <Jack id={`${p}-sqr`} label={<WaveIcon type="square" />} />
           </div>
           {onSyncChange && (
             <div className={styles.jackRow}>
@@ -915,9 +954,13 @@ function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback, onRoot
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id="chordseq-cv-in"   label="SEQ IN" />
-            <Jack id="chordseq-cv-out"  label="OUT" />
+            <Jack id="chordseq-cv-in"       label="SEQ IN" />
+            <Jack id="chordseq-cv-out"      label="OUT" />
+          </div>
+          <div className={styles.jackRow}>
             <Jack id="chordseq-root-out" label="ROOT" />
+            <Jack id="chordseq-3rd-out"  label="3RD" />
+            <Jack id="chordseq-5th-out"  label="5TH" />
           </div>
         </div>
       </div>
@@ -931,17 +974,19 @@ function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback, onRoot
 // onSetCallback(fn|null) — registers/deregisters the step-advance LED callback.
 // LEDs are driven by direct DOM classList mutation from inside Tone.Loop — zero React
 // state writes in the audio hot path, consistent with the Zero-Re-render Rule.
-function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, number = 1 }) {
+function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, onGlideChange, number = 1 }) {
   const p = number === 1 ? 'seq' : `seq${number}`;
   const [steps, setSteps] = useState(() =>
-    Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true }))
+    Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true, prob: 1 }))
   );
   const [tempo, setTempoState] = useState(120);
+  const [glide, setGlide]       = useState(0);
   const ledRefs    = useRef([]);
   const prevStepRef = useRef(-1);
 
-  useEffect(() => { onStepsChange?.(steps); }, [steps, onStepsChange]);
+  useEffect(() => { onStepsChange?.(steps); }, [steps,  onStepsChange]);
   useEffect(() => { onTempoChange?.(tempo);  }, [tempo,  onTempoChange]);
+  useEffect(() => { onGlideChange?.(glide);  }, [glide,  onGlideChange]);
 
   // Register DOM-mutation callback for LED animation.
   // The callback receives stepIndex (0–15) or -1 to clear all.
@@ -977,6 +1022,8 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, number =
 
   // Map knob 0–1 to BPM 20–300
   const handleTempoKnob = (v) => setTempoState(Math.round(20 + v * 280));
+  // Map knob 0–1 to 0–1.5 s glide time
+  const handleGlideKnob = (v) => setGlide(v * 1.5);
 
   return (
     <div className={styles.module}>
@@ -992,15 +1039,24 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, number =
         <div className={styles.plateBody}>
           <div className={styles.seqLayout}>
 
-            {/* Left: tempo knob + BPM readout + patch jacks */}
+            {/* Left: tempo + glide knobs, BPM readout, patch jacks */}
             <div className={styles.seqCtrl}>
-              <MoogKnob
-                label="TEMPO"
-                size="lg"
-                value={(tempo - 20) / 280}
-                onChange={handleTempoKnob}
-                defaultValue={(120 - 20) / 280}
-              />
+              <div className={styles.knobRow}>
+                <MoogKnob
+                  label="TEMPO"
+                  size="lg"
+                  value={(tempo - 20) / 280}
+                  onChange={handleTempoKnob}
+                  defaultValue={(120 - 20) / 280}
+                />
+                <MoogKnob
+                  label="GLIDE"
+                  size="sm"
+                  value={glide / 1.5}
+                  onChange={handleGlideKnob}
+                  defaultValue={0}
+                />
+              </div>
               <div className={styles.seqBpmDisplay}>
                 <span className={styles.selectorValue}>{tempo}</span>
               </div>
@@ -1035,6 +1091,14 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, number =
                       next[i] = { ...next[i], gate: !next[i].gate };
                       return next;
                     })}
+                  />
+                  <input
+                    type="range"
+                    min="0" max="1" step="0.01"
+                    value={step.prob}
+                    className={styles.seqProbSlider}
+                    onChange={e => updateStep(i, 'prob', parseFloat(e.target.value))}
+                    title={`Step ${i + 1} probability: ${Math.round(step.prob * 100)}%`}
                   />
                 </div>
               ))}
@@ -1097,6 +1161,177 @@ function ChorusModule({ onParamUpdate }) {
   );
 }
 
+// ──────────── Kick Drum ────────────
+
+// onParamUpdate({ tune, pitchEnv, decay, click }) — wires knobs to useMoogAudio.
+// onTrigger(onFlash) — fires the kick manually; onFlash() pulses the LED.
+// onSetTrigCallback(fn) — registers the LED flash so the sequencer gate also pulses it.
+function KickModule({ onParamUpdate, onTrigger, onSetTrigCallback }) {
+  const [tune,     setTune]     = useState(0.2);  // 0–1 → 40–200 Hz
+  const [pitchEnv, setPitchEnv] = useState(0.7);  // 0–1 → 0–5 octaves drop
+  const [decay,    setDecay]    = useState(0.35); // 0–1 → 0.05–2 s
+  const [click,    setClick]    = useState(0.3);  // 0–1 gain
+
+  const ledRef     = useRef(null);
+  const flashTimer = useRef(null);
+
+  // Register flash as the sequencer-gate LED callback so patching seq-gate-out →
+  // kick-gate-in pulses the LED in sync with the sequencer clock.
+  useEffect(() => {
+    onSetTrigCallback?.(flash);
+    return () => onSetTrigCallback?.(null);
+  // flash is stable (refs only, no state captures) — eslint-disable-next-line
+  }, [onSetTrigCallback]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    onParamUpdate?.({
+      tune:     40 * Math.pow(5, tune),        // 40 Hz → 200 Hz exponential
+      pitchEnv: pitchEnv * 5,
+      decay:    0.05 + decay * 1.95,
+      click,
+    });
+  }, [tune, pitchEnv, decay, click, onParamUpdate]);
+
+  const flash = () => {
+    const el = ledRef.current;
+    if (!el) return;
+    el.style.opacity    = '1';
+    el.style.boxShadow  = '0 0 8px rgba(220,40,20,0.95), 0 0 20px rgba(200,20,10,0.60)';
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => {
+      if (!ledRef.current) return;
+      ledRef.current.style.opacity   = '0.12';
+      ledRef.current.style.boxShadow = '';
+    }, 80);
+  };
+
+  return (
+    <div className={styles.module}>
+      <Screw pos="screwTL" /><Screw pos="screwTR" />
+      <Screw pos="screwBL" /><Screw pos="screwBR" />
+      <div className={styles.plate}>
+        <div className={styles.plateHeader}>
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>KICK</span>
+            <span className={styles.plateSub}>MEMBRANE DRUM SYNTHESIZER</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          <div className={styles.knobRow}>
+            <MoogKnob label="TUNE"  size="md" value={tune}     onChange={setTune}     defaultValue={0.2}  />
+            <MoogKnob label="P.ENV" size="md" value={pitchEnv} onChange={setPitchEnv} defaultValue={0.7}  />
+            <MoogKnob label="DECAY" size="md" value={decay}    onChange={setDecay}    defaultValue={0.35} />
+            <MoogKnob label="CLICK" size="sm" value={click}    onChange={setClick}    defaultValue={0.3}  />
+          </div>
+          <div className={styles.gateBtnRow}>
+            <div ref={ledRef} className={styles.kickLed} style={{ opacity: 0.12 }} />
+            <span className={styles.gateBtnLabel}>TRIG</span>
+            <button
+              className={styles.gateBtn}
+              onMouseDown={() => onTrigger?.(flash)}
+            />
+          </div>
+          <PlateDivider />
+          <div className={styles.jackRow}>
+            <Jack id="kick-gate-in"  label="GATE" />
+            <Jack id="kick-click-in" label="ACCT" />
+            <Jack id="kick-out"      label="OUT" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────── 914 Fixed Filter Bank ────────────
+
+// onParamUpdate({ bands: number[], master: number }) — wires sliders to useMoogAudio.
+// getAnalyserData() — stable getter for the FFT input analyser; used to drive LEDs.
+function FFBModule({ onParamUpdate, getAnalyserData }) {
+  const [bands,  setBands]  = useState(() => Array(FFB_BANDS.length).fill(0.75));
+  const [master, setMaster] = useState(1.0);
+
+  // DOM refs for per-band LEDs — written by rAF loop (Zero-Re-render Rule)
+  const ledRefs = useRef([]);
+  const rafRef  = useRef(null);
+
+  useEffect(() => {
+    onParamUpdate?.({ bands, master });
+  }, [bands, master, onParamUpdate]);
+
+  // rAF loop: reads FFT from input analyser, computes per-band peak, writes LED opacity.
+  // FFT buffer is 512 → 256 bins, sampleRate/512 ≈ 86 Hz/bin. Maps dB (−∞ to 0) → 0–1.
+  useEffect(() => {
+    if (!getAnalyserData) return;
+    const SAMPLE_RATE = 44100;
+    const FFT_SIZE    = 512;
+    const BIN_HZ      = SAMPLE_RATE / FFT_SIZE;
+
+    const tick = () => {
+      rafRef.current = requestAnimationFrame(tick);
+      const data = getAnalyserData();
+      if (!data || !data.length) return;
+      FFB_BANDS.forEach((band, i) => {
+        const el = ledRefs.current[i];
+        if (!el) return;
+        // Bin range: one half-octave around center frequency
+        const lo = Math.max(0, Math.floor(band.freq / (Math.SQRT2 * BIN_HZ)));
+        const hi = Math.min(data.length - 1, Math.ceil(band.freq * Math.SQRT2 / BIN_HZ));
+        let peak = -100;
+        for (let b = lo; b <= hi; b++) if (data[b] > peak) peak = data[b];
+        // Map −80 dB→0 to 0 dB→1; most musical material stays in −60 to −6 range
+        const brightness = Math.max(0, Math.min(1, (peak + 80) / 80));
+        el.style.opacity = String(0.08 + brightness * 0.92);
+      });
+    };
+    tick();
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [getAnalyserData]);
+
+  const handleBand = (i, v) =>
+    setBands(prev => { const next = [...prev]; next[i] = v; return next; });
+
+  return (
+    <div className={styles.module}>
+      <Screw pos="screwTL" /><Screw pos="screwTR" />
+      <Screw pos="screwBL" /><Screw pos="screwBR" />
+      <div className={styles.plate}>
+        <div className={styles.plateHeader}>
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>914</span>
+            <span className={styles.plateSub}>FIXED FILTER BANK</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          <div className={styles.ffbBands}>
+            {FFB_BANDS.map((band, i) => (
+              <div key={i} className={styles.ffbBand}>
+                <div ref={el => { ledRefs.current[i] = el; }} className={styles.ffbLed} />
+                <MoogKnob
+                  label={band.label}
+                  size="sm"
+                  value={bands[i]}
+                  onChange={v => handleBand(i, v)}
+                  defaultValue={0.75}
+                />
+              </div>
+            ))}
+            <div className={styles.ffbMasterDivider} />
+            <div className={styles.ffbMasterCol}>
+              <MoogKnob label="MSTR" size="sm" value={master / 1.5} onChange={v => setMaster(v * 1.5)} defaultValue={1 / 1.5} />
+            </div>
+          </div>
+          <PlateDivider />
+          <div className={styles.jackRow}>
+            <Jack id="ffb-in"  label="IN" />
+            <Jack id="ffb-out" label="OUT" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ──────────── Main shell ────────────
 
 // onBusReady(getter) — called once on mount to hand the Workstation a function
@@ -1104,6 +1339,7 @@ function ChorusModule({ onParamUpdate }) {
 export default function MoogShell({ onNavigateHome, onBusReady }) {
   const audio      = useMoogAudio();
   const cabinetRef = useRef(null);
+  const [lightsOut, setLightsOut] = useState(false);
 
   // Register the bus getter with Root.js so the Workstation can tap Moog audio.
   // audio.getMoogBusNode is a stable useCallback ref — effect fires once.
@@ -1130,6 +1366,12 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
   // Stable getValue closures — created once (audio.getMeterValue has empty-dep useCallback,
   // so its reference never changes). Passing pre-bound getters prevents Led's useEffect
   // from restarting on every re-render of the parent module component.
+  const getVco1Level   = useCallback(() => audio.getMeterValue('vco1'),   [audio.getMeterValue]);
+  const getVco2Level   = useCallback(() => audio.getMeterValue('vco2'),   [audio.getMeterValue]);
+  const getVco3Level   = useCallback(() => audio.getMeterValue('vco3'),   [audio.getMeterValue]);
+  const getVco4Level   = useCallback(() => audio.getMeterValue('vco4'),   [audio.getMeterValue]);
+  const getVco5Level   = useCallback(() => audio.getMeterValue('vco5'),   [audio.getMeterValue]);
+  const getFFBData     = useCallback(() => audio.getFFBAnalyserData?.(),  [audio.getFFBAnalyserData]);
   const getLfoLevel    = useCallback(() => audio.getMeterValue('lfo'),    [audio.getMeterValue]);
   const getLfo2Level   = useCallback(() => audio.getMeterValue('lfo2'),   [audio.getMeterValue]);
   // Instantaneous LFO phase for rate LEDs — pulses at the actual modulated rate
@@ -1213,8 +1455,14 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
     <MoogPatchProvider onCableAdded={audio.connect} onCableRemoved={audio.disconnect}>
       <div className={styles.shell}>
         <button className={styles.homeBtn} onClick={onNavigateHome}>← home</button>
+        <button
+          className={`${styles.lightsOutBtn} ${lightsOut ? styles.lightsOutActive : ''}`}
+          onClick={() => setLightsOut(v => !v)}
+        >
+          {lightsOut ? '○ lights on' : '● lights out'}
+        </button>
 
-        <div className={styles.cabinet} ref={cabinetRef}>
+        <div className={styles.cabinet} ref={cabinetRef} data-lights-out={lightsOut ? 'true' : undefined}>
           {/* SVG patch cable overlay — position:absolute, inset:0, z-index:50 */}
           <PatchCableOverlay />
           {/* Unified studio lamp — single radial gradient covering the whole rack.
@@ -1231,10 +1479,11 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
           <div className={styles.rack}>
             {/* Row 1: VCO bank + Noise source */}
             <div className={`${styles.tier} ${styles.tierRow1}`}>
-              <VcoModule number={1} onParamUpdate={audio.updateVcoParams} />
-              <VcoModule number={2} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco2SyncEnabled} />
-              <VcoModule number={3} onParamUpdate={audio.updateVcoParams} />
-              <VcoModule number={4} onParamUpdate={audio.updateVcoParams} />
+              <VcoModule number={1} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco1SyncEnabled} getLedValue={getVco1Level} />
+              <VcoModule number={2} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco2SyncEnabled} getLedValue={getVco2Level} />
+              <VcoModule number={3} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco3SyncEnabled} getLedValue={getVco3Level} />
+              <VcoModule number={4} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco4SyncEnabled} getLedValue={getVco4Level} />
+              <VcoModule number={5} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco5SyncEnabled} getLedValue={getVco5Level} />
               <NoiseModule number={1} />
               <NoiseModule number={2} />
               <NoiseModule number={3} />
@@ -1249,6 +1498,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
               <ReverbModule number={1} onParamUpdate={audio.updateReverbParams} />
               <ReverbModule number={2} onParamUpdate={audio.updateReverb2Params} />
               <ChorusModule             onParamUpdate={audio.updateChorusParams} />
+              <FFBModule               onParamUpdate={audio.updateFFBParams} getAnalyserData={getFFBData} />
             </div>
 
             {/* Row 3: VCA × 3, Envelopes */}
@@ -1259,6 +1509,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
               <EnvelopeModule label="ENV 1" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv1Level} />
               <EnvelopeModule label="ENV 2" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv2Level} />
               <EnvelopeModule label="ENV 3" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv3Level} />
+              <KickModule onParamUpdate={audio.updateKickParams} onTrigger={audio.triggerKick} onSetTrigCallback={audio.setKickTrigCallback} />
             </div>
 
             {/* Row 4: 960 Sequencer (×2 stacked) + Chord Sequencer + Quantizer + I/O */}
@@ -1269,12 +1520,14 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
                   onStepsChange={audio.updateSequencerSteps}
                   onTempoChange={audio.setTempo}
                   onSetCallback={audio.setSeqStepCallback}
+                  onGlideChange={audio.setSeqGlide}
                 />
                 <SequencerModule
                   number={2}
                   onStepsChange={audio.updateSeq2Steps}
                   onTempoChange={audio.setTempo}
                   onSetCallback={audio.setSeq2StepCallback}
+                  onGlideChange={audio.setSeq2Glide}
                 />
               </div>
               <ChordSeqModule
@@ -1305,7 +1558,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
           <div className={styles.kbdBarrier} />
 
           {/* 953 Keyboard Controller — sits below the rack, spans full cabinet width */}
-          <KeyboardModule onUpdate={audio.updateKeyboard} />
+          <KeyboardModule onUpdate={audio.updateKeyboard} onGlideChange={audio.setKbdGlide} onVibratoChange={audio.setKbdVibrato} />
         </div>
       </div>
     </MoogPatchProvider>

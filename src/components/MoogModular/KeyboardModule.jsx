@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useMoogPatch } from './MoogPatchContext';
+import MoogKnob from './MoogKnob';
 import styles from './KeyboardModule.module.css';
 
 // ──────────── Key geometry ────────────
@@ -58,10 +59,14 @@ const KB_NOTE_MAP = Object.fromEntries(
 
 // ──────────── Component ────────────
 
-export default function KeyboardModule({ onUpdate }) {
+export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChange }) {
   const { registerJack, unregisterJack, startDrag } = useMoogPatch();
 
   const [pressedNote, setPressedNote] = useState(null);
+  const [glide,       setGlide]       = useState(0);
+  const [vibrato,      setVibrato]      = useState(0);
+  const [vibratoRate,  setVibratoRate]  = useState(0.57); // 0–1 → 0.5–10 Hz; default ≈ 5 Hz
+  const [vibratoDelay, setVibratoDelay] = useState(0); // 0–1 → 0–4 s ramp time
   const pressedNoteRef    = useRef(null);
   const pressedHzRef      = useRef(null);
   // Tracks whether the currently active note was triggered by pointer (vs MIDI),
@@ -80,6 +85,14 @@ export default function KeyboardModule({ onUpdate }) {
   // Stable ref so MIDI listener never needs to be re-attached when onUpdate identity changes.
   const onUpdateRef = useRef(onUpdate);
   useEffect(() => { onUpdateRef.current = onUpdate; }, [onUpdate]);
+
+  // Propagate glide to audio engine (0-1 knob → 0-1.5s, matching sequencer mapping)
+  useEffect(() => { onGlideChange?.(glide * 1.5); }, [glide, onGlideChange]);
+
+  // Propagate vibrato params: depth 0–20 Hz, rate 0.5–10 Hz, delay 0–4 s
+  useEffect(() => {
+    onVibratoChange?.({ depth: vibrato * 20, rate: 0.5 + vibratoRate * 9.5, delay: vibratoDelay * 4 });
+  }, [vibrato, vibratoRate, vibratoDelay, onVibratoChange]);
 
   const pitchJackRef = useRef(null);
   const gateJackRef  = useRef(null);
@@ -306,6 +319,38 @@ export default function KeyboardModule({ onUpdate }) {
             <span className={styles.jackLabel}>GATE</span>
           </div>
         </div>
+
+        <MoogKnob
+          label="GLIDE"
+          size="sm"
+          value={glide}
+          onChange={setGlide}
+          defaultValue={0}
+        />
+
+        <MoogKnob
+          label="VIBRATO"
+          size="sm"
+          value={vibrato}
+          onChange={setVibrato}
+          defaultValue={0}
+        />
+
+        <MoogKnob
+          label="VIB RATE"
+          size="sm"
+          value={vibratoRate}
+          onChange={setVibratoRate}
+          defaultValue={0.57}
+        />
+
+        <MoogKnob
+          label="VIB DLY"
+          size="sm"
+          value={vibratoDelay}
+          onChange={setVibratoDelay}
+          defaultValue={0}
+        />
 
         <div className={styles.kbdHint}>
           <span className={styles.kbdHintText}>A–K · W E T Y U · computer keys play C4–C5</span>

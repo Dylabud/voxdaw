@@ -284,3 +284,44 @@
     inset 1px 0 0 rgba(255, 255, 255, 0.04),
     0 1px 3px rgba(0, 0, 0, 0.8);
 }
+
+:global([data-lights-out="true"]) .keyboard { opacity: 0; }
+
+/* Vibrato knob + delay button grouped together */
+.vibratoGroup {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Delayed vibrato toggle button */
+.vibratoDelayBtn {
+  appearance: none;
+  background: linear-gradient(to bottom, #1a1612, #141210);
+  border: 1px solid #38342c;
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.55);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 6px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.12s, color 0.12s, box-shadow 0.12s;
+}
+.vibratoDelayBtn:hover {
+  border-color: #58503c;
+  color: rgba(255, 255, 255, 0.80);
+}
+.vibratoDelayOn {
+  background: linear-gradient(to bottom, #0e1a14, #0a140f);
+  border-color: #3a9070;
+  color: #5DCAA5;
+  box-shadow: 0 0 6px rgba(93, 202, 165, 0.25);
+}
+.vibratoDelayOn:hover {
+  border-color: #4aaa88;
+  color: #7adbb8;
+}

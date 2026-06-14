@@ -10,3 +10,5 @@
   pointer-events: none;
   z-index: 50;
 }
+
+:global([data-lights-out="true"]) .overlay { opacity: 0; }

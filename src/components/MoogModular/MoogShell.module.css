@@ -42,6 +42,41 @@
   color: #c8a86a;
 }
 
+/* ── Lights-out toggle ── */
+.lightsOutBtn {
+  position: fixed;
+  top: 12px;
+  right: 16px;
+  z-index: 100;
+  appearance: none;
+  background: transparent;
+  border: 1px solid #4a2c10;
+  color: #7a5020;
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 5px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, box-shadow 0.2s;
+}
+.lightsOutBtn:hover {
+  border-color: #c8a86a;
+  color: #c8a86a;
+}
+/* In lights-out mode — button glows faintly so you can find it in the dark */
+.lightsOutActive {
+  border-color: rgba(93, 202, 165, 0.28);
+  color: rgba(93, 202, 165, 0.38);
+  box-shadow: 0 0 8px rgba(93, 202, 165, 0.08);
+}
+.lightsOutActive:hover {
+  border-color: rgba(93, 202, 165, 0.65);
+  color: rgba(93, 202, 165, 0.75);
+  box-shadow: 0 0 14px rgba(93, 202, 165, 0.22);
+}
+
 /* ══════════════════════════════════════════════════════
    CABINET — outer mounting frame (darker walnut)
    Each tier carries its own prominent walnut cabinet.
@@ -183,9 +218,9 @@
 }
 
 /* Row column templates */
-.tierRow1 { grid-template-columns: 1fr 1fr 1fr 1fr 0.6fr 0.6fr 0.6fr; }
-.tierRow2 { grid-template-columns: 1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr 0.8fr; }
-.tierRow3 { grid-template-columns: 0.85fr 0.85fr 0.85fr 1fr 1fr 1fr; }
+.tierRow1 { grid-template-columns: 1fr 1fr 1fr 1fr 1fr 0.6fr 0.6fr 0.6fr; }
+.tierRow2 { grid-template-columns: 1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr 0.8fr 1.6fr; }
+.tierRow3 { grid-template-columns: 0.85fr 0.85fr 0.85fr 1fr 1fr 1fr 1fr; }
 .tierRow4 { grid-template-columns: 2.5fr 1fr 0.9fr 1fr; }
 /* Stacks two sequencer modules vertically inside a single grid cell */
 .seqStack {
@@ -440,6 +475,40 @@
   gap: 12px;
   padding: 0 2px;
   align-items: center;
+}
+
+/* Aligns the RANGE selector and sync switch+LED on the same visual row.
+   vcoSyncRow is a sibling of selectorRow (not inside it) so the lights-out
+   selectorRow opacity:0 rule cannot hide the blue LED through a parent stacking context. */
+.vcoControlRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Hard sync physical switch — same toggle CSS, cursor + no-select added for interactivity */
+.hardSyncSwitch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+  user-select: none;
+}
+
+/* Sync switch + blue LED row — sits inside .selectorRow alongside RANGE */
+.vcoSyncRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Blue LED + "SYNC" label stacked vertically */
+.vcoSyncLed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
 }
 
 .toggleGroup {
@@ -813,11 +882,63 @@
 
 /* One step column: LED → pitch knob → gate toggle */
 .seqStep {
+  position: relative;  /* anchor for .seqProbSlider absolute positioning */
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 3px;
   min-width: 0;
+}
+
+/* Probability slider — rotated horizontal range input floated over the gap
+   between steps. transform:rotate(-90deg) is universally reliable across
+   browsers: min(0) ends up at the visual bottom, max(1) at the top.
+   writing-mode + direction had inconsistent value-mapping in Firefox/Chrome. */
+.seqProbSlider {
+  position: absolute;
+  right: -42px;           /* centers the visual slider on the step's right edge (width/2 = 42) */
+  top: calc(50% - 4px);  /* vertically centered (height/2 = 4) */
+  width: 84px;            /* becomes visual height after rotation; matches step height ~87px */
+  height: 8px;            /* becomes visual width (thin strip) after rotation */
+  transform: rotate(-90deg);
+  transform-origin: center center;
+  z-index: 5;
+  cursor: ns-resize;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  border: none;
+  outline: none;
+}
+.seqProbSlider::-webkit-slider-runnable-track {
+  height: 2px;
+  background: #2a2010;
+  border-radius: 1px;
+}
+.seqProbSlider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #5DCAA5;
+  margin-top: -2px;
+  box-shadow: 0 0 3px rgba(93, 202, 165, 0.65);
+}
+.seqProbSlider::-moz-range-track {
+  height: 2px;
+  background: #2a2010;
+  border-radius: 1px;
+  border: none;
+}
+.seqProbSlider::-moz-range-thumb {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #5DCAA5;
+  border: none;
+  box-shadow: 0 0 3px rgba(93, 202, 165, 0.65);
 }
 
 /* Chord sequencer step: LED → root button only (no gate, no knob) */
@@ -1153,4 +1274,161 @@
     rgba(255, 255, 255, 0.01) 52%,
     transparent 70%
   );
+}
+
+/* ══════════════════════════════════════════════════════
+   LIGHTS OUT MODE
+   Cabinet + all module faceplates go near-black.
+   Only LED elements remain visible (at their natural
+   rAF-driven opacity). The oscilloscope CRT also stays
+   visible — green phosphor glow in complete darkness.
+   ══════════════════════════════════════════════════════ */
+
+/* Cabinet: walnut → near-black */
+.cabinet[data-lights-out="true"] {
+  background: #030101;
+  box-shadow:
+    0 0 0 2px #0c0404,
+    0 0 0 4px #080202,
+    0 0 0 5px #100505,
+    0 28px 80px rgba(0, 0, 0, 0.99),
+    0 10px 28px rgba(0, 0, 0, 0.92),
+    inset 0 1px 0 rgba(0, 0, 0, 0.5),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.9);
+}
+
+/* Studio lamp: off */
+.cabinet[data-lights-out="true"] .lightOverlay { display: none; }
+
+/* Nameplate strip: off */
+.cabinet[data-lights-out="true"] .nameplate { opacity: 0; }
+
+/* Keyboard barrier: dark */
+.cabinet[data-lights-out="true"] .kbdBarrier {
+  background: #020101;
+  box-shadow: none;
+  border-top-color: rgba(0, 0, 0, 0.8);
+  border-bottom-color: rgba(0, 0, 0, 0.95);
+}
+
+/* Rack chassis: black */
+.cabinet[data-lights-out="true"] .rack { background: #010101; }
+
+/* Module faceplates: black, no glow */
+.cabinet[data-lights-out="true"] .plate {
+  background: #010101 !important;
+  box-shadow: none !important;
+  border-right-color: #080505 !important;
+}
+.cabinet[data-lights-out="true"] .plate::after { display: none; }
+
+/* Screws + dividers: vanish */
+.cabinet[data-lights-out="true"] .screw,
+.cabinet[data-lights-out="true"] .plateDivider { opacity: 0; }
+
+/* Module header (title + subtitle): off */
+.cabinet[data-lights-out="true"] .plateHeader { opacity: 0; }
+
+/* Selector rows (WAVE, RANGE, SCALE, ROOT, etc.): off */
+.cabinet[data-lights-out="true"] .selectorRow { opacity: 0; }
+
+/* Toggle switches (LOG/LIN, FREE/SYNC): off.
+   PowerSwitch uses the same .toggleGroup class — hiding it here
+   leaves the sibling .powerLamp/.powerLampOn fully visible. */
+.cabinet[data-lights-out="true"] .toggleGroup { opacity: 0; }
+
+/* All patch jacks and labels: off */
+.cabinet[data-lights-out="true"] .jackGroup { opacity: 0; }
+
+/* Gate button row — hide the text label and the red tactile button;
+   the sibling Led component (.ledWrap) is not targeted and stays lit. */
+.cabinet[data-lights-out="true"] .gateBtnLabel,
+.cabinet[data-lights-out="true"] .gateBtn { opacity: 0; }
+
+/* Sequencer: hide the left control column (tempo knob + BPM readout + jacks) */
+.cabinet[data-lights-out="true"] .seqCtrl { opacity: 0; }
+
+/* Sequencer gate buttons that are OFF: hide; .seqGateOn keeps its mint glow
+   as a live step-state indicator in the darkness. */
+.cabinet[data-lights-out="true"] .seqGateBtn:not(.seqGateOn) { opacity: 0; }
+.cabinet[data-lights-out="true"] .seqProbSlider { opacity: 0; }
+
+/* Chord sequencer step root/type buttons: off (.seqLed siblings stay visible) */
+.cabinet[data-lights-out="true"] .chordSeqRoot,
+.cabinet[data-lights-out="true"] .chordSeqType { opacity: 0; }
+
+/* Hard sync row — hide the switch lever, keep the blue LED visible */
+.cabinet[data-lights-out="true"] .hardSyncSwitch { opacity: 0; }
+.cabinet[data-lights-out="true"] .vcoSyncLed .toggleLabel { opacity: 0; }
+
+/* Quantizer: hide all text; keep .qntLed, .qntInLed, .qntExtLed */
+.cabinet[data-lights-out="true"] .qntLedLabel,
+.cabinet[data-lights-out="true"] .qntMonitorLabel,
+.cabinet[data-lights-out="true"] .qntDisplay,
+.cabinet[data-lights-out="true"] .qntExtLabel,
+.cabinet[data-lights-out="true"] .qntExtDisplay,
+.cabinet[data-lights-out="true"] .qntExtChordType { opacity: 0; }
+
+
+/* ══════════════════════════════════════════════════════
+   914 FIXED FILTER BANK
+   ══════════════════════════════════════════════════════ */
+
+/* 7×2 grid of band knobs + master separated by a thin divider */
+.ffbBands {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr) 4px 1fr;
+  gap: 2px 1px;
+  align-items: start;
+  padding: 0 2px;
+}
+
+/* One band column: activity LED on top, then the MoogKnob (includes its own label) */
+.ffbBand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Activity LED — rAF-driven opacity, mint color */
+.ffbLed {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  will-change: opacity;
+  background: radial-gradient(circle at 38% 28%, #a0f8b0 0%, #30d060 48%, #0c6820 100%);
+  box-shadow:
+    0 0 3px  rgba(60, 200, 100, 0.80),
+    0 0 8px  rgba(40, 180,  80, 0.45);
+}
+
+/* Thin vertical divider between the 14 bands and the master knob */
+.ffbMasterDivider {
+  grid-column: 8;
+  grid-row: 1 / span 2;
+  width: 1px;
+  background: #2a2010;
+  align-self: stretch;
+}
+
+/* Master column — sits in the 9th grid column */
+.ffbMasterCol {
+  grid-column: 9;
+  grid-row: 1 / span 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Kick drum trigger LED — same geometry as gate LED, red color ── */
+.kickLed {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  will-change: opacity;
+  background: radial-gradient(circle at 38% 28%, #ff8878 0%, #e02828 48%, #8c0c0c 100%);
+  transition: opacity 0.08s ease, box-shadow 0.08s ease;
 }
