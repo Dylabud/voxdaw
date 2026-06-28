@@ -256,6 +256,72 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 
 ---
 
+### 11. Vocoder — 16-Band Spectral Vocoder [Implemented: Moog Phase 42]
+
+**Function:** Imposes the spectral envelope of a **modulator** signal (voice, drum machine, sequence) onto a harmonically rich **carrier** signal (VCOs). Each of 16 frequency bands measures the modulator's energy and uses it to gate the matching band of the carrier — the classic "transfer of characteristics" / talking-synth effect.
+
+**Bands:** 16 log-spaced bandpass bands, 100 Hz → 8 kHz (geometric ratio ≈ 1.339), Q = 4. Exported as `VOC_BANDS` from `useMoogAudio.js` (mirrors the `FFB_BANDS` pattern), shared between the audio engine and the UI meter.
+
+**Controls:**
+| Knob | Function |
+|---|---|
+| **MIX** | Dry/wet crossfade. **Dry = raw carrier passthrough**, wet = vocoded output. At 1.0 (default) you hear pure vocoded signal; at 0.0 the unprocessed carrier. |
+| **VOLUME** | Master output level (`vocVolume`, the `voc-out` jack node). Knob 0–1 → 0–2× (0.5 = nominal). `vocOut` carries a fixed 3× internal makeup (the band bank is intrinsically quiet), so VOLUME combines to up to 6× total and also scales the CLARITY blend (which sums at `vocVolume`). |
+| **PWIDTH** | Internal carrier pulse width (PWM duty). Knob 0–1 → width −0.95..0.95 (0.5 = square). The internal carrier runs at a fixed pitch (130 Hz, set at construction). |
+| **CARR MIX** | Crossfade between the external carrier (`voc-carr-in`) and the internal pulse osc. 0 = external only (default), 1 = internal only. Lets the vocoder run standalone (mic + internal carrier, no patched VCOs). |
+| **SHIFT** | Spectral/formant shift — scales all 16 carrier bandpass center freqs by a ratio. Knob 0–1 → ±1 octave (0.5 = no shift). Up = chipmunk/feminine formants, down = deeper. |
+| **RES** | Q of the 16 carrier bandpass filters. Knob 0–1 → Q 1–7 (0.5 ≈ the base Q of 4). Higher = sharper, more resonant/vocal formants. |
+| **SH RATE** | Rate of the LFO that modulates SHIFT. Knob 0–1 → 0.05–10 Hz. |
+| **SH AMP** | Depth of the SHIFT LFO. Knob 0–1 → 0–1 octave of swing. Creates sweeping/phaser-like formant motion. Default 0. |
+| **DECAY** | Envelope-follower smoothing (the 16 env LP cutoffs). Knob 0–1 → ~56 Hz (snappy) … ~7 Hz (smeary/sustained), 0.5 ≈ 20 Hz. Lower = longer vowel tails. |
+| **PRESENCE** | Peaking-EQ boost (~2.7 kHz, Q 1) on the vocoded output so the robot voice cuts through a mix. Knob 0–1 → 0..+12 dB (boost only, default 0). |
+| **CLARITY** | Blends the high-passed (~1.5 kHz) **real voice** (modulator consonants/sibilance) straight into the output, bypassing the band bank. Knob 0–1 → 0–0.9×. The headline word-intelligibility control — keeps vocoded vowels while letting actual consonants cut through. Default 0. |
+| **HISS** | Level of high-passed (~3.5 kHz) white noise injected into the carrier bank so unvoiced consonants (s, sh, t, f) surface through the high bands. Default 0. Synthetic sibilance — compare with CLARITY (real voice). |
+| **BUZZ** | Level of low-passed (~250 Hz) pink noise injected into the carrier bank for low-end body/thump, thickening vowels. Default 0. |
+
+**Ports (3 Total):**
+| Port | Direction | Signal | Description |
+|---|---|---|---|
+| MOD (`voc-mod-in`) | Input | AUDIO | Modulator source — its spectral envelope is analysed. Patch from a voice/drum/sequence audio out. |
+| CARR (`voc-carr-in`) | Input | AUDIO | Carrier source — gets shaped by the modulator. Patch from VCO/mixer audio out (saws ideal). |
+| OUT (`voc-out`) | Output | AUDIO | Vocoded (+ optional dry) output. Patch to the mixer / I/O From-Rig. |
+
+**DSP graph (native-on-shared-Tone-context, single writer per node):**
+```
+voc-mod-in → vocModRaw → HP(150) → Compressor → vocModIn
+vocModIn ─→ 16× [ modBPF → rectifier(WaveShaper |x|·DRIVE) → envLP(DECAY) ]
+                                                                  │ (audio-rate AudioParam)
+                                                                  ▼
+voc-carr-in → vocCarrExtGain ─┐                                   │
+internal PulseOsc → vocCarrOscGain ┴→ vocCarrSum ─→ vocCarrBank ─→ 16× [ carrBPF(SHIFT/RES) → carrVCA.gain ◄── envLP ] → vocSum → vocWet ─┐
+                                  │   ▲  ▲                                                                                                  │
+                                  │   │  └── BUZZ: noise(pink) → LP(250) → vocBuzzGain ──┐                                                  │
+                                  │   └───── HISS: noise(white) → HP(3.5k) → vocHissGain ┴→ vocCarrBank                                     │
+                                  └──────────────────── carrier passthrough (no HISS/BUZZ) ───────── vocDry ────────────────────────────────┤
+                                                                                            wet+dry → vocOut(×3 makeup) → vocPresence(EQ) ───┤
+vocModIn ─→ HP(1.5k) → vocClarityGain (CLARITY: real voice) ───────────────────────────────────────────────────────────────────────────────┴─→ vocVolume(VOLUME ×0–2) → voc-out
+vocModIn ─→ vocAnalyser (FFT 512)   ← drives the 16-segment LED spectrum meter
+```
+Each modulator band rectifies + smooths to an envelope follower, whose output connects directly to the matching carrier band's `Tone.Gain.gain` AudioParam (audio-rate, zero polling). `VOC_ENV_DRIVE` (≈8) scales the rectifier; **DECAY** sets the env-LP cutoff. The carrier is the external `voc-carr-in` and an internal `Tone.PulseOscillator` blended by **CARR MIX** into `vocCarrSum`, which feeds both the bank and `vocDry` — so HISS/BUZZ (bank-only) never leak into dry. The **spectral-shift rAF loop** (sole writer of `vocCarrBPF*.frequency`) applies SHIFT + its LFO; **RES** writes `vocCarrBPF*.Q`. Output: `wet+dry → vocOut` (fixed ×3 makeup) `→ vocPresence` (PRESENCE peaking EQ) `→ vocVolume` (VOLUME ×0–2, the jack); CLARITY sums at `vocVolume`, bypassing makeup + EQ. `getVocAnalyserData()` feeds the 16-LED meter via the same per-band-peak rAF loop as `FFBModule`.
+
+**Tone.js Nodes:** modulator pre-chain (`vocModRaw`, `vocModHP`, `vocModComp`) + buses (`vocModIn/vocCarrIn/vocCarrExtGain/vocCarrOscGain/vocCarrSum/vocCarrBank/vocSum/vocWet/vocDry/vocOut/vocPresence/vocVolume`) + internal carrier (`vocCarrOsc` PulseOscillator + `vocCarrOscGain`) + `Tone.Analyser('fft', 512)` + HISS/BUZZ chain (`Tone.Noise`×2, HP+LP `Tone.Filter`, `Tone.Gain`×2) + CLARITY (`vocClarityHP` + `vocClarityGain`) + per band: `Tone.Filter(bandpass)` ×2 (mod + carr), `Tone.WaveShaper` (rectifier), `Tone.Filter(lowpass)` (env follower), `Tone.Gain(0)` (carrier VCA) — ~80 always-on band nodes. The PulseOscillator + HISS/BUZZ noise are started/stopped in `powerOn`/`powerOff`.
+
+**Built-in mic (modulator):** the vocoder has an integrated mic (ENABLE MIC button + MIC IN level knob + SIG LED, top of the faceplate). It opens a `Tone.UserMedia` stream (`enableMic()`) → `extMicGain` → `vocModRaw` (the modulator pre-chain front), so enabling the mic + a carrier vocodes instantly with **no patching**. The `MOD` jack still accepts external modulator sources (drum machine, sequence), which sum with the mic. There is no separate EXT IN module — it was merged into the vocoder (Phase 48). Use headphones to avoid carrier→mic feedback.
+
+**Modulator pre-processing (always on, voice-optimized):** both the mic and the `voc-mod-in` jack land on `vocModRaw → vocModHP (highpass 150 Hz) → vocModComp (Tone.Compressor −28 dB / 4:1) → vocModIn`. The highpass removes rumble/plosives (safe — voice intelligibility lives in formants >300 Hz); the compressor evens the drive into the envelope followers for consistent vocoding. Tuned for voice; a low-frequency modulator (e.g. a kick) loses content below 150 Hz.
+
+The bank runs continuously even when unpatched; gating it to "carrier + modulator present" is a possible future CPU optimization.
+
+---
+
+### 12. EXT IN — merged into the Vocoder (§11) [Phase 48]
+
+The external-mic input was originally a standalone module (Phase 43) but was **merged into the Vocoder** (Phase 48) since its only real use was as the vocoder modulator. The mic controls (ENABLE MIC, MIC IN, SIG LED) now live on the vocoder faceplate and feed `vocModRaw` directly — see §11 "Built-in mic". `Tone.UserMedia` lifecycle (`enableMic`/`disableMic`/`updateExtMicParams`, `extMicRef`, `extMicGain`, `extMicMeter`) is unchanged; only the routing (now → `vocModRaw` instead of a separate `ext-out` jack) and the UI host changed.
+
+**Note on AEC:** uses `Tone.UserMedia` defaults (browser echo-cancellation/AGC may be on). Use **headphones** so the carrier doesn't bleed into the mic. If raw-signal quality becomes an issue, switch to native `getUserMedia` with `echoCancellation:false, noiseSuppression:false, autoGainControl:false` (as `useVocoder.js` does) wrapped via `createMediaStreamSource`.
+
+---
+
 ## Default Signal Chain (No Patch Cables)
 
 When the page first loads, this hardwired default lets sound happen immediately before the user builds any patches:
@@ -306,4 +372,7 @@ This gives the user an immediately playable arpeggio on load, showcasing the ins
 | Moog Phase 13 ✅ | 953 Keyboard Controller — 3-oct piano (C3–B5), pitch CV + gate out, computer keyboard (A–K) | Keyboard |
 | Moog Phase 8a | CP3 Mixer knob wiring + clipping drive WaveShaperNode | CP3 |
 | Moog Phase 8b | Noise Generator Level knob wiring | Noise |
+| Moog Phase 42 ✅ | 16-band spectral vocoder — patchable MOD/CARR/OUT, envelope-follower bank, MIX/HISS/BUZZ, 16-seg meter | Vocoder |
+| Moog Phase 43 ✅ | EXT IN — live mic via Tone.UserMedia (later merged into the Vocoder, Phase 48) | EXT IN |
+| Moog Phase 48 ✅ | Merged EXT IN into the Vocoder — built-in mic feeds the modulator directly | Vocoder |
 | Moog Phase 12 | Visual polish — LEDs, aging effects, mobile fallback | All |

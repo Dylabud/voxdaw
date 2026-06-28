@@ -27,6 +27,32 @@ export const FFB_BANDS = [
   { freq: 8000, type: 'highpass', Q: 0.7, label: 'HP'   },
 ];
 
+// 16-band Vocoder — log-spaced bandpass bands 100 Hz → 8 kHz (geometric ratio ≈ 1.339).
+// Each band exists twice: once in the modulator-analysis bank, once in the carrier-synthesis
+// bank. Modulator bands drive the matching carrier band's VCA via an envelope follower.
+export const VOC_BANDS = [
+  { freq: 100,  Q: 4, label: '100'  },
+  { freq: 135,  Q: 4, label: '135'  },
+  { freq: 180,  Q: 4, label: '180'  },
+  { freq: 240,  Q: 4, label: '240'  },
+  { freq: 320,  Q: 4, label: '320'  },
+  { freq: 430,  Q: 4, label: '430'  },
+  { freq: 580,  Q: 4, label: '580'  },
+  { freq: 770,  Q: 4, label: '770'  },
+  { freq: 1035, Q: 4, label: '1k'   },
+  { freq: 1385, Q: 4, label: '1.4k' },
+  { freq: 1855, Q: 4, label: '1.9k' },
+  { freq: 2485, Q: 4, label: '2.5k' },
+  { freq: 3330, Q: 4, label: '3.3k' },
+  { freq: 4460, Q: 4, label: '4.5k' },
+  { freq: 5970, Q: 4, label: '6k'   },
+  { freq: 8000, Q: 4, label: '8k'   },
+];
+
+// Rectifier drive — scales the full-wave-rectified band signal so the envelope follower
+// drives the carrier VCA gain into a useful range. Tuned by ear; raise for hotter vocoding.
+const VOC_ENV_DRIVE = 8;
+
 // Quantizer scale definitions (semitone offsets from root).
 // Sent to the quantizer AudioWorklet via port.postMessage.
 const SCALE_DEFS = {
@@ -175,6 +201,10 @@ function buildJackMap(n) {
     // ── 914 FFB ──
     'ffb-in':  { type: 'in',  dest: n.ffbIn    },
     'ffb-out': { type: 'out', node: n.ffbMaster },
+    // ── 16-band Vocoder ── modulator + carrier audio inputs, vocoded output.
+    'voc-mod-in':  { type: 'in',  dest: n.vocModRaw },
+    'voc-carr-in': { type: 'in',  dest: n.vocCarrIn },
+    'voc-out':     { type: 'out', node: n.vocVolume },
     // ── VCF ──
     // cv1/cv2 → vcfcv1/vcfcv2 Gain(5000): LFO ±1 → ±5000 Hz — sweeps full audible spectrum
     // env     → vcfenv Gain(1000):         env  0→1 →  0→1000 Hz lift above base cutoff
@@ -287,6 +317,12 @@ export default function useMoogAudio() {
   const vco3SyncEnabledRef  = useRef(false);
   const vco4SyncEnabledRef  = useRef(false);
   const vco5SyncEnabledRef  = useRef(false);
+  const extMicRef           = useRef(null);      // Tone.UserMedia mic instance (lazy, on enable)
+  // Vocoder spectral-shift state — read by the shift rAF loop, written by updateVocoderParams.
+  const vocShiftBaseRef     = useRef(1.0);       // base ratio (1 = no shift)
+  const vocShiftLfoRateRef  = useRef(0.7);       // Hz
+  const vocShiftLfoAmpRef   = useRef(0);         // octaves of swing
+  const vocShiftLastRatioRef = useRef(0);        // delta gate so a static shift settles to 0 writes
   // Glide time in seconds (0 = off). Written by the UI knob, read by the Tone.Loop.
   const seqGlideRef   = useRef(0);
   const seq2GlideRef  = useRef(0);
@@ -430,6 +466,12 @@ export default function useMoogAudio() {
       ioCh3Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
       ioCh4Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
 
+      // Built-in vocoder mic — Tone.UserMedia (opened on enable) → extMicGain (MIC IN level)
+      // → vocModRaw (the vocoder modulator pre-chain). extMicMeter taps post-gain for the
+      // SIG LED (getMeterValue('extMic')).
+      extMicGain:  new Tone.Gain(1),
+      extMicMeter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
+
       // Hard sync signal path (replicated per VCO).
       // Each VCO gets an input buffer (syncIn), worklet output buffer (syncOut),
       // a normal-path gate (normalGain), and a mixing bus (bus). The worklet is
@@ -530,6 +572,62 @@ export default function useMoogAudio() {
       ffbAnalyser: new Tone.Analyser('fft', 512),
       ...Object.fromEntries(FFB_BANDS.map((b, i) => [`ffbFilter${i}`, new Tone.Filter({ type: b.type, frequency: b.freq, Q: b.Q, rolloff: -12 })])),
       ...Object.fromEntries(FFB_BANDS.map((_, i) => [`ffbGain${i}`,   new Tone.Gain(0.75)])),
+
+      // 16-band Vocoder — modulator analysis bank gates a carrier synthesis bank.
+      // vocModIn fans to 16 modulator bands: BPF → full-wave rectifier (WaveShaper, drive
+      // baked in) → ~20 Hz envelope-follower LP. Each envelope LP connects to the matching
+      // carrier band's VCA gain (audio-rate, zero polling). MIX crossfades carrier-dry
+      // (vocDry) ↔ vocoded-wet (vocWet) into vocOut. vocAnalyser taps vocModIn for the meter.
+      vocModIn:    new Tone.Gain(1),
+      vocCarrIn:   new Tone.Gain(1),
+      vocSum:      new Tone.Gain(1),
+      vocWet:      new Tone.Gain(1),
+      vocDry:      new Tone.Gain(0),
+      vocOut:      new Tone.Gain(3),  // fixed internal makeup (the band bank is quiet); user level is VOLUME
+      vocAnalyser: new Tone.Analyser('fft', 512),
+      // Carrier bank feed — patched carrier + HISS/BUZZ excitation sum here before the
+      // filter bank. vocDry taps vocCarrIn (raw carrier) directly, so HISS/BUZZ never
+      // leak into the dry path — they only appear in the vocoded (wet) signal.
+      vocCarrBank: new Tone.Gain(1),
+      // Internal carrier oscillator (FREQ + PWIDTH) crossfaded with the external
+      // voc-carr-in by CARR MIX. vocCarrSum = mixed carrier (no noise) → feeds both the
+      // band bank and vocDry. A pulse wave is a harmonically rich, classic vocoder carrier.
+      vocCarrOsc:     new Tone.PulseOscillator({ frequency: 130, width: 0 }),
+      vocCarrOscGain: new Tone.Gain(0),  // internal-osc level (CARR MIX)
+      vocCarrExtGain: new Tone.Gain(1),  // external-carrier level (CARR MIX)
+      vocCarrSum:     new Tone.Gain(1),  // mixed carrier bus
+      vocVolume:      new Tone.Gain(1),  // final module output (VOLUME) — the voc-out jack node
+      // HISS — high-passed white noise added to the carrier so unvoiced consonants
+      // (s, sh, t, f) surface through the high bands. Gain owned by updateVocoderParams.
+      vocHissNoise: new Tone.Noise({ type: 'white' }),
+      vocHissHP:    new Tone.Filter({ type: 'highpass', frequency: 3500, rolloff: -12 }),
+      vocHissGain:  new Tone.Gain(0),
+      // BUZZ — low-passed pink noise added to the carrier for low-end body/thump,
+      // thickening vowels. Gain owned by updateVocoderParams.
+      vocBuzzNoise: new Tone.Noise({ type: 'pink' }),
+      vocBuzzLP:    new Tone.Filter({ type: 'lowpass', frequency: 250, rolloff: -12 }),
+      vocBuzzGain:  new Tone.Gain(0),
+      // CLARITY — high-passed (~1.5 kHz) dry modulator (the real voice's consonants/
+      // sibilance) blended straight into the output for word intelligibility. Bypasses
+      // the band bank entirely (it is the actual voice, not vocoded). Gain owned by
+      // updateVocoderParams. The headline intelligibility control.
+      vocClarityHP:   new Tone.Filter({ type: 'highpass', frequency: 1500, rolloff: -12 }),
+      vocClarityGain: new Tone.Gain(0),
+      // Modulator pre-processing chain (always on, voice-optimized): the voc-mod-in jack
+      // lands on vocModRaw → highpass (rumble/plosive removal; voice intelligibility lives
+      // in formants >300 Hz so the lost lows don't matter) → compressor (even drive into the
+      // envelope followers = consistent, "pro" vocoding) → vocModIn (existing fan-out).
+      vocModRaw:  new Tone.Gain(1),
+      vocModHP:   new Tone.Filter({ type: 'highpass', frequency: 150, rolloff: -12 }),
+      vocModComp: new Tone.Compressor({ threshold: -28, ratio: 4, attack: 0.003, release: 0.12 }),
+      // PRESENCE — peaking EQ (~2.7 kHz) on the vocoded output so the robot voice cuts
+      // through. Gain (dB) owned by updateVocoderParams; sits vocOut → vocPresence → vocVolume.
+      vocPresence: new Tone.Filter({ type: 'peaking', frequency: 2700, Q: 1, gain: 0 }),
+      ...Object.fromEntries(VOC_BANDS.map((b, i) => [`vocModBPF${i}`,  new Tone.Filter({ type: 'bandpass', frequency: b.freq, Q: b.Q, rolloff: -12 })])),
+      ...Object.fromEntries(VOC_BANDS.map((_, i) => [`vocModRect${i}`, new Tone.WaveShaper((x) => Math.min(1, Math.abs(x) * VOC_ENV_DRIVE))])),
+      ...Object.fromEntries(VOC_BANDS.map((_, i) => [`vocModEnv${i}`,  new Tone.Filter({ type: 'lowpass', frequency: 20, Q: 0.5, rolloff: -12 })])),
+      ...Object.fromEntries(VOC_BANDS.map((b, i) => [`vocCarrBPF${i}`, new Tone.Filter({ type: 'bandpass', frequency: b.freq, Q: b.Q, rolloff: -12 })])),
+      ...Object.fromEntries(VOC_BANDS.map((_, i) => [`vocCarrVCA${i}`, new Tone.Gain(0)])),
     };
 
     // VCO output buses — each VCO routes through its bus so the HARD SYNC crossfade
@@ -592,6 +690,11 @@ export default function useMoogAudio() {
     n.ioCh2.connect(n.ioCh2Meter);
     n.ioCh3.connect(n.ioCh3Meter);
     n.ioCh4.connect(n.ioCh4Meter);
+    n.extMicGain.connect(n.extMicMeter); // dead-end level tap for the mic LED
+    // Built-in mic → vocoder modulator. The mic feeds the same pre-chain front (vocModRaw)
+    // as the MOD jack, so enabling the mic + a carrier vocodes instantly (no patching), and
+    // an external MOD patch still sums in. extMicGain is silent until the mic is enabled.
+    n.extMicGain.connect(n.vocModRaw);
     n.vco1bus.connect(n.vco1Meter);
     n.vco2bus.connect(n.vco2Meter);
     n.vco3bus.connect(n.vco3Meter);
@@ -629,6 +732,52 @@ export default function useMoogAudio() {
     });
     n.ffbSum.connect(n.ffbMaster);
     n.ffbIn.connect(n.ffbAnalyser);
+
+    // 16-band Vocoder — modulator envelope followers gate carrier band VCAs.
+    // Single writer per node: each vocCarrVCA.gain is driven only by its env follower
+    // (audio connection into the AudioParam); vocWet/vocDry.gain owned by updateVocoderParams.
+    VOC_BANDS.forEach((_, i) => {
+      n.vocModIn.connect(n[`vocModBPF${i}`]);
+      n[`vocModBPF${i}`].connect(n[`vocModRect${i}`]);
+      n[`vocModRect${i}`].connect(n[`vocModEnv${i}`]);
+      n[`vocModEnv${i}`].connect(n[`vocCarrVCA${i}`].gain); // audio-rate env → VCA gain
+      n.vocCarrBank.connect(n[`vocCarrBPF${i}`]);
+      n[`vocCarrBPF${i}`].connect(n[`vocCarrVCA${i}`]);
+      n[`vocCarrVCA${i}`].connect(n.vocSum);
+    });
+    // Carrier sum — external (voc-carr-in) + internal pulse osc, blended by CARR MIX.
+    // Feeds both the band bank (vocoded) and vocDry (passthrough). HISS/BUZZ go to the
+    // bank only, so they never leak into vocDry.
+    n.vocCarrIn.connect(n.vocCarrExtGain);
+    n.vocCarrExtGain.connect(n.vocCarrSum);
+    n.vocCarrOsc.connect(n.vocCarrOscGain);
+    n.vocCarrOscGain.connect(n.vocCarrSum);
+    n.vocCarrSum.connect(n.vocCarrBank); // mixed carrier → band bank (vocoded path)
+    n.vocCarrSum.connect(n.vocDry);      // dry = mixed carrier passthrough (no HISS/BUZZ)
+    // HISS/BUZZ excitation → bank only, shaped by the modulator envelope.
+    n.vocHissNoise.connect(n.vocHissHP);
+    n.vocHissHP.connect(n.vocHissGain);
+    n.vocHissGain.connect(n.vocCarrBank);
+    n.vocBuzzNoise.connect(n.vocBuzzLP);
+    n.vocBuzzLP.connect(n.vocBuzzGain);
+    n.vocBuzzGain.connect(n.vocCarrBank);
+    // Modulator pre-processing — jack lands on vocModRaw; HP + compressor condition the
+    // voice before it fans out (vocModIn keeps all its existing downstream connections).
+    n.vocModRaw.connect(n.vocModHP);
+    n.vocModHP.connect(n.vocModComp);
+    n.vocModComp.connect(n.vocModIn);
+    // Output stage: vocoded (wet) + carrier (dry) → vocOut (OUT makeup) → vocPresence (EQ).
+    n.vocSum.connect(n.vocWet);
+    n.vocWet.connect(n.vocOut);
+    n.vocDry.connect(n.vocOut);
+    n.vocOut.connect(n.vocPresence);
+    // CLARITY — high-passed real voice to the volume stage (bypasses OUT makeup + presence).
+    n.vocModIn.connect(n.vocClarityHP);
+    n.vocClarityHP.connect(n.vocClarityGain);
+    n.vocClarityGain.connect(n.vocVolume);
+    // Final master volume (VOL) → voc-out jack.
+    n.vocPresence.connect(n.vocVolume);
+    n.vocModIn.connect(n.vocAnalyser); // FFT tap for the 16-segment meter
 
     // seqGateNode sits between VCA and the vca-out jack — secondary gate for vca-out path.
     n.vca.connect(n.seqGateNode);
@@ -936,6 +1085,26 @@ export default function useMoogAudio() {
     };
     vibratoTick();
 
+    // Vocoder spectral-shift rAF — scales the 16 carrier bandpass center freqs by
+    // ratio = base · 2^(ampOct · sin(2π·rate·t)). base ← SHIFT knob; LFO ← SH RATE / SH AMP.
+    // Sole writer of vocCarrBPF*.frequency. Delta-gated so a static shift settles to 0 writes.
+    let vocShiftRafId;
+    const vocShiftTick = () => {
+      vocShiftRafId = requestAnimationFrame(vocShiftTick);
+      const now  = Tone.context.rawContext.currentTime;
+      const amp  = vocShiftLfoAmpRef.current;
+      const lfo  = amp < 0.001 ? 1 : Math.pow(2, amp * Math.sin(2 * Math.PI * vocShiftLfoRateRef.current * now));
+      const ratio = vocShiftBaseRef.current * lfo;
+      if (Math.abs(ratio - vocShiftLastRatioRef.current) < 1e-4) return; // unchanged — skip
+      vocShiftLastRatioRef.current = ratio;
+      for (let i = 0; i < VOC_BANDS.length; i++) {
+        const f = n[`vocCarrBPF${i}`];
+        if (!f) continue;
+        f.frequency.setValueAtTime(Math.max(20, Math.min(18000, VOC_BANDS[i].freq * ratio)), now);
+      }
+    };
+    vocShiftTick();
+
     nodesRef.current   = n;
     jackMapRef.current = buildJackMap(n);
 
@@ -1039,10 +1208,17 @@ export default function useMoogAudio() {
       cancelAnimationFrame(chordSnapRafId);
       cancelAnimationFrame(qntOverrideRafId);
       cancelAnimationFrame(vibratoRafId);
+      cancelAnimationFrame(vocShiftRafId);
+      // Release the mic device if it was opened, so the OS mic indicator clears on unmount.
+      if (extMicRef.current) {
+        try { extMicRef.current.close(); } catch (_) {}
+        try { extMicRef.current.dispose(); } catch (_) {}
+        extMicRef.current = null;
+      }
       // Null out nodesRef first so any in-flight worklet Promise .then() bails immediately.
       nodesRef.current = null;
       jackMapRef.current = null;
-      [n.vco1, n.vco2, n.vco3, n.vco4, n.vco5, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2, n.chorus].forEach(node => {
+      [n.vco1, n.vco2, n.vco3, n.vco4, n.vco5, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.vocHissNoise, n.vocBuzzNoise, n.vocCarrOsc, n.lfo, n.lfo2, n.chorus].forEach(node => {
         try { node.stop(); } catch (_) {}
       });
       if (seqLoopRef.current) {
@@ -1080,7 +1256,7 @@ export default function useMoogAudio() {
 
     const n = nodesRef.current;
     if (!n) return;
-    [n.vco1, n.vco2, n.vco3, n.vco4, n.vco5, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2, n.chorus].forEach(node => {
+    [n.vco1, n.vco2, n.vco3, n.vco4, n.vco5, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.vocHissNoise, n.vocBuzzNoise, n.vocCarrOsc, n.lfo, n.lfo2, n.chorus].forEach(node => {
       try { node.start(); } catch (_) {}
     });
 
@@ -1115,7 +1291,7 @@ export default function useMoogAudio() {
 
     const n = nodesRef.current;
     if (!n) return;
-    [n.vco1, n.vco2, n.vco3, n.vco4, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.lfo, n.lfo2, n.chorus].forEach(node => {
+    [n.vco1, n.vco2, n.vco3, n.vco4, n.vco5, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.vocHissNoise, n.vocBuzzNoise, n.vocCarrOsc, n.lfo, n.lfo2, n.chorus].forEach(node => {
       try { node.stop(); } catch (_) {}
     });
 
@@ -1688,6 +1864,102 @@ export default function useMoogAudio() {
     return n.ffbAnalyser.getValue();
   }, []);
 
+  // 16-band Vocoder — MIX crossfades carrier-dry (vocDry) ↔ vocoded-wet (vocWet).
+  // HISS/BUZZ scale the high-passed / low-passed noise injected into the carrier bank.
+  // OUT is post-mix makeup gain (the bank is intrinsically quiet); CLARITY blends the
+  // high-passed real voice for word intelligibility.
+  // Single writer: this owns vocWet/vocDry/vocHissGain/vocBuzzGain/vocOut/vocClarityGain;
+  // the env followers own the per-band VCA gains.
+  const updateVocoderParams = useCallback((p = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    const { mix, hiss, buzz, clarity,
+            pwidth, carrierMix, shift, res, shiftRate, shiftAmp, decay, volume, presence } = p;
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+    if (mix !== undefined) {
+      const m = clamp01(mix);
+      safeRamp(n.vocWet.gain, m, 0.05);
+      safeRamp(n.vocDry.gain, 1 - m, 0.05);
+    }
+    // Knob 0–1 → conservative gain ceilings so the excitation supports rather than swamps.
+    if (hiss !== undefined)    safeRamp(n.vocHissGain.gain,    clamp01(hiss) * 0.5, 0.05);
+    if (buzz !== undefined)    safeRamp(n.vocBuzzGain.gain,    clamp01(buzz) * 0.7, 0.05);
+    // Voice clarity: knob 0–1 → 0–0.9× of the high-passed dry voice.
+    if (clarity !== undefined) safeRamp(n.vocClarityGain.gain, clamp01(clarity) * 0.9, 0.05);
+
+    // Internal carrier oscillator (fixed pitch — set at construction).
+    // PWIDTH: knob 0–1 → width −0.95..0.95 (0.5 = square). Tone.PulseOscillator.width.
+    if (pwidth !== undefined)  safeRamp(n.vocCarrOsc.width, (clamp01(pwidth) * 2 - 1) * 0.95, 0.05);
+    // CARR MIX: knob 0 = external carrier only, 1 = internal osc only.
+    if (carrierMix !== undefined) {
+      const cm = clamp01(carrierMix);
+      safeRamp(n.vocCarrExtGain.gain, 1 - cm, 0.05);
+      safeRamp(n.vocCarrOscGain.gain, cm, 0.05);
+    }
+    // RES: carrier band Q. knob 0–1 → Q 1–7 (0.5 ≈ 4, the base VOC_BANDS Q).
+    if (res !== undefined) {
+      const q = 1 + clamp01(res) * 6;
+      for (let i = 0; i < VOC_BANDS.length; i++) safeRamp(n[`vocCarrBPF${i}`].Q, q, 0.05);
+    }
+    // DECAY: envelope-follower LP cutoff. knob 0–1 → ~56 Hz (snappy) … ~7 Hz (smeary), 0.5 ≈ 20 Hz.
+    if (decay !== undefined) {
+      const cutoff = 20 * Math.pow(2, (0.5 - clamp01(decay)) * 3);
+      for (let i = 0; i < VOC_BANDS.length; i++) safeRamp(n[`vocModEnv${i}`].frequency, cutoff, 0.05);
+    }
+    // SHIFT / SH RATE / SH AMP — ref writes consumed by the spectral-shift rAF loop.
+    if (shift !== undefined)     vocShiftBaseRef.current    = Math.pow(2, (clamp01(shift) - 0.5) * 2); // ±1 octave
+    if (shiftRate !== undefined) vocShiftLfoRateRef.current = 0.05 * Math.pow(2, clamp01(shiftRate) * 7.64); // 0.05–10 Hz
+    if (shiftAmp !== undefined)  vocShiftLfoAmpRef.current  = clamp01(shiftAmp); // 0–1 octave swing
+    // VOLUME: final module output level. knob 0–1 → 0–2× (0.5 = nominal; combines with the
+    // fixed 3× makeup on vocOut → up to 6× total). Also scales the CLARITY blend (it sums here).
+    if (volume !== undefined)  safeRamp(n.vocVolume.gain, clamp01(volume) * 2, 0.05);
+    // PRESENCE: peaking EQ gain at ~2.7 kHz. knob 0–1 → 0..+12 dB (boost only).
+    if (presence !== undefined) safeRamp(n.vocPresence.gain, clamp01(presence) * 12, 0.05);
+  }, []);
+
+  const getVocAnalyserData = useCallback(() => {
+    const n = nodesRef.current;
+    if (!n) return null;
+    return n.vocAnalyser.getValue();
+  }, []);
+
+  // Built-in vocoder mic — opens a Tone.UserMedia stream (requires a user gesture for the
+  // browser permission prompt) and routes it into extMicGain, which feeds the vocoder
+  // modulator (vocModRaw). Returns true on success, false if permission denied / unavailable.
+  // Idempotent: a second call while already open is a no-op success.
+  const enableMic = useCallback(async () => {
+    const n = nodesRef.current;
+    if (!n) return false;
+    if (extMicRef.current) return true;
+    try {
+      await Tone.start(); // resume context + satisfy autoplay policy
+      const mic = new Tone.UserMedia();
+      await mic.open();
+      mic.connect(n.extMicGain);
+      extMicRef.current = mic;
+      return true;
+    } catch (e) {
+      console.warn('[MoogAudio] mic enable failed:', e?.message ?? e);
+      return false;
+    }
+  }, []);
+
+  const disableMic = useCallback(() => {
+    const mic = extMicRef.current;
+    if (!mic) return;
+    try { mic.close(); } catch (_) {}
+    try { mic.dispose(); } catch (_) {}
+    extMicRef.current = null;
+  }, []);
+
+  // External mic INPUT gain — single writer (this owns extMicGain.gain).
+  const updateExtMicParams = useCallback(({ gain } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (gain !== undefined) safeRamp(n.extMicGain.gain, Math.max(0, gain), 0.05);
+  }, []);
+
   // Crossfades normalGain ↔ syncOut over 10 ms per VCO.
   // State persisted in ref so powerOff/powerOn can gate and restore it.
   const setVco1SyncEnabled = useCallback((enabled) => {
@@ -1754,6 +2026,8 @@ export default function useMoogAudio() {
     setVco1SyncEnabled, setVco2SyncEnabled, setVco3SyncEnabled, setVco4SyncEnabled, setVco5SyncEnabled,
     setSeqGlide, setSeq2Glide, setKbdGlide, setKbdVibrato,
     updateFFBParams, getFFBAnalyserData,
+    updateVocoderParams, getVocAnalyserData,
+    enableMic, disableMic, updateExtMicParams,
     updateKickParams, triggerKick,
     setKickTrigCallback: (fn) => { kickTrigCbRef.current = fn; },
     updateQuantizerParams, setQuantizerCallback,

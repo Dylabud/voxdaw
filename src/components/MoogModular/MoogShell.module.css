@@ -220,7 +220,7 @@
 /* Row column templates */
 .tierRow1 { grid-template-columns: 1fr 1fr 1fr 1fr 1fr 0.6fr 0.6fr 0.6fr; }
 .tierRow2 { grid-template-columns: 1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr 0.8fr 1.6fr; }
-.tierRow3 { grid-template-columns: 0.85fr 0.85fr 0.85fr 1fr 1fr 1fr 1fr; }
+.tierRow3 { grid-template-columns: 0.85fr 0.85fr 0.85fr 1fr 1fr 1fr 1fr max-content; }
 .tierRow4 { grid-template-columns: 2.5fr 1fr 0.9fr 1fr; }
 /* Stacks two sequencer modules vertically inside a single grid cell */
 .seqStack {
@@ -1420,6 +1420,127 @@
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* ── External mic enable button ── */
+.micBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid #4a2c10;
+  color: #7a5020;
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 5px 10px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.18s, color 0.18s, box-shadow 0.18s;
+}
+.micBtn:hover {
+  border-color: #c8a86a;
+  color: #c8a86a;
+}
+/* Mic live — mint glow */
+.micBtnOn {
+  border-color: rgba(93, 202, 165, 0.65);
+  color: rgba(93, 202, 165, 0.9);
+  box-shadow: 0 0 12px rgba(93, 202, 165, 0.22);
+}
+.micBtnOn:hover {
+  border-color: rgba(93, 202, 165, 0.9);
+  color: rgba(93, 202, 165, 1);
+}
+/* Permission denied — red */
+.micBtnErr {
+  border-color: rgba(224, 40, 40, 0.6);
+  color: rgba(224, 90, 90, 0.85);
+}
+
+/* ── 16-Band Vocoder two-column layout — mic + jacks (left) / knobs + meter (right) ── */
+.vocLayout {
+  display: flex;
+  gap: 2px;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2px;
+}
+/* Left column: MIC knob (with SIG + button to its right), then jacks beneath */
+.vocLeft {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+/* MIC knob + its controls (button over SIG) side by side */
+.vocMicTop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.vocMicCtrls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+.vocLeftJacks {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 2px;
+}
+/* Right column: the 4×3 control grid (shrinks to content so it sits right against the left) */
+.vocRight {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+/* Compact mic button for the condensed faceplate */
+.vocLeft .micBtn {
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  padding: 3px 6px;
+}
+
+/* ── 16-Band Vocoder control grid — 4×3 sm-knob block (12 knobs under MIX), spread out ── */
+.vocKnobGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px 8px;
+  justify-items: center;
+  align-items: start;
+  padding: 4px 2px;
+}
+
+/* ── 16-Band Vocoder spectrum meter — full-width row of 16 LEDs along the module bottom ── */
+.vocMeter {
+  display: grid;
+  grid-template-columns: repeat(16, 1fr);
+  gap: 1px;
+  align-items: center;
+  justify-items: center;
+  padding: 4px 4px 2px;
+  margin-top: 4px;
+  border-top: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+/* Vocoder band LED — opacity driven by per-band modulator energy (mint, matches FFB) */
+.vocLed {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  will-change: opacity;
+  background: radial-gradient(circle at 38% 28%, #a0f8b0 0%, #30d060 48%, #0c6820 100%);
+  box-shadow:
+    0 0 3px  rgba(60, 200, 100, 0.80),
+    0 0 8px  rgba(40, 180,  80, 0.45);
 }
 
 /* ── Kick drum trigger LED — same geometry as gate LED, red color ── */

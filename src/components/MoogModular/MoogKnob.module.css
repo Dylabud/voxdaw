@@ -1,4 +1,4 @@
-/* ═══════════════════════════════════════════════════════
+  /* ═══════════════════════════════════════════════════════
    MoogKnob — self-contained knob component styles
    Mirrors the silver aesthetic from MoogShell.module.css.
    All dimensions are hardware-literal (no CSS vars).
@@ -96,6 +96,11 @@
 .knob_lg { width: 42px; height: 42px; }
 .knob_md { width: 32px; height: 32px; }
 .knob_sm { width: 25px; height: 25px; }
+.knob_xs { width: 18px; height: 18px; }
+
+/* Ultra-compact group: tighter knob↔label gap + tiny label (used by the dense Vocoder grid) */
+.groupXs { gap: 2px; }
+.groupXs .knobLabel { font-size: 7px; letter-spacing: 0.04em; }
 
 /* ── Indicator pointer — dark line on silver face ── */
 .knobCap {
@@ -117,6 +122,7 @@
 .knob_lg .knobCap { width: 4px;   height: 37%; }
 .knob_md .knobCap { width: 3px;   height: 36%; top: 12%; }
 .knob_sm .knobCap { width: 2.5px; height: 35%; top: 12%; }
+.knob_xs .knobCap { width: 2px;   height: 34%; top: 13%; }
 
 .knobLabel {
   font-size: 11px;

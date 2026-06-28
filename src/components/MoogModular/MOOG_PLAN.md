@@ -39,6 +39,101 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-06-26 → 06-28] Vocoder Condense, Row 3 placement + faceplate rework (Phase 49)
+
+**Files modified:** `MoogKnob.jsx`, `MoogKnob.module.css`, `MoogShell.jsx`, `MoogShell.module.css`
+
+Visual-only (no audio/behavior changes). Moved the vocoder into **Row 3** (8th column; `tierRow3` extended to 8 cols). Added a new ultra-compact **`xs`** knob size (18px body, **no tick ring**, 7px label, tight group gap) — globally available but used only by the vocoder grid. Shortened grid labels (VOL/C.MIX/PWID/S.RT/S.AMP/PRES/CLAR); meter LEDs 5→4px.
+
+Final faceplate (`.vocLayout`, two columns hugging each other, `gap: 2px`):
+- **Left** (`.vocLeft`): **MIX + MIC** knobs side by side (same `md` size, MIX left of MIC), with the **ENABLE MIC** button over the **SIG** LED to their right (`.vocMicTop`/`.vocMicCtrls`); the **MOD/CARR/OUT** jacks in a **horizontal** row beneath (`.vocLeftJacks`).
+- **Right** (`.vocRight`, `flex: 0 0 auto` so it shrinks to content and sits flush against the left): the remaining **12 knobs** in a spread-out **4×3 `sm` grid** (`.vocKnobGrid`, `gap: 10px 8px`).
+- **Spectrum meter** (`.vocMeter`): full-width row of 16 LEDs along the **module bottom**, below both columns.
+- **Module width:** the Row 3 vocoder track is `max-content`, so the module hugs its content (no empty faceplate); the other 7 modules share the remaining rack width via `fr`.
+
+### [2026-06-26] Merge EXT IN into the Vocoder (Phase 48)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MOOG_ARCHITECTURE.md`
+
+The standalone EXT IN module existed only to feed the vocoder modulator, so it was merged into the Vocoder as a single module.
+
+- **Audio:** added a permanent `extMicGain → vocModRaw` connection (the modulator pre-chain front). Enabling the mic + a carrier now vocodes instantly with **no patching**; the `MOD` jack still accepts external sources (they sum at `vocModRaw`). Removed the `ext-out` jack from `buildJackMap`. `enableMic`/`disableMic`/`updateExtMicParams`/`extMicGain`/`extMicMeter` unchanged — only the routing + UI host moved.
+- **UI:** deleted `ExtInModule`; added a mic row to `VocoderModule` (ENABLE MIC button, SIG LED, MIC IN knob) via new props `onMicEnable`/`onMicDisable`/`onMicGainChange`/`getMicLevel` (wired to the same hook fns + `getExtMicLevel`). New `.vocMicRow` CSS. Row 4 drops back to seq stack / chordseq / qnt / I/O.
+
+### [2026-06-26] Vocoder Knob Cleanup — single VOLUME (Phase 47)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MOOG_ARCHITECTURE.md`
+
+Consolidated the two level knobs (OUT makeup + VOL) into one **VOLUME**. `vocOut` now carries a fixed ×3 internal makeup (the band bank is intrinsically quiet); the single VOLUME knob drives `vocVolume` (the jack node) at 0–2× — so it scales the **whole module** including the CLARITY blend, and combines with the fixed makeup to the same ≤6× ceiling as before. Defaults preserve the prior loudness (VOLUME 0.5 → ×1 → ×3 net). `updateVocoderParams` drops `out`, renames `vol` → `volume`. Grid: 14 → 13 knobs.
+
+### [2026-06-25] Vocoder "Daft Punk" Pre/Post Chain (Phase 46, from a Gemini blueprint — partially rejected)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MOOG_ARCHITECTURE.md`
+
+Implemented the genuinely useful parts of Gemini's Phase 43 plan; rejected the rest with reasons.
+
+**Implemented:**
+- **Modulator pre-processing (always on):** `voc-mod-in` now lands on `vocModRaw → vocModHP (highpass 150 Hz) → vocModComp (Tone.Compressor −28/4:1, atk 3 ms, rel 120 ms) → vocModIn`. Removes rumble/plosives + evens drive into the envelope followers. Voice-optimized (a sub-150 Hz modulator loses lows). Filters/compressor need no power start/stop.
+- **PRESENCE knob:** peaking EQ (~2.7 kHz, Q 1) on the vocoded output, `vocOut → vocPresence → vocVolume`, knob 0–1 → 0..+12 dB. CLARITY still bypasses it (sums at vocVolume).
+
+**Rejected (with reasons — per the "be critical of Gemini" directive):**
+- **Autotune/PitchShifter on the modulator** — fundamental vocoder misunderstanding: output pitch comes from the **carrier**, not the modulator. Retuning the voice barely affects the vocoded output. Gemini conflated a vocoder (play the carrier melody) with autotune (T-Pain). The Daft-Punk robot pitch already comes from the carrier (keyboard→VCO or internal osc).
+- **"Hiss" knob** — already exists (Phase 42 HISS = high-passed noise excitation into high bands).
+- **"Dry/Wet" knob** — already exists as MIX (Phase 42).
+- **Auto-patch "dual sawtooth" carrier** — already solved differently via the internal carrier osc + CARR MIX (Phase 45); programmatic fake patch cables would fight the manual-patch architecture. (Offered: optionally enrich the internal carrier to a detuned dual-saw.)
+
+### [2026-06-25] Vocoder Synth Expansion — 9 new controls (Phase 45)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MOOG_ARCHITECTURE.md`
+
+Added fully-functional controls (no skeletons): PWIDTH, CARR MIX, SHIFT, RES, SH RATE, SH AMP, DECAY, VOL. (A FREQ knob for the internal carrier was added then removed at the user's request — the internal osc now runs at a fixed 130 Hz; PWIDTH/CARR MIX still apply.)
+
+- **Internal carrier oscillator:** `vocCarrOsc` (`Tone.PulseOscillator`) → `vocCarrOscGain`; external `voc-carr-in` → `vocCarrExtGain`; both sum into new `vocCarrSum`, which feeds the band bank **and** `vocDry`. **CARR MIX** crossfades ext↔internal (`vocCarrExtGain`/`vocCarrOscGain`). **PWIDTH** → osc `width` (−0.95..0.95, 0.5=square); osc pitch fixed at 130 Hz (construction). Osc added to all 3 power start/stop arrays. Lets the vocoder run standalone (mic + internal carrier, no patched VCOs).
+- **Spectral shift (SHIFT/SH RATE/SH AMP):** new rAF loop (`vocShiftTick`, peer of `vibratoTick`) scales the 16 carrier BPF center freqs by `ratio = base · 2^(ampOct·sin(2π·rate·t))`. SHIFT (ref `vocShiftBaseRef`, ±1 oct), SH RATE (`vocShiftLfoRateRef`, 0.05–10 Hz), SH AMP (`vocShiftLfoAmpRef`, 0–1 oct). **Sole writer** of `vocCarrBPF*.frequency`; delta-gated (`vocShiftLastRatioRef`) so a static shift settles to zero writes. Can't be done with a connected `Tone.LFO` — it's a per-band *multiplicative* ratio across 16 different base freqs.
+- **RES:** carrier band Q (1–7, 0.5≈base 4) via `updateVocoderParams` (writes `vocCarrBPF*.Q` — disjoint from the rAF's frequency writes). **DECAY:** the 16 env-follower LP cutoffs (~56 Hz snappy … ~7 Hz smeary, 0.5≈20 Hz) via `vocModEnv*.frequency`.
+- **VOL:** new final `vocVolume` node (the `voc-out` jack now taps it); CLARITY routed to `vocVolume` (bypassing the OUT makeup gain) so chain is `wet+dry → vocOut(OUT) → vocVolume(VOL) ← clarity`.
+- `updateVocoderParams` now takes `{ mix, out, vol, carrierMix, freq, pwidth, shift, res, shiftRate, shiftAmp, decay, clarity, hiss, buzz }`. All audio-param writes remain single-writer; SHIFT trio are ref-only (consumed by the rAF). UI: 14-knob 4-col grid (`.vocKnobGrid`).
+
+### [2026-06-25] Vocoder Loudness + Intelligibility (Phase 44)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MOOG_ARCHITECTURE.md`
+
+Two user-driven improvements: the vocoder was too quiet when mixed with other instruments, and the words were hard to make out.
+
+- **OUT (makeup gain):** `vocOut` was a fixed `Gain(1)` with no writer; now `updateVocoderParams({ out })` owns it, knob 0–1 → 0–6× (default 0.5 = 3×). Addresses the "intrinsically quiet" nature of a band-gated vocoder (speech only excites a few of the 16 bands at once, so the sum is far below the raw carrier — turning VCOs down doesn't change the *relative* level).
+- **CLARITY (voice intelligibility):** new `vocModIn → HP(1.5 kHz) → vocClarityGain → vocOut` path blends the **real voice's** consonants/sibilance straight into the output (bypassing the band bank), knob 0–1 → 0–0.9×. The strongest legibility lever — keeps vocoded vowels while real consonants (s/t/sh/f/k) carry word recognition. Preferred over forcing a faster (buzzier) envelope follower, which would have hurt the smooth synth tone the user also wanted.
+- `updateVocoderParams` extended to `{ mix, hiss, buzz, out, clarity }`; all six gains remain single-writer (env followers still own the per-band VCA gains). UI: VocoderModule now has MIX/OUT (lg) on row 1 and CLARITY/HISS/BUZZ (sm) on row 2.
+- **Why not HISS for clarity:** HISS is *synthetic* noise-sibilance through the high bands; CLARITY is the *actual* voice — far more intelligible. Both retained (different character).
+
+### [2026-06-24] EXT IN — External Mic Input (Phase 43)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MOOG_ARCHITECTURE.md`
+
+Added a live microphone as a patchable audio source so the user can sing through the vocoder (`ext-out → voc-mod-in`, VCOs → `voc-carr-in`, `voc-out → mixer`). Built as a dedicated **EXT IN** module rather than folding into I/O (keeps I/O uncluttered; consistent with recent dedicated-module phases).
+
+- **Audio:** `extMicGain` (`Tone.Gain`, INPUT level + `ext-out` jack node) + `extMicMeter` (`Tone.Meter`, SIG LED via `getMeterValue('extMic')`). `extMicRef` holds a lazily-created `Tone.UserMedia`.
+- **`enableMic()`** (async) — `await Tone.start()`, `new Tone.UserMedia()`, `await mic.open()`, connect into `extMicGain`; returns bool (false on permission denial). Idempotent. **`disableMic()`** + unmount cleanup `close()`+`dispose()` to release the device / clear the OS mic indicator. **`updateExtMicParams({ gain })`** sole writer of `extMicGain.gain` (knob 0–1 → 0–2×, 0.5 = unity).
+- **Jack:** `ext-out` (type:out → `extMicGain`) in the I/O section of `buildJackMap`; existing `connect/disconnect` handles it with zero new logic.
+- **UI:** `ExtInModule` in Row 4 before I/O — INPUT knob, SIG LED, and an ENABLE MIC button with off/connecting/on/error states (mint when live, red on DENIED). New `.micBtn`/`.micBtnOn`/`.micBtnErr` CSS.
+- **Decision — Tone.UserMedia over native getUserMedia:** proven in `useAutotune`, connects cleanly to Tone nodes, lives in the shared context. Tradeoff: browser AEC/AGC defaults may be on — documented headphone recommendation + the native-constraints fallback path if raw quality is needed.
+
+### [2026-06-24] 16-Band Vocoder (Phase 42)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MOOG_ARCHITECTURE.md`
+
+Added a self-contained, patchable 16-band spectral vocoder built on the shared Tone.js context (NOT reusing `useVocoder.js`, which spins its own AudioContext + internal carriers — both forbidden by `MOOG_ARCHITECTURE.md`). Modeled structurally on the 914 FFB.
+
+- **`VOC_BANDS`** — 16 log-spaced bandpass bands (100 Hz → 8 kHz, ratio ≈ 1.339, Q 4), exported like `FFB_BANDS`.
+- **DSP:** `vocModIn` fans to 16 modulator bands `BPF → rectifier(Tone.WaveShaper |x|·VOC_ENV_DRIVE) → envLP(20 Hz)`; each env follower connects directly to the matching carrier band's `vocCarrVCA.gain` AudioParam (audio-rate, zero polling). `vocCarrIn → 16× carrBPF → carrVCA → vocSum → vocWet`. **MIX** crossfades `vocDry` (raw carrier passthrough) ↔ `vocWet` via `updateVocoderParams({ mix })`. `vocAnalyser` (FFT 512) taps `vocModIn`.
+- **Single-writer compliance:** env followers own the VCA gains; `updateVocoderParams` owns wet/dry. Both confirmed disjoint.
+- **Jacks (fully manual, no default patch):** `voc-mod-in`, `voc-carr-in`, `voc-out` — handled by existing `connect/disconnect` with zero new logic.
+- **UI:** `VocoderModule` in Row 2 beside FFB — MIX/HISS/BUZZ knobs + 16-segment LED spectrum meter (reuses the FFB per-band-peak rAF pattern via `getVocAnalyserData`). New `.vocMeter`/`.vocLed` CSS.
+- **HISS/BUZZ excitation:** `vocCarrBank` inserted between `vocCarrIn` and the filter bank. HISS = white noise → HP(3.5 kHz) → `vocHissGain`; BUZZ = pink noise → LP(250 Hz) → `vocBuzzGain`; both sum into `vocCarrBank` so they're vocoded by the modulator envelope but **never leak into `vocDry`** (dry taps raw `vocCarrIn`). Knob 0–1 → gain ×0.5 (hiss) / ×0.7 (buzz). Noise sources started/stopped in `powerOn`/`powerOff` + cleanup arrays. `updateVocoderParams` extended to `{ mix, hiss, buzz }`.
+- **Tradeoff noted:** ~80 always-on band nodes; gating to "both inputs patched" deferred as a future CPU optimization.
+- **Pre-existing bug fixed:** the `powerOff` node-stop array omitted `vco5` (stopped vco1–vco4 only), so VCO5 kept oscillating after power-off. Added `n.vco5` to the `powerOff` array (it was already in the `powerOn` and cleanup arrays); VCO5 now follows the same start/stop/start cycle as the other VCOs.
+
+**Critique of Gemini:** his "own module" instinct was correct for a modular synth (a vocoder needs both a carrier and a modulator audio path; the keyboard, a CV/gate controller, has neither — so "build it into the keyboard" had no signal home). But he assumed a mic modulator — there is no `Tone.UserMedia` input in the Moog engine, so the modulator must be an internal source for now. Reusing `useVocoder.js` wholesale would have violated the shared-context rule. HISS/BUZZ deferred per scope.
+
 ### [2026-06-11] MIDI-to-CV Integration (Phase 34)
 
 **Files modified:** `KeyboardModule.jsx`, `KeyboardModule.module.css`

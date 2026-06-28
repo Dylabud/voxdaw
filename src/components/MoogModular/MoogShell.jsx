@@ -3,7 +3,7 @@ import styles from './MoogShell.module.css';
 import MoogKnob from './MoogKnob';
 import { MoogPatchProvider, useMoogPatch } from './MoogPatchContext';
 import PatchCableOverlay from './PatchCableOverlay';
-import useMoogAudio, { FFB_BANDS } from './useMoogAudio';
+import useMoogAudio, { FFB_BANDS, VOC_BANDS } from './useMoogAudio';
 import Oscilloscope from './Oscilloscope';
 import KeyboardModule from './KeyboardModule';
 import Led from './Led';
@@ -1332,6 +1332,145 @@ function FFBModule({ onParamUpdate, getAnalyserData }) {
   );
 }
 
+// ──────────── 16-Band Vocoder ────────────
+
+// onParamUpdate({ mix }) — wires the MIX knob to useMoogAudio.
+// getAnalyserData() — stable getter for the modulator FFT analyser; drives the 16-seg meter.
+// Patch MOD (modulator: voice/drum/sequence) + CARR (carrier: VCOs) in, take OUT to the mixer.
+function VocoderModule({ onParamUpdate, getAnalyserData, onMicEnable, onMicDisable, onMicGainChange, getMicLevel }) {
+  const [micGain, setMicGain]       = useState(0.5);  // built-in mic input level
+  const [micStatus, setMicStatus]   = useState('off'); // 'off' | 'connecting' | 'on' | 'error'
+  const [mix, setMix]               = useState(1.0);
+  const [volume, setVolume]         = useState(0.5);  // 0.5 = nominal (×3 internal makeup → 3×)
+  const [carrierMix, setCarrierMix] = useState(0.0);  // 0 = external carrier only
+  const [pwidth, setPwidth]         = useState(0.5);  // 0.5 = square
+  const [shift, setShift]           = useState(0.5);  // 0.5 = no shift
+  const [res, setRes]               = useState(0.5);  // 0.5 ≈ base Q
+  const [shiftRate, setShiftRate]   = useState(0.5);
+  const [shiftAmp, setShiftAmp]     = useState(0.0);
+  const [decay, setDecay]           = useState(0.5);  // 0.5 ≈ base env speed
+  const [presence, setPresence]     = useState(0.0);  // 2.7 kHz cut-through boost
+  const [clarity, setClarity]       = useState(0.0);
+  const [hiss, setHiss]             = useState(0.0);
+  const [buzz, setBuzz]             = useState(0.0);
+
+  // DOM refs for the 16 spectrum LEDs — written by rAF loop (Zero-Re-render Rule).
+  const ledRefs = useRef([]);
+  const rafRef  = useRef(null);
+
+  useEffect(() => {
+    onParamUpdate?.({ mix, volume, carrierMix, pwidth, shift, res,
+                     shiftRate, shiftAmp, decay, presence, clarity, hiss, buzz });
+  }, [mix, volume, carrierMix, pwidth, shift, res,
+      shiftRate, shiftAmp, decay, presence, clarity, hiss, buzz, onParamUpdate]);
+
+  // Built-in mic — INPUT level (knob 0–1 → 0–2×, 0.5 = unity) and enable/disable toggle.
+  useEffect(() => {
+    onMicGainChange?.({ gain: micGain * 2 });
+  }, [micGain, onMicGainChange]);
+
+  const toggleMic = async () => {
+    if (micStatus === 'connecting') return;
+    if (micStatus === 'on') { onMicDisable?.(); setMicStatus('off'); return; }
+    setMicStatus('connecting');
+    const ok = await onMicEnable?.();
+    setMicStatus(ok ? 'on' : 'error');
+  };
+  const micBtnText = micStatus === 'on'         ? '● LIVE'
+                   : micStatus === 'connecting' ? '○ …'
+                   : micStatus === 'error'      ? '○ DENIED'
+                   :                              '○ MIC';
+
+  // rAF loop: per-band peak from the modulator FFT → LED opacity. Same pattern as FFBModule
+  // (FFT 512 → 256 bins, ~86 Hz/bin, dB → 0–1 over a half-octave window per band center).
+  useEffect(() => {
+    if (!getAnalyserData) return;
+    const BIN_HZ = 44100 / 512;
+
+    const tick = () => {
+      rafRef.current = requestAnimationFrame(tick);
+      const data = getAnalyserData();
+      if (!data || !data.length) return;
+      VOC_BANDS.forEach((band, i) => {
+        const el = ledRefs.current[i];
+        if (!el) return;
+        const lo = Math.max(0, Math.floor(band.freq / (Math.SQRT2 * BIN_HZ)));
+        const hi = Math.min(data.length - 1, Math.ceil(band.freq * Math.SQRT2 / BIN_HZ));
+        let peak = -100;
+        for (let b = lo; b <= hi; b++) if (data[b] > peak) peak = data[b];
+        const brightness = Math.max(0, Math.min(1, (peak + 80) / 80));
+        el.style.opacity = String(0.08 + brightness * 0.92);
+      });
+    };
+    tick();
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [getAnalyserData]);
+
+  return (
+    <div className={styles.module}>
+      <Screw pos="screwTL" /><Screw pos="screwTR" />
+      <Screw pos="screwBL" /><Screw pos="screwBR" />
+      <div className={styles.plate}>
+        <div className={styles.plateHeader}>
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>VOCODER</span>
+            <span className={styles.plateSub}>16-BAND SPECTRAL VOCODER</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          <div className={styles.vocLayout}>
+            {/* Left column — MIC knob with SIG LED + ENABLE button to its right, jacks beneath */}
+            <div className={styles.vocLeft}>
+              <div className={styles.vocMicTop}>
+                <MoogKnob label="MIX" size="md" value={mix}     onChange={setMix}     defaultValue={1.0} />
+                <MoogKnob label="MIC" size="md" value={micGain} onChange={setMicGain} defaultValue={0.5} />
+                <div className={styles.vocMicCtrls}>
+                  <button
+                    type="button"
+                    className={`${styles.micBtn} ${micStatus === 'on' ? styles.micBtnOn : ''} ${micStatus === 'error' ? styles.micBtnErr : ''}`}
+                    onClick={toggleMic}
+                  >
+                    {micBtnText}
+                  </button>
+                  <Led getValue={getMicLevel ?? ZERO_GETTER} color="green" label="SIG" />
+                </div>
+              </div>
+              <div className={styles.vocLeftJacks}>
+                <Jack id="voc-mod-in"  label="MOD" />
+                <Jack id="voc-carr-in" label="CARR" />
+                <Jack id="voc-out"     label="OUT" />
+              </div>
+            </div>
+            {/* Right column — 4×3 grid of the remaining controls (MIX/MIC live on the left) */}
+            <div className={styles.vocRight}>
+              <div className={styles.vocKnobGrid}>
+                <MoogKnob label="VOL"   size="sm" value={volume}     onChange={setVolume}     defaultValue={0.5} />
+                <MoogKnob label="C.MIX" size="sm" value={carrierMix} onChange={setCarrierMix} defaultValue={0.0} />
+                <MoogKnob label="PWID"  size="sm" value={pwidth}     onChange={setPwidth}     defaultValue={0.5} />
+                <MoogKnob label="SHIFT" size="sm" value={shift}      onChange={setShift}      defaultValue={0.5} />
+                <MoogKnob label="RES"   size="sm" value={res}        onChange={setRes}        defaultValue={0.5} />
+                <MoogKnob label="S.RT"  size="sm" value={shiftRate}  onChange={setShiftRate}  defaultValue={0.5} />
+                <MoogKnob label="S.AMP" size="sm" value={shiftAmp}   onChange={setShiftAmp}   defaultValue={0.0} />
+                <MoogKnob label="DECAY" size="sm" value={decay}      onChange={setDecay}      defaultValue={0.5} />
+                <MoogKnob label="PRES"  size="sm" value={presence}   onChange={setPresence}   defaultValue={0.0} />
+                <MoogKnob label="CLAR"  size="sm" value={clarity}    onChange={setClarity}    defaultValue={0.0} />
+                <MoogKnob label="HISS"  size="sm" value={hiss}       onChange={setHiss}       defaultValue={0.0} />
+                <MoogKnob label="BUZZ"  size="sm" value={buzz}       onChange={setBuzz}       defaultValue={0.0} />
+              </div>
+            </div>
+          </div>
+          {/* Spectrum meter — full width along the bottom of the module */}
+          <div className={styles.vocMeter}>
+            {VOC_BANDS.map((_, i) => (
+              <div key={i} ref={el => { ledRefs.current[i] = el; }} className={styles.vocLed} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ──────────── Main shell ────────────
 
 // onBusReady(getter) — called once on mount to hand the Workstation a function
@@ -1372,6 +1511,8 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
   const getVco4Level   = useCallback(() => audio.getMeterValue('vco4'),   [audio.getMeterValue]);
   const getVco5Level   = useCallback(() => audio.getMeterValue('vco5'),   [audio.getMeterValue]);
   const getFFBData     = useCallback(() => audio.getFFBAnalyserData?.(),  [audio.getFFBAnalyserData]);
+  const getVocData     = useCallback(() => audio.getVocAnalyserData?.(),  [audio.getVocAnalyserData]);
+  const getExtMicLevel = useCallback(() => audio.getMeterValue('extMic'), [audio.getMeterValue]);
   const getLfoLevel    = useCallback(() => audio.getMeterValue('lfo'),    [audio.getMeterValue]);
   const getLfo2Level   = useCallback(() => audio.getMeterValue('lfo2'),   [audio.getMeterValue]);
   // Instantaneous LFO phase for rate LEDs — pulses at the actual modulated rate
@@ -1501,7 +1642,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
               <FFBModule               onParamUpdate={audio.updateFFBParams} getAnalyserData={getFFBData} />
             </div>
 
-            {/* Row 3: VCA × 3, Envelopes */}
+            {/* Row 3: VCA × 3, Envelopes, Kick, Vocoder */}
             <div className={`${styles.tier} ${styles.tierRow3}`}>
               <VcaModule number={1} onParamUpdate={audio.updateVcaParams} />
               <VcaModule number={2} onParamUpdate={audio.updateVca2Params} />
@@ -1510,6 +1651,14 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
               <EnvelopeModule label="ENV 2" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv2Level} />
               <EnvelopeModule label="ENV 3" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv3Level} />
               <KickModule onParamUpdate={audio.updateKickParams} onTrigger={audio.triggerKick} onSetTrigCallback={audio.setKickTrigCallback} />
+              <VocoderModule
+                onParamUpdate={audio.updateVocoderParams}
+                getAnalyserData={getVocData}
+                onMicEnable={audio.enableMic}
+                onMicDisable={audio.disableMic}
+                onMicGainChange={audio.updateExtMicParams}
+                getMicLevel={getExtMicLevel}
+              />
             </div>
 
             {/* Row 4: 960 Sequencer (×2 stacked) + Chord Sequencer + Quantizer + I/O */}

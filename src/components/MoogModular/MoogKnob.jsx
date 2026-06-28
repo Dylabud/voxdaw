@@ -5,10 +5,11 @@ const TICK_COUNT = 11;
 const MIN_DEG = -135;
 const MAX_DEG =  135;
 
-const BODY_PX = { xl: 54, lg: 42, md: 32, sm: 25 };
-const WRAP_PX = { xl: 94, lg: 76, md: 58, sm: 46 };
+const BODY_PX = { xl: 54, lg: 42, md: 32, sm: 25, xs: 18 };
+const WRAP_PX = { xl: 94, lg: 76, md: 58, sm: 46, xs: 22 };
 
 function KnobScale({ size }) {
+  if (size === 'xs') return null; // ultra-compact: no tick ring (keeps the wrap tight)
   const showNums = size === 'xl' || size === 'lg';
   return (
     <div className={styles.knobScale}>
@@ -73,7 +74,7 @@ export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', de
   }, [onChange, defaultValue]);
 
   return (
-    <div className={styles.knobGroup}>
+    <div className={`${styles.knobGroup} ${size === 'xs' ? styles.groupXs : ''}`}>
       <div className={styles.knobWrap} style={{ width: wrapPx, height: wrapPx }}>
         <KnobScale size={size} />
         <div
