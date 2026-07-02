@@ -137,6 +137,10 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* Clip so a long effects list can never paint past the docked panel over
+     the timeline; the list itself scrolls (EffectsList .list). */
+  min-height: 0;
+  overflow: hidden;
 }
 
 .header {

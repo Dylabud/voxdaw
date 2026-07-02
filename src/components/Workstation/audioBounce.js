@@ -1,5 +1,6 @@
 import * as Tone from 'tone';
 import { makeSynth } from './synthFactory';
+import { makeFxGraph } from './fxChain';
 import {
   buildRegionEvents,
   volForSliderValue,
@@ -10,9 +11,14 @@ import {
  * Offline render of the current project to an AudioBuffer.
  *
  * Mirrors the live signal graph from useWorkstationAudio:
- *   regionSynth → regionFadeGain → trackVolumeGain → trackMuteGain → Destination
+ *   regionSynth → regionFadeGain → trackVolumeGain → trackPanner
+ *     → [insert FX, track.effects order] → trackMuteGain → Destination
  *
- * Mute/solo and per-track volume are snapshotted at call time and baked in.
+ * Mute/solo, per-track volume, and effect params are snapshotted at call time
+ * and baked in. Bypassed effects are simply not instantiated (no crossfade
+ * machinery is needed offline). Note: the default tailSec may truncate a long
+ * delay-feedback/reverb tail ringing past the last region — raise tailSec if
+ * that matters for a given export.
  */
 export async function bounceProject({ tracks, regions, notes, bpm, tailSec = 2 }) {
   const rightMeasure = regions.reduce(
@@ -24,12 +30,25 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = 2 }
     transport.bpm.value = bpm;
     const anySoloed = tracks.some(t => t.isSolo);
 
-    // Per-track volume → pan → mute → destination
+    // Per-track volume → pan → [FX] → mute → destination
     const trackVolumeByTrackId = new Map();
     for (const t of tracks) {
       const audible = !t.isMuted && (!anySoloed || t.isSolo);
       const mute    = new Tone.Gain(audible ? 1 : 0).toDestination();
-      const pan     = new Tone.Panner(Math.max(-1, Math.min(1, t.pan ?? 0))).connect(mute);
+      // Insert effects built back-to-front so `head` always points at the
+      // next node downstream; bypassed/unknown effects are skipped entirely.
+      // Params (incl. delay dryThru) are baked at construction; Chorus/
+      // AutoFilter .start() runs inside the builder — valid in this offline
+      // context because the graph is constructed within the Offline callback.
+      let head = mute;
+      for (const e of [...(t.effects ?? [])].reverse()) {
+        if (e.bypass) continue;
+        const g = makeFxGraph(e.type, e.params);
+        if (!g) continue;
+        g.out.connect(head);
+        head = g.in;
+      }
+      const pan     = new Tone.Panner(Math.max(-1, Math.min(1, t.pan ?? 0))).connect(head);
       const volume  = new Tone.Gain(volForSliderValue(t.volume ?? 75)).connect(pan);
       trackVolumeByTrackId.set(t.id, volume);
     }

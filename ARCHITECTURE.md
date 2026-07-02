@@ -302,33 +302,68 @@ Custom right-click menu (`position: fixed; z-index: 500`, styled after `.exportM
 ### Region mute (`region.isMuted`)
 Boolean on the region shape (default false). **Audio:** `buildRegionEvents` early-returns `[]` when muted, so the region schedules no Part events — covering both the live engine and `audioBounce` (which reuses the same pure function); `isMuted` is part of `computePartKey` so a toggle rebuilds. **Visual:** a single `.regionMuted` class (`opacity: 0.5; filter: grayscale(0.85)`) applies when `r.isMuted || t.isMuted`, covering both region mute and **cascading track mute** (a muted track grays every region in its lane). Persisted additively in `projectIO.js`. Track master-mute audio is still the existing `trackMuteGain` writer; `isMuted` only adds the per-region gate + the unified visual.
 
-### Effects rack (skeleton) — per-track insert effects
-**State/UI skeleton only; no DSP wired yet.** Each track carries an `effects` array (default `[]`),
-each entry `{ id, type, bypass, params }` where **array order = signal-chain order** (no separate
-`order` field — array position is the source of truth, matching notes/regions). Available types,
-labels, and default params live in one registry, **`src/components/Workstation/effectDefs.js`**
-(`EFFECT_DEFS` = `filter`/`delay`/`reverb`, `EFFECT_TYPES`, `effectLabel()`), consumed by the
-CRUD defaults and both UIs.
+### Effects rack — per-track insert effects (state + UI + DSP)
+Each track carries an `effects` array (default `[]`), each entry `{ id, type, bypass, params }`
+where **array order = signal-chain order** (no separate `order` field — array position is the
+source of truth, matching notes/regions). Types, labels, and **param metadata**
+(`{ default, min, max, step, label, unit?, scale?, kind? }` — ranges are load-bearing: delay time
+≤ 1.0s matches `maxDelay: 1`, feedback ≤ 0.9 / roomSize ≤ 0.95 prevent self-oscillation;
+`kind: 'toggle'` marks boolean params) live in one registry,
+**`src/components/Workstation/effectDefs.js`** (`EFFECT_DEFS` = `filter`/`delay`/`reverb`/
+`doubler`/`autofilter`/`autowah`, `EFFECT_TYPES`, `effectLabel()`, `defaultParamsFor()`).
 
-- **CRUD** (`WorkstationShell.jsx`): `addEffect` / `removeEffect` / `toggleBypassEffect` /
-  `updateEffectSettings` are `useCallback`s using the same immutable nested-map pattern as the
-  other track mutators, so they inherit the **passive undo/redo recorder for free**. Effect IDs
-  come from `nextEffectIdRef` (`e<N>`), restored on load from `deserializeProject().nextEffectId`.
-- **Two synced views of `track.effects`** (single source of truth, threaded on the existing
-  `track` prop): a compact list in the RegionEditor left inspector
-  (`RegionEditor/EffectsList.jsx` — bypass dot, name, expand caret → placeholder, `No Effects`
-  empty state) and a full horizontal module grid on the **effects tab**
-  (`RegionEditor/EffectsRack.jsx` — empty state with *+ add effect*; populated → module panels
-  with a header bar `bypass / title / × delete` + placeholder body, bypassed panels dim). The
-  effects tab now renders `<EffectsRack>`; the placeholder overlay is scoped to the *instrument*
-  tab only.
-- **Persistence** (`projectIO.js`): `effects` is serialized/deserialized additively with guards
-  (old projects → `[]`). **`SCHEMA_VERSION` is intentionally not bumped** — the version check is
-  strict-equality, so a bump would reject every existing `.voxdaw` file; an additive defaulted
-  field is backward-compatible.
-- **Deferred audio (future):** the chosen shape slots into the per-track chain at
-  `trackPan → [effects] → trackMute` in `useWorkstationAudio.js` (per-track node Maps, delta-check
-  pattern) and mirrored in `audioBounce.js`. Not implemented in this phase.
+- **DSP factory (`src/components/Workstation/fxChain.js`,** peer to `synthFactory.js`**):**
+  `makeFxGraph(type, params)` → uniform `{ in, out, apply(params, rampSec), dispose }` per type
+  (unknown type → `null` passthrough). Six types: `filter` (`Tone.Filter` lowpass), `delay`
+  (composite, below), `reverb` (`Tone.Freeverb`), `doubler` (`Tone.Chorus` freq 1.5 / delayTime
+  3.5ms / spread 180, `.start()`), `autofilter` (`Tone.AutoFilter` LFO sweep, base 200 Hz,
+  `.start()`), `autowah` (`Tone.AutoWah` envelope follower, base 100 Hz, no start). Per-type
+  `KEY_MAPS` route state keys → Tone params (`q→Q`, `rate→frequency`, `depth→octaves` on the
+  wahs); the generic applier ramps Signal/Param targets and **direct-assigns plain-setter
+  props** (`Chorus.depth`, `octaves`). **Delay composite** (enables `dryThru`): FeedbackDelay
+  held at `wet: 1` with explicit parallel `dryLvl`/`wetLvl` gains into a summing out —
+  `wetLvl = wet`, `dryLvl = dryThru ? 1 : 1−wet` (linear complement — correct for correlated
+  dry/wet). The dry-thru toggle is a pure ramped gain move, zero topology change, click-free.
+  `makeFx(type, params, bypass)` → live wrapper `{ input, output, setBypass, updateParams,
+  dispose }`: input fans to `graph → onGain → output` and `offGain → output`; **bypass is a
+  complementary 0.05s gain crossfade** (the `setArpFx` pattern) so the graph stays static and
+  toggling never pops. Gains are *initialized* to the bypass state (loaded bypassed effects
+  start silent-correct, no ramp). Tone effects keep their **built-in `wet`** as a user param —
+  the wrapper adds bypass only, no second dry/wet stage.
+- **Live engine (`useWorkstationAudio.js`):** per-track chain is
+  `fade → volume → pan → [FX wrappers] → mute → Destination`. Three effects between track-node
+  creation (#1) and mute/solo sync (#2), declaration order load-bearing (chain built in the same
+  commit as node creation → project-load wiring is free): **1b structural sync** — per-track key
+  `effects.map(e => id+':'+type).join('|')`; on change, `pan.disconnect()` (1b is the *only*
+  post-creation writer of pan's output), dispose old wrappers, rewire pan→w0…wN→mute; `'' ` key
+  fallback means no-FX tracks are never rewired. **1c bypass sync** (delta map → `setBypass`) and
+  **1d param sync** (**object-reference compare** — `updateEffectSettings` mints a new params
+  object each call → `updateParams`, 0.02s ramps). Wrappers disposed on track removal + unmount
+  sweep. *Accepted limitation:* add/remove while playing is a synchronous rewire (possible
+  momentary click on that track); bypass — the frequent live action — is click-free.
+- **Offline bounce (`audioBounce.js`):** mirrors the chain; non-bypassed effects instantiated
+  back-to-front via `makeFxGraph` (`g.out.connect(head); head = g.in`) between pan and mute (no
+  crossfade machinery offline; bypassed effects simply not built; Chorus/AutoFilter `.start()`
+  runs inside the builder, valid in the Offline context). Default `tailSec` may truncate long
+  delay/reverb tails past the last region.
+- **CRUD** (`WorkstationShell.jsx`): `addEffect` (params from `defaultParamsFor`) / `removeEffect`
+  / `toggleBypassEffect` / `updateEffectSettings` (**merges** partial params — sliders send
+  single keys) — immutable nested-map `useCallback`s, so they inherit the **passive undo/redo
+  recorder for free** (burst coalescing folds a slider drag into one entry). Effect IDs come from
+  `nextEffectIdRef` (`e<N>`), restored on load from `deserializeProject().nextEffectId`.
+- **Two synced views of `track.effects`**: compact inspector list (`RegionEditor/EffectsList.jsx`)
+  and the effects-tab module grid (`RegionEditor/EffectsRack.jsx` — header `bypass / title / ×`,
+  body = registry-driven param rows: sliders with log scaling for filter cutoff / autofilter
+  rate (`min·(max/min)^v`) + value readouts, and **`kind: 'toggle'` metadata → pill button**
+  (delay `dry thru`); `onUpdate` → `updateEffectSettings`). **Inspector overflow:** `.inspector`
+  clips (`min-height: 0; overflow: hidden`); EffectsList's `.field` has `min-height: 0` and
+  `.list` is `flex: 0 1 auto; overflow-y: auto` with the 4px mint scrollbar — natural height
+  while it fits, shrink-and-scroll when it doesn't, header/instrument pinned above and the
+  add-select pinned right below the last row.
+- **Persistence** (`projectIO.js`): `effects` (incl. params) serialized/deserialized additively
+  with guards (old projects → `[]`). **`SCHEMA_VERSION` is intentionally not bumped** — the
+  version check is strict-equality, so a bump would reject every existing `.voxdaw` file; an
+  additive defaulted field is backward-compatible.
 
 ### Undo/redo history (Phase 139, `WorkstationShell.jsx`)
 Tracks **arrangement data only** (`tracks`/`regions`/`notes` — mute/solo/volume/pan/instrument live on those objects); UI state (zoom/scroll/playhead/selection) is not tracked. A **passive recorder** `useEffect([tracks, regions, notes])` records history *after* React commits, so React 18 batching coalesces a multi-setter action (e.g. split = `setRegions`+`setNotes`) into one entry — **zero changes to the ~46 mutation sites**. **Leading-edge burst coalescing** (push the pre-change snapshot on the first change of a burst, suppress further pushes for ~200ms) folds a drag's mid-flight commits + continuous volume/pan slider commits into one entry. Snapshots store array **references** (state is updated immutably). `undo`/`redo` swap snapshots between `past`/`future`/`latestRef` under a `timeTravelingRef` guard, then `silenceAll()` + `recomputeFades()` (no forced pause); capped at `MAX_HISTORY = 100`. Toolbar ↶/↷ (disabled via `canUndo`/`canRedo`) + Cmd/Ctrl+Z / Cmd/Ctrl+Shift+Z / Cmd/Ctrl+Y, input-guarded. **Gotcha (fixed):** the `setFuture`/`setPast` updater closures must capture the present (`const current = latestRef.current`) *before* `latestRef` is reassigned — reading it inside the updater (which runs later) grabbed the post-mutation value, making the first redo a no-op.

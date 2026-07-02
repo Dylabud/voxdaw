@@ -8,7 +8,7 @@ import { firstLoopOffsetMeasures, loopBoundaries } from './loopMath';
 import useWorkstationAudio from '../../hooks/useWorkstationAudio';
 import PanKnob from './PanKnob';
 import { serializeProject, deserializeProject, downloadJSON, readJSONFile } from './projectIO';
-import { EFFECT_DEFS } from './effectDefs';
+import { EFFECT_DEFS, defaultParamsFor } from './effectDefs';
 import { bounceProject } from './audioBounce';
 import { exportWAV, exportMP3 } from '../../utils/audioExport';
 import { transcribeAudio } from './transcribeAudio';
@@ -375,7 +375,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const addEffect = useCallback((trackId, fxType) => {
     const def = EFFECT_DEFS[fxType];
     if (!def) return;
-    const fx = { id: `e${nextEffectIdRef.current++}`, type: fxType, bypass: false, params: { ...def.params } };
+    const fx = { id: `e${nextEffectIdRef.current++}`, type: fxType, bypass: false, params: defaultParamsFor(fxType) };
     setTracks(prev => prev.map(t =>
       t.id === trackId ? { ...t, effects: [...(t.effects ?? []), fx] } : t));
   }, []);

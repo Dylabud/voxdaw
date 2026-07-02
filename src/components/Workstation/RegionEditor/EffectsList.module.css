@@ -4,6 +4,10 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* min-height: 0 lets this section (the inspector's last child) shrink when
+     the column runs out of room — the list inside then scrolls. Siblings keep
+     min-height: auto, so only the effects list ever gives up space. */
+  min-height: 0;
 }
 .fieldLabel {
   font-size: 9px;
@@ -27,7 +31,17 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* Natural height while it fits (add-select sits right below the last row);
+     shrink-and-scroll when it doesn't. Never grows to pin the select down. */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
+/* Thin mint scrollbar — the scrollable-list convention (ContextMenu submenu,
+   GestureSettings rowList). */
+.list::-webkit-scrollbar { width: 4px; }
+.list::-webkit-scrollbar-track { background: transparent; }
+.list::-webkit-scrollbar-thumb { background: rgba(93, 202, 165, 0.2); border-radius: 2px; }
 
 .item {
   border: 1px solid var(--border-subtle);
