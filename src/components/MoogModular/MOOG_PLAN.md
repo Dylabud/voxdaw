@@ -39,6 +39,21 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-07-02] Chord Seq glide + bigger chord buttons, Keyboard glide staircase fix (Phase 50)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+
+Two independent items.
+
+**Chord Sequencer — GLIDE knob + larger chord display buttons (`ChordSeqModule`):**
+- Added a `GLIDE` knob (in the selector row beside CLOCK DIV / ROOT OCT) that portamentos the **root/3rd/5th** voice CV outs. Knob maps 0–1 → 0–1.5 s (same convention as the 960 seq + 953 keyboard). New `onGlideChange` prop → `audio.setChordSeqGlide` → new `chordSeqGlideRef`.
+- Glide is applied **at each connected VCO's `glideBus`**, not on the `chordSeqRootOut/ThirdOut/FifthOut` signals themselves — those still jump instantly (`setValueAtTime`) because they also feed the analyser/quantizer paths; ramping them would smear the CV other modules sample. This mirrors the established `seq-pitch-out` convention (instant signal, ramp at the bus), so portamento lands *after* any quantizer and never staircases. In the chord `Tone.Loop`, the per-VCO glideBus write is now `chordGlide < 0.001 ? setValueAtTime : rampTo(vhz, chordGlide, time)`. At glide 0 the behavior is byte-for-byte identical to before.
+- Enlarged the chord display buttons: `.chordSeqRoot` 26→38px / 14→20px font; `.chordSeqType` 18→26px / 10→13px font.
+
+**Keyboard glide — staircase → pure smooth glide (`vibratoTick` rAF):**
+- The kbd glide+vibrato rAF (sole writer of kbd-connected VCO glideBuses) delivered each per-frame Hz with `_param.setValueAtTime(hz, now)` — a **zero-order hold**, so a portamento sweep rendered as ~60 discrete pitch steps (the audible staircase). The JS glide trajectory (`kbdCurrentHzRef` exponential lerp) was already smooth; only the AudioParam delivery was stepped.
+- Fix: when glide is active (`glide ≥ 0.001`) use `_param.linearRampToValueAtTime(hz, now + rampAhead)` (rampAhead = `max(dt*2, 1/30)`, ~2 frames of lookahead so the param is always mid-ramp and never holds flat) — audio-rate linear interpolation between frame targets = continuous glide (and smoother vibrato on held notes). Glide-off keeps the instant `setValueAtTime` so note attacks stay snappy (no 32 ms slur on every keypress). Stays in the native `_param` lane (matching the existing deliberate avoidance of Tone's Param event queue); sole-writer means the successive ramps chain cleanly.
+
 ### [2026-06-26 → 06-28] Vocoder Condense, Row 3 placement + faceplate rework (Phase 49)
 
 **Files modified:** `MoogKnob.jsx`, `MoogKnob.module.css`, `MoogShell.jsx`, `MoogShell.module.css`

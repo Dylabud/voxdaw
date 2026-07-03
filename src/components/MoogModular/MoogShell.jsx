@@ -845,7 +845,7 @@ const CHORD_TYPE_LABELS = {
 const ROOT_OCT_STEPS  = [-3, -2, -1, 0, 1, 2, 3];
 const ROOT_OCT_LABELS = { '-3': '-3', '-2': '-2', '-1': '-1', '0': '0', '1': '+1', '2': '+2', '3': '+3' };
 
-function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback, onRootOctaveChange }) {
+function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback, onRootOctaveChange, onGlideChange }) {
   const [steps, setSteps] = useState(() =>
     Array.from({ length: 8 }, (_, i) => ({
       rootClass: [9, 9, 5, 5, 0, 0, 4, 4][i],
@@ -854,6 +854,7 @@ function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback, onRoot
   );
   const [division,   setDivision]   = useState('1m');
   const [rootOctave, setRootOctave] = useState(0);
+  const [glide,      setGlide]      = useState(0); // glide time in seconds (0–1.5)
 
   const ledRefs     = useRef([]);
   const prevStepRef = useRef(-1);
@@ -861,6 +862,10 @@ function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback, onRoot
   useEffect(() => { onStepsChange?.(steps); },             [steps,       onStepsChange]);
   useEffect(() => { onDivisionChange?.(division); },       [division,    onDivisionChange]);
   useEffect(() => { onRootOctaveChange?.(rootOctave); },   [rootOctave,  onRootOctaveChange]);
+  useEffect(() => { onGlideChange?.(glide); },             [glide,       onGlideChange]);
+
+  // Map knob 0–1 to 0–1.5 s glide time (matches the 960/953 glide convention)
+  const handleGlideKnob = (v) => setGlide(v * 1.5);
 
   useEffect(() => {
     onSetCallback?.((idx) => {
@@ -951,6 +956,13 @@ function ChordSeqModule({ onStepsChange, onDivisionChange, onSetCallback, onRoot
               <span className={styles.selectorLabel}>ROOT OCT</span>
               <span className={styles.selectorValue}>{ROOT_OCT_LABELS[String(rootOctave)]}</span>
             </div>
+            <MoogKnob
+              label="GLIDE"
+              size="sm"
+              value={glide / 1.5}
+              onChange={handleGlideKnob}
+              defaultValue={0}
+            />
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
@@ -1684,6 +1696,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
                 onDivisionChange={audio.setChordSeqDivision}
                 onSetCallback={audio.setChordSeqStepCallback}
                 onRootOctaveChange={audio.setChordSeqRootOctave}
+                onGlideChange={audio.setChordSeqGlide}
               />
               <QuantizerModule
                 onParamUpdate={audio.updateQuantizerParams}

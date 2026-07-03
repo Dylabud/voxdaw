@@ -327,6 +327,7 @@ export default function useMoogAudio() {
   const seqGlideRef   = useRef(0);
   const seq2GlideRef  = useRef(0);
   const kbdGlideRef   = useRef(0);
+  const chordSeqGlideRef = useRef(0); // glide time (s) for chordseq root/3rd/5th CV outs
   // Keyboard vibrato — depth in Hz, rate in Hz. Driven by a rAF loop inside useEffect.
   const kbdVibratoDepthRef = useRef(0);
   const kbdVibratoRateRef  = useRef(5);
@@ -939,11 +940,18 @@ export default function useMoogAudio() {
       n.chordSeqRootOut.setValueAtTime(voiceHz[0], time);
       n.chordSeqThirdOut.setValueAtTime(voiceHz[1], time);
       n.chordSeqFifthOut.setValueAtTime(voiceHz[2], time);
+      // Glide (portamento) for the voice CV outs — applied at each VCO's glideBus,
+      // matching the seq-pitch-out convention (instant signal jump, ramp at the bus).
+      const chordGlide = chordSeqGlideRef.current;
+      const VOICE_HZ = { 'chordseq-root-out': voiceHz[0], 'chordseq-3rd-out': voiceHz[1], 'chordseq-5th-out': voiceHz[2] };
       for (const vcoId of VCO_IDS) {
         const src = vcoActiveCvRef.current[vcoId];
-        if (src === 'chordseq-root-out') n[`${vcoId}GlideBus`]?.setValueAtTime(voiceHz[0], time);
-        if (src === 'chordseq-3rd-out')  n[`${vcoId}GlideBus`]?.setValueAtTime(voiceHz[1], time);
-        if (src === 'chordseq-5th-out')  n[`${vcoId}GlideBus`]?.setValueAtTime(voiceHz[2], time);
+        const vhz = VOICE_HZ[src];
+        if (vhz === undefined) continue;
+        const gb = n[`${vcoId}GlideBus`];
+        if (!gb) continue;
+        if (chordGlide < 0.001) gb.setValueAtTime(vhz, time);
+        else                    gb.rampTo(vhz, chordGlide, time);
       }
 
       if (chordSeqStepCbRef.current) chordSeqStepCbRef.current(idx);
@@ -1075,12 +1083,23 @@ export default function useMoogAudio() {
         ? 0
         : effectiveDepth * Math.sin(2 * Math.PI * kbdVibratoRateRef.current * now);
 
-      // Write once per frame — no scheduled events, no conflicts
+      // Write once per frame. During glide (glide > 0) we linearly ramp to the new
+      // Hz over ~2 frames instead of a setValueAtTime hold — a bare setValueAtTime is
+      // a zero-order hold, so the ~60 fps target updates render as an audible staircase
+      // during a portamento sweep. linearRampToValueAtTime interpolates at audio rate,
+      // giving a pure continuous glide (and smoother vibrato on held notes). Glide-off
+      // keeps the instant setValueAtTime so note attacks stay snappy (no 32 ms slur).
+      // This rAF is the sole writer of these glideBuses, so the ramps chain cleanly.
       const hz = Math.max(1, kbdCurrentHzRef.current + swing);
       kbdLastOutputHzRef.current = hz;
+      const rampAhead = Math.max(dt * 2, 1 / 30); // stay ahead of the next frame so the param never holds flat
+      const gliding = glide >= 0.001;
       for (const vcoId of VCO_IDS) {
         if (vcoActiveCvRef.current[vcoId] !== 'kbd-pitch-out') continue;
-        n[`${vcoId}GlideBus`]?._param.setValueAtTime(hz, now);
+        const p = n[`${vcoId}GlideBus`]?._param;
+        if (!p) continue;
+        if (gliding) p.linearRampToValueAtTime(hz, now + rampAhead);
+        else         p.setValueAtTime(hz, now);
       }
     };
     vibratoTick();
@@ -1842,6 +1861,7 @@ export default function useMoogAudio() {
   }, []);
 
   const setSeqGlide  = useCallback((v) => { seqGlideRef.current  = v; }, []);
+  const setChordSeqGlide = useCallback((v) => { chordSeqGlideRef.current = v; }, []);
   const setSeq2Glide = useCallback((v) => { seq2GlideRef.current = v; }, []);
   const setKbdGlide  = useCallback((v) => { kbdGlideRef.current  = v; }, []);
 
@@ -2022,7 +2042,7 @@ export default function useMoogAudio() {
     setTempo, updateSequencerSteps, setSeqStepCallback,
     updateSeq2Steps, setSeq2StepCallback, updateKeyboard,
     updateChordSeqSteps, setChordSeqStepCallback, setChordSeqDivision,
-    setChordSeqChordCallback, setChordSeqRootOctave,
+    setChordSeqChordCallback, setChordSeqRootOctave, setChordSeqGlide,
     setVco1SyncEnabled, setVco2SyncEnabled, setVco3SyncEnabled, setVco4SyncEnabled, setVco5SyncEnabled,
     setSeqGlide, setSeq2Glide, setKbdGlide, setKbdVibrato,
     updateFFBParams, getFFBAnalyserData,
