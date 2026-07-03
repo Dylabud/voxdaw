@@ -111,14 +111,72 @@
 .moduleBody {
   min-height: 90px;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  text-align: center;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 14px 12px;
+}
+
+.noParams {
+  margin: auto;
   font-size: 9px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-dimmer);
+}
+
+/* ── Param rows ────────────────────────────────────────── */
+.paramRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.paramLabel {
+  flex: 0 0 44px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dimmer);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.paramSlider {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--track-color, var(--accent-color));
+  cursor: pointer;
+}
+.paramValue {
+  flex: 0 0 42px;
+  text-align: right;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Boolean param — pill toggle, styled after the header .bypass pill. */
+.paramToggle {
+  flex: 1 1 auto;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 8px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: 4px 6px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.paramToggleOn {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+  color: var(--bg-panel);
 }
 
 /* Trailing add slot in a populated chain. */

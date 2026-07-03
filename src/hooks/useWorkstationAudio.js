@@ -1,13 +1,15 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import * as Tone from 'tone';
 import { makeSynth, isSampledInstrument } from '../components/Workstation/synthFactory';
+import { makeFx } from '../components/Workstation/fxChain';
 import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
 
 /**
  * Workstation playback engine — peer to useAudioEngine / useVocoder / useAutotune.
  *
  * Per-region signal flow:
- *   regionSynth → regionFadeGain → trackVolumeGain → trackMuteGain → Destination
+ *   regionSynth → regionFadeGain → trackVolumeGain → trackPanner
+ *     → [insert FX wrappers, track.effects order] → trackMuteGain → Destination
  *
  * - regionFadeGain runs a per-region linear fade envelope (in→out, with floors).
  *   Scheduled via Tone.Transport.schedule so it fires synchronously with the
@@ -28,6 +30,12 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
   const pannersByTrackIdRef       = useRef(new Map()); // trackId → Panner
   const appliedVolumeByTrackIdRef = useRef(new Map()); // trackId → last v 0..100
   const appliedPanByTrackIdRef    = useRef(new Map()); // trackId → last pan -1..+1
+
+  // Per-track insert-FX chain (pan → wrappers → mute)
+  const fxChainsByTrackIdRef     = useRef(new Map()); // trackId → [makeFx wrapper] (parallel to track.effects)
+  const appliedFxKeyByTrackIdRef = useRef(new Map()); // trackId → structural key "id:type|id:type"
+  const appliedFxBypassByIdRef   = useRef(new Map()); // fxId → last bypass bool
+  const appliedFxParamsByIdRef   = useRef(new Map()); // fxId → last params object reference
 
   // Refs into latest props for recomputeFades (called by shell from event handlers)
   const regionsRef = useRef(regions); regionsRef.current = regions;
@@ -55,7 +63,10 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
   }, []);
 
   // ── 1. Track sync — owns volume + pan + mute nodes ─────────────────────
-  // Signal:  regionFadeGain → volume → pan → mute → Destination
+  // Signal:  regionFadeGain → volume → pan → [FX chain, effect 1b] → mute → Destination
+  // Creation wires pan → mute directly; effect 1b re-splices the FX chain in
+  // between whenever track.effects structure changes (and is the ONLY code
+  // that touches pan's output after creation).
   useEffect(() => {
     const mutes   = mutesByTrackIdRef.current;
     const volumes = volumesByTrackIdRef.current;
@@ -86,6 +97,110 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       volumes.set(t.id, volume);
       volApp.set(t.id, t.volume ?? 75);
       panApp.set(t.id, t.pan ?? 0);
+    }
+  }, [tracks]);
+
+  // ── 1b. FX chain structural sync — owns pan's output topology ─────────
+  // Rebuilds a track's wrapper chain only when the effects STRUCTURE changes
+  // (ids/types/order — bypass toggles and param drags never rebuild). Runs
+  // after effect #1 in the same commit, so a loaded project's chain is wired
+  // on the first pass for free. Declaration order is load-bearing.
+  //
+  // Accepted limitation: add/remove while the Transport plays is a synchronous
+  // rewire — a momentary click on that track is possible. Bypass (the frequent
+  // live action) is click-free via the wrapper crossfade.
+  useEffect(() => {
+    const chains  = fxChainsByTrackIdRef.current;
+    const keyApp  = appliedFxKeyByTrackIdRef.current;
+    const bypApp  = appliedFxBypassByIdRef.current;
+    const parApp  = appliedFxParamsByIdRef.current;
+    const panners = pannersByTrackIdRef.current;
+    const mutes   = mutesByTrackIdRef.current;
+    const liveIds = new Set(tracks.map(t => t.id));
+
+    const disposeChain = (trackId) => {
+      for (const w of chains.get(trackId) ?? []) {
+        bypApp.delete(w.fxId);
+        parApp.delete(w.fxId);
+        w.dispose();
+      }
+      chains.delete(trackId);
+    };
+
+    // Teardown for removed tracks (effect #1 already disposed their nodes).
+    for (const id of [...chains.keys()]) {
+      if (liveIds.has(id)) continue;
+      disposeChain(id);
+      keyApp.delete(id);
+    }
+
+    for (const t of tracks) {
+      const pan  = panners.get(t.id);
+      const mute = mutes.get(t.id);
+      if (!pan || !mute) continue; // race during initial mount — will reconcile on next pass
+      const fxList = t.effects ?? [];
+      const key = fxList.map(e => `${e.id}:${e.type}`).join('|');
+      // '' fallback: a fresh no-FX track skips entirely — the pan→mute wire
+      // from effect #1 stands and is never touched.
+      if ((keyApp.get(t.id) ?? '') === key) continue;
+
+      // Rebuild: sever pan's output (disconnect() drops ALL its connections,
+      // including the pan→mute made at creation — intended), then rewire
+      // pan → w0 … wN → mute (or straight pan → mute when the rack is empty).
+      pan.disconnect();
+      disposeChain(t.id);
+      const wrappers = fxList.map(e =>
+        Object.assign(makeFx(e.type, e.params, e.bypass), { fxId: e.id }));
+      let prevOut = pan;
+      for (const w of wrappers) {
+        prevOut.connect(w.input);
+        prevOut = w.output;
+      }
+      prevOut.connect(mute);
+      chains.set(t.id, wrappers);
+      keyApp.set(t.id, key);
+      // Seed applied maps — makeFx already initialized bypass gains + params,
+      // so 1c/1d must not re-ramp them this commit.
+      for (const e of fxList) {
+        bypApp.set(e.id, !!e.bypass);
+        parApp.set(e.id, e.params);
+      }
+    }
+  }, [tracks]);
+
+  // ── 1c. FX bypass sync — sole post-init writer of the crossfade gains ─
+  useEffect(() => {
+    const chains = fxChainsByTrackIdRef.current;
+    const bypApp = appliedFxBypassByIdRef.current;
+    for (const t of tracks) {
+      const wrappers = chains.get(t.id);
+      if (!wrappers) continue;
+      for (const e of t.effects ?? []) {
+        if (bypApp.get(e.id) === !!e.bypass) continue;
+        const w = wrappers.find(x => x.fxId === e.id);
+        if (!w) continue;
+        w.setBypass(!!e.bypass);
+        bypApp.set(e.id, !!e.bypass);
+      }
+    }
+  }, [tracks]);
+
+  // ── 1d. FX param sync — sole post-construction writer of node params ──
+  // Reference compare is a correct delta check: updateEffectSettings always
+  // mints a new params object, and undo/redo restores different snapshot refs.
+  useEffect(() => {
+    const chains = fxChainsByTrackIdRef.current;
+    const parApp = appliedFxParamsByIdRef.current;
+    for (const t of tracks) {
+      const wrappers = chains.get(t.id);
+      if (!wrappers) continue;
+      for (const e of t.effects ?? []) {
+        if (parApp.get(e.id) === e.params) continue;
+        const w = wrappers.find(x => x.fxId === e.id);
+        if (!w) continue;
+        w.updateParams(e.params);
+        parApp.set(e.id, e.params);
+      }
     }
   }, [tracks]);
 
@@ -307,6 +422,10 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     const applied = appliedRegionStateRef.current;
     const volApp  = appliedVolumeByTrackIdRef.current;
     const panApp  = appliedPanByTrackIdRef.current;
+    const fxChains = fxChainsByTrackIdRef.current;
+    const fxKeyApp = appliedFxKeyByTrackIdRef.current;
+    const fxBypApp = appliedFxBypassByIdRef.current;
+    const fxParApp = appliedFxParamsByIdRef.current;
     return () => {
       Tone.Transport.stop();
       Tone.Transport.cancel(0);
@@ -316,10 +435,15 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       for (const g of fades.values())   g.dispose();
       for (const g of volumes.values()) g.dispose();
       for (const p of panners.values()) p.dispose();
+      for (const ws of fxChains.values()) for (const w of ws) w.dispose();
       for (const g of mutes.values())   g.dispose();
       mutes.clear();
       volumes.clear();
       panners.clear();
+      fxChains.clear();
+      fxKeyApp.clear();
+      fxBypApp.clear();
+      fxParApp.clear();
       synths.clear();
       fades.clear();
       parts.clear();

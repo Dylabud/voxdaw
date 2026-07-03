@@ -25,6 +25,30 @@ VoxDaw is actively under development. Core gesture engine, audio DSP chain, arpe
 
 ## Completed Steps Log
 
+* **[2026-07-02] Workstation FX Expansion — Doubler / Auto Filter / Auto Wah + Delay Dry-Thru + Inspector Overflow Fix (`fxChain.js`, `effectDefs.js`, `audioBounce.js`, `EffectsRack.jsx` + `.module.css`, `EffectsList.module.css`, `RegionEditor.module.css`):**
+
+  **`makeFxGraph` refactor:** `makeFxNode` (single bare node) → per-type builders returning uniform `{ in, out, apply, dispose }`; per-type `KEY_MAPS` (global map broke: `depth` = `Chorus.depth` on doubler but `octaves` on the wahs); generic applier now direct-assigns **plain-setter** Tone props (Chorus.depth, octaves) and ramps Signal/Param targets. Wrapper API unchanged → **zero changes to `useWorkstationAudio.js`**; `audioBounce.js` swapped to `g.out.connect(head); head = g.in`.
+
+  **Delay dry-thru:** delay rebuilt as a composite — FeedbackDelay pinned `wet: 1` + explicit parallel `dryLvl`/`wetLvl` gains (`dryLvl = dryThru ? 1 : 1−wet`, linear complement for correlated signals). Toggle = ramped gain move only, zero topology change, click-free. `dryThru: { kind: 'toggle' }` metadata → new `.paramToggle` pill in EffectsRack (styled after the `.bypass` pill).
+
+  **Three new types:** `doubler` (`Tone.Chorus` 1.5 Hz / 3.5 ms / spread 180, `.start()`; depth + mix), `autofilter` (`Tone.AutoFilter` LFO sweep base 200 Hz, `.start()`; rate log-scaled + depth-octaves + mix), `autowah` (`Tone.AutoWah` envelope follower base 100 Hz; depth + res + mix). Verified Tone 15 typings: Chorus/AutoFilter need `.start()`, AutoWah doesn't; wet/frequency/Q/AutoFilter.depth rampable, Chorus.depth + octaves plain setters.
+
+  **Inspector overflow fix (verified, not Gemini's guess):** `.inspector` had no overflow and nothing clipped up to the shell root; EffectsList is the column's *last* child. Fix: `.inspector { min-height: 0; overflow: hidden }`, EffectsList `.field { min-height: 0 }`, `.list { flex: 0 1 auto; min-height: 0; overflow-y: auto }` + 4px mint scrollbar (ContextMenu convention; Dylan chose visible over Gemini's hidden). `flex: 0 1 auto` (not Gemini's `flex: 1`) so the list takes natural height while it fits — add-select sits right below the last row instead of pinned to the column bottom.
+
+  **Critique of Gemini:** his dry-thru ("force dryNode.gain to 1") assumed his previously-rejected FXWrapper dry/wet stage existed — and Tone's built-in wet CrossFade constrains dry = f(wet), so dry can't be held at 1; the composite rebuild was the real fix. His "Auto-Wah = Tone.AutoFilter" is a naming error (LFO sweep ≠ envelope wah) — shipped both honestly-named per Dylan. His CSS fix targeted the wrong element (nothing needed `height: 100%`; the panel is already height-bounded) and `flex: 1` on the list would have mis-pinned the add-select.
+
+* **[2026-07-02] Workstation Effects Rack — DSP wiring + param UI (`fxChain.js` new, `useWorkstationAudio.js`, `audioBounce.js`, `effectDefs.js`, `EffectsRack.jsx` + `.module.css`, `WorkstationShell.jsx` 1-line):**
+
+  **`fxChain.js` factory (peer to `synthFactory.js`):** `makeFxNode(type, params)` (bare `Tone.Filter` lowpass / `Tone.FeedbackDelay maxDelay:1` / `Tone.Freeverb`; unknown → null passthrough), `applyFxParams` (key map `q→Q`, `time→delayTime`; ramp or direct set), `makeFx(type, params, bypass)` — wrapper with **click-free bypass via complementary 0.05s gain crossfade** (the proven `setArpFx` pattern): `input → node → onGain → output` ∥ `input → offGain → output`. Gains initialized to bypass state so loaded projects start silent-correct. Tone's built-in `wet` stays the user mix param — no second dry/wet stage.
+
+  **Live engine:** chain inserted at `pan → [FX] → mute` via three new effects (1b/1c/1d) between track-node creation and mute/solo sync — declaration order load-bearing (project-load wiring free in the same commit). 1b rebuilds only on **structural** key change (`id:type` join — bypass/param changes never rebuild) and is the sole post-creation writer of pan's output; 1c syncs bypass (delta map); 1d syncs params (**object-reference compare** — `updateEffectSettings` mints new objects). Dispose on track removal + unmount sweep. Accepted limitation: add/remove mid-playback = synchronous rewire, possible momentary click (bypass is the click-free path).
+
+  **Bounce parity:** `audioBounce.js` threads non-bypassed effects back-to-front via `makeFxNode` between pan and mute (bypassed effects simply not instantiated offline).
+
+  **Param UI:** `EFFECT_DEFS` params → metadata (`default/min/max/step/label/unit/scale`; delay time capped 1.0s = `maxDelay`, feedback ≤ 0.9, roomSize ≤ 0.95 for stability) + `defaultParamsFor()`; `addEffect` switched to it (old `{ ...def.params }` would have spread metadata objects into state). `EffectsRack.jsx` module bodies = registry-driven slider rows (log scaling for cutoff, formatted readouts) → `onUpdate` (merge semantics; history burst-coalescing = one undo entry per drag).
+
+  **Critique of Gemini:** core dry/wet-wrapper idea kept (it's our `setArpFx` pattern), but: rejected his `setMix` equal-power crossfade (Tone effects already have a built-in `wet` CrossFade — double-mixing; and dry/wet of one source are correlated → linear is correct anyway); class → factory function (`synthFactory.js` precedent); he missed `audioBounce.js` entirely (exports wouldn't match playback); his "Track Routing Manager" ignored the existing per-track Maps + delta-key reconcile engine — the chain slots in as three peer effects preserving Single Writer Per Node.
+
 * **[2026-06-14] Moog Modular Session — Phases 37–49 (VCO expansion, sequencer fixes, keyboard effects, new modules):**
 
   **Lights-Out Mode:** `data-lights-out="true"` attribute on `.cabinet`; CSS attribute selectors hide all faceplates, knobs, text, jacks, cables, keyboard — only LEDs, sequencer active-step indicators, power lamp, oscilloscope, and gate-on buttons remain visible. Toggle button at top-right of shell (`lightsOutBtn` / `lightsOutActive`).
