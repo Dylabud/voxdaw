@@ -2146,11 +2146,18 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // Capture-phase + blur-active-element so a previously-focused Mute/Solo/✎
   // button doesn't also fire its default activate-on-keyup. preventDefault
   // also blocks page scroll. Bypass for text inputs.
+  //
+  // Cross-page guard: Root.js keeps every visited page mounted under
+  // display:none, so these window listeners stay attached while the user is
+  // on the VoxTool/Moog pages — without the guard, Space there silently
+  // toggles the hidden Workstation transport. offsetParent is null under a
+  // display:none ancestor (shell is never position:fixed, so this is exact).
   useEffect(() => {
     const isTextField = (el) =>
       !el || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable;
     const onKey = (e) => {
       if (e.code !== 'Space') return;
+      if (!shellRef.current || shellRef.current.offsetParent === null) return; // page hidden
       if (isTextField(document.activeElement)) return;
       e.preventDefault();
       e.stopPropagation();
@@ -2161,6 +2168,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     };
     const onKeyUp = (e) => {
       if (e.code !== 'Space') return;
+      if (!shellRef.current || shellRef.current.offsetParent === null) return; // page hidden
       if (isTextField(document.activeElement)) return;
       e.preventDefault();
       e.stopPropagation();
@@ -2176,6 +2184,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // ── Delete / Backspace / Copy / Paste keyboard handlers ─────
   useEffect(() => {
     const onKey = (e) => {
+      // Same cross-page guard as the spacebar hijack — a Cmd+Z / Delete on the
+      // VoxTool/Moog pages must not silently mutate the hidden arrangement.
+      if (!shellRef.current || shellRef.current.offsetParent === null) return;
       const el = document.activeElement;
       const inInput = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.isContentEditable;
 

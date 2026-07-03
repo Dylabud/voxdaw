@@ -6,8 +6,10 @@ import * as Tone from 'tone';
  * makeFxGraph(type, params) builds the bare effect graph for a type as a
  * uniform { in, out, apply, dispose } object — shared by the live wrapper
  * (makeFx) and the offline bounce (audioBounce.js). Most types are a single
- * Tone node (in === out); the delay is a composite (see below) so its
- * "dry thru" toggle is a pure gain move with zero topology change.
+ * Tone node (in === out); delay and reverb are composites (see below) — delay
+ * so its "dry thru" toggle and in-loop cut filters are expressible, reverb so
+ * pre-delay hits only the wet path. Both keep param changes as pure gain/
+ * param moves with zero topology change.
  *
  * makeFx(type, params, bypass) wraps a graph with click-free bypass:
  *
@@ -28,27 +30,46 @@ import * as Tone from 'tone';
 // State-param key → Tone node param, per type. Types absent here use identity
 // mapping. All Signal/Param targets are rampable in Tone 15 (verified: Filter
 // frequency/Q, AutoFilter frequency/wet, AutoWah Q/wet, Chorus frequency/wet,
-// Freeverb roomSize/wet); plain-setter targets (Chorus.depth, octaves on the
-// wahs) are assigned directly by applyMappedParams below.
+// Freeverb roomSize/wet, EQ3 low/mid/high, Compressor threshold/ratio/attack/
+// release, Phaser frequency); plain-setter targets (Chorus.depth, octaves on
+// the wahs/phaser, Distortion.distortion, Freeverb.dampening, Filter.type)
+// are assigned directly by applyMappedParams below.
 const KEY_MAPS = {
   filter:     { q: 'Q' },
   autofilter: { rate: 'frequency', depth: 'octaves' },
   autowah:    { depth: 'octaves', q: 'Q' },
+  distortion: { drive: 'distortion' },
+  phaser:     { rate: 'frequency', depth: 'octaves' },
+};
+
+// Per-type value clamps applied before ramp/assign. compressor.threshold must
+// stay strictly below 0: Tone's Param.setRampPoint swaps an exact current
+// value of 0 for +1e-7 (_minOutput — exponential ramps can't start at 0) and
+// its own [-100, 0] assert then throws, crashing the React tree. The UI max
+// is −0.1 (effectDefs.js); this clamp covers legacy saves holding 0.
+const VALUE_CLAMPS = {
+  compressor: { threshold: (v) => Math.min(v, -0.1) },
 };
 
 // Generic applier: rampable targets get rampTo (live) or .value (offline/init);
-// plain getter/setter properties get direct assignment. Booleans and unknown
+// plain getter/setter properties get direct assignment. Strings assign to
+// plain setters only (enum params like Filter.type). Booleans and unknown
 // keys are skipped (composite types handle their own booleans in a custom apply).
-function applyMappedParams(node, keyMap, params, rampSec) {
+function applyMappedParams(node, keyMap, params, rampSec, clamps) {
   for (const [key, value] of Object.entries(params)) {
-    if (typeof value !== 'number') continue;
     const mapped = keyMap[key] ?? key;
+    if (typeof value === 'string') {
+      if (mapped in node) node[mapped] = value; // enum plain setter (e.g. Filter.type)
+      continue;
+    }
+    if (typeof value !== 'number') continue;
+    const clampedValue = clamps?.[key] ? clamps[key](value) : value;
     const target = node[mapped];
     if (target != null && typeof target.rampTo === 'function') {
-      if (rampSec > 0) target.rampTo(value, rampSec);
-      else target.value = value;
+      if (rampSec > 0) target.rampTo(clampedValue, rampSec);
+      else target.value = clampedValue;
     } else if (mapped in node) {
-      node[mapped] = value; // plain setter (e.g. Chorus.depth, octaves)
+      node[mapped] = clampedValue; // plain setter (e.g. Chorus.depth, octaves)
     }
   }
 }
@@ -56,39 +77,51 @@ function applyMappedParams(node, keyMap, params, rampSec) {
 // Single-node graph helper.
 function simpleGraph(node, type) {
   const keyMap = KEY_MAPS[type] ?? {};
+  const clamps = VALUE_CLAMPS[type];
   return {
     in: node,
     out: node,
-    apply: (params, rampSec = 0) => applyMappedParams(node, keyMap, params, rampSec),
+    apply: (params, rampSec = 0) => applyMappedParams(node, keyMap, params, rampSec, clamps),
     dispose: () => node.dispose(),
   };
 }
 
-// Delay composite — FeedbackDelay held fully wet with explicit parallel
-// dry/wet level gains, so "dry thru" (dry pinned at 1 while echoes ride on
-// top) is expressible. With dryThru off, dry = 1 − wet (linear complement —
-// correct for correlated dry/wet of the same source).
+// Delay composite — explicit feedback loop on a raw Tone.Delay with the
+// low/high cut filters INSIDE the loop, so each repeat passes through them
+// again and echoes get progressively darker/thinner (standard DAW delay).
+// (Tone.FeedbackDelay's internal loop is sealed — it can't be filtered.)
+// Parallel dry/wet level gains make "dry thru" (dry pinned at 1 while echoes
+// ride on top) expressible. With dryThru off, dry = 1 − wet (linear
+// complement — correct for correlated dry/wet of the same source).
 //
-//   in(Gain 1) → FeedbackDelay(wet:1, maxDelay:1) → wetLvl ─┐
-//         └──────────────→ dryLvl ─────────────────────────┴→ out(Gain 1)
+//   in(Gain 1) → sum(Gain 1) → Delay(maxDelay:1) → hp(lowCut) → lp(highCut) ─┬→ wetLvl ─┐
+//         │           ↑                                                      │          │
+//         │           └────────────── fbGain(feedback) ←──────────────────────┘          │
+//         └──────────────→ dryLvl ───────────────────────────────────────────────────────┴→ out(Gain 1)
 //
-// maxDelay caps delayTime.maxValue — a rampTo above it throws. The UI time
-// slider is capped at 1.0s to match (effectDefs.js).
+// Stability: cut-filter passband gain ≤ 1 and feedback ≤ 0.9 (effectDefs.js),
+// so the loop gain never reaches unity. maxDelay caps delayTime.maxValue — a
+// rampTo above it throws. The UI time knob is capped at 1.0s to match.
 function delayGraph(params = {}) {
   let wet     = params.wet ?? 0.3;
   let dryThru = !!params.dryThru;
   const inGain  = new Tone.Gain(1);
   const outGain = new Tone.Gain(1);
-  const delay   = new Tone.FeedbackDelay({
-    maxDelay: 1,
-    delayTime: params.time ?? 0.25,
-    feedback: params.feedback ?? 0.3,
-    wet: 1,
-  });
+  const sum     = new Tone.Gain(1);
+  const delay   = new Tone.Delay({ delayTime: params.time ?? 0.25, maxDelay: 1 });
+  // Q = 0.7071 (Butterworth) — flat passband, no resonance bump in the loop.
+  const hp = new Tone.Filter({ type: 'highpass', frequency: params.lowCut ?? 20, Q: 0.7071 });
+  const lp = new Tone.Filter({ type: 'lowpass', frequency: params.highCut ?? 18000, Q: 0.7071 });
+  const fbGain = new Tone.Gain(params.feedback ?? 0.3);
   const wetLvl = new Tone.Gain(wet).connect(outGain);
   const dryLvl = new Tone.Gain(dryThru ? 1 : 1 - wet).connect(outGain);
-  inGain.connect(delay);
-  delay.connect(wetLvl);
+  inGain.connect(sum);
+  sum.connect(delay);
+  delay.connect(hp);
+  hp.connect(lp);
+  lp.connect(wetLvl);
+  lp.connect(fbGain);
+  fbGain.connect(sum);
   inGain.connect(dryLvl);
 
   const setLevel = (g, v, rampSec) => {
@@ -101,7 +134,9 @@ function delayGraph(params = {}) {
     out: outGain,
     apply(p, rampSec = 0) {
       if (typeof p.time === 'number')     setLevelParam(delay.delayTime, p.time, rampSec);
-      if (typeof p.feedback === 'number') setLevelParam(delay.feedback, p.feedback, rampSec);
+      if (typeof p.feedback === 'number') setLevel(fbGain, p.feedback, rampSec);
+      if (typeof p.lowCut === 'number')   setLevelParam(hp.frequency, p.lowCut, rampSec);
+      if (typeof p.highCut === 'number')  setLevelParam(lp.frequency, p.highCut, rampSec);
       // wet and dryThru are coupled: dryLvl depends on both. Recompute from
       // the full params object (updateEffectSettings merges, so p is complete;
       // fall back to the last-applied values for legacy saves missing a key).
@@ -111,8 +146,67 @@ function delayGraph(params = {}) {
       setLevel(dryLvl, dryThru ? 1 : 1 - wet, rampSec);
     },
     dispose() {
+      // fbGain first — severs the feedback loop before the loop nodes go down.
+      fbGain.dispose();
       inGain.dispose();
+      sum.dispose();
       delay.dispose();
+      hp.dispose();
+      lp.dispose();
+      wetLvl.dispose();
+      dryLvl.dispose();
+      outGain.dispose();
+    },
+  };
+}
+
+// Reverb composite — pre-delay + dampening on Freeverb. The pre-delay must
+// only delay the WET path: Freeverb's built-in wet CrossFade mixes dry
+// internally, so a Delay in front of a bare Freeverb would delay the dry
+// signal too. Same parallel-levels pattern as the delay composite; Freeverb
+// is pinned wet:1 and dry = 1 − wet (linear complement).
+//
+//   in(Gain 1) → Delay(preDelay, maxDelay:0.25) → Freeverb(wet:1) → wetLvl ─┐
+//         └──────────────→ dryLvl ───────────────────────────────────────────┴→ out(Gain 1)
+function reverbGraph(params = {}) {
+  let wet = params.wet ?? 0.3;
+  const inGain   = new Tone.Gain(1);
+  const outGain  = new Tone.Gain(1);
+  const preDelay = new Tone.Delay({ delayTime: params.preDelay ?? 0, maxDelay: 0.25 });
+  const verb     = new Tone.Freeverb({
+    roomSize: params.roomSize ?? 0.7,
+    dampening: params.dampening ?? 3000,
+    wet: 1,
+  });
+  const wetLvl = new Tone.Gain(wet).connect(outGain);
+  const dryLvl = new Tone.Gain(1 - wet).connect(outGain);
+  inGain.connect(preDelay);
+  preDelay.connect(verb);
+  verb.connect(wetLvl);
+  inGain.connect(dryLvl);
+
+  const setLevel = (g, v, rampSec) => {
+    if (rampSec > 0) g.gain.rampTo(v, rampSec);
+    else g.gain.value = v;
+  };
+
+  return {
+    in: inGain,
+    out: outGain,
+    apply(p, rampSec = 0) {
+      if (typeof p.roomSize === 'number')  setLevelParam(verb.roomSize, p.roomSize, rampSec);
+      if (typeof p.preDelay === 'number')  setLevelParam(preDelay.delayTime, p.preDelay, rampSec);
+      if (typeof p.dampening === 'number') verb.dampening = p.dampening; // plain setter (Tone 15)
+      if (typeof p.wet === 'number') {
+        wet = p.wet;
+        setLevel(wetLvl, wet, rampSec);
+        setLevel(dryLvl, 1 - wet, rampSec);
+      }
+    },
+    dispose() {
+      inGain.dispose();
+      preDelay.dispose();
+      verb.dispose();
       wetLvl.dispose();
       dryLvl.dispose();
       outGain.dispose();
@@ -126,25 +220,22 @@ function setLevelParam(param, v, rampSec) {
   else param.value = v;
 }
 
-// Bare effect graph for a type. Safe inside Tone.Offline: all five types are
-// native-node graphs with no async generate step; .start() (Chorus/AutoFilter
-// LFOs) is valid in the offline context when constructed in its callback.
-// Unknown/legacy type → null (caller treats as passthrough).
+// Bare effect graph for a type. Safe inside Tone.Offline: all types are
+// native-node graphs with no async generate step; .start() (Chorus/AutoFilter/
+// Phaser LFOs) is valid in the offline context when constructed in its
+// callback. Unknown/legacy type → null (caller treats as passthrough).
 export function makeFxGraph(type, params = {}) {
   switch (type) {
     case 'filter':
       return simpleGraph(new Tone.Filter({
-        type: 'lowpass',
+        type: params.type ?? 'lowpass',
         frequency: params.frequency ?? 5000,
         Q: params.q ?? 1,
       }), type);
     case 'delay':
       return delayGraph(params);
     case 'reverb':
-      return simpleGraph(new Tone.Freeverb({
-        roomSize: params.roomSize ?? 0.7,
-        wet: params.wet ?? 0.3,
-      }), type);
+      return reverbGraph(params);
     case 'doubler':
       // Vocal-doubler voicing: short modulated delay, slow LFO, full stereo spread.
       return simpleGraph(new Tone.Chorus({
@@ -168,6 +259,39 @@ export function makeFxGraph(type, params = {}) {
         baseFrequency: 100,
         octaves: params.depth ?? 4,
         Q: params.q ?? 2,
+        wet: params.wet ?? 0.5,
+      }), type);
+    case 'eq':
+      // 3-band gain (low/mid/high are rampable dB Params). No wet — inline tone
+      // shaping; the wrapper's bypass is the off-switch.
+      return simpleGraph(new Tone.EQ3({
+        low: params.low ?? 0,
+        mid: params.mid ?? 0,
+        high: params.high ?? 0,
+      }), type);
+    case 'distortion':
+      // WaveShaper drive. `distortion` is a plain setter (regenerates the
+      // shaping curve — fine at UI/knob rate, never touched per-frame).
+      return simpleGraph(new Tone.Distortion({
+        distortion: params.drive ?? 0.4,
+        wet: params.wet ?? 0.5,
+      }), type);
+    case 'compressor':
+      // Native DynamicsCompressorNode wrapper — all params rampable. No wet.
+      // threshold clamped below 0 (see VALUE_CLAMPS) — legacy saves may hold 0.
+      return simpleGraph(new Tone.Compressor({
+        threshold: Math.min(-0.1, params.threshold ?? -24),
+        ratio: params.ratio ?? 4,
+        attack: params.attack ?? 0.01,
+        release: params.release ?? 0.2,
+      }), type);
+    case 'phaser':
+      // LFO-swept allpass ladder. LFOs auto-start in the constructor (no
+      // .start() method); octaves is a plain setter, frequency rampable.
+      return simpleGraph(new Tone.Phaser({
+        frequency: params.rate ?? 0.5,
+        octaves: params.depth ?? 3,
+        baseFrequency: 350,
         wet: params.wet ?? 0.5,
       }), type);
     default:

@@ -1,0 +1,63 @@
+/* Rotary knob — hardware-style dial for the effects rack.
+   Colors ride the per-track custom property with the mint accent fallback,
+   matching the region/rack convention. */
+
+.knob {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 52px;
+  user-select: none;
+}
+
+.dial {
+  cursor: ns-resize;
+  touch-action: none; /* pointer-capture drag owns vertical gestures */
+  display: block;
+}
+
+.track {
+  fill: none;
+  stroke: var(--border-mid);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.fill {
+  fill: none;
+  stroke: var(--track-color, var(--accent-color));
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.face {
+  fill: var(--bg-elevated);
+  stroke: var(--border-mid);
+  stroke-width: 1;
+}
+
+.indicator {
+  stroke: var(--track-color, var(--accent-color));
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.value {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.label {
+  font-size: 8px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dimmer);
+  white-space: nowrap;
+  max-width: 60px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

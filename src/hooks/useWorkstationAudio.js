@@ -348,15 +348,48 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     }
   }, [tracks, regions, notes, bpm, recomputeLoadingTrackIds]);
 
-  // Silence in-flight voices on pause/stop (Tone.Transport.pause keeps tails alive).
-  // releaseAll() still triggers each synth/sampler release tail, so we also ramp
-  // every region's fade gain to 0 in ~20ms for a true hard cut. recomputeFades()
-  // (called on resume before Transport.start) cancels this and restores the gain —
-  // pause writes 0, play recomputes, never concurrent (single-writer preserved).
+  // Silence in-flight voices on pause/stop/seek (Tone.Transport.pause keeps
+  // tails alive). Two layers:
+  //
+  // 1. SOURCE-LEVEL KILL — releaseAll() alone leaves each voice's release
+  //    tail sounding: sampled instruments carry release: 1 (baked into every
+  //    ToneBufferSource's fadeOut at trigger time), and on the seek path
+  //    recomputeFades() runs synchronously right after this and restores the
+  //    fade gain instantly — so a 1s tail would ride through at full gain
+  //    (the "sampler ghost note"). Fix at the voice source, so fade-restore
+  //    timing stops mattering:
+  //      · Sampler — pre-set fadeOut = HARD_CUT_SEC on every active source
+  //        before releaseAll(); OneShotSource._stopGain reads _fadeOut at
+  //        stop-call time (verified Tone 15.1.22). _activeSources is private
+  //        API — optional-chained so a future Tone bump degrades to the old
+  //        tail behavior instead of crashing.
+  //      · PolySynth — Envelope.triggerRelease reads envelope.release at call
+  //        time, so temporarily set it to HARD_CUT_SEC around releaseAll()
+  //        (strings' 0.8s release was the synth-side ghost) and restore in
+  //        the same tick — Part callbacks can't interleave with sync JS.
+  //
+  // 2. FADE-GAIN BACKSTOP — ramp every region's fade gain to 0 in ~20ms.
+  //    recomputeFades() (on resume/seek) restores it — pause writes 0, play
+  //    recomputes, never concurrent (single-writer preserved).
   const HARD_CUT_SEC = 0.02;
   const silenceAll = useCallback(() => {
     const audioNow = Tone.now();
-    for (const s of synthsByRegionIdRef.current.values()) s?.releaseAll?.();
+    for (const s of synthsByRegionIdRef.current.values()) {
+      if (!s || s.disposed) continue;
+      if (s._activeSources) {
+        // Tone.Sampler — hard-cut each active buffer source.
+        s._activeSources.forEach?.((sources) => {
+          sources?.forEach?.((src) => { src.fadeOut = HARD_CUT_SEC; });
+        });
+        s.releaseAll?.();
+      } else if (typeof s.releaseAll === 'function') {
+        // Tone.PolySynth — shorten the amplitude release around the releaseAll.
+        const origRelease = s.get?.()?.envelope?.release;
+        if (origRelease != null) s.set({ envelope: { release: HARD_CUT_SEC } });
+        s.releaseAll();
+        if (origRelease != null) s.set({ envelope: { release: origRelease } });
+      }
+    }
     for (const g of fadeGainsByRegionIdRef.current.values()) {
       if (!g) continue;
       g.gain.cancelScheduledValues(audioNow);

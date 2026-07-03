@@ -30,16 +30,22 @@
 }
 
 /* ── Populated: horizontal signal chain ────────────────── */
+/* margin-block: auto centers the chain vertically inside the rack when it is
+   shorter than the panel; falls back to normal flow (scroll) when taller. */
 .chain {
   display: flex;
   flex-direction: row;
-  align-items: flex-start;
+  align-items: center;
   gap: 14px;
   padding: 20px;
+  margin-block: auto;
 }
 
+/* Uniform module height (hardware-rack look); width varies with knob count. */
 .module {
-  flex: 0 0 200px;
+  flex: 0 0 auto;
+  height: 238px;
+  min-width: 178px;
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
@@ -109,13 +115,13 @@
 .close:hover { color: var(--accent-color); }
 
 .moduleBody {
-  min-height: 90px;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  justify-content: flex-start;
   gap: 10px;
-  padding: 14px 12px;
+  padding: 12px;
 }
 
 .noParams {
@@ -126,41 +132,118 @@
   color: var(--text-dimmer);
 }
 
-/* ── Param rows ────────────────────────────────────────── */
-.paramRow {
+/* ── Visualizer ────────────────────────────────────────── */
+.vizBox {
+  flex: 0 0 56px;
+  height: 56px;
+  border: 1px solid var(--border-faint);
+  border-radius: 3px;
+  background: var(--bg-base);
+  overflow: hidden;
+}
+.viz {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* SVG shape classes — preserveAspectRatio:none stretches the user space, so
+   every stroked shape uses non-scaling-stroke to stay crisp at any width. */
+.vizStroke {
+  fill: none;
+  stroke: var(--track-color, var(--accent-color));
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.vizGrid {
+  fill: none;
+  stroke: var(--border-mid);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+.vizFillShape {
+  fill: var(--track-color, var(--accent-color));
+  fill-opacity: 0.12;
+  stroke: none;
+}
+.vizCircle {
+  fill: var(--track-color, var(--accent-color));
+  fill-opacity: 0.08;
+  stroke: var(--track-color, var(--accent-color));
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.vizDot {
+  fill: var(--track-color, var(--accent-color));
+}
+.vizBar {
+  fill: var(--track-color, var(--accent-color));
+}
+.vizBarDim {
+  fill: var(--text-dimmer);
+}
+
+/* LFO sine slide — translate distance must equal one period = VIZ_W (160
+   user units) in FxVisualizer.jsx; duration is set inline (1 / rate). */
+.vizAnim {
+  animation: vizSlide linear infinite;
+}
+@keyframes vizSlide {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-160px); }
+}
+
+/* ── Knob row ──────────────────────────────────────────── */
+.knobRow {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 6px;
 }
-.paramLabel {
-  flex: 0 0 44px;
+
+/* Enum param — compact dropdown with a knob-style label under it. */
+.selectCol {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.paramSelect {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--input-bg);
+  border: 1px solid var(--border-mid);
+  color: var(--form-text);
+  font-family: inherit;
   font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 4px 6px;
+  border-radius: 2px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s, color 0.2s;
+}
+.paramSelect:hover,
+.paramSelect:focus {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+.selectLabel {
+  font-size: 8px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text-dimmer);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.paramSlider {
-  flex: 1 1 auto;
-  min-width: 0;
-  accent-color: var(--track-color, var(--accent-color));
-  cursor: pointer;
-}
-.paramValue {
-  flex: 0 0 42px;
-  text-align: right;
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 /* Boolean param — pill toggle, styled after the header .bypass pill. */
 .paramToggle {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
+  align-self: center;
   background: transparent;
   border: 1px solid var(--border-mid);
   color: var(--text-muted);
