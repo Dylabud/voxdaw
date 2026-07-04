@@ -1,5 +1,6 @@
 import * as Tone from 'tone';
-import { SAMPLED_INSTRUMENTS, SAMPLED_INSTRUMENT_NAMES } from './sampleInstruments';
+import { SAMPLED_INSTRUMENTS, SAMPLED_INSTRUMENT_NAMES, SAMPLED_MELODIC_NAMES } from './sampleInstruments';
+import { DRUM_KIT_NAMES, isDrumKit, chokeTargetsFor } from './drumKits';
 
 // sampleInstruments added Phase 131 — re-exported for RegionEditor / audioBounce consumers
 export const SYNTH_INSTRUMENTS = [
@@ -7,7 +8,7 @@ export const SYNTH_INSTRUMENTS = [
   'sine', 'square', 'sawtooth', 'triangle',
 ];
 
-export { SAMPLED_INSTRUMENT_NAMES };
+export { SAMPLED_INSTRUMENT_NAMES, SAMPLED_MELODIC_NAMES, DRUM_KIT_NAMES, isDrumKit, chokeTargetsFor };
 
 export const INSTRUMENTS = [...SYNTH_INSTRUMENTS, ...SAMPLED_INSTRUMENT_NAMES];
 

@@ -4,9 +4,10 @@ import styles from './RegionEditor.module.css';
 import { drawGrid, getSnapIncrement } from '../WorkstationShell';
 import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
 import { firstLoopOffsetMeasures } from '../loopMath';
-import { SYNTH_INSTRUMENTS, SAMPLED_INSTRUMENT_NAMES, makeSynth } from '../synthFactory';
+import { SYNTH_INSTRUMENTS, SAMPLED_MELODIC_NAMES, DRUM_KIT_NAMES, makeSynth, isDrumKit, chokeTargetsFor } from '../synthFactory';
 import EffectsList from './EffectsList';
 import EffectsRack from './EffectsRack';
+import InstrumentPanel from './InstrumentPanel';
 
 // Process-wide preview-synth cache, keyed by instrument name. Keeps sampler
 // buffers warm across editor opens / instrument switches so we don't pay a
@@ -67,6 +68,11 @@ export default function RegionEditor({
   onEffectToggleBypass,
   onEffectUpdate,
   isDarkMode,
+  loadingTrackIds,
+  auditionAttack,
+  auditionRelease,
+  auditionReleaseAll,
+  auditionPrime,
 }) {
   const [instrument,        setInstrument]        = useState(track?.instrument ?? 'fm pluck');
   const [activeTab,         setActiveTab]         = useState('notes');
@@ -85,6 +91,7 @@ export default function RegionEditor({
   const pianoAutoScrollFrameRef = useRef(null);
 
   const notesRef              = useRef(notes);              notesRef.current = notes;
+  const instrumentRef         = useRef(instrument);         instrumentRef.current = instrument;
   const regionsRef            = useRef(regions);            regionsRef.current = regions;
   const selectedNoteIdsRef    = useRef(selectedNoteIds);    selectedNoteIdsRef.current = selectedNoteIds;
   const noteSnapRef           = useRef(noteSnapDivision);   noteSnapRef.current = noteSnapDivision;
@@ -268,7 +275,19 @@ export default function RegionEditor({
   // `loaded !== false` plays PolySynths (no `loaded` prop) and ready Samplers, skips unready ones.
   const previewAttack = (note) => {
     const s = previewSynthRef.current;
-    if (s && !s.disposed && s.loaded !== false) s.triggerAttack(note);
+    if (!s || s.disposed || s.loaded === false) return;
+    // Hi-hat choke mirrors the playback engine: clicking the closed hat cuts
+    // a ringing open-hat preview (safe no-op when nothing rings).
+    if (isDrumKit(instrumentRef.current)) {
+      for (const tgt of chokeTargetsFor(note)) s.triggerRelease(tgt);
+    }
+    s.triggerAttack(note);
+  };
+  // Drum previews are one-shots: no releaseAll on mouseup/drag, so a clicked
+  // cymbal rings out. Safe to skip — Sampler buffer sources self-stop at
+  // sample end; only PolySynths (which keep releaseAll) can sustain forever.
+  const previewRelease = () => {
+    if (!isDrumKit(instrumentRef.current)) previewSynthRef.current?.releaseAll();
   };
   function handleMouseDown(note, e) {
     Tone.start().then(() => previewAttack(note));
@@ -278,14 +297,14 @@ export default function RegionEditor({
   }
   function handleMouseEnter(note, e) {
     if (e.buttons !== 1) return;
-    previewSynthRef.current?.releaseAll();
+    previewRelease();
     activeKeyElRef.current?.classList.remove(styles.keyActive);
     activeKeyElRef.current = e.currentTarget;
     e.currentTarget.classList.add(styles.keyActive);
     previewAttack(note);
   }
   function handleMouseUp() {
-    previewSynthRef.current?.releaseAll();
+    previewRelease();
     activeKeyElRef.current?.classList.remove(styles.keyActive);
     activeKeyElRef.current = null;
   }
@@ -489,7 +508,9 @@ export default function RegionEditor({
     const onUp = () => {
       // Release any note auditioned on grid/note mousedown (precedes the early
       // returns below so it fires for placement, note-drag, and marquee paths).
-      previewSynthRef.current?.releaseAll();
+      // Drum kits skip it (one-shot preview) — via instrumentRef because this
+      // closure is mounted once and would otherwise capture stale state.
+      if (!isDrumKit(instrumentRef.current)) previewSynthRef.current?.releaseAll();
       // Drag end
       const dD = noteDragRef.current;
       if (dD) {
@@ -718,7 +739,10 @@ export default function RegionEditor({
               {SYNTH_INSTRUMENTS.map(i => <option key={i} value={i}>{i}</option>)}
             </optgroup>
             <optgroup label="sampled">
-              {SAMPLED_INSTRUMENT_NAMES.map(i => <option key={i} value={i}>{i}</option>)}
+              {SAMPLED_MELODIC_NAMES.map(i => <option key={i} value={i}>{i}</option>)}
+            </optgroup>
+            <optgroup label="drums">
+              {DRUM_KIT_NAMES.map(i => <option key={i} value={i}>{i}</option>)}
             </optgroup>
           </select>
         </div>
@@ -883,11 +907,18 @@ export default function RegionEditor({
         />
       )}
 
-      {/* Placeholder overlay — outside the scroll container so it never affects scrollWidth (bug 12) */}
+      {/* Performance UI overlay — outside the scroll container so it never affects scrollWidth (bug 12).
+          Uses the LOCAL instrument state so the panel flips drum/melodic in the same commit as the dropdown. */}
       {activeTab === 'instrument' && (
-        <div className={styles.placeholderOverlay}>
-          <span className={styles.placeholderText}>instrument — coming soon</span>
-        </div>
+        <InstrumentPanel
+          trackId={track?.id}
+          instrument={instrument}
+          isLoading={!!(track?.id && loadingTrackIds?.has(track.id))}
+          auditionAttack={auditionAttack}
+          auditionRelease={auditionRelease}
+          auditionReleaseAll={auditionReleaseAll}
+          auditionPrime={auditionPrime}
+        />
       )}
 
       </div>

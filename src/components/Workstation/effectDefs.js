@@ -6,7 +6,8 @@
 // EffectsList / EffectsRack "Add Effect" dropdowns, the EffectsRack param
 // knobs/toggles/selects, and the audio engine's fxChain.js (which maps these
 // keys onto Tone graphs: Filter / Delay composite / Reverb composite / Chorus /
-// AutoFilter / AutoWah / EQ3 / Distortion / Compressor / Phaser — see
+// AutoFilter / AutoWah / EQ3 / Distortion / Compressor / Phaser / BitCrusher /
+// Tremolo / Vibrato / StereoWidener / PitchShift / AutoPanner — see
 // KEY_MAPS + per-type builders there).
 //
 // Param metadata: { default, min, max, step, label, unit?, scale?, kind?, options? }.
@@ -113,6 +114,52 @@ export const EFFECT_DEFS = {
       rate:  { default: 0.5, min: 0.1, max: 8, step: 0.01, label: 'rate', unit: 'hz', scale: 'log' },
       depth: { default: 3, min: 1, max: 6, step: 0.1, label: 'depth' }, // octaves above 350 Hz
       wet:   { default: 0.5, min: 0, max: 1, step: 0.01, label: 'mix' },
+    },
+  },
+  bitcrusher: {
+    label: 'Bitcrusher', // worklet-based bit-depth reduction
+    params: {
+      bits: { default: 4, min: 1, max: 8, step: 0.5, label: 'bits' },
+      wet:  { default: 1, min: 0, max: 1, step: 0.01, label: 'mix' },
+    },
+  },
+  tremolo: {
+    label: 'Tremolo', // stereo amplitude LFO
+    params: {
+      rate:   { default: 4, min: 0.1, max: 20, step: 0.01, label: 'rate', unit: 'hz', scale: 'log' },
+      depth:  { default: 0.6, min: 0, max: 1, step: 0.01, label: 'depth' },
+      spread: { default: 0, min: 0, max: 180, step: 1, label: 'spread' }, // L/R LFO phase offset (deg)
+      wet:    { default: 1, min: 0, max: 1, step: 0.01, label: 'mix' },
+    },
+  },
+  vibrato: {
+    label: 'Vibrato', // pitch LFO (delay-line modulation)
+    params: {
+      rate:  { default: 5, min: 0.1, max: 12, step: 0.01, label: 'rate', unit: 'hz', scale: 'log' },
+      depth: { default: 0.1, min: 0, max: 1, step: 0.01, label: 'depth' },
+      wet:   { default: 1, min: 0, max: 1, step: 0.01, label: 'mix' },
+    },
+  },
+  widener: {
+    label: 'Stereo Widener', // mid/side width — 0.5 = unity; no wet, bypass is the off-switch
+    params: {
+      width: { default: 0.75, min: 0, max: 1, step: 0.01, label: 'width' },
+    },
+  },
+  pitchshift: {
+    label: 'Pitch Shift',
+    params: {
+      pitch:      { default: 0, min: -12, max: 12, step: 1, label: 'semi' },
+      windowSize: { default: 0.1, min: 0.03, max: 0.1, step: 0.005, label: 'window', unit: 's' },
+      wet:        { default: 1, min: 0, max: 1, step: 0.01, label: 'mix' },
+    },
+  },
+  autopanner: {
+    label: 'Auto-Pan', // LFO-driven stereo panning
+    params: {
+      rate:  { default: 1, min: 0.1, max: 10, step: 0.01, label: 'rate', unit: 'hz', scale: 'log' },
+      depth: { default: 1, min: 0, max: 1, step: 0.01, label: 'depth' },
+      wet:   { default: 1, min: 0, max: 1, step: 0.01, label: 'mix' },
     },
   },
 };

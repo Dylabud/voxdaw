@@ -1,0 +1,4 @@
+Acoustic drum kit samples from the Sonic Pi built-in sample library
+(https://github.com/sonic-pi-net/sonic-pi, etc/samples, drum_* files).
+License: CC0 1.0 Universal Public Domain Dedication.
+Converted flac -> aac/m4a. File mapping in src/components/Workstation/drumKits.js.

@@ -1,5 +1,53 @@
 import { Mp3Encoder } from '@breezystack/lamejs';
 
+// Last sample index (across all channels) whose peak amplitude clears the
+// threshold, scanning backward so the cost is proportional to the silent tail
+// only. Returns -1 if nothing at/after fromSample is audible.
+function lastAudibleSample(audioBuffer, threshold, fromSample) {
+  const channels = [];
+  for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+    channels.push(audioBuffer.getChannelData(ch));
+  }
+  for (let i = audioBuffer.length - 1; i >= fromSample; i--) {
+    for (let ch = 0; ch < channels.length; ch++) {
+      const s = channels[ch][i];
+      if (s > threshold || s < -threshold) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Trim an export buffer: drop everything before startSec (the first note's
+ * onset, computed analytically by the bounce — a signal scan would eat
+ * fade-ins and slow attacks) and trailing silence after the last audible
+ * sample (+ padSec breathing room).
+ *
+ * Returns the original buffer when no trim is needed, a new sliced
+ * AudioBuffer otherwise, or null when nothing audible remains at/after
+ * startSec (callers should skip the download).
+ */
+export function trimExportBuffer(audioBuffer, {
+  startSec  = 0,
+  threshold = 1e-4,   // −80 dBFS peak; ~3× the 16-bit LSB, inaudible
+  padSec    = 0.25,   // breathing room after the last audible sample
+} = {}) {
+  const { sampleRate, numberOfChannels, length } = audioBuffer;
+  const start = Math.max(0, Math.min(Math.floor(startSec * sampleRate), length));
+
+  const lastAudible = lastAudibleSample(audioBuffer, threshold, start);
+  if (lastAudible < start) return null;
+
+  const end = Math.min(lastAudible + 1 + Math.round(padSec * sampleRate), length);
+  if (start === 0 && end === length) return audioBuffer;
+
+  const out = new AudioBuffer({ numberOfChannels, length: end - start, sampleRate });
+  for (let ch = 0; ch < numberOfChannels; ch++) {
+    out.copyToChannel(audioBuffer.getChannelData(ch).subarray(start, end), ch);
+  }
+  return out;
+}
+
 export function exportMP3(audioBuffer) {
   const { numberOfChannels, sampleRate, length } = audioBuffer;
   const isStereo = numberOfChannels >= 2;

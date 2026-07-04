@@ -1,10 +1,11 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import styles from './ContextMenu.module.css';
+import { TRACK_COLORS } from '../trackColors';
 
 // Approximate dimensions used to clamp the menu inside the viewport before the
 // real element is measured. The post-mount effect refines with actual size.
 const MENU_W = 168;
-const MENU_H = 240;
+const MENU_H = 300;
 const SUBMENU_W = 96;
 
 // Semitone options for the Pitch submenu: curated musical intervals, descending
@@ -13,9 +14,13 @@ const SUBMENU_W = 96;
 const PITCH_STEPS = [12, 7, 5, 4, 3, 2, 1, -1, -2, -3, -4, -5, -7, -12];
 
 // Command sets per target type. Item kinds:
-//   { action, label }        — plain command
-//   'divider'                — separator
-//   { submenu: 'pitch', … }  — Pitch ▸ row with a nested semitone submenu
+//   { action, label }         — plain command
+//   'divider'                 — separator
+//   { submenu: <kind>, … }    — row with a nested submenu:
+//     'pitch'     → semitone list         → onCommand('pitch', …, semis)
+//     'color'     → TRACK_COLORS swatches → onCommand('color', …, hex)
+//     'pasteFx'   → other-track list      → onCommand('pasteEffects', …, targetTrackId)
+//     'exportFmt' → WAV / MP3             → onCommand('export', …, 'wav'|'mp3')
 const ITEMS = {
   region: [
     { action: 'copy',  label: 'Copy' },
@@ -35,27 +40,42 @@ const ITEMS = {
     'divider',
     { action: 'delete', label: 'Delete' },
   ],
+  track: [
+    { action: 'rename', label: 'Rename' },
+    { submenu: 'color', label: 'Color' },
+    { submenu: 'pitch', label: 'Pitch Shift' },
+    'divider',
+    { action: 'duplicate', label: 'Duplicate Track' },
+    { submenu: 'pasteFx', label: 'Paste Effects To' },
+    { submenu: 'exportFmt', label: 'Export' },
+    'divider',
+    { action: 'delete', label: 'Delete Track' },
+  ],
 };
 
 /**
- * Custom right-click context menu for Workstation regions and notes.
+ * Custom right-click context menu for Workstation regions, notes and tracks.
  * Fixed-position floating panel positioned at the click coordinates.
  *
- * @param {{x:number,y:number,targetType:'region'|'note',targetId:string}|null} menu
+ * @param {{x:number,y:number,targetType:'region'|'note'|'track',targetId:string}|null} menu
  * @param {() => void} onClose
- * @param {(action:string, targetType:string, targetId:string, payload?:number) => void} onCommand
+ * @param {(action:string, targetType:string, targetId:string, payload?:number|string) => void} onCommand
+ * @param {Array<{id:string,name:string,color:string}>} [tracks] — for the track menu's Paste-Effects-To submenu
  */
-export default function ContextMenu({ menu, onClose, onCommand }) {
+export default function ContextMenu({ menu, onClose, onCommand, tracks = [] }) {
   const menuRef = useRef(null);
   const submenuRef = useRef(null);
-  const [submenuOpen, setSubmenuOpen] = useState(false);
+  // Which submenu row is open: null | 'pitch' | 'color' | 'pasteFx' |
+  // 'exportFmt'. A single kind (not a boolean) because the track menu has
+  // several submenu rows.
+  const [submenuOpen, setSubmenuOpen] = useState(null);
   const closeTimerRef = useRef(null);       // submenu open/close delay
   const menuCloseTimerRef = useRef(null);   // whole-menu mouse-leave auto-close
 
   // Open/close lifecycle: any interaction outside a menu item dismisses it.
   useEffect(() => {
     if (!menu) return;
-    setSubmenuOpen(false);
+    setSubmenuOpen(null);
     const close = () => onClose();
     const onDocMouseDown = (e) => {
       if (menuRef.current && menuRef.current.contains(e.target)) return;
@@ -124,8 +144,8 @@ export default function ContextMenu({ menu, onClose, onCommand }) {
   // Flip the submenu to the left when there isn't room on the right.
   const flipLeft = menu.x + MENU_W + SUBMENU_W > window.innerWidth;
 
-  const openSub  = () => { clearTimeout(closeTimerRef.current); setSubmenuOpen(true); };
-  const closeSub = () => { closeTimerRef.current = setTimeout(() => setSubmenuOpen(false), 360); };
+  const openSub  = (kind) => { clearTimeout(closeTimerRef.current); setSubmenuOpen(kind); };
+  const closeSub = () => { closeTimerRef.current = setTimeout(() => setSubmenuOpen(null), 360); };
 
   // Auto-close the whole menu shortly after the cursor leaves it. onMouseLeave is
   // subtree-aware, so moving into the (descendant) Pitch submenu doesn't fire it;
@@ -146,26 +166,28 @@ export default function ContextMenu({ menu, onClose, onCommand }) {
       {items.map((it, i) => {
         if (it === 'divider') return <div key={`d${i}`} className={styles.divider} />;
 
-        if (it.submenu === 'pitch') {
+        if (it.submenu) {
+          const kind = it.submenu;
+          const otherTracks = kind === 'pasteFx' ? tracks.filter(t => t.id !== menu.targetId) : null;
           return (
             <div
-              key="pitch"
+              key={kind}
               className={styles.subWrap}
-              onMouseEnter={openSub}
+              onMouseEnter={() => openSub(kind)}
               onMouseLeave={closeSub}
             >
               <button
                 type="button"
                 className={`${styles.item} ${styles.subItem}`}
                 onMouseDown={(e) => e.stopPropagation()}
-                onClick={openSub}
+                onClick={() => openSub(kind)}
               >
                 <span>{it.label}</span>
                 <span className={styles.chevron}>▸</span>
               </button>
-              {submenuOpen && (
+              {submenuOpen === kind && (
                 <div ref={submenuRef} className={`${styles.submenu} ${flipLeft ? styles.submenuLeft : ''}`}>
-                  {PITCH_STEPS.map(n => (
+                  {kind === 'pitch' && PITCH_STEPS.map(n => (
                     <React.Fragment key={n}>
                       <button
                         type="button"
@@ -177,6 +199,48 @@ export default function ContextMenu({ menu, onClose, onCommand }) {
                       </button>
                       {n === 1 && <div className={styles.divider} />}
                     </React.Fragment>
+                  ))}
+                  {kind === 'color' && (
+                    <div className={styles.swatchGrid}>
+                      {TRACK_COLORS.map(hex => (
+                        <button
+                          key={hex}
+                          type="button"
+                          className={styles.swatch}
+                          style={{ background: hex }}
+                          title={hex}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={() => { onCommand('color', menu.targetType, menu.targetId, hex); onClose(); }}
+                        />
+                      ))}
+                    </div>
+                  )}
+                  {kind === 'exportFmt' && ['wav', 'mp3'].map(fmt => (
+                    <button
+                      key={fmt}
+                      type="button"
+                      className={styles.item}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={() => { onCommand('export', menu.targetType, menu.targetId, fmt); onClose(); }}
+                    >
+                      {fmt.toUpperCase()}
+                    </button>
+                  ))}
+                  {kind === 'pasteFx' && (otherTracks.length === 0 ? (
+                    <div className={styles.submenuEmpty}>no other tracks</div>
+                  ) : (
+                    otherTracks.map(t => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        className={styles.item}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={() => { onCommand('pasteEffects', menu.targetType, menu.targetId, t.id); onClose(); }}
+                      >
+                        <span className={styles.trackSwatchDot} style={{ background: t.color }} />
+                        {t.name}
+                      </button>
+                    ))
                   ))}
                 </div>
               )}

@@ -1,11 +1,42 @@
 import * as Tone from 'tone';
-import { makeSynth } from './synthFactory';
+import { makeSynth, isDrumKit, chokeTargetsFor } from './synthFactory';
 import { makeFxGraph } from './fxChain';
 import {
   buildRegionEvents,
   volForSliderValue,
   scheduleFadeEnvelope,
 } from '../../hooks/useWorkstationAudio';
+
+// Upper bound on how long the audible tracks can ring past the last note,
+// so the render window covers the full tail (trimExportBuffer then finds the
+// real endpoint by scanning). Only delay, reverb and drum-kit one-shots
+// sustain energy; everything else in the rack is millisecond-scale. Worst
+// legal delay (time 1.0, feedback 0.9) would need ~66 s to reach −60 dB —
+// the 30 s clamp is the documented compromise for such pathological settings.
+function estimateFxTailSec(tracks) {
+  const anySoloed = tracks.some(t => t.isSolo);
+  let tail = 0;
+  for (const t of tracks) {
+    if (t.isMuted || (anySoloed && !t.isSolo)) continue;
+    // Drum one-shots ignore note duration, so a cymbal on the last note
+    // rings 3–6 s past the content end regardless of FX.
+    if (isDrumKit(t.instrument)) tail = Math.max(tail, 6);
+    for (const e of t.effects ?? []) {
+      if (e.bypass) continue;
+      const p = e.params ?? {};
+      if (e.type === 'delay' && (p.wet ?? 0) > 0) {
+        // Repeats to decay to −60 dB through the feedback loop.
+        const fb = p.feedback ?? 0;
+        const repeats = fb > 0 ? Math.ceil(Math.log(1e-3) / Math.log(fb)) : 1;
+        tail = Math.max(tail, (p.time ?? 0.25) * repeats);
+      } else if (e.type === 'reverb' && (p.wet ?? 0) > 0) {
+        // Freeverb has no analytic decay; generous comb-decay heuristic.
+        tail = Math.max(tail, 1 + (p.roomSize ?? 0.7) * 9);
+      }
+    }
+  }
+  return Math.min(30, Math.max(2, tail));
+}
 
 /**
  * Offline render of the current project to an AudioBuffer.
@@ -16,15 +47,21 @@ import {
  *
  * Mute/solo, per-track volume, and effect params are snapshotted at call time
  * and baked in. Bypassed effects are simply not instantiated (no crossfade
- * machinery is needed offline). Note: the default tailSec may truncate a long
- * delay-feedback/reverb tail ringing past the last region — raise tailSec if
- * that matters for a given export.
+ * machinery is needed offline). tailSec defaults to an FX-aware estimate
+ * (estimateFxTailSec) so delay/reverb tails aren't truncated; pass a number to
+ * override. capSec bounds the total render (the project's hard right stop).
+ *
+ * Returns { buffer, firstOnsetSec }: firstOnsetSec is the earliest note onset
+ * across audible tracks (for export start-trim), or null if nothing audible
+ * is scheduled at all.
  */
-export async function bounceProject({ tracks, regions, notes, bpm, tailSec = 2 }) {
+export async function bounceProject({ tracks, regions, notes, bpm, tailSec = null, capSec = Infinity }) {
   const rightMeasure = regions.reduce(
     (m, r) => Math.max(m, r.startMeasure + r.durationMeasures), 0,
   );
-  const durationSec = Math.max(0.1, rightMeasure * 4 * (60 / bpm) + tailSec);
+  const tail = tailSec ?? estimateFxTailSec(tracks);
+  const durationSec = Math.max(0.1, Math.min(rightMeasure * 4 * (60 / bpm) + tail, capSec));
+  let minOnsetTicks = Infinity;
 
   const buffer = await Tone.Offline(async ({ transport }) => {
     transport.bpm.value = bpm;
@@ -32,8 +69,10 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = 2 }
 
     // Per-track volume → pan → [FX] → mute → destination
     const trackVolumeByTrackId = new Map();
+    const audibleTrackIds = new Set();
     for (const t of tracks) {
       const audible = !t.isMuted && (!anySoloed || t.isSolo);
+      if (audible) audibleTrackIds.add(t.id);
       const mute    = new Tone.Gain(audible ? 1 : 0).toDestination();
       // Insert effects built back-to-front so `head` always points at the
       // next node downstream; bypassed/unknown effects are skipped entirely.
@@ -67,8 +106,26 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = 2 }
 
       const events = buildRegionEvents(r, notes);
       if (events.length > 0) {
+        // Fold the earliest onset across audible tracks for the export
+        // start-trim. Event times are "${ticks}i" strings and looped-region
+        // events aren't sorted, so scan them all.
+        if (audibleTrackIds.has(r.trackId)) {
+          for (const ev of events) {
+            minOnsetTicks = Math.min(minOnsetTicks, parseInt(ev.time, 10));
+          }
+        }
+        // Drum kits mirror the live path: choke the hat group, then a bare
+        // attack (one-shot — the source self-stops at buffer end, so drawn
+        // note length never truncates a cymbal). Melodic path unchanged.
+        const isDrum = isDrumKit(track.instrument);
         new Tone.Part(
-          (time, ev) => synth.triggerAttackRelease(ev.note, ev.duration, time, 0.8),
+          isDrum
+            ? (time, ev) => {
+                const t = synth.toSeconds(time);
+                for (const tgt of chokeTargetsFor(ev.note)) synth.triggerRelease(tgt, t);
+                synth.triggerAttack(ev.note, t, 0.8);
+              }
+            : (time, ev) => synth.triggerAttackRelease(ev.note, ev.duration, time, 0.8),
           events,
         ).start(0);
       }
@@ -81,5 +138,8 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = 2 }
     transport.start();
   }, durationSec);
 
-  return buffer.get();
+  const firstOnsetSec = minOnsetTicks === Infinity
+    ? null
+    : (minOnsetTicks / Tone.Transport.PPQ) * (60 / bpm);
+  return { buffer: buffer.get(), firstOnsetSec };
 }

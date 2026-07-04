@@ -2,6 +2,8 @@
 // URL maps mirror nbrosowsky/tonejs-instruments exactly; samples vendored
 // at public/samples/<name>/<file>.mp3. Pure data — no Tone.js imports.
 
+import { DRUM_KITS } from './drumKits';
+
 export const SAMPLED_INSTRUMENTS = {
   'bass-electric': {
     baseUrl: '/samples/bass-electric/',
@@ -214,5 +216,13 @@ export const SAMPLED_INSTRUMENTS = {
     },
   },
 };
+
+// Melodic-only list captured BEFORE the drum-kit merge — feeds the
+// "sampled" optgroup in the instrument dropdown (drums get their own).
+export const SAMPLED_MELODIC_NAMES = Object.keys(SAMPLED_INSTRUMENTS);
+
+// Drum kits ride the same registry so isSampledInstrument / makeSynth /
+// the loading indicator / bounce Tone.loaded() all pick them up for free.
+Object.assign(SAMPLED_INSTRUMENTS, DRUM_KITS);
 
 export const SAMPLED_INSTRUMENT_NAMES = Object.keys(SAMPLED_INSTRUMENTS);

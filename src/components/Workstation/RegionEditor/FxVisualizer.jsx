@@ -4,10 +4,11 @@ import styles from './EffectsRack.module.css';
 /**
  * Per-effect SVG visualizer for the rack modules. Pure function of the
  * effect's params — static types re-render only when a param changes (normal
- * React commit, outside the rAF hot path). The two LFO effects (autofilter /
- * phaser) animate via a CSS keyframe translate on a <g> — compositor-only,
- * zero JS per frame; `animation-duration = 1/rate` so one visual cycle tracks
- * one LFO cycle exactly.
+ * React commit, outside the rAF hot path). The LFO effects (autofilter /
+ * phaser / vibrato / tremolo / autopanner) animate via a CSS keyframe
+ * translate on a <g> — compositor-only, zero JS per frame;
+ * `animation-duration = 1/rate` so one visual cycle tracks one LFO cycle
+ * exactly (autopanner uses 1/(2·rate): alternate legs are half-cycles).
  *
  * All shapes live in a fixed W×H user space stretched to the module width
  * with preserveAspectRatio="none". VIZ_W must match the translate distance in
@@ -249,6 +250,139 @@ function ReverbViz({ params }) {
   );
 }
 
+function BitcrushViz({ params }) {
+  // Sample-and-hold sine: time columns and amplitude levels both collapse as
+  // bits falls, so the stepped path degrades from near-smooth (8) to blocky (1)
+  // over the smooth reference sine.
+  const bits = params.bits ?? 4;
+  const cols = Math.max(4, Math.round(bits * 6));
+  const levels = Math.pow(2, Math.max(1, Math.round(bits)));
+  const mid = VIZ_H / 2;
+  const amp = VIZ_H * 0.38;
+  const quant = (v) => (Math.round(((v + 1) / 2) * (levels - 1)) / (levels - 1)) * 2 - 1;
+  const smooth = Array.from({ length: 65 }, (_, i) => {
+    const x = (i / 64) * VIZ_W;
+    return [x, mid - amp * Math.sin((2 * Math.PI * x) / VIZ_W)];
+  });
+  let d = '';
+  for (let i = 0; i < cols; i++) {
+    const x0 = (i / cols) * VIZ_W;
+    const x1 = ((i + 1) / cols) * VIZ_W;
+    const xc = (x0 + x1) / 2;
+    const y = mid - amp * quant(Math.sin((2 * Math.PI * xc) / VIZ_W));
+    d += `${i === 0 ? 'M' : 'L'} ${x0.toFixed(1)} ${y.toFixed(1)} L ${x1.toFixed(1)} ${y.toFixed(1)} `;
+  }
+  return (
+    <>
+      <path className={styles.vizGrid} d={pathFrom(smooth)} />
+      <path className={styles.vizStroke} opacity={wetOpacity(params.wet)} d={d} />
+    </>
+  );
+}
+
+function TremoloViz({ params }) {
+  // AM waveform: dense carrier inside a 1 − depth·(0.5 + 0.5·sin) envelope,
+  // spanning two envelope periods and CSS-translated one period (VIZ_W) per
+  // LFO cycle — same compositor-only vizAnim pattern as LfoSineViz.
+  const rate = params.rate ?? 4;
+  const depth = params.depth ?? 0.6;
+  const mid = VIZ_H / 2;
+  const amp = VIZ_H * 0.4;
+  const env = (x) => 1 - depth * (0.5 + 0.5 * Math.sin((2 * Math.PI * x) / VIZ_W));
+  const n = 257; // dense enough for the 12-cycle carrier over 2·VIZ_W
+  const carrier = [];
+  const top = [];
+  const bottom = [];
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 * VIZ_W;
+    const e = amp * env(x);
+    carrier.push([x, mid - e * Math.sin((2 * Math.PI * 12 * x) / (2 * VIZ_W))]);
+    top.push([x, mid - e]);
+    bottom.push([x, mid + e]);
+  }
+  const fill = `${pathFrom(top)} ${bottom.reverse().map(([x, y]) => `L ${x.toFixed(1)} ${y.toFixed(1)}`).join(' ')} Z`;
+  return (
+    <>
+      <line className={styles.vizGrid} x1={0} y1={mid} x2={VIZ_W} y2={mid} />
+      <g
+        className={styles.vizAnim}
+        opacity={wetOpacity(params.wet)}
+        style={{ animationDuration: `${(1 / (rate || 1)).toFixed(3)}s` }}
+      >
+        <path className={styles.vizFillShape} d={fill} />
+        <path className={styles.vizStroke} d={pathFrom(carrier)} />
+      </g>
+    </>
+  );
+}
+
+function PanDotViz({ params }) {
+  // Dot sweeping L↔R. ease-in-out alternate approximates the sine pan law;
+  // one alternate leg is half an LFO cycle, so duration = 1/(2·rate). Sweep
+  // distance scales with depth via the --pan-sweep custom property read by
+  // the vizPanSweep keyframes.
+  const rate = params.rate ?? 1;
+  const depth = params.depth ?? 1;
+  const mid = VIZ_H / 2;
+  const sweep = clamp01(depth) * VIZ_W * 0.4;
+  return (
+    <>
+      <line className={styles.vizGrid} x1={0} y1={mid} x2={VIZ_W} y2={mid} />
+      <line className={styles.vizGrid} x1={VIZ_W / 2} y1={VIZ_H * 0.2} x2={VIZ_W / 2} y2={VIZ_H * 0.8} />
+      <g
+        className={styles.vizPanAnim}
+        opacity={wetOpacity(params.wet)}
+        style={{
+          animationDuration: `${(1 / (2 * (rate || 1))).toFixed(3)}s`,
+          '--pan-sweep': `${sweep.toFixed(1)}px`,
+        }}
+      >
+        <circle className={styles.vizCircle} cx={VIZ_W / 2} cy={mid} r={VIZ_H * 0.18} />
+        <circle className={styles.vizDot} cx={VIZ_W / 2} cy={mid} r={2.5} />
+      </g>
+    </>
+  );
+}
+
+function WidenerViz({ params }) {
+  // Mid/side spread: outward chevrons pull apart from the center dot with
+  // width. 0.5 (unity) sits mid-way; 0 collapses to mono, 1 hugs the edges.
+  const width = clamp01(params.width ?? 0.75);
+  const mid = VIZ_H / 2;
+  const off = 6 + width * (VIZ_W / 2 - 16);
+  const h = VIZ_H * 0.28;
+  const chevron = (x, dir) =>
+    `M ${(x - dir * 7).toFixed(1)} ${(mid - h).toFixed(1)} L ${x.toFixed(1)} ${mid.toFixed(1)} L ${(x - dir * 7).toFixed(1)} ${(mid + h).toFixed(1)}`;
+  return (
+    <>
+      <line className={styles.vizGrid} x1={0} y1={mid} x2={VIZ_W} y2={mid} />
+      <path className={styles.vizStroke} d={chevron(VIZ_W / 2 - off, -1)} />
+      <path className={styles.vizStroke} d={chevron(VIZ_W / 2 + off, 1)} />
+      <circle className={styles.vizDot} cx={VIZ_W / 2} cy={mid} r={2.5} />
+    </>
+  );
+}
+
+function PitchShiftViz({ params }) {
+  // Reference sine (dim grid) vs the shifted copy whose frequency is scaled
+  // by 2^(pitch/12) — visibly compressed (up) or stretched (down) with the knob.
+  const pitch = params.pitch ?? 0;
+  const ratio = Math.pow(2, pitch / 12);
+  const mid = VIZ_H / 2;
+  const amp = VIZ_H * 0.36;
+  const wave = (cycles) =>
+    Array.from({ length: 97 }, (_, i) => {
+      const x = (i / 96) * VIZ_W;
+      return [x, mid - amp * Math.sin((2 * Math.PI * cycles * x) / VIZ_W)];
+    });
+  return (
+    <>
+      <path className={styles.vizGrid} d={pathFrom(wave(3))} />
+      <path className={styles.vizStroke} opacity={wetOpacity(params.wet)} d={pathFrom(wave(3 * ratio))} />
+    </>
+  );
+}
+
 const RENDERERS = {
   filter: (p) => <FilterViz params={p} />,
   eq: (p) => <EqViz params={p} />,
@@ -260,6 +394,12 @@ const RENDERERS = {
   compressor: (p) => <CompressorViz params={p} />,
   delay: (p) => <DelayViz params={p} />,
   reverb: (p) => <ReverbViz params={p} />,
+  bitcrusher: (p) => <BitcrushViz params={p} />,
+  tremolo: (p) => <TremoloViz params={p} />,
+  vibrato: (p) => <LfoSineViz rate={p.rate ?? 5} depth={p.depth ?? 0.1} maxDepth={1} wet={p.wet} />,
+  widener: (p) => <WidenerViz params={p} />,
+  pitchshift: (p) => <PitchShiftViz params={p} />,
+  autopanner: (p) => <PanDotViz params={p} />,
 };
 
 export default function FxVisualizer({ type, params = {} }) {

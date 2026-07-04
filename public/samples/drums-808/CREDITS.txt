@@ -1,0 +1,6 @@
+Roland TR-808 samples via the oramics/sampled collection
+(https://github.com/oramics/sampled, DM/TR-808 - originally from the
+Music Machines archive, machines.hyperreal.org; distributed as public
+domain / open license). Converted wav -> aac/m4a at 192kbps.
+Variant mapping (01/03/05... = TR-808 tone/decay settings) in
+src/components/Workstation/drumKits.js.

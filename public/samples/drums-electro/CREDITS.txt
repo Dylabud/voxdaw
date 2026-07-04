@@ -1,0 +1,5 @@
+Electro drum kit samples from the Sonic Pi built-in sample library
+(https://github.com/sonic-pi-net/sonic-pi, etc/samples, bd_*/elec_*/hat_*/perc_* files).
+License: CC0 1.0 Universal Public Domain Dedication.
+Converted flac -> aac/m4a; tom-low/tom-high are varispeed repitches (-4/+3 semitones)
+of elec_fuzz_tom. File mapping in src/components/Workstation/drumKits.js.
