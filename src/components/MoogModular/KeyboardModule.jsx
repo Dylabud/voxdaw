@@ -4,16 +4,17 @@ import MoogKnob from './MoogKnob';
 import styles from './KeyboardModule.module.css';
 
 // ──────────── Key geometry ────────────
-const WW = 20;  // white key width (px, box-sizing: border-box) — narrower to fit 61 keys
-const BW = 12;  // black key width (px)
+const WW = 30;  // white key width (px, box-sizing: border-box) — widened in Phase 54 to fill the strip
+const BW = 18;  // black key width (px)
 const WH = 116; // white key height (px)
 const BH = 74;  // black key height (px)
 
 const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 
 // Semitone (0–11) → black key left px from octave start (null if white)
-// Formula: nextWhiteIdx × WW − BW/2  (WW=20, BW=12 → BW/2=6)
-const SEMI_BLACK = [null, 14, null, 34, null, null, 74, null, 94, null, 114, null];
+// Derived from the geometry (was hardcoded): nextWhiteIdx × WW − BW/2
+const BLACK_NEXT_WHITE = [null, 1, null, 2, null, null, 4, null, 5, null, 6, null];
+const SEMI_BLACK = BLACK_NEXT_WHITE.map(n => (n === null ? null : n * WW - BW / 2));
 
 // Computer keyboard shortcut → note name (C4 octave + partial C5)
 const KB_MAP = {

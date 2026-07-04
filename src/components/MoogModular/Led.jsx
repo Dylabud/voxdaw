@@ -26,11 +26,15 @@ export default function Led({ getValue, color = 'green', label }) {
 
   return (
     <div className={styles.ledWrap}>
-      <div
-        ref={elRef}
-        className={`${styles.led} ${styles[color]}`}
-        style={{ opacity: 0.12 }}
-      />
+      {/* Bezel is a separate element so the chrome ring stays at full
+          opacity while the rAF fades only the lamp glass inside it */}
+      <div className={styles.ledBezel}>
+        <div
+          ref={elRef}
+          className={`${styles.led} ${styles[color]}`}
+          style={{ opacity: 0.12 }}
+        />
+      </div>
       {label && <span className={styles.ledLabel}>{label}</span>}
     </div>
   );

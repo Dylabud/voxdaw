@@ -184,7 +184,7 @@
 /* ── White keys ── */
 .whiteKey {
   flex-shrink: 0;
-  width: 20px;
+  width: 30px; /* must equal WW in KeyboardModule.jsx — black-key lefts derive from it */
   box-sizing: border-box;
   border-left: 1px solid #8c8070;
   border-right: none;

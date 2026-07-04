@@ -5,8 +5,8 @@ const TICK_COUNT = 11;
 const MIN_DEG = -135;
 const MAX_DEG =  135;
 
-const BODY_PX = { xl: 54, lg: 42, md: 32, sm: 25, xs: 18 };
-const WRAP_PX = { xl: 94, lg: 76, md: 58, sm: 46, xs: 22 };
+const BODY_PX = { xl: 64, lg: 50, md: 38, sm: 30, xs: 22 };
+const WRAP_PX = { xl: 104, lg: 86, md: 66, sm: 52, xs: 26 };
 
 function KnobScale({ size }) {
   if (size === 'xs') return null; // ultra-compact: no tick ring (keeps the wrap tight)
@@ -38,7 +38,7 @@ function KnobScale({ size }) {
   );
 }
 
-export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', defaultValue = 0.5 }) {
+export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', defaultValue = 0.5, variant = 'black' }) {
   const bodyPx = BODY_PX[size] ?? 26;
   const wrapPx = WRAP_PX[size] ?? 48;
   const rotateDeg = MIN_DEG + value * (MAX_DEG - MIN_DEG);
@@ -78,7 +78,7 @@ export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', de
       <div className={styles.knobWrap} style={{ width: wrapPx, height: wrapPx }}>
         <KnobScale size={size} />
         <div
-          className={`${styles.knob} ${styles[`knob_${size}`]}`}
+          className={`${styles.knob} ${styles[`knob_${size}`]} ${variant === 'cream' ? styles.knobCream : ''}`}
           style={{ transform: `rotate(${rotateDeg}deg)` }}
           onMouseDown={handleMouseDown}
           onDoubleClick={handleDoubleClick}

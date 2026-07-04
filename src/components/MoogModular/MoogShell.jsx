@@ -560,11 +560,12 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue, 
         </div>
         <div className={styles.plateBody}>
           <Oscilloscope getData={getOscData} />
-          <div className={styles.switchRow}>
+          {/* Power + master share one row; channels sit 4-across with the legacy
+              jack as a 5th column — halves the module height vs stacked rows
+              (Phase 54: I/O was the row-4 height driver after the seq de-stack). */}
+          <div className={styles.knobRow}>
             <PowerSwitch isPowered={isPowered} onToggle={onPower} />
             <div className={`${styles.powerLamp} ${isPowered ? styles.powerLampOn : ''}`} />
-          </div>
-          <div className={styles.knobRow}>
             <MoogKnob
               label="MASTER"
               size="lg"
@@ -575,22 +576,24 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue, 
             <Led getValue={getLedValue} color="red" label="PEAK" />
           </div>
           <PlateDivider />
-          {[1, 2, 3, 4].map((ch, i) => (
-            <div key={ch} className={styles.ioChRow}>
-              <Led getValue={getChLevels?.[i] ?? ZERO_GETTER} color="green" />
-              <MoogKnob
-                label={`CH ${ch}`}
-                size="sm"
-                value={chVols[i]}
-                onChange={v => handleChVol(i, v)}
-                defaultValue={0.8}
-              />
-              <Jack id={`io-in${ch}`} label={`IN ${ch}`} />
+          <div className={styles.ioChGrid}>
+            {[1, 2, 3, 4].map((ch, i) => (
+              <div key={ch} className={styles.ioChCol}>
+                <Led getValue={getChLevels?.[i] ?? ZERO_GETTER} color="green" />
+                <MoogKnob
+                  label={`CH ${ch}`}
+                  size="sm"
+                  value={chVols[i]}
+                  onChange={v => handleChVol(i, v)}
+                  defaultValue={0.8}
+                />
+                <Jack id={`io-in${ch}`} label={`IN ${ch}`} />
+              </div>
+            ))}
+            <div className={styles.ioChCol}>
+              <div className={styles.ioChColSpacer} />
+              <Jack id="io-in" label="IN ✦" />
             </div>
-          ))}
-          <PlateDivider />
-          <div className={styles.jackRow}>
-            <Jack id="io-in" label="IN ✦" />
           </div>
         </div>
       </div>
@@ -1092,6 +1095,7 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, onGlideC
                   <MoogKnob
                     label={String(i + 1)}
                     size="sm"
+                    variant="cream"
                     value={step.voltage}
                     onChange={v => updateStep(i, 'voltage', v)}
                     defaultValue={0.5}
@@ -1547,9 +1551,48 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
     else audio.powerOn();
   }, [audio.isPowered, audio.powerOff, audio.powerOn]);
 
+  // ── Viewport camera: fit-to-screen base + wheel-zoom / drag-pan (Phase 53) ──
+  // The fitted full-rack view is the home state (z = 1); wheel/pinch zooms toward
+  // the cursor up to 8×, dragging empty faceplate pans, Esc / double-click on
+  // empty faceplate animates back. transform = translate(tx,ty) scale(s0·z) with
+  // origin 0 0 (cabinet is align-self:flex-start so its layout origin is the
+  // viewport content corner — translate math needs no centering compensation).
+  // ALL view state lives in this closure — zero React state, direct style writes.
   useEffect(() => {
     const el = cabinetRef.current;
     if (!el) return;
+
+    // s0 = fit scale · z = user zoom · tx/ty = pan (screen px) · ox/oy = layout origin
+    const view = { s0: 1, z: 1, tx: 0, ty: 0, natW: 0, natH: 0, availW: 0, availH: 0, ox: 16, oy: 44 };
+    el.style.transformOrigin = '0 0';
+
+    // Transient layer promotion — promote the cabinet only while the camera is
+    // moving, release ~0.5s after it settles. A permanent will-change layer this
+    // large blew GPU tile budgets: any small repaint (gate button :active) or a
+    // tab-return re-raster flashed modules black while tiles rebuilt. Releasing
+    // also re-rasters the rack at the current zoom scale (crisper when zoomed).
+    let wcTimer = null;
+    const touchWillChange = () => {
+      el.style.willChange = 'transform';
+      clearTimeout(wcTimer);
+      wcTimer = setTimeout(() => { el.style.willChange = ''; }, 500);
+    };
+
+    const apply = () => {
+      el.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.s0 * view.z})`;
+      // Pannable affordance — cursor is inherited, so interactive children
+      // (knobs ns-resize, jacks/keys/buttons pointer) still show their own.
+      el.style.cursor = view.z > 1.001 ? 'grab' : '';
+    };
+
+    // Keep the rack glued to the viewport: no gaps on the pannable axes,
+    // centered/top-anchored when the scaled content is smaller than the viewport.
+    const clampPan = () => {
+      const S = view.s0 * view.z;
+      const w = view.natW * S, h = view.natH * S;
+      view.tx = w > view.availW ? Math.max(view.availW - w, Math.min(0, view.tx)) : (view.availW - w) / 2;
+      view.ty = h > view.availH ? Math.max(view.availH - h, Math.min(0, view.ty)) : 0;
+    };
 
     // scheduleFit debounce — multiple rapid ResizeObserver callbacks (e.g. from fit()'s
     // own DOM writes) are collapsed into a single deferred fit() call, preventing loops.
@@ -1562,6 +1605,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
     const fit = () => {
       // Clear transform so offsetHeight reflects the true layout height (transform is
       // visual-only and doesn't affect layout, but clearing ensures a clean measurement).
+      el.style.transition   = 'none';
       el.style.transform    = 'none';
       el.style.marginBottom = '0px';
 
@@ -1569,24 +1613,104 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
       if (!natH) return; // hidden (display:none) — ResizeObserver fires when it becomes visible
 
       // Available space (shell padding: 16px sides, 44px top + 16px bottom).
-      const availW = window.innerWidth  - 32;
-      const availH = window.innerHeight - 60;
-      const scale  = Math.min(availH / natH, 1);
+      view.availW = window.innerWidth  - 32;
+      view.availH = window.innerHeight - 60;
+      const s0 = Math.min(view.availH / natH, 1);
 
-      el.style.transformOrigin = 'top center';
-
-      if (scale < 1) {
+      if (s0 < 1) {
         // Width compensation: widen the layout box so that after scale(), the visual
         // width equals availW — no blank side margins from transform shrinking the width.
         // Guard: only assign if the value differs to avoid unnecessary ResizeObserver triggers.
-        const newW = `${Math.ceil(availW / scale)}px`;
+        const newW = `${Math.ceil(view.availW / s0)}px`;
         if (el.style.width !== newW) el.style.width = newW;
-        el.style.transform    = `scale(${scale})`;
-        el.style.marginBottom = `${Math.round(natH * (scale - 1))}px`;
+        el.style.marginBottom = `${Math.round(natH * (s0 - 1))}px`;
       } else {
         if (el.style.width !== '') el.style.width = '';
       }
+
+      view.s0   = s0;
+      view.natW = el.offsetWidth;   // re-measure after the width write
+      view.natH = el.offsetHeight;
+      view.ox   = el.offsetLeft;
+      view.oy   = el.offsetTop;
+      clampPan();
+      apply();
     };
+
+    // ── Wheel / pinch zoom toward the cursor ──
+    // Keeps the world point under the pointer fixed: w = (p − t)/S ⇒ t' = p − w·S'.
+    // ctrlKey marks trackpad pinch (small deltas → larger factor).
+    const onWheel = (e) => {
+      e.preventDefault();
+      const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.012 : 0.0022));
+      const zNew = Math.min(8, Math.max(1, view.z * factor));
+      if (zNew === view.z) return;
+      const S  = view.s0 * view.z;
+      const Sn = view.s0 * zNew;
+      const px = e.clientX - view.ox;
+      const py = e.clientY - view.oy;
+      view.tx = px - ((px - view.tx) / S) * Sn;
+      view.ty = py - ((py - view.ty) / S) * Sn;
+      view.z  = zNew;
+      el.style.transition = 'none';
+      touchWillChange();
+      clampPan();
+      apply();
+    };
+
+    // ── Drag-pan on non-interactive surfaces while zoomed ──
+    // cursor is an inherited CSS property: every control in the rack resolves to
+    // pointer/ns-resize (knobs, jacks, keys, selectors, cables), bare faceplate
+    // resolves to auto — one computed-style check covers all components with
+    // zero per-component markup.
+    const isInteractive = (t) => {
+      if (!(t instanceof Element)) return false;
+      if (t.closest('button, input, select, [data-jack-id]')) return true;
+      const cur = getComputedStyle(t).cursor;
+      return cur === 'pointer' || cur === 'ns-resize' || cur === 'ew-resize' || cur === 'crosshair';
+    };
+
+    let panning = false, lastX = 0, lastY = 0;
+    const onMouseDown = (e) => {
+      if (view.z <= 1.001 || e.button !== 0 || isInteractive(e.target)) return;
+      panning = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      el.style.transition = 'none';
+      el.style.cursor = 'grabbing';
+      touchWillChange();
+      e.preventDefault();
+    };
+    const onMouseMove = (e) => {
+      if (!panning) return;
+      touchWillChange();
+      view.tx += e.clientX - lastX;
+      view.ty += e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      clampPan();
+      apply();
+    };
+    const onMouseUp = () => {
+      if (!panning) return;
+      panning = false;
+      apply(); // restores 'grab' cursor
+    };
+
+    // ── Reset to full-rack view (Esc / double-click empty faceplate) ──
+    const reset = () => {
+      if (view.z === 1) return;
+      touchWillChange(); // covers the 0.35s transition; released 0.5s after
+      el.style.transition = 'transform 0.35s cubic-bezier(0.2, 0.8, 0.25, 1)';
+      view.z = 1;
+      view.tx = 0;
+      view.ty = 0;
+      clampPan();
+      apply();
+      setTimeout(() => { el.style.transition = 'none'; }, 400);
+    };
+    const onDblClick = (e) => { if (!isInteractive(e.target)) reset(); };
+    const onKeyDown  = (e) => { if (e.key === 'Escape') reset(); };
 
     fit(); // immediate on mount
     document.fonts.ready.then(scheduleFit);
@@ -1596,10 +1720,24 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
     const ro = new ResizeObserver(scheduleFit);
     ro.observe(el);
 
+    const shell = el.parentElement; // .shell — wheel anywhere on the page zooms
+    shell.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('mousedown', onMouseDown);
+    el.addEventListener('dblclick', onDblClick);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('keydown', onKeyDown);
     window.addEventListener('resize', fit);
     return () => {
       clearTimeout(fitTimer);
+      clearTimeout(wcTimer);
       ro.disconnect();
+      shell.removeEventListener('wheel', onWheel);
+      el.removeEventListener('mousedown', onMouseDown);
+      el.removeEventListener('dblclick', onDblClick);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('resize', fit);
     };
   }, []);
@@ -1674,23 +1812,23 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
             </div>
 
             {/* Row 4: 960 Sequencer (×2 stacked) + Chord Sequencer + Quantizer + I/O */}
+            {/* Row 4 — sequencers side by side (Phase 54): stacking them made this
+                tier 616px (⅓ of the rack) and halved the global fit() scale. */}
             <div className={`${styles.tier} ${styles.tierRow4}`}>
-              <div className={styles.seqStack}>
-                <SequencerModule
-                  number={1}
-                  onStepsChange={audio.updateSequencerSteps}
-                  onTempoChange={audio.setTempo}
-                  onSetCallback={audio.setSeqStepCallback}
-                  onGlideChange={audio.setSeqGlide}
-                />
-                <SequencerModule
-                  number={2}
-                  onStepsChange={audio.updateSeq2Steps}
-                  onTempoChange={audio.setTempo}
-                  onSetCallback={audio.setSeq2StepCallback}
-                  onGlideChange={audio.setSeq2Glide}
-                />
-              </div>
+              <SequencerModule
+                number={1}
+                onStepsChange={audio.updateSequencerSteps}
+                onTempoChange={audio.setTempo}
+                onSetCallback={audio.setSeqStepCallback}
+                onGlideChange={audio.setSeqGlide}
+              />
+              <SequencerModule
+                number={2}
+                onStepsChange={audio.updateSeq2Steps}
+                onTempoChange={audio.setTempo}
+                onSetCallback={audio.setSeq2StepCallback}
+                onGlideChange={audio.setSeq2Glide}
+              />
               <ChordSeqModule
                 onStepsChange={audio.updateChordSeqSteps}
                 onDivisionChange={audio.setChordSeqDivision}

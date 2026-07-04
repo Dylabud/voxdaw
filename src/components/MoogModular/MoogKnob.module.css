@@ -1,6 +1,8 @@
   /* ═══════════════════════════════════════════════════════
    MoogKnob — self-contained knob component styles
-   Mirrors the silver aesthetic from MoogShell.module.css.
+   Vintage skirted bakelite knob (Phase 51 photorealistic pass).
+   Default: black skirted knob, white pointer line.
+   variant="cream" → ivory bakelite (960 sequencer step dials).
    All dimensions are hardware-literal (no CSS vars).
    ═══════════════════════════════════════════════════════ */
 
@@ -21,10 +23,13 @@
   /* width/height set via inline style from WRAP_PX map */
 }
 
-/* ── Knob body — rotationally symmetric base only ──
-   center at 50% 50% means the gradient varies only with radius, never with angle,
-   so rotating the element has zero visible effect on the base chrome tone.
-   All directional shading (specular, inset bevel, bounce) lives on .knobShading. ── */
+/* ── Knob body — rotates with the value ──
+   Layer order (top → bottom):
+     1. dome cap  — opaque to 58%, transparent past 61% (covers flute center)
+     2. flutes    — repeating-conic skirt ridges; these ROTATE with the value,
+                    which is physically correct (real grip flutes spin)
+     3. skirt base — dark radial fill under the flutes
+   All screen-fixed directional light lives on .knobShading. ── */
 .knob {
   border-radius: 50%;
   flex-shrink: 0;
@@ -34,100 +39,202 @@
   user-select: none;
   touch-action: none;
   will-change: transform;
-  background: radial-gradient(
-    circle at 50% 50%,
-    #ffffff 0%,
-    #f0f0f0 20%,
-    #dedede 42%,
-    #c0c0c0 64%,
-    #949494 83%,
-    #686868 100%
-  );
-  /* Symmetric ring shadows only — these are rotationally invariant */
+  background:
+    /* 1. Matte-black body shoulder — ring between metal cap and flutes */
+    radial-gradient(
+      circle at 50% 50%,
+      #232322 0%,
+      #1a1a19 46%,
+      #0e0e0d 56%,
+      #060606 60%,
+      transparent 62%
+    ),
+    /* 2. Fluted skirt — grip ridges around the rim */
+    repeating-conic-gradient(
+      from 0deg,
+      #2c2c2a 0deg 4deg,
+      #0a0a09 9deg 13deg,
+      #222220 18deg 20deg
+    ),
+    /* 3. Skirt base */
+    radial-gradient(circle at 50% 50%, #1c1c1a 0%, #101010 70%, #060606 100%);
+  /* Symmetric ring shadows only — these are rotationally invariant.
+     The directional drop shadow lives on .knobShading (screen-fixed). */
   box-shadow:
-    0 0 0 2px #0a0a0a,
-    0 0 0 4px #d8d8d8,
-    0 0 0 5px #161614,
-    0 5px 16px rgba(0, 0, 0, 0.90),
-    0 2px 6px  rgba(0, 0, 0, 0.75);
+    0 0 0 1px rgba(0, 0, 0, 0.92),
+    0 0 0 1.5px rgba(70, 68, 62, 0.35),
+    0 0 12px rgba(0, 0, 0, 0.55);
 }
 
+/* ── Spun-aluminum inset cap — the silver top of the vintage Moog knob ──
+   Concentric brushing rings (repeating-radial) are rotationally symmetric,
+   so the cap spinning with the knob (physically correct) never shimmers.
+   Inset ring shadow seats the cap INTO the black body. */
+.knob::before {
+  content: '';
+  position: absolute;
+  inset: 22%;
+  border-radius: 50%;
+  background:
+    /* radial falloff — spun metal is brightest mid-radius */
+    radial-gradient(
+      circle at 50% 50%,
+      #b8b6b0 0%,
+      #d8d6d0 34%,
+      #c2c0ba 58%,
+      #92908a 86%,
+      #6e6c66 100%
+    ),
+    /* concentric brushing rings — low contrast so they stay subliminal
+       even at 8× viewport zoom */
+    repeating-radial-gradient(
+      circle at 50% 50%,
+      rgba(255, 255, 255, 0.05) 0px,
+      rgba(255, 255, 255, 0.05) 1px,
+      rgba(0, 0, 0, 0.04) 1.5px,
+      rgba(0, 0, 0, 0.04) 2.5px
+    );
+  background-blend-mode: overlay;
+  box-shadow:
+    /* recessed seat — cap sits below the body shoulder */
+    inset 0 1px 2px rgba(0, 0, 0, 0.55),
+    inset 0 -0.5px 1px rgba(255, 255, 255, 0.25),
+    0 0 0 1px rgba(0, 0, 0, 0.85);
+}
+
+/* ── Cream bakelite variant — the ivory 960 sequencer dials ── */
+.knobCream {
+  background:
+    radial-gradient(
+      circle at 50% 50%,
+      #f4ecd8 0%,
+      #e8e0ca 26%,
+      #d8cfb6 46%,
+      #c2b89e 56%,
+      #a89e84 60%,
+      transparent 62%
+    ),
+    repeating-conic-gradient(
+      from 0deg,
+      #efe7d2 0deg 4deg,
+      #a2987e 9deg 13deg,
+      #d8cfb6 18deg 20deg
+    ),
+    radial-gradient(circle at 50% 50%, #ddd3ba 0%, #bfb59a 70%, #948a70 100%);
+  box-shadow:
+    0 0 0 1px rgba(30, 26, 18, 0.85),
+    0 0 0 1.5px rgba(120, 112, 94, 0.4),
+    0 0 12px rgba(0, 0, 0, 0.5);
+}
+
+/* Cream dials are solid bakelite — no spun-metal cap */
+.knobCream::before { content: none; }
+
 /* ── Shading overlay — counter-rotates to stay lamp-aligned at all knob positions ──
-   Carries every directional effect so nothing rotates with the knob value.
-   Light source: upper-right at ~72% 16% on the sphere face.
+   Net screen transform is identity (+θ parent · −θ self), so BOTH the gradient
+   speculars and the outer directional drop shadow below render screen-fixed.
+   Light source: studio lamp upper-right (~72% 16% on the dome face).
 
    box-shadow inset direction key for upper-right light:
-     bright upper-right rim → inset -X +Y rgba(white)   (negative X = right, positive Y = top)
-     dark  lower-left  rim  → inset +X -Y rgba(black)   (positive X = left,  negative Y = bottom)  ── */
+     bright upper-right rim → inset -X +Y rgba(white)
+     dark  lower-left  rim  → inset +X -Y rgba(black)  ── */
 .knobShading {
   position: absolute;
   inset: 0;
   border-radius: 50%;
   pointer-events: none;
-  /* No z-index — DOM order (before .knobCap) keeps it below the indicator dot */
+  /* No z-index — DOM order (before .knobCap) keeps it below the indicator line */
   background:
-    /* 1. Primary specular — sharp lamp reflection on upper-right of sphere face */
+    /* 1. Primary specular — tight lamp hotspot, upper-right. Kept modest so
+       it never washes out the engraved pointer line on the aluminum cap */
     radial-gradient(
-      ellipse at 72% 16%,
-      rgba(255, 255, 255, 0.96) 0%,
-      rgba(255, 255, 255, 0.30) 18%,
-      transparent 40%
+      ellipse at 70% 18%,
+      rgba(255, 255, 255, 0.30) 0%,
+      rgba(255, 255, 255, 0.08) 12%,
+      transparent 26%
     ),
-    /* 2. Broad diffuse — the whole lit hemisphere is brighter, not just the hotspot */
+    /* 2. Broad diffuse — lit hemisphere slightly brighter (matte plastic sheen) */
     radial-gradient(
-      ellipse at 68% 24%,
-      rgba(255, 255, 255, 0.18) 0%,
-      transparent 62%
+      ellipse at 66% 26%,
+      rgba(255, 255, 255, 0.09) 0%,
+      transparent 60%
     ),
-    /* 3. Shadow — the unlit hemisphere (lower-left, opposite the lamp) is darker */
+    /* 3. Core shadow — unlit hemisphere, lower-left */
     radial-gradient(
-      ellipse at 22% 82%,
-      rgba(0, 0, 0, 0.30) 0%,
-      transparent 54%
+      ellipse at 24% 80%,
+      rgba(0, 0, 0, 0.42) 0%,
+      transparent 55%
     );
   box-shadow:
+    /* Screen-fixed cast shadow onto the faceplate — lamp upper-right → shadow
+       lower-left. Long+soft & short+hard pair sells the deep skirt height. */
+    -7px 10px 16px rgba(0, 0, 0, 0.68),
+    -3px 4px 6px  rgba(0, 0, 0, 0.60),
     /* Upper-right rim catches the lamp */
-    inset -1px 1px 4px rgba(255, 255, 255, 0.48),
+    inset -1px 1px 3px rgba(255, 255, 255, 0.30),
     /* Lower-left rim is in shadow */
-    inset  1px -1px 3px rgba(0, 0, 0, 0.42);
+    inset  1px -1px 3px rgba(0, 0, 0, 0.55);
 }
 
-.knob_xl { width: 54px; height: 54px; }
-.knob_lg { width: 42px; height: 42px; }
-.knob_md { width: 32px; height: 32px; }
-.knob_sm { width: 25px; height: 25px; }
-.knob_xs { width: 18px; height: 18px; }
+.knob_xl { width: 64px; height: 64px; }
+.knob_lg { width: 50px; height: 50px; }
+.knob_md { width: 38px; height: 38px; }
+.knob_sm { width: 30px; height: 30px; }
+.knob_xs { width: 22px; height: 22px; }
 
 /* Ultra-compact group: tighter knob↔label gap + tiny label (used by the dense Vocoder grid) */
 .groupXs { gap: 2px; }
 .groupXs .knobLabel { font-size: 7px; letter-spacing: 0.04em; }
 
-/* ── Indicator pointer — dark line on silver face ── */
+/* ── Indicator pointer — two-segment line ──
+   Line runs from 6% (skirt rim) to 50% (knob center). The metal cap edge
+   sits at 22% from the rim → (22−6)/44 ≈ 36% of the line's length.
+   Outer 0–35%: white-filled tick on the black skirt (visible).
+   Inner 37–100%: dark engraved line across the aluminum cap.
+   (Gemini's "black line to the skirt edge" would vanish on a black skirt —
+   the real 900-series knobs fill the skirt segment for exactly this reason.) */
 .knobCap {
   position: absolute;
-  top: 11%;
+  top: 6%;
   left: 50%;
   transform: translateX(-50%);
   border-radius: 1.5px;
   background: linear-gradient(
     to bottom,
-    #1a1a18 0%,
-    #2a2a26 65%,
-    transparent 100%
+    #f6f4ee 0%,
+    #e4e1d8 35%,
+    #14130f 37%,
+    #23211c 100%
   );
-  box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+  box-shadow:
+    0 0 1.5px rgba(0, 0, 0, 0.85),
+    /* engraving catches light on its lower edge */
+    0.5px 0.5px 0 rgba(255, 255, 255, 0.22);
 }
 
-.knob_xl .knobCap { width: 4.5px; height: 38%; }
-.knob_lg .knobCap { width: 4px;   height: 37%; }
-.knob_md .knobCap { width: 3px;   height: 36%; top: 12%; }
-.knob_sm .knobCap { width: 2.5px; height: 35%; top: 12%; }
-.knob_xs .knobCap { width: 2px;   height: 34%; top: 13%; }
+/* Cream variant: solid dark pointer line on ivory bakelite (no metal cap) */
+.knobCream .knobCap {
+  background: linear-gradient(
+    to bottom,
+    #26241f 0%,
+    #3a372f 70%,
+    rgba(58, 55, 47, 0) 100%
+  );
+  box-shadow: 0 0 1.5px rgba(255, 252, 240, 0.4);
+}
 
+.knob_xl .knobCap { width: 4.5px; height: 44%; }
+.knob_lg .knobCap { width: 4px;   height: 44%; }
+.knob_md .knobCap { width: 3px;   height: 44%; }
+.knob_sm .knobCap { width: 2.5px; height: 44%; }
+.knob_xs .knobCap { width: 2px;   height: 44%; }
+
+/* Worn heat-stamped lettering — warm off-white, soft ink-bleed edge */
 .knobLabel {
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: 0.2em;
-  color: rgba(255, 255, 255, 0.75);
+  color: rgba(234, 229, 217, 0.80);
+  text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.55);
   text-transform: uppercase;
   text-align: center;
   white-space: nowrap;
@@ -178,9 +285,9 @@
 
 .tickNum {
   position: absolute;
-  top: -7px;
+  top: -8px;
   left: 50%;
-  font-size: 7px;
+  font-size: 8px;
   line-height: 1;
   color: rgba(255, 255, 255, 0.78);
   letter-spacing: 0;

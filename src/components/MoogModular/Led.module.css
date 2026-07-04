@@ -8,15 +8,57 @@
   flex-shrink: 0;
 }
 
+/* Chrome mounting bezel — the physical lamp housing. Full opacity always;
+   only the glass inside fades. Recessed dark seat between ring and glass. */
+.ledBezel {
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at 65% 25%, rgba(255, 255, 255, 0.35) 0%, transparent 42%),
+    conic-gradient(
+      from 0deg,
+      #8a867e 0deg, #b8b4ac 52deg, #9a968e 110deg,
+      #565248 200deg, #444038 240deg, #6a665e 320deg, #8a867e 360deg
+    );
+  box-shadow:
+    -1px 2px 3px rgba(0, 0, 0, 0.7),
+    0 0 0 1px rgba(0, 0, 0, 0.6),
+    inset 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
 /* Single element — full glow state in CSS; opacity fades between dim (0.12) and bright (1.0).
    At 0.12 opacity the LED is a barely-visible coloured dot (authentic "off" state).
    At 1.0 the box-shadow bleeds warm light onto the surrounding faceplate. */
 .led {
-  width: 10px;
-  height: 10px;
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
+  position: relative;     /* anchor for the faceted-glass overlay */
   will-change: opacity;   /* GPU compositing layer — no layout/paint per frame */
   flex-shrink: 0;
+}
+
+/* Faceted jewel-glass dome — cut-glass facets over the lamp color.
+   Part of the glass, so it fades with the rAF-driven opacity (correct:
+   facets are only visible when the lamp is lit). */
+.led::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    repeating-conic-gradient(
+      from 8deg,
+      rgba(255, 255, 255, 0.16) 0deg 10deg,
+      transparent 16deg 45deg
+    ),
+    radial-gradient(circle at 62% 24%, rgba(255, 250, 235, 0.40) 0%, transparent 38%);
+  pointer-events: none;
 }
 
 .green {
@@ -52,9 +94,16 @@
 }
 
 .ledLabel {
-  font-size: 5px;
+  font-size: 7px;
   letter-spacing: 0.18em;
   color: #6a6052;
   text-transform: uppercase;
   white-space: nowrap;
+}
+
+/* Lights out: kill the chrome housing — an unlit bezel reflects nothing in a
+   dark room. The lamp glass inside keeps its rAF-driven glow untouched. */
+:global([data-lights-out="true"]) .ledBezel {
+  background: none;
+  box-shadow: none;
 }

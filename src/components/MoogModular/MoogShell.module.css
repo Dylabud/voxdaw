@@ -87,52 +87,51 @@
   position: relative; /* anchor for PatchCableOverlay (position:absolute inset:0) */
   width: 100%;
   flex-shrink: 0; /* prevent flex from shrinking the cabinet before fit() measures it */
+  /* Viewport camera (Phase 53): layout origin pinned to the shell's content
+     corner so translate/scale math in MoogShell.jsx needs no centering
+     compensation. Horizontal centering at rest comes from the width
+     compensation in fit() (scaled width == availW exactly). */
+  align-self: flex-start;
+  /* NOTE: no static will-change here. Permanently promoting a layer this large
+     (~2900×1750 px of textures/shadows/blends) exceeds GPU tile budgets — any
+     small repaint (e.g. a gate button :active) or tab-return re-raster showed
+     black modules while tiles rebuilt. The camera promotes transiently instead
+     (el.style.willChange during wheel/pan, released ~0.5s after — MoogShell.jsx). */
   background:
-    /* Vignette — edge darkening; reduced opacity so brighter wood base shows through */
+    /* Vignette — edge darkening for physical depth */
     radial-gradient(
       ellipse at 50% 45%,
       transparent 22%,
-      rgba(0, 0, 0, 0.32) 100%
+      rgba(0, 0, 0, 0.40) 100%
     ),
-    /* Noise grain — tight 73° diagonal breaks up the smooth digital wood gradient */
-    repeating-linear-gradient(
-      73deg,
-      transparent 0px,
-      transparent 1px,
-      rgba(0, 0, 0, 0.052) 1px,
-      rgba(0, 0, 0, 0.052) 2px
-    ),
+    /* Organic wood grain — horizontally-stretched fractal noise gives
+       irregular figure/streaking that repeating gradients can't fake */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='120'%3E%3Cfilter id='w'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.009 0.11' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.06  0 0 0 0 0.02  0 0 0 0 0.01  0.68 0 0 0 -0.04'/%3E%3C/filter%3E%3Crect width='300' height='120' filter='url(%23w)'/%3E%3C/svg%3E"),
+    /* Fine straight grain lines under the organic streaks */
     repeating-linear-gradient(
       180deg,
       transparent 0px,
       transparent 3px,
-      rgba(0, 0, 0, 0.09) 3px,
-      rgba(0, 0, 0, 0.09) 4px
-    ),
-    repeating-linear-gradient(
-      177deg,
-      transparent 0px,
-      transparent 22px,
-      rgba(255, 255, 255, 0.012) 22px,
-      rgba(255, 255, 255, 0.012) 23px
+      rgba(0, 0, 0, 0.07) 3px,
+      rgba(0, 0, 0, 0.07) 4px
     ),
     linear-gradient(
       to bottom,
-      #7a3a14 0%,
-      #a85828 12%,
-      #944e20 30%,
-      #c06c34 50%,
-      #944e20 70%,
-      #8a4418 88%,
-      #7a3a14 100%
+      #522410 0%,
+      #7c3e1c 12%,
+      #6a3216 30%,
+      #904c24 50%,
+      #6a3216 70%,
+      #5e2a12 88%,
+      #4a1e0c 100%
     );
   border-radius: 14px;
   /* Walnut visible only at the outer frame edges */
-  padding: 18px 22px 22px;
+  padding: 14px 18px 18px;
   box-shadow:
-    0 0 0 2px #c06c34,
-    0 0 0 4px #4a2010,
-    0 0 0 5px #8a4418,
+    0 0 0 2px #904c24,
+    0 0 0 4px #2e1206,
+    0 0 0 5px #5e2a12,
     0 28px 80px rgba(0, 0, 0, 0.95),
     0 10px 28px rgba(0, 0, 0, 0.7),
     inset 0 1px 0 rgba(255, 255, 255, 0.06),
@@ -221,7 +220,7 @@
 .tierRow1 { grid-template-columns: 1fr 1fr 1fr 1fr 1fr 0.6fr 0.6fr 0.6fr; }
 .tierRow2 { grid-template-columns: 1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr 0.8fr 1.6fr; }
 .tierRow3 { grid-template-columns: 0.85fr 0.85fr 0.85fr 1fr 1fr 1fr 1fr max-content; }
-.tierRow4 { grid-template-columns: 2.5fr 1fr 0.9fr 1fr; }
+.tierRow4 { grid-template-columns: 1.5fr 1.5fr 1fr 0.9fr 1.1fr; }
 /* Stacks two sequencer modules vertically inside a single grid cell */
 .seqStack {
   display: flex;
@@ -245,23 +244,29 @@
   flex-direction: column;
 }
 
-/* ── Faceplate — glossy piano-black, lit from upper-right ── */
+/* ── Faceplate — matte textured black metal, lit from upper-right ──
+   The grain layer is an inline SVG feTurbulence raster (encoded once,
+   tiled as a background-image) — zero runtime cost, gives the plate the
+   gritty light-absorbing tooth of crinkle-finish steel. ── */
 .plate {
   flex: 1;
   position: relative; /* anchor for ::after specular */
   background:
+    /* Micro-grain — warm-grey speckle, alpha modulated by fractal noise.
+       Third octave + higher alpha = the abrasive vintage crinkle finish */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.95' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.62  0 0 0 0 0.61  0 0 0 0 0.58  0.22 0 0 0 0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)'/%3E%3C/svg%3E"),
     /* Diffuse ambient — right edge picks up more light from the lamp */
     linear-gradient(
       to left,
       rgba(255, 255, 255, 0.025) 0%,
       transparent 55%
     ),
-    /* Piano-black base */
-    #080808;
-  padding: 11px;
+    /* Near-black matte base */
+    #0a0a09;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   border-right: 1px solid #1a1a1a;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.14),
@@ -279,8 +284,8 @@
   inset: 0;
   background: linear-gradient(
     to bottom left,
-    rgba(255, 255, 255, 0.07) 0%,
-    rgba(255, 255, 255, 0.02) 32%,
+    rgba(255, 255, 255, 0.05) 0%,
+    rgba(255, 255, 255, 0.015) 32%,
     transparent 62%
   );
   pointer-events: none;
@@ -293,24 +298,28 @@
   border-right: 1px solid #181818;
 }
 
-/* ── Corner screws — Phillips cross ──
-   7px × 7px at 2px offset → bottom-right corner of screw reaches (9, 9).
-   Plate padding is 10px all sides → content starts at (10, 10). 1px clear. */
+/* ── Corner screws — physical Phillips fasteners ──
+   8px × 8px at 2px offset → bottom-right corner of screw reaches (10, 10).
+   Plate padding is 11px all sides → content starts at (11, 11). 1px clear.
+   Lamp upper-right: highlight at 68% 22%, cast shadow offset lower-left.
+   Each corner's cross is rotated differently — real screws never land aligned. */
 .screw {
   position: absolute;
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: radial-gradient(
-    circle at 30% 25%,
-    #beb8ae 0%,
-    #8a8278 32%,
-    #545048 62%,
-    #2c2824 100%
+    circle at 68% 22%,
+    #e2ddd2 0%,
+    #a29a8c 30%,
+    #625c52 60%,
+    #302c26 100%
   );
   box-shadow:
-    0 2px 4px rgba(0, 0, 0, 0.85),
-    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    -1px 2px 3px rgba(0, 0, 0, 0.85),
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    inset -1px 1px 1px rgba(255, 255, 255, 0.30),
+    inset 1px -1px 1px rgba(0, 0, 0, 0.45);
   z-index: 2;
 }
 .screw::before,
@@ -319,17 +328,23 @@
   position: absolute;
   top: 50%;
   left: 50%;
-  transform: translate(-50%, -50%);
-  background: rgba(0, 0, 0, 0.60);
+  background: rgba(0, 0, 0, 0.68);
   border-radius: 1px;
+  box-shadow: 0 0.5px 0 rgba(255, 255, 255, 0.14);
 }
-.screw::before { width: 4px; height: 1px; }
-.screw::after  { width: 1px; height: 4px; }
+.screw::before { width: 5px; height: 1.2px; }
+.screw::after  { width: 1.2px; height: 5px; }
 
 .screwTL { top: 2px;    left: 2px; }
 .screwTR { top: 2px;    right: 2px; }
 .screwBL { bottom: 2px; left: 2px; }
 .screwBR { bottom: 2px; right: 2px; }
+
+/* Per-corner slot rotation — same angle on both bars keeps the cross square */
+.screwTL::before, .screwTL::after { transform: translate(-50%, -50%) rotate(18deg); }
+.screwTR::before, .screwTR::after { transform: translate(-50%, -50%) rotate(-11deg); }
+.screwBL::before, .screwBL::after { transform: translate(-50%, -50%) rotate(-27deg); }
+.screwBR::before, .screwBR::after { transform: translate(-50%, -50%) rotate(7deg); }
 
 /* ── Plate header ── */
 .plateHeader {
@@ -340,7 +355,7 @@
 }
 
 .plateNum {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 200;
   color: rgba(255, 255, 255, 0.45);
   line-height: 1;
@@ -354,18 +369,20 @@
 }
 
 .plateTitle {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 700;
   letter-spacing: 0.26em;
-  color: #ffffff;
+  color: #ece7db;
+  text-shadow: 0 0 0.7px rgba(236, 231, 219, 0.55);
   text-transform: uppercase;
   line-height: 1;
 }
 
 .plateSub {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.18em;
-  color: rgba(255, 255, 255, 0.50);
+  color: rgba(234, 229, 217, 0.58);
+  text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.45);
   text-transform: uppercase;
 }
 
@@ -519,35 +536,43 @@
 }
 
 .toggleLabel {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.16em;
-  color: rgba(255, 255, 255, 0.60);
+  color: rgba(234, 229, 217, 0.66);
+  text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.5);
   text-transform: uppercase;
 }
 
 .toggle {
-  width: 10px;
-  height: 20px;
-  background: linear-gradient(to bottom, #181818, #0e0e0e);
-  border-radius: 5px;
-  border: 1px solid #363636;
+  width: 13px;
+  height: 26px;
+  background: linear-gradient(to bottom, #1a1a18, #0c0c0b);
+  border-radius: 5.5px;
+  border: 1px solid #3a3a36;
   box-shadow:
-    inset 0 2px 4px rgba(0, 0, 0, 0.85),
-    0 1px 1px rgba(255, 255, 255, 0.03);
+    inset 0 2px 5px rgba(0, 0, 0, 0.9),
+    /* chrome mounting collar around the switch body */
+    0 0 0 1.5px #64605a,
+    0 0 0 2.5px #14120e,
+    -1px 2px 4px rgba(0, 0, 0, 0.7);
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding: 2px 0;
 }
 
+/* Bat-handle lever — chrome capsule with a bright lamp-side tip */
 .toggleLever {
-  width: 7px;
-  height: 8px;
-  background: radial-gradient(circle at 38% 28%, #aca49a 0%, #726862 48%, #404038 100%);
-  border-radius: 3px;
+  width: 8px;
+  height: 13px;
+  background:
+    radial-gradient(circle at 62% 16%, #f0ece2 0%, rgba(240, 236, 226, 0) 42%),
+    linear-gradient(to bottom, #b8b2a6 0%, #8a847a 45%, #4e4a44 100%);
+  border-radius: 3.5px 3.5px 2.5px 2.5px;
   box-shadow:
-    0 2px 4px rgba(0, 0, 0, 0.65),
-    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    -1px 2px 4px rgba(0, 0, 0, 0.75),
+    inset -0.5px 0.5px 0.5px rgba(255, 255, 255, 0.4),
+    inset 0.5px -1px 1px rgba(0, 0, 0, 0.5);
 }
 
 /* ══════════════════════════════════════════════════════
@@ -571,14 +596,15 @@
 }
 
 .selectorLabel {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.16em;
-  color: rgba(255, 255, 255, 0.60);
+  color: rgba(234, 229, 217, 0.66);
+  text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.5);
   text-transform: uppercase;
 }
 
 .selectorValue {
-  font-size: 15px;
+  font-size: 17px;
   letter-spacing: 0.13em;
   color: #ffffff;
   text-transform: uppercase;
@@ -616,16 +642,17 @@
 }
 
 .gateBtnLabel {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.16em;
-  color: rgba(255, 255, 255, 0.60);
+  color: rgba(234, 229, 217, 0.66);
+  text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.5);
   text-transform: uppercase;
 }
 
 .gateBtn {
   appearance: none;
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   border: none;
   cursor: pointer;
@@ -685,8 +712,8 @@
 }
 
 .jack {
-  width: 24px;
-  height: 24px;
+  width: 29px;
+  height: 29px;
   border-radius: 50%;
   flex-shrink: 0;
   position: relative;
@@ -700,6 +727,14 @@
       rgba(255, 255, 255, 0.45) 0%,
       rgba(255, 255, 255, 0.14) 18%,
       transparent 38%
+    ),
+    /* Hex mounting-nut facets — 6 flats at 60° period; seam lines where
+       facets meet catch/lose the lamp, breaking the smooth chrome ring */
+    repeating-conic-gradient(
+      from 22deg,
+      rgba(255, 255, 255, 0.13) 0deg 3deg,
+      transparent 10deg 50deg,
+      rgba(0, 0, 0, 0.30) 57deg 60deg
     ),
     conic-gradient(
       from 0deg,
@@ -716,28 +751,39 @@
       #888882 360deg
     );
   box-shadow:
-    0 3px 10px rgba(0, 0, 0, 0.95),
+    /* cast shadow lower-left, matching the lamp */
+    -2px 4px 8px rgba(0, 0, 0, 0.9),
     0 1px 3px  rgba(0, 0, 0, 0.75),
     /* outer edge definition */
     0 0 0 1px rgba(0, 0, 0, 0.60);
 }
 
-/* Inner socket body — recessed concave area between ring and hole */
+/* Inner socket body — recessed concave area between ring and hole.
+   Concentric micro-rings read as the exposed mounting thread of an
+   open-frame Switchcraft socket. */
 .jack::before {
   content: '';
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
-  background: radial-gradient(
-    circle at 58% 32%,
-    #2e2c2a 0%,
-    #181614 38%,
-    #060504 100%
-  );
+  background:
+    repeating-radial-gradient(
+      circle at 50% 50%,
+      rgba(200, 195, 185, 0.10) 0px,
+      rgba(200, 195, 185, 0.10) 0.8px,
+      transparent 1.4px,
+      transparent 2.6px
+    ),
+    radial-gradient(
+      circle at 58% 32%,
+      #2e2c2a 0%,
+      #181614 38%,
+      #060504 100%
+    );
   box-shadow:
     inset 0 2px 6px rgba(0, 0, 0, 0.98),
     inset 0 0 4px rgba(0, 0, 0, 0.80),
@@ -752,8 +798,8 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: radial-gradient(circle at 42% 38%, #0e0c0a, #000000);
   box-shadow:
@@ -762,9 +808,10 @@
 }
 
 .jackLabel {
-  font-size: 11px;
+  font-size: 13px;
   letter-spacing: 0.12em;
-  color: rgba(255, 255, 255, 0.70);
+  color: rgba(234, 229, 217, 0.78);
+  text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.55);
   text-transform: uppercase;
   text-align: center;
   white-space: nowrap;
@@ -821,24 +868,29 @@
 }
 
 .powerLamp {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   flex-shrink: 0;
   background: radial-gradient(circle at 38% 32%, #2c0a0a, #140404);
   border: 1px solid #2e1010;
   box-shadow:
-    inset 0 1px 3px rgba(0, 0, 0, 0.95),
-    0 1px 0 rgba(0, 0, 0, 0.5);
+    /* chrome jewel-lamp bezel — stays visible when the lamp is dark */
+    0 0 0 2px #767066,
+    0 0 0 3px #100e0c,
+    -1px 2px 3px 2px rgba(0, 0, 0, 0.6),
+    inset 0 1px 3px rgba(0, 0, 0, 0.95);
 }
 
 .powerLampOn {
   background: radial-gradient(circle at 38% 28%, #ff7060 0%, #e02020 48%, #8c0a0a 100%);
   border-color: #881010;
   box-shadow:
-    0 0 6px  rgba(220, 30, 20, 0.92),
-    0 0 16px rgba(200, 20, 10, 0.55),
-    0 0 30px rgba(180, 10, 10, 0.22),
+    0 0 0 2px #8a827a,
+    0 0 0 3px #100e0c,
+    0 0 6px  3px rgba(220, 30, 20, 0.92),
+    0 0 16px 3px rgba(200, 20, 10, 0.55),
+    0 0 30px 3px rgba(180, 10, 10, 0.22),
     inset 0 1px 0 rgba(255, 160, 140, 0.45);
   animation: flicker 5.3s ease-in-out infinite;
 }
@@ -861,7 +913,7 @@
   align-items: flex-start;
   gap: 5px;
   flex-shrink: 0;
-  min-width: 86px;
+  min-width: 96px;
 }
 
 .seqBpmDisplay {
@@ -896,9 +948,9 @@
    writing-mode + direction had inconsistent value-mapping in Firefox/Chrome. */
 .seqProbSlider {
   position: absolute;
-  right: -42px;           /* centers the visual slider on the step's right edge (width/2 = 42) */
+  right: -48px;           /* centers the visual slider on the step's right edge (width/2 = 48) */
   top: calc(50% - 4px);  /* vertically centered (height/2 = 4) */
-  width: 84px;            /* becomes visual height after rotation; matches step height ~87px */
+  width: 96px;            /* becomes visual height after rotation; matches step height ~100px (Phase 54 sizes) */
   height: 8px;            /* becomes visual width (thin strip) after rotation */
   transform: rotate(-90deg);
   transform-origin: center center;
@@ -1026,8 +1078,8 @@
 
 /* Step position LED */
 .seqLed {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   flex-shrink: 0;
   background: radial-gradient(circle at 35% 30%, #2a1a1a, #1a0808);
@@ -1101,8 +1153,8 @@
    (DOM mutation, no React state). The initial values here are the
    inactive state that the cleanup branch restores. */
 .qntLed {
-  width: 7px;
-  height: 10px;
+  width: 9px;
+  height: 12px;
   border-radius: 1.5px;
   background: rgba(93, 202, 165, 0.12);
   box-shadow: none;
@@ -1114,7 +1166,7 @@
 }
 
 .qntLedLabel {
-  font-size: 6px;
+  font-size: 7px;
   letter-spacing: 0;
   color: rgba(255, 255, 255, 0.50);
   text-align: center;
@@ -1145,8 +1197,8 @@
 
 /* IN LED: round signal-presence indicator — DOM-mutated on cable connect/disconnect */
 .qntInLed {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: rgba(93, 202, 165, 0.15);
   box-shadow: none;
@@ -1155,7 +1207,7 @@
 
 /* Note name + Hz text display — DOM-mutated directly, no React state */
 .qntDisplay {
-  font-size: 8px;
+  font-size: 10px;
   font-family: 'Courier New', monospace;
   letter-spacing: 0.04em;
   color: #5DCAA5;
@@ -1175,8 +1227,8 @@
 
 /* EXT presence LED — round dot; lit green when TRANSPOSE CV is detected */
 .qntExtLed {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
   background: rgba(93, 202, 165, 0.12);
@@ -1220,11 +1272,31 @@
   padding: 1px 2px;
 }
 
+/* Phase 54: channels 4-across + legacy jack column — half the height of stacked rows */
+.ioChGrid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+  justify-items: center;
+  align-items: end;
+  padding: 2px 0;
+}
+
+.ioChCol {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+/* aligns the legacy jack's baseline with the channel jacks */
+.ioChColSpacer { flex: 1; }
+
 /* ══════════════════════════════════════════════════════
    KEYBOARD BARRIER — walnut rail between rack and keys
    ══════════════════════════════════════════════════════ */
 .kbdBarrier {
-  height: 20px;
+  height: 14px;
   background:
     /* Horizontal wood grain lines */
     repeating-linear-gradient(
@@ -1240,10 +1312,10 @@
     ),
     linear-gradient(
       to bottom,
-      #b86830 0%,
-      #c87038 35%,
-      #b46030 65%,
-      #8a4418 100%
+      #8c4620 0%,
+      #9a5028 35%,
+      #82401c 65%,
+      #5e2a12 100%
     );
   border-top:    1px solid rgba(255, 255, 255, 0.12);
   border-bottom: 1px solid rgba(0, 0, 0, 0.55);
@@ -1269,9 +1341,9 @@
   mix-blend-mode: screen;
   background: radial-gradient(
     ellipse at 78% 18%,
-    rgba(255, 255, 255, 0.10) 0%,
-    rgba(255, 255, 255, 0.04) 28%,
-    rgba(255, 255, 255, 0.01) 52%,
+    rgba(255, 253, 246, 0.13) 0%,
+    rgba(255, 253, 246, 0.055) 28%,
+    rgba(255, 253, 246, 0.012) 52%,
     transparent 70%
   );
 }
@@ -1393,8 +1465,8 @@
 
 /* Activity LED — rAF-driven opacity, mint color */
 .ffbLed {
-  width: 5px;
-  height: 5px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
   will-change: opacity;
@@ -1532,8 +1604,8 @@
 
 /* Vocoder band LED — opacity driven by per-band modulator energy (mint, matches FFB) */
 .vocLed {
-  width: 4px;
-  height: 4px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
   will-change: opacity;
@@ -1545,8 +1617,8 @@
 
 /* ── Kick drum trigger LED — same geometry as gate LED, red color ── */
 .kickLed {
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   flex-shrink: 0;
   will-change: opacity;

@@ -39,6 +39,106 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-07-04] Bug Fix — Black-Flashing Modules (GPU layer thrash from Phase 53's `will-change`)
+
+**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`
+
+**Symptom (Dylan):** modules flashed black for ~a second on ENV gate-button presses and when switching back to the tab.
+
+**Root cause:** Phase 53 put a static `will-change: transform` on `.cabinet`, permanently promoting the entire rack (~2900×1750 px of turbulence textures, layered shadows, and a blend-mode overlay) to a single giant composited GPU layer (~80 MB at DPR 2). Any small invalidation inside it (the gate button's `:active` transform — the handler itself touches no React state) forced tile re-rasterization of the giant layer, and slow tiles paint **black** until ready. Tab switch-away evicts the layer's GPU memory → tab return re-rasters everything → same flash.
+
+**Fix — transient promotion:** removed the static `will-change`; the camera now sets `el.style.willChange = 'transform'` imperatively on wheel/pan/reset activity and releases it 500 ms after the camera settles (`touchWillChange()` + debounced timer). At rest the rack paints as normal screen-space tiles (nothing to evict, small cheap repaints); during zoom it's composited and smooth. Side benefit: releasing the layer re-rasters the rack at the current zoom scale, so a zoomed-in view snaps crisp instead of staying blurry-scaled.
+
+**Verified (Playwright):** willChange `(empty)` at rest → `transform` immediately after wheel → `(empty)` 800 ms later; gate press causes no promotion churn; Esc reset exact; zero console errors; build compiles.
+
+### [2026-07-04] Rack Densification — Maximize On-Screen Component Size (Phase 54, Dylan-driven)
+
+**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.jsx`, `MoogKnob.module.css`, `Led.module.css`, `KeyboardModule.jsx`, `KeyboardModule.module.css`
+
+Dylan: "everything is too small — maximize the modules." Under fit(), uniform px inflation is a no-op (Phase 53 lesson), so the win came from **non-uniform** changes: cutting vertical slack (raises the fit scale) + growing components into under-filled space. Measured-first with a Playwright geometry script (per-tier heights, per-module slack).
+
+**Result: controls ~28% bigger on screen.** natH 1858→1744, fit scale 0.506→0.539, on top of components ~+20% natural size. No overlaps (verified full-rack screenshot + zoom drive).
+
+- **Row 4 de-stack (the big one):** the two 960s were stacked in `.seqStack`, making tier 4 **616px — ⅓ of the rack** — and forcing CHORD/QNT/I/O to stretch double-height. Now side-by-side: `tierRow4` = 5 cols `1.5fr 1.5fr 1fr 0.9fr 1.1fr`. Tier 4: 616→409px. (`.seqStack` CSS left as dead class.)
+- **I/O slimming (it was the next row-4 driver):** power switch + lamp folded into the MASTER knob row; 4 channel strips converted from stacked rows to a 4-across `.ioChGrid` with the legacy `io-in` jack as a 5th column (`.ioChColSpacer` baseline-aligns it).
+- **Component bump ~+20%:** knobs xl 54/94→64/104, lg 42/76→50/86, md 32/58→38/66, sm 25/46→30/52, xs 18/22→22/26 (BODY_PX/WRAP_PX + `.knob_*` classes must stay in sync). Jacks 24→29 (socket 16→20, hole 8→10). LED bezel 14→17 / glass 9→11; seq/kick/power/ffb/voc/qnt LEDs all bumped. Toggles 11×22→13×26. Gate button 22→26.
+- **Typography:** plateTitle 20→22, plateSub 10→11, knobLabel 11→13, jackLabel 11→13, selectorValue 15→17, toggle/selector/gate labels 10→11, ledLabel 5→7, tickNum 7→8, qntDisplay 8→10.
+- **Slack trims:** plate padding 11→10 (+gap 6→5), cabinet padding 18/22→14/18, kbdBarrier 20→14.
+- **Coupled geometry updated:** `.seqCtrl` min-width 86→96 (lg wrap); `.seqProbSlider` 84px/−42px → 96px/−48px (step height).
+- **Keyboard widened to fill its strip:** WW 20→30, BW 12→18; `SEMI_BLACK` now **derived** from the documented formula (`nextWhiteIdx × WW − BW/2`) instead of hardcoded. **Gotcha found:** white keys are flex children sized by CSS (`.whiteKey width`) while black keys use inline `WW`-derived lefts — the CSS width must equal `WW` or black keys detach (comment added).
+
+**Verified:** geometry re-measured (tiers 360/344/329/409); zoom camera re-driven post-layout (knob drag doesn't pan, Esc restores base scale 0.539); zero console errors; production build compiles.
+
+### [2026-07-04] Viewport Camera — Wheel Zoom + Drag Pan (Phase 53, from a Gemini blueprint — largely rejected)
+
+**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.module.css`
+
+Gemini's "High-Readability" phase. The legibility complaint was real; the prescription was mostly wrong — the one sound idea (a zoom/pan viewport) was implemented, the rest rejected.
+
+**Implemented — viewport camera (`MoogShell.jsx` fit effect, rewritten):**
+- `transform: translate(tx,ty) scale(s0·z)` on the cabinet, origin `0 0`; `s0` = fit scale (the zoomed-out home state, unchanged math), `z` = user zoom 1–8×. Cabinet gains `align-self: flex-start` so its layout origin is the shell's content corner — translate math needs no centering compensation (horizontal centering at rest comes from fit's width compensation making scaled width == availW exactly).
+- **Wheel/pinch zooms toward the cursor** (`t' = p − ((p−t)/S)·S'`; ctrlKey = trackpad pinch, larger factor). **Drag empty faceplate pans** when zoomed. **Esc / double-click empty plate** animates back (0.35s transition, cleared after).
+- **Interactivity detection with zero per-component markup:** `cursor` is an inherited CSS property and every control in the rack resolves to `pointer`/`ns-resize` (knobs, jacks, keys, selectors, cables) while bare faceplate resolves to `auto` — one `getComputedStyle(target).cursor` check (+ `closest('button, input, select, [data-jack-id]')`) gates pan/dblclick-reset. Knob drags, cable drags, and piano keys all work while zoomed.
+- All view state in the effect closure; direct style writes only (Zero-Re-render Rule). Pan clamped so the rack never detaches from the viewport. `will-change: transform` on the cabinet. Cables need no changes: the overlay lives inside the cabinet (transforms with it) and `getSvgCoords` derives scale from bounding-rect ratios (new drags while zoomed land correctly — verified).
+- Label contrast bump (~+0.08–0.10 alpha on knob/jack/plate-sub/toggle/selector/gate labels) keeping the Phase 52 worn warm tone. Cap polish: brushing-ring contrast halved + specular tamed so caps read clean at 8×.
+
+**Rejected from Gemini's blueprint (with reasons):**
+- **"+25% components / +30% fonts" — a mathematical no-op under fit():** `scale = availH/natH`; inflating components inflates natH, fit() scales down by the same factor → identical on-screen size. Only a camera can change perceived size in this architecture.
+- **"Scrolling rack" (`overflow-y: auto`)** — the exact documented fit()-breaking proposal from Phases 27–29 (feedback memory item #6); also sacrifices the whole-instrument view. Zoom subsumes it (a zoomed view pans vertically).
+- **"High-contrast crisp sans-serif"** — reverses Gemini's own Phase 52 "worn heat-stamped, NOT crisp modern print" directive (third self-reversal in three phases). Kept the period lettering; slight alpha bump only.
+- **Module glow/borders** — real System 55 modules don't glow; contradicts Phases 51–52 photorealism.
+- **Phase number 46** — already taken (vocoder Daft-Punk chain).
+
+**Verified (Playwright-driven):** wheel zoom to 8× clamp toward cursor; knob drag while zoomed does not pan the view; pan works and clamps; cable drawn while zoomed lands dead-center on jacks; Esc restores the exact base transform (`translate(0,0) scale(0.50592)`); zero console errors; production build compiles.
+
+### [2026-07-04] Period-Correct System 55 Component Pass (Phase 52, from a Gemini blueprint — partially rejected)
+
+**Files modified:** `MoogKnob.module.css`, `MoogShell.module.css`, `Led.module.css`, `PatchCableOverlay.jsx`
+
+Refinement pass on Phase 51 toward the exact vintage System 55 components. All static paint; no JSX changes except the cable layer removal. (Gemini labeled this "Phase 45"; renumbered — 45 was Vocoder Synth Expansion.)
+
+- **Spun-aluminum knob caps:** new `.knob::before` (inset 22%) — brushed-metal disc via concentric `repeating-radial-gradient` brushing rings blended over a radial falloff, seated with an inset ring shadow. Pseudo-element ⇒ no JSX change; it rotates with the knob (physically correct) and concentric rings are rotationally symmetric so rotation never shimmers. `.knobCream::before { content: none }` — cream 960 dials stay solid bakelite.
+- **Two-segment pointer line:** `.knobCap` now runs rim→center (top 6%, height 44%) with a single gradient: white-filled tick on the skirt (0–35%) → dark engraved line across the aluminum cap (37–100%); breakpoint = cap edge at (22−6)/44 ≈ 36%. Gemini's "black line to the skirt edge" was rejected as physically incoherent (invisible on a black skirt); the real 900-series fills the skirt segment.
+- **Deeper cast shadows:** `.knobShading` outer pair bumped to `-7px 10px 16px` + `-3px 4px 6px` (long-soft + short-hard sells skirt height). Still screen-fixed via the counter-rotation identity.
+- **Worn heat-stamped lettering:** all label classes (`plateTitle/plateSub/jackLabel/toggleLabel/selectorLabel/gateBtnLabel/knobLabel`) moved from pure white to warm off-white `rgba(234,229,217,…)` + faint ink-bleed `text-shadow`.
+- **Abrasive plate finish:** grain turbulence bumped (baseFrequency 0.85→0.95, 3 octaves, alpha 0.16→0.22).
+- **Jack thread:** concentric micro-rings on `.jack::before` — open-frame Switchcraft mounting-thread read inside the recess.
+- **Cables → smooth rubber:** braid dash layer removed (Gemini reversed its own Phase 51 braid directive; rubber is the period-correct jacket anyway); sheen dulled and broadened (0.25/1.6px → 0.12/2.6px).
+- **Jewel-lamp facets:** `.led::after` cut-glass facet overlay (repeating-conic wedges + warm hotspot). Lives on the glass so it fades with the rAF opacity — facets show only when lit.
+- **Wood:** grain streak alpha raised (0.55→0.68) for more visible walnut figure.
+
+**Rejected from Gemini's blueprint (with reasons):**
+- **"Maintain upper-left lighting"** — nothing to maintain; lamp has always been upper-right and Dylan settled this in Phase 51. Kept upper-right.
+- **Grey/black-only cables** — the 6-color palette is load-bearing UX for tracing patches on a dense rack; texture changed, palette kept.
+- **"Sync-Lock / Cycle-Peak / Prob. Flicker LEDs"** — still-hallucinated feature names; facet treatment applied to the real `Led` component.
+- **Phase number 45** — already taken.
+
+**Verified:** production build compiles (warnings pre-existing); Playwright full-rack + close-up screenshots, zero console errors.
+
+### [2026-07-04] Photorealistic Material Overhaul (Phase 51, from a Gemini blueprint — partially rejected)
+
+**Files modified:** `MoogKnob.jsx`, `MoogKnob.module.css`, `MoogShell.jsx`, `MoogShell.module.css`, `Led.jsx`, `Led.module.css`, `PatchCableOverlay.jsx`
+
+Full material/lighting pass — all static CSS/SVG paint, zero runtime cost, Zero-Re-render Rule untouched. (Gemini labeled this "Phase 44"; renumbered — 44 was Vocoder Loudness.)
+
+- **Knobs (flagship):** silver knobs → **black skirted vintage bakelite** with white pointer line; **cream/ivory variant** on the 960 step dials (photo-accurate two-tone). New `variant` prop on `MoogKnob` (`'black'` default | `'cream'`). Fluted skirt = `repeating-conic-gradient` on the rotating `.knob` (physical — flutes spin with the value); dome cap = opaque-center radial layer above it. **Shadow physics:** `.knobShading` counter-rotates (−θ inside +θ ⇒ net screen transform is identity), so both its speculars AND the new directional outer drop shadow (`-5px 7px`, lamp upper-right → shadow lower-left) render screen-fixed at every knob position; only rotationally-symmetric ring shadows stay on `.knob`.
+- **Faceplate:** glossy piano-black → matte crinkle-black with micro-grain via inline SVG `feTurbulence` data-URI (rasterized once, tiles as background-image); specular toned down.
+- **Screws:** 7→8px, lamp-aligned highlight (68% 22%), cast shadow lower-left, per-corner slot rotation (18/−11/−27/7°).
+- **Jacks:** hex mounting-nut facets — `repeating-conic-gradient` 60°-period seam lines over the chrome ring; directional cast shadow.
+- **Cables (`PatchCableOverlay`):** each committed cable is now a 5-layer group — blurred cast-shadow path (`translate(-3,6)`, `feGaussianBlur`), base stroke (6px, sole interactive layer), braid dash overlay, cylindrical sheen line, and **plug hardware at both ends** (nickel collar + cable-colored strain-relief boot; endpoint tangents are exactly vertical because the bezier control points sit directly below the jacks, so plugs are axis-aligned rects). Active drag path unchanged (imperative).
+- **LEDs:** new `.ledBezel` wrapper (chrome conic ring + recessed seat) around the lamp glass — separate element because the rAF fades `opacity` on the glass only; the housing must not fade. **Lights-out:** bezel background/box-shadow killed via `:global([data-lights-out])` (an unlit bezel reflects nothing in a dark room — without this, grey dots float in the darkness).
+- **Toggles:** bat-handle chrome levers + mounting collar. **Power lamp:** chrome jewel bezel (persists when dark — class-swap, not opacity).
+- **Wood:** deepened to reference walnut (`#522410`–`#904c24`), organic grain via horizontally-stretched `feTurbulence` (baseFrequency `0.009 0.11`); kbdBarrier matched.
+- **Lamp:** `.lightOverlay` warmed + brightened (`rgba(255,253,246,0.13)` peak).
+
+**Rejected from Gemini's blueprint (with reasons):**
+- **Light from upper-left** — the entire existing system (lamp overlay, plate speculars, jack conics, knob shading) is built around the upper-right lamp at `78% 18%`; mirroring everything = pure churn for zero realism gain. Kept upper-right, deepened instead (Dylan approved).
+- **"Sync-Lock / Cycle-Peak / Prob. Flicker LEDs we added"** — hallucinated feature names; the `Led` component already rendered jewel lamps. Only the bezel was missing.
+- **"Flexible cable physics"** — cables already droop via gravity bezier (Phase 7); "physics" scoped to draped cast shadows + plug hardware.
+- **Phase number 44** — already taken.
+
+**Verified:** production build compiles (all warnings pre-existing); Playwright screenshots of full rack, module close-ups, patched cables, and lights-out mode.
+
 ### [2026-07-02] Chord Seq glide + bigger chord buttons, Keyboard glide staircase fix (Phase 50)
 
 **Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
