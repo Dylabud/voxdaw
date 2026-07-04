@@ -1,8 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import styles from './InstrumentPanel.module.css';
 
 /**
- * Playable 2-octave keyboard (C3–C5) for the instrument tab. Mouse only —
+ * Playable 2-octave keyboard for the instrument tab, transposed by octaveBase
+ * (a sliding window — the whole keyboard shifts, like a hardware controller).
+ * Mouse only —
  * QWERTY input lives in InstrumentPanel (single listener for both panel
  * kinds). Pure presentation: audio + pressed-class work happens in the
  * parent's onNoteOn/onNoteOff, targeting the data-note attributes here.
@@ -21,30 +23,31 @@ const WHITE = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
 // Black key sits after this white index within the octave (C#=0, D#=1, F#=3…).
 const BLACKS = [{ n: 'C#', after: 0 }, { n: 'D#', after: 1 }, { n: 'F#', after: 3 }, { n: 'G#', after: 4 }, { n: 'A#', after: 5 }];
 
-const LO_OCT = 3;
 const N_WHITE = 15; // two octaves + top C
 const WHITE_W = 100 / N_WHITE;
 const BLACK_W = WHITE_W * 0.6;
 
-const buildKeyboard = () => {
+// Geometry is a function of octaveBase so the keyboard transposes as a whole.
+// `left` is positional (0/1 index within the span), independent of the octave.
+const buildKeyboard = (octaveBase) => {
   const whites = [];
   const blacks = [];
   for (let oct = 0; oct < 2; oct++) {
-    for (let i = 0; i < 7; i++) whites.push(`${WHITE[i]}${LO_OCT + oct}`);
+    for (let i = 0; i < 7; i++) whites.push(`${WHITE[i]}${octaveBase + oct}`);
     for (const b of BLACKS) {
       blacks.push({
-        note: `${b.n}${LO_OCT + oct}`,
+        note: `${b.n}${octaveBase + oct}`,
         left: (oct * 7 + b.after + 1) * WHITE_W - BLACK_W / 2,
       });
     }
   }
-  whites.push(`C${LO_OCT + 2}`);
+  whites.push(`C${octaveBase + 2}`);
   return { whites, blacks };
 };
-const KEYBOARD = buildKeyboard();
 
 export default function KeyboardPanel({ octaveBase, onNoteOn, onNoteOff, hotkeys = {} }) {
   const mouseNoteRef = useRef(null);
+  const KEYBOARD = useMemo(() => buildKeyboard(octaveBase), [octaveBase]);
 
   useEffect(() => {
     const up = () => {
@@ -68,7 +71,10 @@ export default function KeyboardPanel({ octaveBase, onNoteOn, onNoteOff, hotkeys
     onNoteOn(note);
   };
 
-  const letterFor = (note) => (note.endsWith(String(octaveBase)) || note === `C${octaveBase + 1}` ? hotkeys[note] : null);
+  // Show the QWERTY letter on any mapped key. `hotkeys` (= noteToKey) is
+  // octave-qualified and built with the same octaveBase, so this stays correct
+  // under the sliding window and covers the extended second-octave keys.
+  const letterFor = (note) => hotkeys[note] ?? null;
 
   return (
     <div className={styles.kbd}>

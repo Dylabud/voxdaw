@@ -100,7 +100,7 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = nul
       if (!track) continue;
 
       const fadeGain = new Tone.Gain(1).connect(trackVolume);
-      const synth    = makeSynth(track.instrument).connect(fadeGain);
+      const synth    = makeSynth(track.instrument, { envelope: track.envelope }).connect(fadeGain);
 
       scheduleFadeEnvelope(fadeGain, r, bpm);
 

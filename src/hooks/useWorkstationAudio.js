@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import * as Tone from 'tone';
-import { makeSynth, isSampledInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
+import { makeSynth, applyEnvelope, defaultEnvelopeFor, isSampledInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
 import { makeFx } from '../components/Workstation/fxChain';
 import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
 
@@ -30,6 +30,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
   const pannersByTrackIdRef       = useRef(new Map()); // trackId → Panner
   const appliedVolumeByTrackIdRef = useRef(new Map()); // trackId → last v 0..100
   const appliedPanByTrackIdRef    = useRef(new Map()); // trackId → last pan -1..+1
+  const appliedEnvByTrackIdRef    = useRef(new Map()); // trackId → last envelope object (ref-compared)
 
   // Per-track insert-FX chain (pan → wrappers → mute)
   const fxChainsByTrackIdRef     = useRef(new Map()); // trackId → [makeFx wrapper] (parallel to track.effects)
@@ -96,14 +97,16 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       loadingRegionsRef.current.set(`audition:${trackId}`, trackId);
       recomputeLoadingTrackIds();
     }
-    const synth = makeSynth(instrument, sampled ? {
-      onLoad: () => {
+    const opts = { envelope: track.envelope };
+    if (sampled) {
+      opts.onLoad = () => {
         // Only clear if this load still matches the cached instrument —
         // a stale load must not clear a newer instrument's indicator.
         if (auditionByTrackIdRef.current.get(trackId)?.instrument !== instrument) return;
         if (loadingRegionsRef.current.delete(`audition:${trackId}`)) recomputeLoadingTrackIds();
-      },
-    } : undefined);
+      };
+    }
+    const synth = makeSynth(instrument, opts);
     synth.connect(volume);
     cache.set(trackId, { synth, instrument });
     return synth;
@@ -164,6 +167,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
         mutes.delete(id);
         volApp.delete(id);
         panApp.delete(id);
+        appliedEnvByTrackIdRef.current.delete(id);
       }
     }
     for (const t of tracks) {
@@ -323,6 +327,32 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     }
   }, [tracks]);
 
+  // ── 3c. Envelope sync — per-track ADSR override ────────────────────────
+  // track.envelope (optional) overrides the instrument default. Applied live
+  // to the audition synth (immediate feedback while turning knobs) and every
+  // region synth on the track (correct on next play — no synth rebuild).
+  // Object-reference compare, mirroring the FX param sync: onEnvelopeChange
+  // mints a fresh envelope object each edit. `undefined → default` is handled
+  // by resolving to defaultEnvelopeFor so clearing the override (on instrument
+  // change) restores the instrument's baseline.
+  useEffect(() => {
+    const envApp   = appliedEnvByTrackIdRef.current;
+    const synths   = synthsByRegionIdRef.current;
+    const regsByTrack = new Map();
+    for (const r of regions) {
+      if (!regsByTrack.has(r.trackId)) regsByTrack.set(r.trackId, []);
+      regsByTrack.get(r.trackId).push(r.id);
+    }
+    for (const t of tracks) {
+      if (envApp.get(t.id) === t.envelope) continue;
+      envApp.set(t.id, t.envelope);
+      const env = t.envelope ?? defaultEnvelopeFor(t.instrument);
+      const audition = auditionByTrackIdRef.current.get(t.id);
+      if (audition && audition.instrument === t.instrument) applyEnvelope(audition.synth, env);
+      for (const rid of regsByTrack.get(t.id) ?? []) applyEnvelope(synths.get(rid), env);
+    }
+  }, [tracks, regions]);
+
   // ── 4. Region/Note sync — per-region synth + fade gain + Part ─────────
   useEffect(() => {
     const synths   = synthsByRegionIdRef.current;
@@ -351,20 +381,22 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     }
 
     // Helper — build a synth, wire sampler loading bookkeeping if needed.
-    const buildSynthForRegion = (regionId, trackId, instrument, destination) => {
+    const buildSynthForRegion = (regionId, trackId, instrument, destination, envelope) => {
       const sampled = isSampledInstrument(instrument);
       if (sampled) {
         loadingRegionsRef.current.set(regionId, trackId);
         recomputeLoadingTrackIds();
       }
-      const synth = makeSynth(instrument, sampled ? {
-        onLoad: () => {
+      const opts = { envelope };
+      if (sampled) {
+        opts.onLoad = () => {
           // Mark this region loaded only if it still maps to this instrument.
           const st = applied.get(regionId);
           if (st) applied.set(regionId, { ...st, loaded: true });
           if (loadingRegionsRef.current.delete(regionId)) recomputeLoadingTrackIds();
-        },
-      } : undefined);
+        };
+      }
+      const synth = makeSynth(instrument, opts);
       synth.connect(destination);
       return synth;
     };
@@ -385,7 +417,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       // (Re)build synth + fadeGain on first appearance OR when instrument changed.
       if (!synths.has(r.id)) {
         const fadeGain = new Tone.Gain(1).connect(trackVolume);
-        const synth    = buildSynthForRegion(r.id, r.trackId, track.instrument, fadeGain);
+        const synth    = buildSynthForRegion(r.id, r.trackId, track.instrument, fadeGain, track.envelope);
         synths.set(r.id, synth);
         fades.set(r.id, fadeGain);
       } else {
@@ -393,7 +425,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
           // Clear any pending sampler load for the prior instrument.
           if (loadingRegionsRef.current.delete(r.id)) recomputeLoadingTrackIds();
           synths.get(r.id)?.dispose();
-          const synth = buildSynthForRegion(r.id, r.trackId, track.instrument, fades.get(r.id));
+          const synth = buildSynthForRegion(r.id, r.trackId, track.instrument, fades.get(r.id), track.envelope);
           synths.set(r.id, synth);
         }
         // Region moved to another track: re-parent its fadeGain into the new

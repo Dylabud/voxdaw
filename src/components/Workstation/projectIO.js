@@ -15,6 +15,8 @@ export function serializeProject({ bpm, totalMeasures, tracks, regions, notes })
       effects: Array.isArray(t.effects)
         ? t.effects.map(e => ({ id: e.id, type: e.type, bypass: !!e.bypass, params: { ...e.params } }))
         : [],
+      // ADSR override (optional) — omitted when the track uses the instrument default.
+      ...(t.envelope && typeof t.envelope === 'object' ? { envelope: { ...t.envelope } } : {}),
     })),
     regions: regions.map(r => ({
       id: r.id, trackId: r.trackId,
@@ -108,6 +110,7 @@ export function deserializeProject(raw) {
       volume:  typeof t.volume === 'number' ? t.volume : 75,
       pan:     typeof t.pan    === 'number' ? Math.max(-1, Math.min(1, t.pan)) : 0,
       effects: deserializeEffects(t.effects),
+      envelope: deserializeEnvelope(t.envelope),
     })),
     regions: outRegions,
     notes: outNotes,
@@ -132,6 +135,19 @@ function deserializeEffects(raw) {
       bypass: !!e.bypass,
       params: (e.params && typeof e.params === 'object') ? { ...e.params } : {},
     }));
+}
+
+// Rebuild a track's optional ADSR override (old projects have no `envelope`
+// field → undefined = use the instrument default). Additive, backward-
+// compatible — SCHEMA_VERSION intentionally NOT bumped. Only numeric keys
+// survive; an empty/invalid object collapses to undefined.
+function deserializeEnvelope(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out = {};
+  for (const k of ['attack', 'decay', 'sustain', 'release']) {
+    if (typeof raw[k] === 'number' && isFinite(raw[k])) out[k] = raw[k];
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function nextSuffix(items) {

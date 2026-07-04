@@ -15,14 +15,19 @@
   user-select: none;
 }
 
-/* margin:auto centers when content is shorter than the panel; the panel
-   scrolls when squeezed below content height (min tab area ≈ 102px). */
+/* Fill the panel so child widths are relative to the panel, not the widest
+   child — this decouples the keyboard's width from the chassis knob count.
+   The panel scrolls when squeezed below content height (overflow: auto). */
 .content {
-  margin: auto;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  margin: 0;
   padding: 10px 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 8px;
 }
 
@@ -128,51 +133,171 @@
   }
 }
 
-/* ── Melodic keyboard ─────────────────────────────────────────────────── */
+/* ── Control chassis (Master · Envelope · Pitch) ──────────────────────── */
+
+.chassis {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 14px;
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--bg-elevated, var(--bg-panel)), #fff 4%),
+    var(--bg-panel));
+  border: 1px solid var(--border-mid);
+  border-radius: 8px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+.knobGroup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+}
+.knobGroup + .knobGroup {
+  border-left: 1px solid var(--border-faint, var(--border-mid));
+}
+.groupLabel {
+  font-size: 8px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--text-dimmer);
+}
+.knobRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.octaveRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+}
+.octaveBtn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--form-text, var(--text-primary));
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--bg-surface, var(--bg-elevated)), #fff 8%),
+    var(--bg-surface, var(--bg-elevated)));
+  border: 1px solid var(--border-mid);
+  border-radius: 5px;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: transform 0.05s, filter 0.1s;
+}
+.octaveBtn:hover:not(:disabled) {
+  border-color: var(--track-color, var(--accent-color));
+  filter: brightness(1.1);
+}
+.octaveBtn:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.35);
+}
+.octaveBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.octaveDisplay {
+  min-width: 46px;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--track-color, var(--accent-color));
+}
+
+/* ── Melodic keyboard — hardware keybed ───────────────────────────────── */
 
 .kbd {
   position: relative;
   display: flex;
-  width: min(560px, 100%);
-  height: 130px;
+  /* Consistent large width, independent of the chassis; grows to fill the
+     remaining vertical space so the keyboard dominates the tab. */
+  width: min(1100px, 95%);
+  flex: 1 1 auto;
+  min-height: 150px;
+  padding-top: 4px;
+  border-radius: 4px 4px 6px 6px;
+  /* Felt strip above the keys — the top of a controller keybed. */
+  background: linear-gradient(180deg,
+    var(--track-color, var(--accent-color)) 0,
+    color-mix(in srgb, var(--track-color, var(--accent-color)) 55%, #000) 3px,
+    transparent 4px);
 }
 .whiteKey {
   flex: 1;
   position: relative;
-  background: var(--piano-key-white);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--piano-key-white), #fff 12%) 0%,
+    var(--piano-key-white) 45%,
+    color-mix(in srgb, var(--piano-key-white), #000 10%) 100%);
   border: 1px solid var(--piano-key-white-border, var(--border-mid));
-  border-radius: 0 0 3px 3px;
+  border-radius: 0 0 4px 4px;
   cursor: pointer;
   display: flex;
   align-items: flex-end;
   justify-content: center;
   padding-bottom: 6px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -4px 5px -3px rgba(0, 0, 0, 0.28),
+    0 2px 3px rgba(0, 0, 0, 0.28);
+  transition: transform 0.04s ease-out, box-shadow 0.04s ease-out, filter 0.1s;
+}
+.whiteKey:hover {
+  filter: brightness(1.04);
 }
 .blackKey {
   position: absolute;
-  top: 0;
+  top: 4px;
   height: 62%;
-  background: var(--piano-key-black);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--piano-key-black), #fff 24%) 0%,
+    var(--piano-key-black) 34%,
+    color-mix(in srgb, var(--piano-key-black), #000 30%) 100%);
   border: 1px solid var(--piano-key-black-border, var(--border-mid));
-  border-radius: 0 0 3px 3px;
+  border-radius: 0 0 4px 4px;
   cursor: pointer;
   z-index: 2;
   display: flex;
   align-items: flex-end;
   justify-content: center;
   padding-bottom: 4px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 3px 4px rgba(0, 0, 0, 0.5);
+  transition: transform 0.04s ease-out, box-shadow 0.04s ease-out, filter 0.1s;
+}
+.blackKey:hover {
+  filter: brightness(1.3);
 }
 .keyLetter {
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-dimmer);
   pointer-events: none;
 }
-/* Pressed tint — the .keyActive color-mix recipe against each key color. */
-.whiteKey.keyDown {
-  background: color-mix(in srgb, var(--track-color, var(--accent-color)) 35%, var(--piano-key-white));
+.blackKey .keyLetter {
+  color: rgba(255, 255, 255, 0.55);
 }
-.blackKey.keyDown {
+/* Pressed — physical depression: key sinks, gains an inner shadow, and takes
+   the track-color tint. Fires on both mouse :active and the keyDown class. */
+.whiteKey.keyDown,
+.whiteKey:active {
+  background: color-mix(in srgb, var(--track-color, var(--accent-color)) 35%, var(--piano-key-white));
+  transform: translateY(2px);
+  box-shadow: inset 0 3px 6px rgba(0, 0, 0, 0.3), 0 1px 1px rgba(0, 0, 0, 0.2);
+}
+.blackKey.keyDown,
+.blackKey:active {
   background: color-mix(in srgb, var(--track-color, var(--accent-color)) 60%, var(--piano-key-black));
+  transform: translateY(2px);
+  box-shadow: inset 0 3px 6px rgba(0, 0, 0, 0.5);
 }

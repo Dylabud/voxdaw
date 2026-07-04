@@ -63,6 +63,8 @@ export default function RegionEditor({
   scrollMemoryRef,
   magnetOn,
   onInstrumentChange,
+  onVolumeChange,
+  onEnvelopeChange,
   onEffectAdd,
   onEffectRemove,
   onEffectToggleBypass,
@@ -913,7 +915,11 @@ export default function RegionEditor({
         <InstrumentPanel
           trackId={track?.id}
           instrument={instrument}
+          volume={track?.volume ?? 75}
+          envelope={track?.envelope}
           isLoading={!!(track?.id && loadingTrackIds?.has(track.id))}
+          onVolumeChange={onVolumeChange}
+          onEnvelopeChange={onEnvelopeChange}
           auditionAttack={auditionAttack}
           auditionRelease={auditionRelease}
           auditionReleaseAll={auditionReleaseAll}
