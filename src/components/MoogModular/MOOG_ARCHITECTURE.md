@@ -375,4 +375,9 @@ This gives the user an immediately playable arpeggio on load, showcasing the ins
 | Moog Phase 42 ✅ | 16-band spectral vocoder — patchable MOD/CARR/OUT, envelope-follower bank, MIX/HISS/BUZZ, 16-seg meter | Vocoder |
 | Moog Phase 43 ✅ | EXT IN — live mic via Tone.UserMedia (later merged into the Vocoder, Phase 48) | EXT IN |
 | Moog Phase 48 ✅ | Merged EXT IN into the Vocoder — built-in mic feeds the modulator directly | Vocoder |
-| Moog Phase 12 | Visual polish — LEDs, aging effects, mobile fallback | All |
+| Moog Phase 51 ✅ | Photorealistic material overhaul — black skirted knobs (+cream 960 dials), matte feTurbulence plates, cable plugs, LED bezels, dark walnut | All (visual) |
+| Moog Phase 52 ✅ | Period-correct System 55 pass — spun-aluminum knob caps, worn lettering, jack thread, rubber cables, jewel-lamp facets | All (visual) |
+| Moog Phase 53 ✅ | Viewport camera — wheel/pinch zoom 1–8× toward cursor, drag-pan, Esc reset; zero-re-render imperative transforms | Shell (interaction) |
+| Moog Phase 54 ✅ | Rack densification — 960s de-stacked, I/O channel grid, components +20%, keyboard widened; controls ~28% bigger on screen | Shell (layout) |
+| GPU Fix ✅ | Black-flashing modules — replaced static cabinet `will-change` with transient promotion during camera moves | Shell (compositing) |
+| Moog Phase 12 | Visual polish (remaining) — knob tooltips on hover, module bypass switches, mobile fallback | All |
