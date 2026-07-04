@@ -3,7 +3,9 @@ import * as Tone from 'tone';
 import styles from './InstrumentPanel.module.css';
 import DrumKitPanel from './DrumKitPanel';
 import KeyboardPanel from './KeyboardPanel';
+import RotaryKnob from './RotaryKnob';
 import { DRUM_KITS, isDrumKit } from '../drumKits';
+import { isSampledInstrument, defaultEnvelopeFor } from '../synthFactory';
 
 /**
  * Instrument-tab performance UI: routes to the visual drum kit (drum kit
@@ -22,9 +24,37 @@ import { DRUM_KITS, isDrumKit } from '../drumKits';
  * @param {Function} auditionAttack / auditionRelease / auditionReleaseAll / auditionPrime
  */
 
-// Moog KeyboardModule's chromatic map (muscle-memory consistency): C → C.
-const MELODIC_KEY_ORDER = ['a', 'w', 's', 'e', 'd', 'f', 't', 'g', 'y', 'h', 'u', 'j', 'k'];
+// Moog KeyboardModule's chromatic map (muscle-memory consistency): C → C, then
+// extended a further 4th into the second visible octave. Home row = white keys
+// (…j k l ; '), top row = black keys (…u [gap] o p [gap] ]) — '[' is the E–F
+// no-black-key skip, mirroring 'r'/'i' in the first octave.
+const MELODIC_KEY_ORDER = ['a', 'w', 's', 'e', 'd', 'f', 't', 'g', 'y', 'h', 'u', 'j',
+                           'k', 'o', 'l', 'p', ';', "'", ']'];
 const NOTE_SEQ = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+// Octave stepper bounds (sliding-window keyboard). C1..C9 spanned at the edges.
+const MIN_OCT = 1;
+const MAX_OCT = 7;
+
+// Chassis knob metadata — 0..1 ↔ real-value mapping (log for time params so the
+// short end has resolution), mirroring EffectsRack's toKnob/fromKnob.
+const VOL_META = { min: 0, max: 100 };
+const ENV_META = {
+  attack:  { min: 0.001, max: 2, scale: 'log', label: 'atk' },
+  decay:   { min: 0.001, max: 2, scale: 'log', label: 'dcy' },
+  sustain: { min: 0,     max: 1,               label: 'sus' },
+  release: { min: 0.001, max: 3, scale: 'log', label: 'rel' },
+};
+const toKnob = (value, meta) => meta.scale === 'log'
+  ? Math.log(value / meta.min) / Math.log(meta.max / meta.min)
+  : (value - meta.min) / (meta.max - meta.min);
+const fromKnob = (v, meta) => {
+  const out = meta.scale === 'log'
+    ? meta.min * Math.pow(meta.max / meta.min, v)
+    : meta.min + (meta.max - meta.min) * v;
+  return Math.min(meta.max, Math.max(meta.min, out));
+};
+const fmtTime = (s) => (s < 0.1 ? `${Math.round(s * 1000)}ms` : `${s.toFixed(2)}s`);
 
 // Drum piece hotkeys — NOT the chromatic map: a chromatic octave would hit
 // unmapped keys (C#4, F#4…) and Tone.Sampler would repitch neighbors there.
@@ -63,6 +93,7 @@ const inTextInput = () => {
 
 export default function InstrumentPanel({
   trackId, instrument, isLoading,
+  volume = 75, envelope, onVolumeChange, onEnvelopeChange,
   auditionAttack, auditionRelease, auditionReleaseAll, auditionPrime,
 }) {
   const rootRef        = useRef(null);
@@ -139,7 +170,7 @@ export default function InstrumentPanel({
       if (inTextInput()) return;
       const k = e.key.toLowerCase();
       if (!isDrums && (k === 'z' || k === 'x')) {
-        setOctaveBase(b => Math.max(3, Math.min(4, b + (k === 'x' ? 1 : -1))));
+        setOctaveBase(b => Math.max(MIN_OCT, Math.min(MAX_OCT, b + (k === 'x' ? 1 : -1))));
         return;
       }
       const note = keyToNote[k];
@@ -177,10 +208,83 @@ export default function InstrumentPanel({
 
   const { noteToKey } = buildMaps(instrument, octaveBase);
 
+  // Chassis knob values. Sampled melodic instruments (Tone.Sampler) only expose
+  // attack/release, so decay/sustain are hidden; drum kits get no ADSR/octave.
+  const sampledMelodic   = !drums && isSampledInstrument(instrument);
+  const showDecaySustain = !drums && !sampledMelodic;
+  const defEnv = defaultEnvelopeFor(instrument) || {};
+  const curEnv = { ...defEnv, ...(envelope || {}) };
+
+  const envKnob = (key) => {
+    const meta = ENV_META[key];
+    const val = curEnv[key] ?? meta.min;
+    return (
+      <RotaryKnob
+        key={key}
+        value01={toKnob(val, meta)}
+        defaultValue01={toKnob(defEnv[key] ?? meta.min, meta)}
+        onChange={(v) => onEnvelopeChange?.(trackId, { [key]: fromKnob(v, meta) })}
+        label={meta.label}
+        display={key === 'sustain' ? val.toFixed(2) : fmtTime(val)}
+        size={38}
+      />
+    );
+  };
+
   return (
     <div ref={rootRef} className={styles.panel}>
       <div className={`${styles.content} ${isLoading ? styles.dimmed : ''}`}>
         {isLoading && <span className={styles.loadingText}>loading samples…</span>}
+
+        {/* Control chassis — Master · Envelope · Pitch. Drum kits get no chassis
+            (volume lives in the track header; ADSR/octave don't apply). */}
+        {!drums && (
+        <div className={styles.chassis}>
+          <div className={styles.knobGroup}>
+            <span className={styles.groupLabel}>master</span>
+            <div className={styles.knobRow}>
+              <RotaryKnob
+                value01={toKnob(volume, VOL_META)}
+                defaultValue01={toKnob(75, VOL_META)}
+                onChange={(v) => onVolumeChange?.(trackId, fromKnob(v, VOL_META))}
+                label="vol"
+                display={String(Math.round(volume))}
+                size={38}
+              />
+            </div>
+          </div>
+
+          <div className={styles.knobGroup}>
+            <span className={styles.groupLabel}>envelope</span>
+            <div className={styles.knobRow}>
+              {envKnob('attack')}
+              {showDecaySustain && envKnob('decay')}
+              {showDecaySustain && envKnob('sustain')}
+              {envKnob('release')}
+            </div>
+          </div>
+
+          <div className={styles.knobGroup}>
+            <span className={styles.groupLabel}>pitch</span>
+            <div className={styles.octaveRow}>
+                <button
+                  className={styles.octaveBtn}
+                  onClick={() => setOctaveBase((b) => Math.max(MIN_OCT, b - 1))}
+                  disabled={octaveBase <= MIN_OCT}
+                  aria-label="octave down"
+                >−</button>
+                <span className={styles.octaveDisplay}>OCT&nbsp;{octaveBase}</span>
+                <button
+                  className={styles.octaveBtn}
+                  onClick={() => setOctaveBase((b) => Math.min(MAX_OCT, b + 1))}
+                  disabled={octaveBase >= MAX_OCT}
+                  aria-label="octave up"
+                >+</button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {drums ? (
           <DrumKitPanel instrument={instrument} onTrigger={triggerDrum} hotkeys={noteToKey} />
         ) : (
@@ -189,7 +293,7 @@ export default function InstrumentPanel({
         <span className={styles.hint}>
           {drums
             ? 'a s d f g h · j k hats · u i o cymbals · w e r perc'
-            : 'a–k play · w e t y u sharps · z / x octave'}
+            : "a–' play · w e t y u o p ] sharps · z / x octave"}
         </span>
       </div>
     </div>

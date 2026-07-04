@@ -395,7 +395,7 @@ Play/pause and stop buttons live in `.bottomTransport` (border-top panel, `justi
 | `isPlaying` (state) | drives play-button active class; gates the rAF loop |
 | `bpm` (state) | current tempo (default 120); replaces former `BPM` constant — drives `pxPerSec` and `Tone.Transport` |
 | `editingBpm` / `tempBpm` (state) | in-place BPM editor toggle + draft string value |
-| `tracks` (state) | `[{ id, name, instrument, color, isMuted, isSolo, volume, pan, effects }]` — `color` is a hex string from `TRACK_COLORS`; `effects` is the per-track insert-effect rack (see *Effects rack* below) |
+| `tracks` (state) | `[{ id, name, instrument, color, isMuted, isSolo, volume, pan, effects, envelope }]` — `color` is a hex string from `TRACK_COLORS`; `effects` is the per-track insert-effect rack (see *Effects rack* below); `envelope` is the optional per-track ADSR override (see §16 *Per-track ADSR override*) |
 | `regions` (state) | `[{ id, trackId, startMeasure, durationMeasures, clipOffset, fadeIn, fadeOut }]` — `clipOffset` is in measures, can be negative (left padding). `fadeIn`/`fadeOut` are measure-valued visual envelopes (Phase 98), `fadeIn + fadeOut ≤ durationMeasures` enforced by push logic |
 | `notes` (state) | `[{ id, trackId, note, startBeat, durationBeats, regionId }]` — `startBeat` is **bottle-local** (offset from the region's bottle origin = `startMeasure − clipOffset` measures), filtered by `trackId` for the active editor |
 | `editingTrackId` (state) | non-null = bottom editor panel visible |
@@ -572,6 +572,11 @@ A module-level `previewSynthCache: Map<instrumentName, Synth|Sampler>` keeps pre
 
 ### RegionEditor dropdown UX
 The instrument `<select>` uses `<optgroup label="synth">` / `<optgroup label="sampled">` to keep the 29-item list scannable.
+
+### Per-track ADSR override (`track.envelope`)
+Each track carries an optional `envelope` (`{ attack, decay, sustain, release }`); absent = the instrument default. `synthFactory.js` is the single source of truth: a `SYNTH_ENVELOPES` lookup feeds both `makeSynth` and `defaultEnvelopeFor(instrument)` (drum kits → `null`; sampled melodic → `{ attack, release }` only, since `Tone.Sampler` exposes no decay/sustain). `applyEnvelope(synth, env)` handles both node kinds (`Tone.PolySynth.set({ envelope })` vs. `Tone.Sampler.attack`/`.release`), and `makeSynth(instrument, { envelope })` applies it at build.
+
+The override is applied at **every synth build** — region synths and the audition synth in `useWorkstationAudio.js`, plus the offline render in `audioBounce.js` — and kept live by **envelope-sync effect 3c** (`appliedEnvByTrackIdRef`, object-reference compare mirroring the FX-param sync): when `track.envelope` changes it `applyEnvelope`s the audition synth *and* every region synth on that track with no synth rebuild. `WorkstationShell.handleEnvelopeChange` merges partial knob edits (seeded from `defaultEnvelopeFor` on first touch, so a drag folds into one undo entry via the burst-coalescer); `handleInstrumentChange` clears the override so the chassis knobs snap to the new instrument's defaults. Persistence is additive in `projectIO.js` (`deserializeEnvelope`) — **`SCHEMA_VERSION` is intentionally not bumped**, so pre-existing `.voxdaw` files still load.
 
 ---
 

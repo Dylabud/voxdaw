@@ -13,6 +13,7 @@ import { bounceProject } from './audioBounce';
 import { exportWAV, exportMP3, trimExportBuffer } from '../../utils/audioExport';
 import { transcribeAudio } from './transcribeAudio';
 import { TRACK_COLORS } from './trackColors';
+import { defaultEnvelopeFor } from './synthFactory';
 
 const PIXELS_PER_BEAT    = 25;
 const PIXELS_PER_MEASURE = PIXELS_PER_BEAT * 4;  // 100px at zoom 1
@@ -383,8 +384,22 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     prev.map(t => t.id === id
       ? { ...t, isSolo: !t.isSolo, isMuted: !t.isSolo ? false : t.isMuted }
       : t));
+  // Instrument change clears any ADSR override so the knobs snap to the new
+  // instrument's defaults (and a decay/sustain override never lands on a
+  // Sampler after a melodic→drum switch).
   const handleInstrumentChange = useCallback((trackId, instrument) => setTracks(prev =>
-    prev.map(t => t.id === trackId ? { ...t, instrument } : t)), []);
+    prev.map(t => t.id === trackId ? { ...t, instrument, envelope: undefined } : t)), []);
+
+  // Merge a partial ADSR edit into the track's override, seeding from the
+  // instrument default on first touch so the stored object is always complete.
+  // Immutable map → inherits the history burst-coalescer (one undo per drag),
+  // matching updateEffectSettings.
+  const handleEnvelopeChange = useCallback((trackId, partial) => setTracks(prev =>
+    prev.map(t => {
+      if (t.id !== trackId) return t;
+      const base = t.envelope ?? defaultEnvelopeFor(t.instrument) ?? {};
+      return { ...t, envelope: { ...base, ...partial } };
+    })), []);
 
   // ── Per-track effects rack CRUD ──────────────────────────────────────────────
   // Effects live on the track object (track.effects), so they ride existing prop
@@ -3092,6 +3107,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onClose={() => setEditingTrackId(null)}
               scrollMemoryRef={lastPianoScrollTopRef}
               onInstrumentChange={handleInstrumentChange}
+              onVolumeChange={handleVolumeChange}
+              onEnvelopeChange={handleEnvelopeChange}
               onEffectAdd={addEffect}
               onEffectRemove={removeEffect}
               onEffectToggleBypass={toggleBypassEffect}
