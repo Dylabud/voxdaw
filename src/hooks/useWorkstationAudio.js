@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import * as Tone from 'tone';
-import { makeSynth, isSampledInstrument } from '../components/Workstation/synthFactory';
+import { makeSynth, isSampledInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
 import { makeFx } from '../components/Workstation/fxChain';
 import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
 
@@ -40,6 +40,13 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
   // Refs into latest props for recomputeFades (called by shell from event handlers)
   const regionsRef = useRef(regions); regionsRef.current = regions;
   const bpmRef     = useRef(bpm);     bpmRef.current     = bpm;
+  const tracksRef  = useRef(tracks);  tracksRef.current  = tracks;
+
+  // Per-track audition synth (instrument-tab performance UI). Hook-owned so
+  // it can connect into the track chain at the stable `volume` node — that
+  // node's output edge (volume → pan) is never rewired by effect 1b, so the
+  // audition signal rides volume → pan → FX → mute like region playback.
+  const auditionByTrackIdRef = useRef(new Map()); // trackId → { synth, instrument }
 
   // Per-region
   const synthsByRegionIdRef    = useRef(new Map()); // regionId → PolySynth | Sampler
@@ -47,6 +54,10 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
   const partsByRegionIdRef     = useRef(new Map()); // regionId → Part
   const fadeEventIdByRegionRef = useRef(new Map()); // regionId → Transport schedule id
   const appliedRegionStateRef  = useRef(new Map()); // regionId → { instrument, partKey, fadeKey, loaded }
+
+  // Live sampler buffer sources, tracked by us because Tone.Sampler forgets
+  // them at schedule time (see makePartCallback). Consumed by silenceAll.
+  const liveSamplerSourcesRef  = useRef(new Set()); // ToneBufferSource
 
   // Sampler-load tracking: which regions are still downloading buffers,
   // and the derived per-track set for the UI loading indicator.
@@ -60,6 +71,68 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       if (prev.size === next.size && [...prev].every(id => next.has(id))) return prev;
       return next;
     });
+  }, []);
+
+  // ── Audition API — per-track synth for the instrument-tab performance UI ──
+  // Lazily builds (and rebuilds on instrument change) a synth cached by
+  // trackId. Sampled instruments join the existing loading bookkeeping under
+  // a synthetic 'audition:<trackId>' key (values are trackIds, so the derived
+  // per-track indicator just works).
+  const ensureAuditionSynth = useCallback((trackId) => {
+    const volume = volumesByTrackIdRef.current.get(trackId);
+    const track  = tracksRef.current.find(t => t.id === trackId);
+    if (!volume || !track) return null;
+    const cache = auditionByTrackIdRef.current;
+    const entry = cache.get(trackId);
+    if (entry && entry.instrument === track.instrument) return entry.synth;
+
+    if (entry) {
+      entry.synth.dispose();
+      if (loadingRegionsRef.current.delete(`audition:${trackId}`)) recomputeLoadingTrackIds();
+    }
+    const instrument = track.instrument;
+    const sampled = isSampledInstrument(instrument);
+    if (sampled) {
+      loadingRegionsRef.current.set(`audition:${trackId}`, trackId);
+      recomputeLoadingTrackIds();
+    }
+    const synth = makeSynth(instrument, sampled ? {
+      onLoad: () => {
+        // Only clear if this load still matches the cached instrument —
+        // a stale load must not clear a newer instrument's indicator.
+        if (auditionByTrackIdRef.current.get(trackId)?.instrument !== instrument) return;
+        if (loadingRegionsRef.current.delete(`audition:${trackId}`)) recomputeLoadingTrackIds();
+      },
+    } : undefined);
+    synth.connect(volume);
+    cache.set(trackId, { synth, instrument });
+    return synth;
+  }, [recomputeLoadingTrackIds]);
+
+  const auditionAttack = useCallback((trackId, note) => {
+    const synth = ensureAuditionSynth(trackId);
+    // `loaded === false` skips an unready Sampler; PolySynths have no `loaded`.
+    if (!synth || synth.disposed || synth.loaded === false) return;
+    const instrument = auditionByTrackIdRef.current.get(trackId)?.instrument;
+    if (isDrumKit(instrument)) {
+      // Hi-hat choke, mirroring makePartCallback — every caller gets it.
+      for (const tgt of chokeTargetsFor(note)) synth.triggerRelease(tgt);
+    }
+    synth.triggerAttack(note, undefined, 0.8);
+  }, [ensureAuditionSynth]);
+
+  // Drums are one-shots: releases are no-ops so cymbals ring out (the buffer
+  // sources self-stop; silenceAll's _activeSources sweep still covers them).
+  const auditionRelease = useCallback((trackId, note) => {
+    const entry = auditionByTrackIdRef.current.get(trackId);
+    if (!entry || entry.synth.disposed || isDrumKit(entry.instrument)) return;
+    entry.synth.triggerRelease(note);
+  }, []);
+
+  const auditionReleaseAll = useCallback((trackId) => {
+    const entry = auditionByTrackIdRef.current.get(trackId);
+    if (!entry || entry.synth.disposed || isDrumKit(entry.instrument)) return;
+    entry.synth.releaseAll?.();
   }, []);
 
   // ── 1. Track sync — owns volume + pan + mute nodes ─────────────────────
@@ -77,6 +150,12 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
 
     for (const id of [...mutes.keys()]) {
       if (!liveIds.has(id)) {
+        const audition = auditionByTrackIdRef.current.get(id);
+        if (audition) {
+          audition.synth.dispose();
+          auditionByTrackIdRef.current.delete(id);
+          if (loadingRegionsRef.current.delete(`audition:${id}`)) recomputeLoadingTrackIds();
+        }
         volumes.get(id)?.dispose();
         panners.get(id)?.dispose();
         mutes.get(id)?.dispose();
@@ -98,7 +177,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       volApp.set(t.id, t.volume ?? 75);
       panApp.set(t.id, t.pan ?? 0);
     }
-  }, [tracks]);
+  }, [tracks, recomputeLoadingTrackIds]);
 
   // ── 1b. FX chain structural sync — owns pan's output topology ─────────
   // Rebuilds a track's wrapper chain only when the effects STRUCTURE changes
@@ -303,18 +382,29 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       const partChanged       = !prev || prev.partKey  !== partKey;
       const fadeChanged       = !prev || prev.fadeKey  !== fadeKey;
 
-      // (Re)build synth + fadeGain on first appearance OR when track moved / instrument changed.
+      // (Re)build synth + fadeGain on first appearance OR when instrument changed.
       if (!synths.has(r.id)) {
         const fadeGain = new Tone.Gain(1).connect(trackVolume);
         const synth    = buildSynthForRegion(r.id, r.trackId, track.instrument, fadeGain);
         synths.set(r.id, synth);
         fades.set(r.id, fadeGain);
-      } else if (instrumentChanged) {
-        // Clear any pending sampler load for the prior instrument.
-        if (loadingRegionsRef.current.delete(r.id)) recomputeLoadingTrackIds();
-        synths.get(r.id)?.dispose();
-        const synth = buildSynthForRegion(r.id, r.trackId, track.instrument, fades.get(r.id));
-        synths.set(r.id, synth);
+      } else {
+        if (instrumentChanged) {
+          // Clear any pending sampler load for the prior instrument.
+          if (loadingRegionsRef.current.delete(r.id)) recomputeLoadingTrackIds();
+          synths.get(r.id)?.dispose();
+          const synth = buildSynthForRegion(r.id, r.trackId, track.instrument, fades.get(r.id));
+          synths.set(r.id, synth);
+        }
+        // Region moved to another track: re-parent its fadeGain into the new
+        // track's chain (volume → pan → FX → mute). The track volume node is
+        // the fadeGain's only downstream connection, so a full disconnect is
+        // safe; the synth → fadeGain edge is untouched.
+        if (prev && prev.trackId !== r.trackId) {
+          const fadeGain = fades.get(r.id);
+          fadeGain.disconnect();
+          fadeGain.connect(trackVolume);
+        }
       }
 
       // (Re)build Part
@@ -324,7 +414,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
         const events = buildRegionEvents(r, notes);
         if (events.length > 0) {
           const synth = synths.get(r.id);
-          const part = new Tone.Part(makePartCallback(synth), events);
+          const part = new Tone.Part(makePartCallback(synth, liveSamplerSourcesRef.current, isDrumKit(track.instrument)), events);
           part.start(0);
           parts.set(r.id, part);
         }
@@ -344,12 +434,26 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       const loaded = isSampledInstrument(track.instrument)
         ? (instrumentChanged ? !!synths.get(r.id)?.loaded : (prevLoaded ?? !!synths.get(r.id)?.loaded))
         : true;
-      applied.set(r.id, { instrument: track.instrument, partKey, fadeKey, loaded });
+      applied.set(r.id, { instrument: track.instrument, partKey, fadeKey, loaded, trackId: r.trackId });
     }
   }, [tracks, regions, notes, bpm, recomputeLoadingTrackIds]);
 
   // Silence in-flight voices on pause/stop/seek (Tone.Transport.pause keeps
-  // tails alive). Two layers:
+  // tails alive). Three layers:
+  //
+  // 0. TRACKED-SOURCE KILL — the real sampler ghost-note fix. Sampler.
+  //    triggerAttackRelease pre-schedules source.stop() at an ABSOLUTE audio
+  //    time and empties _activeSources at schedule time (Tone 15.1.22
+  //    Sampler.triggerRelease) — so every Part-scheduled sampler note is
+  //    invisible to releaseAll()/layer 1 from the instant it's scheduled,
+  //    and Transport.pause doesn't pause the AudioContext, so the buffer
+  //    keeps playing in wall-clock time behind the layer-2 mute. When
+  //    recomputeFades() restored the fade gain on resume/seek, the still-
+  //    running source resurfaced ("ghost note"). makePartCallback therefore
+  //    captures each source between triggerAttack and triggerRelease into
+  //    liveSamplerSourcesRef; here we re-stop them NOW — valid because
+  //    OneShotSource.stop() calls cancelStop() first, so an already-
+  //    scheduled future stop can be pulled earlier.
   //
   // 1. SOURCE-LEVEL KILL — releaseAll() alone leaves each voice's release
   //    tail sounding: sampled instruments carry release: 1 (baked into every
@@ -374,8 +478,15 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
   const HARD_CUT_SEC = 0.02;
   const silenceAll = useCallback(() => {
     const audioNow = Tone.now();
-    for (const s of synthsByRegionIdRef.current.values()) {
-      if (!s || s.disposed) continue;
+    for (const src of liveSamplerSourcesRef.current) {
+      if (!src.disposed) {
+        src.fadeOut = HARD_CUT_SEC; // _stopGain reads _fadeOut at stop-call time
+        src.stop(audioNow);
+      }
+    }
+    liveSamplerSourcesRef.current.clear();
+    const hardCutSynth = (s) => {
+      if (!s || s.disposed) return;
       if (s._activeSources) {
         // Tone.Sampler — hard-cut each active buffer source.
         s._activeSources.forEach?.((sources) => {
@@ -389,7 +500,12 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
         s.releaseAll();
         if (origRelease != null) s.set({ envelope: { release: origRelease } });
       }
-    }
+    };
+    for (const s of synthsByRegionIdRef.current.values()) hardCutSynth(s);
+    // Audition synths too — a held performance note must not survive
+    // stop/pause/seek. They bypass region fadeGains, so layer 2 below never
+    // touches them and audition stays usable immediately after.
+    for (const entry of auditionByTrackIdRef.current.values()) hardCutSynth(entry.synth);
     for (const g of fadeGainsByRegionIdRef.current.values()) {
       if (!g) continue;
       g.gain.cancelScheduledValues(audioNow);
@@ -459,11 +575,16 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     const fxKeyApp = appliedFxKeyByTrackIdRef.current;
     const fxBypApp = appliedFxBypassByIdRef.current;
     const fxParApp = appliedFxParamsByIdRef.current;
+    const liveSrcs = liveSamplerSourcesRef.current;
+    const auditions = auditionByTrackIdRef.current;
     return () => {
+      liveSrcs.clear(); // sources die with their synths below
       Tone.Transport.stop();
       Tone.Transport.cancel(0);
       for (const id of fadeIds.values()) Tone.Transport.clear(id);
       for (const p of parts.values())   p.dispose();
+      for (const e of auditions.values()) e.synth.dispose();
+      auditions.clear();
       for (const s of synths.values())  s.dispose();
       for (const g of fades.values())   g.dispose();
       for (const g of volumes.values()) g.dispose();
@@ -487,7 +608,11 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     };
   }, []);
 
-  return { silenceAll, recomputeFades, loadingTrackIds };
+  return {
+    silenceAll, recomputeFades, loadingTrackIds,
+    auditionAttack, auditionRelease, auditionReleaseAll,
+    auditionPrime: ensureAuditionSynth,
+  };
 }
 
 // Pure: envelope's expected linear gain at a given transport time (seconds).
@@ -514,7 +639,7 @@ export function computeFadeGainAt(r, transportSec, bpm) {
   return 1;
 }
 
-function makePartCallback(synth) {
+function makePartCallback(synth, liveSources, isDrum = false) {
   return (time, ev) => {
     // A Tone.Sampler throws "buffer is either not set or not loaded" if triggered before
     // its buffers finish loading (instrument hot-swap or paste while the Transport runs).
@@ -522,7 +647,33 @@ function makePartCallback(synth) {
     // (undefined !== false) so they always play. Re-checked at fire time, so once the
     // sampler loads, later events on the same Part play normally (no Part rebuild needed).
     if (!synth || synth.disposed || synth.loaded === false) return;
-    synth.triggerAttackRelease(ev.note, ev.duration, time, 0.8);
+    if (synth._activeSources) {
+      // Tone.Sampler — split triggerAttackRelease into its exact internal steps
+      // (attack at t, release at t + duration; behavior-identical) so the new
+      // buffer source can be captured while it's still in _activeSources.
+      // triggerRelease deregisters it synchronously, which is why silenceAll's
+      // releaseAll() sweep could never see Part-scheduled notes (ghost-note bug).
+      // _activeSources is private API — the else branch is the graceful fallback
+      // if a future Tone bump removes it.
+      const t = synth.toSeconds(time);
+      // Hi-hat choke: a closed-hat attack cuts a ringing open hat (and vice
+      // versa). Safe no-op when nothing in the group is ringing; the fade is
+      // the kit's `release` (~50 ms).
+      if (isDrum) for (const tgt of chokeTargetsFor(ev.note)) synth.triggerRelease(tgt, t);
+      synth.triggerAttack(ev.note, t, 0.8);
+      synth._activeSources.forEach((srcs) => srcs.forEach((src) => {
+        if (liveSources.has(src)) return;
+        liveSources.add(src);
+        const prev = src.onended;
+        src.onended = () => { prev?.(); liveSources.delete(src); };
+      }));
+      // Drums are one-shots: skip the note-end release so short drawn notes
+      // never truncate a cymbal — the buffer source self-stops at sample end
+      // (ToneBufferSource.start pre-schedules its own stop).
+      if (!isDrum) synth.triggerRelease(ev.note, t + synth.toSeconds(ev.duration));
+    } else {
+      synth.triggerAttackRelease(ev.note, ev.duration, time, 0.8);
+    }
   };
 }
 

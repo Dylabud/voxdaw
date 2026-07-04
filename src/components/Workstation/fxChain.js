@@ -40,6 +40,9 @@ const KEY_MAPS = {
   autowah:    { depth: 'octaves', q: 'Q' },
   distortion: { drive: 'distortion' },
   phaser:     { rate: 'frequency', depth: 'octaves' },
+  tremolo:    { rate: 'frequency' },
+  vibrato:    { rate: 'frequency' },
+  autopanner: { rate: 'frequency' },
 };
 
 // Per-type value clamps applied before ramp/assign. compressor.threshold must
@@ -294,6 +297,49 @@ export function makeFxGraph(type, params = {}) {
         baseFrequency: 350,
         wet: params.wet ?? 0.5,
       }), type);
+    case 'bitcrusher':
+      // AudioWorklet bit-depth reduction. bits is a worklet Param (rampable).
+      return simpleGraph(new Tone.BitCrusher({
+        bits: params.bits ?? 4,
+        wet: params.wet ?? 1,
+      }), type);
+    case 'tremolo':
+      // Stereo amplitude LFO — needs .start() (Chorus/AutoFilter precedent).
+      // frequency/depth are Signals (rampable); spread is a plain setter.
+      return simpleGraph(new Tone.Tremolo({
+        frequency: params.rate ?? 4,
+        depth: params.depth ?? 0.6,
+        spread: params.spread ?? 0,
+        wet: params.wet ?? 1,
+      }).start(), type);
+    case 'vibrato':
+      // Delay-line pitch LFO. Its LFO auto-starts in the constructor (like
+      // Phaser); frequency/depth are rampable Params.
+      return simpleGraph(new Tone.Vibrato({
+        frequency: params.rate ?? 5,
+        depth: params.depth ?? 0.1,
+        wet: params.wet ?? 1,
+      }), type);
+    case 'widener':
+      // Mid/side width — width is a rampable Signal (0.5 = unity). No wet.
+      return simpleGraph(new Tone.StereoWidener({
+        width: params.width ?? 0.75,
+      }), type);
+    case 'pitchshift':
+      // Granular semitone shifter (autotune precedent). pitch and windowSize
+      // are plain setters (each rebuilds the grain windows — knob-rate only).
+      return simpleGraph(new Tone.PitchShift({
+        pitch: params.pitch ?? 0,
+        windowSize: params.windowSize ?? 0.1,
+        wet: params.wet ?? 1,
+      }), type);
+    case 'autopanner':
+      // LFO-driven stereo panning — needs .start() (LFOEffect subclass).
+      return simpleGraph(new Tone.AutoPanner({
+        frequency: params.rate ?? 1,
+        depth: params.depth ?? 1,
+        wet: params.wet ?? 1,
+      }).start(), type);
     default:
       return null;
   }

@@ -237,19 +237,25 @@
   min-height: 0;
 }
 
-/* Track header column (left) */
+/* Track header column — sticky-left flex item INSIDE the .timeline scroller
+   (the piano roll's .keys pattern). Not a scroller itself anymore: headers and
+   lanes share one native scroll surface, so they can never desync vertically.
+   z-index 11 covers mid-drag regions (inline z 10), playhead (6) and ruler (5)
+   when grid content scrolls beneath it. */
 .trackHeaders {
   flex: 0 0 var(--left-col-width, 316px); /* inspector(260) + keys(56) — keeps both grids X-aligned */
+  position: sticky;
+  left: 0;
+  z-index: 11;
   background: var(--bg-panel);
   border-right: 1px solid var(--border-mid);
-  overflow-y: auto;
-  overscroll-behavior: none;
   display: flex;
   flex-direction: column;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  /* Same explicit-height treatment as .timelineInner so the column's
+     background/border span the full scroll height, not just the viewport. */
+  height: max-content;
+  min-height: 100%;
 }
-.trackHeaders::-webkit-scrollbar { display: none; }
 
 .trackRow {
   height: 72px;
@@ -312,6 +318,25 @@
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--track-color, var(--accent-color));
+}
+
+/* Inline rename input — matches .trackName metrics so the row doesn't reflow */
+.trackNameInput {
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--track-color, var(--accent-color));
+  background: var(--bg-base);
+  border: 1px solid var(--border-mid);
+  border-radius: 2px;
+  padding: 1px 4px;
+  width: 110px;
+  min-width: 0;
+  outline: none;
+}
+.trackNameInput:focus {
+  border-color: var(--accent-color);
 }
 
 .trackInstrument {
@@ -746,9 +771,13 @@
   color: var(--accent-color);
 }
 
-/* Timeline grid (right) */
+/* Timeline — THE single arrangement scroller (headers + grid). Flex row so the
+   sticky header column and the grid sit side by side in one scroll surface. */
 .timeline {
   flex: 1;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
   overflow: auto;
   background: var(--bg-base);
   position: relative;
@@ -757,18 +786,25 @@
 
 .timelineInner {
   position: relative;
+  flex: 0 0 auto; /* fixed grid width — never squeezed by the flex row */
+  /* Explicit content height: flex-line stretch clamps the box to the
+     scroller's clientHeight (lanes merely overflow it), which cut the
+     absolute playhead's top:0/bottom:0 span short when scrolled down. */
+  height: max-content;
   min-height: 100%;
   cursor: pointer;
   padding-bottom: 50px; /* matches addTrackGhost button height so scroll ranges stay in sync */
 }
 
-/* Grid-line canvas pinned to the scroll viewport. Zero-height sticky holder takes no flow
+/* Grid-line canvas pinned to the scroll viewport. Zero-size sticky flex item takes no flow
    space and never scrolls away; the absolute canvas hangs over the viewport behind the
-   lanes/regions (drawn per-line-snapped in drawGrid). */
+   lanes/regions (drawn per-line-snapped in drawGrid, left-inset by the header width). */
 .gridCanvasHolder {
   position: sticky;
   top: 0;
   left: 0;
+  flex: 0 0 0;
+  align-self: flex-start;
   width: 0;
   height: 0;
   z-index: 0;

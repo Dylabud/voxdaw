@@ -44,6 +44,57 @@ export function deserializeProject(raw) {
   const regions = Array.isArray(raw.regions) ? raw.regions : [];
   const notes   = Array.isArray(raw.notes)   ? raw.notes   : [];
 
+  const outRegions = regions.map(r => ({
+    id: String(r.id),
+    trackId: String(r.trackId),
+    startMeasure: Number(r.startMeasure) || 0,
+    durationMeasures: Number(r.durationMeasures) || 1,
+    clipOffset: Number(r.clipOffset) || 0,
+    fadeIn:  Number(r.fadeIn)  || 0,
+    fadeOut: Number(r.fadeOut) || 0,
+    fadeInFloor:  Number(r.fadeInFloor)  || 0,
+    fadeOutFloor: Number(r.fadeOutFloor) || 0,
+    loopInterval: r.loopInterval == null ? null : Number(r.loopInterval),
+    loopPhase: Number(r.loopPhase) || 0,
+    isMuted: !!r.isMuted,
+  }));
+
+  // ── Note repair pass ──────────────────────────────────────────────────
+  // Files saved while the nextNoteId bug was live (the counter was never
+  // persisted, so post-load mints collided) can contain duplicate note ids
+  // and trackId/regionId desyncs. Heal them here so the corruption cannot
+  // reload: regionId is authoritative (playback, mini-maps and deletion all
+  // key on it), so trackId is reconciled to the owning region and notes
+  // whose region no longer exists are dropped.
+  let nextNoteId = nextSuffix(notes);
+  let repairedCount = 0;
+  const regionById = new Map(outRegions.map(r => [r.id, r]));
+  const seenNoteIds = new Set();
+  const outNotes = [];
+  for (const n of notes) {
+    const region = regionById.get(String(n.regionId));
+    if (!region) { repairedCount++; continue; } // orphan — renders nowhere, never plays
+    let id = String(n.id);
+    if (seenNoteIds.has(id)) {
+      id = `note_${nextNoteId++}`;
+      repairedCount++;
+    }
+    seenNoteIds.add(id);
+    let trackId = String(n.trackId);
+    if (trackId !== region.trackId) {
+      trackId = region.trackId;
+      repairedCount++;
+    }
+    outNotes.push({
+      id,
+      trackId,
+      regionId: region.id,
+      note: String(n.note),
+      startBeat: Number(n.startBeat) || 0,
+      durationBeats: Number(n.durationBeats) || 1,
+    });
+  }
+
   return {
     bpm,
     totalMeasures,
@@ -58,31 +109,13 @@ export function deserializeProject(raw) {
       pan:     typeof t.pan    === 'number' ? Math.max(-1, Math.min(1, t.pan)) : 0,
       effects: deserializeEffects(t.effects),
     })),
-    regions: regions.map(r => ({
-      id: String(r.id),
-      trackId: String(r.trackId),
-      startMeasure: Number(r.startMeasure) || 0,
-      durationMeasures: Number(r.durationMeasures) || 1,
-      clipOffset: Number(r.clipOffset) || 0,
-      fadeIn:  Number(r.fadeIn)  || 0,
-      fadeOut: Number(r.fadeOut) || 0,
-      fadeInFloor:  Number(r.fadeInFloor)  || 0,
-      fadeOutFloor: Number(r.fadeOutFloor) || 0,
-      loopInterval: r.loopInterval == null ? null : Number(r.loopInterval),
-      loopPhase: Number(r.loopPhase) || 0,
-      isMuted: !!r.isMuted,
-    })),
-    notes: notes.map(n => ({
-      id: String(n.id),
-      trackId: String(n.trackId),
-      regionId: String(n.regionId),
-      note: String(n.note),
-      startBeat: Number(n.startBeat) || 0,
-      durationBeats: Number(n.durationBeats) || 1,
-    })),
+    regions: outRegions,
+    notes: outNotes,
     nextId:       nextSuffix(tracks),
     nextRegionId: nextSuffix(regions),
     nextEffectId: nextSuffix(tracks.flatMap(t => (Array.isArray(t.effects) ? t.effects : []))),
+    nextNoteId,       // post-repair value — already past any re-minted ids
+    repairedCount,
   };
 }
 

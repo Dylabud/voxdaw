@@ -1,0 +1,178 @@
+/* Instrument-tab performance UI — shared by InstrumentPanel / DrumKitPanel /
+   KeyboardPanel (one feature, one module). Overlay geometry clones the
+   EffectsRack .rack recipe so all editor tabs occupy identical space. */
+
+.panel {
+  position: absolute;
+  left: var(--left-col-width, 316px);
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 10;
+  background: var(--bg-base);
+  display: flex;
+  overflow: auto;
+  user-select: none;
+}
+
+/* margin:auto centers when content is shorter than the panel; the panel
+   scrolls when squeezed below content height (min tab area ≈ 102px). */
+.content {
+  margin: auto;
+  padding: 10px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.dimmed {
+  opacity: 0.5;
+  filter: grayscale(0.85);
+  pointer-events: none;
+}
+
+.loadingText,
+.hint {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-dimmer);
+  white-space: nowrap;
+}
+
+/* ── Drum kit SVG ─────────────────────────────────────────────────────── */
+
+.kitSvg {
+  width: min(640px, 100%);
+  height: auto;
+  display: block;
+}
+
+/* Shapes inherit fill/stroke from the <g> so the flash animates the whole piece. */
+.piece {
+  fill: var(--bg-panel);
+  stroke: var(--border-mid);
+  stroke-width: 1.5;
+  cursor: pointer;
+}
+.piece:hover {
+  stroke: var(--track-color, var(--accent-color));
+}
+.pieceLabel {
+  fill: var(--text-dimmer);
+  stroke: none;
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  text-anchor: middle;
+  pointer-events: none;
+}
+.stand {
+  stroke: var(--border-mid);
+  stroke-width: 2;
+  fill: none;
+  pointer-events: none;
+}
+
+.piece.hit {
+  animation: pieceFlash 0.18s ease-out;
+}
+@keyframes pieceFlash {
+  0% {
+    fill: var(--track-color, var(--accent-color));
+    filter: drop-shadow(0 0 6px var(--track-color, var(--accent-color)));
+  }
+  100% {
+    fill: var(--bg-panel);
+    filter: none;
+  }
+}
+
+/* ── Alt-pad strip ────────────────────────────────────────────────────── */
+
+.padStrip {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+.pad {
+  min-width: 52px;
+  padding: 8px 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  border-radius: 3px;
+  color: var(--text-dimmer);
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.pad:hover {
+  border-color: var(--track-color, var(--accent-color));
+  color: var(--form-text, inherit);
+}
+.pad.hit {
+  animation: padFlash 0.18s ease-out;
+}
+@keyframes padFlash {
+  0% {
+    background: var(--track-color, var(--accent-color));
+    box-shadow: 0 0 8px var(--track-color, var(--accent-color));
+    color: var(--bg-base);
+  }
+  100% {
+    background: var(--bg-panel);
+    box-shadow: none;
+  }
+}
+
+/* ── Melodic keyboard ─────────────────────────────────────────────────── */
+
+.kbd {
+  position: relative;
+  display: flex;
+  width: min(560px, 100%);
+  height: 130px;
+}
+.whiteKey {
+  flex: 1;
+  position: relative;
+  background: var(--piano-key-white);
+  border: 1px solid var(--piano-key-white-border, var(--border-mid));
+  border-radius: 0 0 3px 3px;
+  cursor: pointer;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 6px;
+}
+.blackKey {
+  position: absolute;
+  top: 0;
+  height: 62%;
+  background: var(--piano-key-black);
+  border: 1px solid var(--piano-key-black-border, var(--border-mid));
+  border-radius: 0 0 3px 3px;
+  cursor: pointer;
+  z-index: 2;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 4px;
+}
+.keyLetter {
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dimmer);
+  pointer-events: none;
+}
+/* Pressed tint — the .keyActive color-mix recipe against each key color. */
+.whiteKey.keyDown {
+  background: color-mix(in srgb, var(--track-color, var(--accent-color)) 35%, var(--piano-key-white));
+}
+.blackKey.keyDown {
+  background: color-mix(in srgb, var(--track-color, var(--accent-color)) 60%, var(--piano-key-black));
+}

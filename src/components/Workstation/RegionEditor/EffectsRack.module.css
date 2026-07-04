@@ -194,6 +194,17 @@
   to   { transform: translateX(-160px); }
 }
 
+/* Auto-pan dot sweep — L↔R alternate; ease-in-out approximates the sine pan
+   law. Sweep distance comes from --pan-sweep (set inline, scaled by depth);
+   duration is 1/(2·rate) since each alternate leg is half an LFO cycle. */
+.vizPanAnim {
+  animation: vizPanSweep ease-in-out infinite alternate;
+}
+@keyframes vizPanSweep {
+  from { transform: translateX(calc(-1 * var(--pan-sweep, 56px))); }
+  to   { transform: translateX(var(--pan-sweep, 56px)); }
+}
+
 /* ── Knob row ──────────────────────────────────────────── */
 .knobRow {
   flex: 1 1 auto;

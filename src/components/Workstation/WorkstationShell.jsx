@@ -10,22 +10,14 @@ import PanKnob from './PanKnob';
 import { serializeProject, deserializeProject, downloadJSON, readJSONFile } from './projectIO';
 import { EFFECT_DEFS, defaultParamsFor } from './effectDefs';
 import { bounceProject } from './audioBounce';
-import { exportWAV, exportMP3 } from '../../utils/audioExport';
+import { exportWAV, exportMP3, trimExportBuffer } from '../../utils/audioExport';
 import { transcribeAudio } from './transcribeAudio';
+import { TRACK_COLORS } from './trackColors';
 
 const PIXELS_PER_BEAT    = 25;
 const PIXELS_PER_MEASURE = PIXELS_PER_BEAT * 4;  // 100px at zoom 1
 const MAX_HISTORY        = 100;                  // undo/redo stack cap
 // BPM and totalMeasures are state inside the component
-const TRACK_COLORS = [
-  '#5DCAA5', // teal (brand accent)
-  '#5A9FD4', // blue
-  '#D4845A', // coral
-  '#A57BD4', // purple
-  '#D4C45A', // amber
-  '#D45A7B', // rose
-  '#7BD45A', // lime
-];
 const TRACK_H            = 72;  // matches .trackLane height in CSS
 const RULER_HEIGHT       = 24;  // matches .ruler height in CSS
 const MIN_REGION         = 0.0625; // minimum region width in measures (one 16th note)
@@ -208,9 +200,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const marqueeHoverIdsRef       = useRef(new Set());
   const snapEnabledRef           = useRef(true);
   // Phase 117 — one-shot suppression flags so a programmatic scroll write on a partner
-  // doesn't trigger a stale mirror-back during a diagonal trackpad swipe (race fix).
+  // doesn't trigger a stale mirror-back (timeline ↔ piano roll horizontal sync only;
+  // vertical header sync was removed when headers moved inside the timeline scroller).
   const pianoScrollSuppressRef   = useRef(false);
-  const trackHeadersSuppressRef  = useRef(false);
   const timelineSuppressRef      = useRef(false);
   const noteSelectionRef         = useRef(new Set());
   const notesClipboardRef        = useRef(null);
@@ -221,6 +213,12 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // ── Derived editor state ───────────────────────────────────
   const editingTrack      = editingTrackId ? tracks.find(t => t.id === editingTrackId) : null;
   const editingTrackNotes = notes.filter(n => n.trackId === editingTrackId);
+
+  // Width of the sticky in-scroller track-header column. The column is
+  // user-resizable (200-600px via --left-col-width), so every coordinate inset
+  // reads this dynamically. offsetWidth is live even mid-resizer-drag (the drag
+  // writes only the CSS var until mouseup).
+  const headerColW = () => trackHeadersRef.current?.offsetWidth ?? leftColWidthRef.current;
 
   // ── Auto-scroll engine ────────────────────────────────────
   const stopAutoScroll = useCallback(() => {
@@ -238,7 +236,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const b  = el.getBoundingClientRect();
       const { x: mx, y: my } = currentMousePosRef.current;
       let dx = 0, dy = 0;
-      const dRight = b.right  - mx;  const dLeft = mx - b.left;
+      // Left hot-zone starts at the grid seam (right edge of the sticky header
+      // column), not the pane edge — the header occupies the pane's left ~316px.
+      const dRight = b.right  - mx;  const dLeft = mx - (b.left + headerColW());
       const dBot   = b.bottom - my;  const dTop  = my - (b.top + RULER_HEIGHT);
       if (dRight < THRESHOLD) dx =  MAX_SPEED * Math.min(1, 1 - dRight / THRESHOLD);
       if (dLeft  < THRESHOLD) dx = -MAX_SPEED * Math.min(1, 1 - dLeft  / THRESHOLD);
@@ -331,7 +331,12 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       nextIdRef.current       = data.nextId;
       nextRegionIdRef.current = data.nextRegionId;
       nextEffectIdRef.current = data.nextEffectId ?? 1;
-      showToast(`loaded ${file.name}`);
+      // Note-counter restore is load-bearing: without it, post-load mints
+      // start at 0 and collide with loaded note ids (the ghost-note bug).
+      nextNoteIdRef.current   = data.nextNoteId ?? 0;
+      showToast(data.repairedCount > 0
+        ? `loaded ${file.name} (repaired ${data.repairedCount} note${data.repairedCount !== 1 ? 's' : ''})`
+        : `loaded ${file.name}`);
     } catch (e) {
       console.error('load project failed', e);
       showToast(`load failed: ${e.message}`);
@@ -344,8 +349,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     setIsBouncing(true);
     showToast('bouncing audio…', 60000);
     try {
-      const ab = await bounceProject({ tracks, regions, notes, bpm });
-      const blob = format === 'wav' ? exportWAV(ab) : exportMP3(ab);
+      const capSec = totalMeasures * 4 * (60 / bpm);
+      const { buffer, firstOnsetSec } = await bounceProject({ tracks, regions, notes, bpm, capSec });
+      // Trim leading silence to the first note's onset and trailing silence
+      // after the last audible sample; null = nothing audible to export.
+      const trimmed = firstOnsetSec == null
+        ? null
+        : trimExportBuffer(buffer, { startSec: firstOnsetSec });
+      if (!trimmed) { showToast('nothing to export'); return; }
+      const blob = format === 'wav' ? exportWAV(trimmed) : exportMP3(trimmed);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -359,12 +371,18 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     } finally {
       setIsBouncing(false);
     }
-  }, [tracks, regions, notes, bpm, isBouncing, showToast]);
+  }, [tracks, regions, notes, bpm, totalMeasures, isBouncing, showToast]);
 
+  // Mute and Solo are mutually exclusive per track: turning one ON clears the
+  // other; turning one OFF changes nothing else.
   const toggleMute = (id) => setTracks(prev =>
-    prev.map(t => t.id === id ? { ...t, isMuted: !t.isMuted } : t));
+    prev.map(t => t.id === id
+      ? { ...t, isMuted: !t.isMuted, isSolo: !t.isMuted ? false : t.isSolo }
+      : t));
   const toggleSolo = (id) => setTracks(prev =>
-    prev.map(t => t.id === id ? { ...t, isSolo: !t.isSolo } : t));
+    prev.map(t => t.id === id
+      ? { ...t, isSolo: !t.isSolo, isMuted: !t.isSolo ? false : t.isMuted }
+      : t));
   const handleInstrumentChange = useCallback((trackId, instrument) => setTracks(prev =>
     prev.map(t => t.id === trackId ? { ...t, instrument } : t)), []);
 
@@ -393,7 +411,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // Workstation audio engine — reconciles synths/gains/parts against tracks/regions/notes.
   // Does NOT call Tone.start(); the user-gesture path (handlePlayPause, RegionEditor preview)
   // already handles that. Stops Transport + disposes nodes on unmount → clean handoff to VoxTool.
-  const { silenceAll, recomputeFades, loadingTrackIds } = useWorkstationAudio({ tracks, regions, notes, bpm });
+  const {
+    silenceAll, recomputeFades, loadingTrackIds,
+    auditionAttack, auditionRelease, auditionReleaseAll, auditionPrime,
+  } = useWorkstationAudio({ tracks, regions, notes, bpm });
 
   // ── History recorder ────────────────────────────────────────
   // Passive: records AFTER React commits, so multi-setter actions (e.g. split =
@@ -576,6 +597,120 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       set.has(n.id) ? { ...n, note: shiftNoteName(n.note, semis) } : n));
   }, []);
 
+  // ── Track context-menu operations ──────────────────────────────
+  // All plain setTracks/setRegions/setNotes mutations → auto-undoable via the
+  // passive history recorder (one batched commit = one undo entry). Ids minted
+  // eagerly OUTSIDE state updaters so StrictMode double-invokes can't
+  // double-increment (same rule as splitRegionAtMeasure).
+  const [renamingTrackId, setRenamingTrackId] = useState(null);
+
+  const duplicateTrack = useCallback((trackId) => {
+    const src = tracksRef.current.find(t => t.id === trackId);
+    if (!src) return;
+    const newTrackId  = `t${nextIdRef.current++}`;
+    const regionIdMap = new Map(); // old regionId → cloned regionId
+    const newRegions = regionsRef.current.filter(r => r.trackId === trackId).map(r => {
+      const id = `r${nextRegionIdRef.current++}`;
+      regionIdMap.set(r.id, id);
+      return { ...r, id, trackId: newTrackId };
+    });
+    // Select by region ownership (regionId is authoritative), not trackId:
+    // the old trackId filter + `?? n.regionId` fallback let a desynced note
+    // clone itself pointing at the SOURCE track's region (ghost note there,
+    // and killed by that region's deletion).
+    const newNotes = notesRef.current.filter(n => regionIdMap.has(n.regionId)).map(n => ({
+      ...n,
+      id: `note_${nextNoteIdRef.current++}`,
+      trackId: newTrackId,
+      regionId: regionIdMap.get(n.regionId),
+    }));
+    const clone = {
+      ...src,
+      id: newTrackId,
+      name: `${src.name} copy`,
+      // Fresh effect ids are load-bearing: the audio hook's bypass delta-check
+      // (appliedFxBypassByIdRef) is keyed by effect id — copied ids would alias
+      // bypass state across the two tracks.
+      effects: (src.effects ?? []).map(fx => ({ ...fx, id: `e${nextEffectIdRef.current++}`, params: { ...fx.params } })),
+    };
+    setTracks(prev => {
+      const i = prev.findIndex(t => t.id === trackId);
+      const next = [...prev];
+      next.splice(i < 0 ? next.length : i + 1, 0, clone);
+      return next;
+    });
+    if (newRegions.length) setRegions(prev => [...prev, ...newRegions]);
+    if (newNotes.length)   setNotes(prev => [...prev, ...newNotes]);
+  }, []);
+
+  const deleteTrack = useCallback((trackId) => {
+    const idx = tracksRef.current.findIndex(t => t.id === trackId);
+    const deadRegionIds = new Set(
+      regionsRef.current.filter(r => r.trackId === trackId).map(r => r.id));
+    setTracks(prev => prev.filter(t => t.id !== trackId));
+    setRegions(prev => prev.filter(r => r.trackId !== trackId));
+    setNotes(prev => prev.filter(n => n.trackId !== trackId));
+    setSelectedRegionIds(prev => {
+      if (![...prev].some(id => deadRegionIds.has(id))) return prev;
+      return new Set([...prev].filter(id => !deadRegionIds.has(id)));
+    });
+    setEditingTrackId(prev => (prev === trackId ? null : prev));
+    setRenamingTrackId(prev => (prev === trackId ? null : prev));
+    setActiveTrackId(prev => {
+      if (prev !== trackId) return prev;
+      const rest = tracksRef.current.filter(t => t.id !== trackId);
+      return rest.length ? rest[Math.min(Math.max(idx, 0), rest.length - 1)].id : null;
+    });
+    pasteAnchorTrackIndexRef.current = null; // index-based anchor may now be stale
+    // Audio nodes self-dispose via the useWorkstationAudio reconcilers (effects
+    // #1/#1b/#4) — NO manual dispose here (it would double-dispose). Just cut
+    // any voice still ringing from the removed regions (undo's precedent).
+    silenceAll();
+  }, [silenceAll]);
+
+  const pasteEffectsTo = useCallback((sourceTrackId, targetTrackId) => {
+    const src = tracksRef.current.find(t => t.id === sourceTrackId);
+    if (!src || sourceTrackId === targetTrackId) return;
+    // Fresh ids + deep-copied params per effect (same aliasing rule as duplicate).
+    const cloned = (src.effects ?? []).map(fx =>
+      ({ ...fx, id: `e${nextEffectIdRef.current++}`, params: { ...fx.params } }));
+    setTracks(prev => prev.map(t => t.id === targetTrackId ? { ...t, effects: cloned } : t));
+  }, []);
+
+  const exportTrack = useCallback(async (trackId, format = 'wav') => {
+    if (isBouncing) return;
+    const track = tracksRef.current.find(t => t.id === trackId);
+    if (!track) return;
+    setIsBouncing(true);
+    showToast(`bouncing ${track.name}…`, 60000);
+    try {
+      // Force-solo the target: bounceProject's audibility rule
+      // (!isMuted && (!anySoloed || isSolo)) then renders only this track.
+      const soloed = tracksRef.current.map(t => ({ ...t, isSolo: t.id === trackId, isMuted: false }));
+      const capSec = totalMeasuresRef.current * 4 * (60 / bpm);
+      const { buffer, firstOnsetSec } = await bounceProject({
+        tracks: soloed, regions: regionsRef.current, notes: notesRef.current, bpm, capSec,
+      });
+      const trimmed = firstOnsetSec == null
+        ? null
+        : trimExportBuffer(buffer, { startSec: firstOnsetSec });
+      if (!trimmed) { showToast('nothing to export'); return; }
+      const blob = format === 'wav' ? exportWAV(trimmed) : exportMP3(trimmed);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${track.name}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`exported ${track.name}.${format}`);
+    } catch (e) {
+      console.error('track bounce failed', e);
+      showToast(`bounce failed: ${e.message}`);
+    } finally {
+      setIsBouncing(false);
+    }
+  }, [bpm, isBouncing, showToast]);
+
   // Split a region at global measure P into Left (keeps id + notes) and Right
   // (new id + cloned notes). Bottle-preserving; phase-aware for looped regions
   // (R resumes the loop mid-cycle so the grid timing is unchanged). Returns
@@ -696,6 +831,21 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // item is part of it; otherwise just the clicked item. `payload` carries the
   // semitone count for the pitch submenu.
   const handleContextCommand = useCallback((action, type, id, payload) => {
+    if (type === 'track') {
+      if (action === 'pitch') {
+        // Destructive track transpose — rewrites note names like the region
+        // pitch submenu (one source of truth; undoable via the recorder).
+        setNotes(prev => prev.map(n =>
+          n.trackId === id ? { ...n, note: shiftNoteName(n.note, payload) } : n));
+      }
+      else if (action === 'rename')       setRenamingTrackId(id);
+      else if (action === 'color')        setTracks(prev => prev.map(t => t.id === id ? { ...t, color: payload } : t));
+      else if (action === 'duplicate')    duplicateTrack(id);
+      else if (action === 'pasteEffects') pasteEffectsTo(id, payload);
+      else if (action === 'export')       exportTrack(id, payload ?? 'wav');
+      else if (action === 'delete')       deleteTrack(id);
+      return;
+    }
     if (type === 'region') {
       const ids = selectedRegionIdsRef.current.has(id)
         ? [...selectedRegionIdsRef.current] : [id];
@@ -739,7 +889,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       else if (action === 'pitch') transposeNotes(set, payload);
       else console.log('[context-menu] note', action, ids); // copy / paste (stubs)
     }
-  }, [transposeRegions, transposeNotes, handleNotesDelete, splitRegionAtMeasure]);
+  }, [transposeRegions, transposeNotes, handleNotesDelete, splitRegionAtMeasure,
+      duplicateTrack, deleteTrack, pasteEffectsTo, exportTrack]);
 
   // ── Ghost region ─────────────────────────────────────────────
   // Returns true if `measure` falls inside any existing region on this track.
@@ -1006,7 +1157,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const scrollAdjust = (tl?.scrollLeft ?? 0) - d.startScrollLeft;
       // Hard right-wall: clamp cursor to the rendered grid's right edge.
       // Region edges may overflow past the wall (anchor's grabOffset still applies); only the cursor is walled.
-      const maxCursorClientX = rect.left + (totalMeasuresRef.current * pixelsPerMeasure) - tl.scrollLeft;
+      // Grid content starts after the sticky header column, so the wall sits headerColW() further right.
+      const maxCursorClientX = rect.left + headerColW() + (totalMeasuresRef.current * pixelsPerMeasure) - tl.scrollLeft;
       const clampedClientX = Math.min(e.clientX, maxCursorClientX);
       const rawDelta = (clampedClientX - d.startX + scrollAdjust) / pixelsPerMeasure;
       let newStart    = d.pendingStart;
@@ -1540,7 +1692,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const scroller = timelineRef.current;
       if (!scroller) return;
       const rect     = scroller.getBoundingClientRect();
-      const currentX = e.clientX - rect.left + scroller.scrollLeft;
+      const currentX = e.clientX - (rect.left + headerColW()) + scroller.scrollLeft;
       const currentY = Math.max(0, e.clientY - rect.top + scroller.scrollTop - RULER_HEIGHT);
       if (!d.active && Math.hypot(currentX - d.startX, currentY - d.startY) < 4) return;
       if (!d.active) {
@@ -1715,7 +1867,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       viewH: el.clientHeight,
       ppm: pixelsPerMeasure,
       zoomLevel,
-      leftInset: 0,
+      leftInset: headerColW(), // grid content starts after the sticky header column
     });
   }, [pixelsPerMeasure, zoomLevel]);
 
@@ -1824,19 +1976,18 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           // The existing piano roll (RegionEditor) and MIDI playback (useWorkstationAudio)
           // handle display and playback without any additional code.
           const transcribed = transcribeAudio(nativeBuf, Tone.Transport.bpm.value);
-          setNotes(prev => {
-            const without = prev.filter(n => n.regionId !== regionId);
-            const newNotes = transcribed.map(n => ({
-              id:            `note_${nextNoteIdRef.current++}`,
-              regionId,
-              trackId:       region.trackId,
-              note:          n.note,
-              startBeat:     n.startBeat,
-              durationBeats: n.durationBeats,
-              velocity:      n.velocity,
-            }));
-            return [...without, ...newNotes];
-          });
+          // Mint ids eagerly, OUTSIDE the updater — StrictMode double-invokes
+          // updaters, which double-mints (the eager-mint rule from splitRegion).
+          const newNotes = transcribed.map(n => ({
+            id:            `note_${nextNoteIdRef.current++}`,
+            regionId,
+            trackId:       region.trackId,
+            note:          n.note,
+            startBeat:     n.startBeat,
+            durationBeats: n.durationBeats,
+            velocity:      n.velocity,
+          }));
+          setNotes(prev => [...prev.filter(n => n.regionId !== regionId), ...newNotes]);
 
           const count = transcribed.length;
           setToastMessage(
@@ -1925,7 +2076,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     const scroller = timelineRef.current;
     if (!scroller) return;
     const rect = scroller.getBoundingClientRect();
-    const x    = clientX - rect.left + scroller.scrollLeft;
+    const x    = clientX - (rect.left + headerColW()) + scroller.scrollLeft;
     if (snapEnabled) {
       const snapInc      = getSnapIncrement(pixelsPerMeasure);
       const rawMeasures  = x / pixelsPerMeasure;
@@ -1940,6 +2091,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   }, [pxPerSec, updatePlayhead, snapEnabled, pixelsPerMeasure, bpm, recomputeFades, silenceAll]);
 
   const handleMouseDown = (e) => {
+    // The sticky header column lives inside this scroller now — its controls
+    // (rows, M/S, add-track, …) must not seek the playhead or arm a marquee.
+    // Return before preventDefault so buttons keep native focus/dblclick.
+    if (trackHeadersRef.current?.contains(e.target)) return;
     e.preventDefault();
     seekToClientX(e.clientX);
     const scroller = timelineRef.current;
@@ -1957,7 +2112,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       }
     } else if (scroller) {
       const rect     = scroller.getBoundingClientRect();
-      const contentX = e.clientX - rect.left + scroller.scrollLeft;
+      const contentX = e.clientX - (rect.left + headerColW()) + scroller.scrollLeft;
       const contentY = e.clientY - rect.top  + scroller.scrollTop - RULER_HEIGHT;
       marqueeDragRef.current = { startX: contentX, startY: contentY, active: false };
     }
@@ -2000,9 +2155,12 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     const onWheel = (e) => {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
-      const mouseX   = e.clientX - el.getBoundingClientRect().left;
+      // Grid-relative cursor X: subtract the sticky header column (clamped to the
+      // seam when the cursor is over the header — mirrors the piano roll's - 56).
+      // clientWidth includes the header, so min-zoom/max-scroll correct for it too.
+      const mouseX   = Math.max(0, e.clientX - el.getBoundingClientRect().left - headerColW());
       const prevZoom = liveZoomRef.current;
-      const minZoom  = el.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current);
+      const minZoom  = (el.clientWidth - headerColW()) / (PIXELS_PER_MEASURE * totalMeasuresRef.current);
       const nextZoom = Math.max(minZoom, Math.min(8, prevZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
       if (nextZoom === prevZoom) return;
       Object.values(ghostRefs.current).forEach(g => { if (g) g.style.opacity = '0'; });
@@ -2015,7 +2173,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const ratio      = nextZoom / prevZoom;
       const baseScroll = pendingScrollRef.current != null ? pendingScrollRef.current : el.scrollLeft;
       const absoluteX  = mouseX + baseScroll;
-      const maxScroll  = Math.max(0, totalMeasuresRef.current * PIXELS_PER_MEASURE * nextZoom - el.clientWidth);
+      const maxScroll  = Math.max(0, headerColW() + totalMeasuresRef.current * PIXELS_PER_MEASURE * nextZoom - el.clientWidth);
       const nextScroll = Math.min(maxScroll, Math.max(0, absoluteX * ratio - mouseX));
       liveZoomRef.current = nextZoom;
       pendingScrollRef.current = nextScroll;
@@ -2037,7 +2195,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const gridMouseX = Math.max(0, e.clientX - rect.left - 56); // subtract sticky keys column
       const prevZoom   = liveZoomRef.current;
       const minZoom    = timelineRef.current
-        ? timelineRef.current.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current)
+        ? (timelineRef.current.clientWidth - headerColW()) / (PIXELS_PER_MEASURE * totalMeasuresRef.current)
         : 0.05;
       const nextZoom = Math.max(minZoom, Math.min(8, prevZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
       if (nextZoom === prevZoom) return;
@@ -2049,7 +2207,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const baseScroll = pendingPianoScrollRef.current != null ? pendingPianoScrollRef.current : el.scrollLeft;
       const absoluteX  = gridMouseX + baseScroll;
       const tl         = timelineRef.current;
-      const maxScroll  = tl ? Math.max(0, totalMeasuresRef.current * PIXELS_PER_MEASURE * nextZoom - tl.clientWidth) : Infinity;
+      const maxScroll  = tl ? Math.max(0, headerColW() + totalMeasuresRef.current * PIXELS_PER_MEASURE * nextZoom - tl.clientWidth) : Infinity;
       const nextScroll = Math.min(maxScroll, Math.max(0, absoluteX * ratio - gridMouseX));
       liveZoomRef.current = nextZoom;
       pendingPianoScrollRef.current = nextScroll;
@@ -2067,11 +2225,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     const observer = new ResizeObserver(() => {
       if (el.clientWidth <= 0) return;
       drawTimelineGrid(); // viewport size changed → repaint grid lines
-      const minZoom = el.clientWidth / (PIXELS_PER_MEASURE * totalMeasuresRef.current);
+      const minZoom = Math.max(0, el.clientWidth - headerColW()) / (PIXELS_PER_MEASURE * totalMeasuresRef.current);
       liveZoomRef.current = Math.max(liveZoomRef.current, minZoom); // keep the zoom anchor ref in sync
       setZoomLevel(prev => Math.max(prev, minZoom));
     });
     observer.observe(el);
+    // The header column is a sticky flex item inside `el`, so resizing it no
+    // longer changes el.clientWidth — observe it directly so the left-column
+    // resizer live-repaints the grid inset and re-clamps min-zoom.
+    if (trackHeadersRef.current) observer.observe(trackHeadersRef.current);
     return () => observer.disconnect();
   }, [drawTimelineGrid]);
 
@@ -2098,28 +2260,21 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     }
   }, [zoomLevel]);
 
-  // ── Scroll sync ───────────────────────────────────────────────
-  // Phase 117 — primary defense is the one-shot suppress flag (see refs above): a
-  //   programmatic scroll on a partner sets the partner's flag; the partner's handler
-  //   consumes the flag and returns. This prevents the diagonal-scroll race where the
-  //   partner's mirror-back yanks the source's other axis. The Phase 82 value-comparison
-  //   guard stays as a secondary defense for no-op writes.
-  // Phase 117 — primary defense is the one-shot suppress flag (see refs above): a
-  //   programmatic scroll on a partner sets the partner's flag; the partner's handler
-  //   consumes the flag and returns. This prevents the cross-scroller mirror-back race.
-  //   The Phase 82 value-comparison guard stays as a secondary defense.
+  // ── Scroll sync (horizontal only: timeline ↔ piano roll) ──────────────
+  // Vertical sync is gone: the track-header column is a sticky flex item INSIDE
+  // the timeline scroller (the piano roll's .keys pattern), so headers and lanes
+  // share one native scroll surface — no mirroring, no ≤1-frame partner lag.
+  // Phase 117 one-shot suppress flags remain for the surviving horizontal pair:
+  //   a programmatic scroll on a partner sets the partner's flag; the partner's
+  //   handler consumes the flag and returns (prevents the mirror-back race). The
+  //   Phase 82 value-comparison guard stays as a secondary defense for no-op writes.
   const handleTimelineScroll = useCallback((e) => {
     drawTimelineGrid(); // repaint pinned grid lines for the new scrollLeft (before any suppress return)
     if (timelineSuppressRef.current) { timelineSuppressRef.current = false; return; }
     const sl = e.target.scrollLeft;
-    const st = e.target.scrollTop;
     if (pianoScrollRef.current && pianoScrollRef.current.scrollLeft !== sl) {
       pianoScrollSuppressRef.current = true;
       pianoScrollRef.current.scrollLeft = sl;
-    }
-    if (trackHeadersRef.current && trackHeadersRef.current.scrollTop !== st) {
-      trackHeadersSuppressRef.current = true;
-      trackHeadersRef.current.scrollTop = st;
     }
   }, [drawTimelineGrid]);
 
@@ -2130,15 +2285,6 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (timelineRef.current && timelineRef.current.scrollLeft !== sl) {
       timelineSuppressRef.current = true;
       timelineRef.current.scrollLeft = sl;
-    }
-  }, []);
-
-  const handleTrackHeadersScroll = useCallback((e) => {
-    if (trackHeadersSuppressRef.current) { trackHeadersSuppressRef.current = false; return; }
-    const st = e.target.scrollTop;
-    if (timelineRef.current && timelineRef.current.scrollTop !== st) {
-      timelineSuppressRef.current = true;
-      timelineRef.current.scrollTop = st;
     }
   }, []);
 
@@ -2552,8 +2698,23 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       {/* ── Arrangement view ─────────────────────────────── */}
       <div className={`${styles.arrangement}${editingTrackId ? ` ${styles.arrangementShrunk}` : ''}`}>
 
-        {/* Track header column */}
-        <div ref={trackHeadersRef} className={styles.trackHeaders} onScroll={handleTrackHeadersScroll}>
+        {/* Left-column resizer handle */}
+        <div data-no-note-deselect className={styles.colResizer} onMouseDown={startLeftColDrag} />
+
+        {/* Single scroll surface: sticky-left track headers + grid share one scroller
+            (the piano roll's .keys pattern) — headers and lanes can never desync. */}
+        <div
+          ref={timelineRef}
+          className={styles.timeline}
+          onMouseDown={handleMouseDown}
+          onScroll={handleTimelineScroll}
+        >
+          {/* Grid lines: canvas pinned to the scroll viewport (zero-size sticky holder),
+              redrawn per-line-snapped on scroll/zoom/resize/theme. Behind the lanes. */}
+          <div className={styles.gridCanvasHolder}><canvas ref={timelineCanvasRef} /></div>
+
+          {/* Track header column — sticky-left inside the scroller */}
+          <div ref={trackHeadersRef} className={styles.trackHeaders}>
           <div className={styles.tracksHeader}>tracks</div>
           {tracks.length === 0 ? (
             <div className={styles.emptyState}>
@@ -2567,12 +2728,41 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                 <div key={t.id} className={`${styles.trackRow}${editingTrackId === t.id ? ` ${styles.trackRowActive}` : activeTrackId === t.id ? ` ${styles.trackRowFocused}` : ''}`}
                   style={{ '--track-color': t.color }}
                   onClick={() => { setActiveTrackId(t.id); pasteAnchorTrackIndexRef.current = tracksRef.current.findIndex(x => x.id === t.id); }}
-                  onDoubleClick={() => setEditingTrackId(prev => prev === t.id ? null : t.id)}>
+                  onDoubleClick={() => setEditingTrackId(prev => prev === t.id ? null : t.id)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setActiveTrackId(t.id);
+                    setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'track', targetId: t.id });
+                  }}>
                   <div className={styles.trackTopRow}>
                     <div className={styles.trackNameBlock}>
                       <div className={styles.trackNameRow}>
                         <span className={styles.trackColorDot} style={{ background: t.color }} />
-                        <span className={styles.trackName}>{t.name}</span>
+                        {renamingTrackId === t.id ? (
+                          <input
+                            className={styles.trackNameInput}
+                            defaultValue={t.name}
+                            autoFocus
+                            onFocus={(e) => e.target.select()}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => e.stopPropagation()}
+                            onDoubleClick={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') e.target.blur();
+                              else if (e.key === 'Escape') { e.target.value = t.name; e.target.blur(); }
+                            }}
+                            onBlur={(e) => {
+                              const name = e.target.value.trim();
+                              if (name && name !== t.name) {
+                                setTracks(prev => prev.map(x => x.id === t.id ? { ...x, name } : x));
+                              }
+                              setRenamingTrackId(null);
+                            }}
+                          />
+                        ) : (
+                          <span className={styles.trackName}>{t.name}</span>
+                        )}
                       </div>
                       <button className={styles.trackInstrument} title={loadingTrackIds.has(t.id) ? 'Loading samples…' : 'Change instrument'}>{t.instrument}{loadingTrackIds.has(t.id) ? ' …' : ''}</button>
                     </div>
@@ -2612,21 +2802,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               <button className={styles.addTrackGhost} onClick={handleAddTrack}>[ + add track ]</button>
             </>
           )}
-        </div>
+          </div>
 
-        {/* Left-column resizer handle */}
-        <div data-no-note-deselect className={styles.colResizer} onMouseDown={startLeftColDrag} />
-
-        {/* Timeline grid */}
-        <div
-          ref={timelineRef}
-          className={styles.timeline}
-          onMouseDown={handleMouseDown}
-          onScroll={handleTimelineScroll}
-        >
-          {/* Grid lines: canvas pinned to the scroll viewport (zero-height sticky holder),
-              redrawn per-line-snapped on scroll/zoom/resize/theme. Behind the lanes. */}
-          <div className={styles.gridCanvasHolder}><canvas ref={timelineCanvasRef} /></div>
           <div
             className={styles.timelineInner}
             style={{
@@ -2662,7 +2839,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                     const scroller = timelineRef.current;
                     if (!scroller) return;
                     const rect     = scroller.getBoundingClientRect();
-                    const contentX = e.clientX - rect.left + scroller.scrollLeft;
+                    const contentX = e.clientX - (rect.left + headerColW()) + scroller.scrollLeft;
                     const contentY = e.clientY - rect.top  + scroller.scrollTop - RULER_HEIGHT;
                     marqueeDragRef.current = { startX: contentX, startY: contentY, active: false };
                   }}
@@ -2920,6 +3097,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onEffectToggleBypass={toggleBypassEffect}
               onEffectUpdate={updateEffectSettings}
               isDarkMode={isDarkMode}
+              loadingTrackIds={loadingTrackIds}
+              auditionAttack={auditionAttack}
+              auditionRelease={auditionRelease}
+              auditionReleaseAll={auditionReleaseAll}
+              auditionPrime={auditionPrime}
             />
           </div>
         </>
@@ -2939,7 +3121,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           {moogRecording ? `■ ${moogRecordSec}s` : '● MOOG'}
         </button>
       </div>
-      <ContextMenu menu={contextMenu} onClose={closeContextMenu} onCommand={handleContextCommand} />
+      <ContextMenu menu={contextMenu} onClose={closeContextMenu} onCommand={handleContextCommand} tracks={tracks} />
     </div>
   );
 }

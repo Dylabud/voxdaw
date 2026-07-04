@@ -82,3 +82,42 @@
   margin-left: 0;
   margin-right: 2px;
 }
+
+/* ── Color submenu (track) ─────────────────────────────── */
+.swatchGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 18px);
+  gap: 8px;
+  padding: 8px 12px;
+}
+.swatch {
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border-mid);
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.swatch:hover {
+  transform: scale(1.15);
+  box-shadow: 0 0 6px rgba(93, 202, 165, 0.4);
+}
+
+/* ── Paste-Effects-To submenu (track) ──────────────────── */
+.trackSwatchDot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+.submenuEmpty {
+  padding: 7px 14px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+}

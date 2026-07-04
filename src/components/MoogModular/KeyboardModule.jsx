@@ -68,6 +68,7 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
   const [vibrato,      setVibrato]      = useState(0);
   const [vibratoRate,  setVibratoRate]  = useState(0.57); // 0–1 → 0.5–10 Hz; default ≈ 5 Hz
   const [vibratoDelay, setVibratoDelay] = useState(0); // 0–1 → 0–4 s ramp time
+  const rootRef           = useRef(null);   // page-visibility guard for the window key listeners
   const pressedNoteRef    = useRef(null);
   const pressedHzRef      = useRef(null);
   // Tracks whether the currently active note was triggered by pointer (vs MIDI),
@@ -252,6 +253,10 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
 
   useEffect(() => {
     const down = (e) => {
+      // Root keeps visited pages mounted under display:none — don't play the
+      // hidden Moog while typing on another page (offsetParent is null under
+      // a display:none ancestor; the module is never position:fixed).
+      if (rootRef.current?.offsetParent === null) return;
       if (e.repeat) return;
       if (e.target.closest('input,textarea,select')) return;
       const noteData = KB_NOTE_MAP[e.key.toLowerCase()];
@@ -263,6 +268,7 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
       onUpdate?.(noteData.hz, true);
     };
     const up = (e) => {
+      if (rootRef.current?.offsetParent === null) return;
       const noteData = KB_NOTE_MAP[e.key.toLowerCase()];
       if (!noteData || pressedNoteRef.current !== noteData.name) return;
       pressedByMouseRef.current = false;
@@ -280,7 +286,7 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
   }, [onUpdate]);
 
   return (
-    <div className={styles.keyboard}>
+    <div ref={rootRef} className={styles.keyboard}>
 
       {/* ── Control strip — jacks + label ── */}
       <div className={styles.controlStrip}>
