@@ -170,6 +170,19 @@
   margin: 0;
 }
 
+/* Project-name in-place editor — same silhouette as the static metaValue span. */
+.nameInput {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--accent-color);
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  width: 14ch;
+  padding: 0;
+}
+
 /* ── Bottom transport bar ───────────────────────────────── */
 .bottomTransport {
   flex: 0 0 48px;

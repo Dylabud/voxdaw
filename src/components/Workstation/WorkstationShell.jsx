@@ -8,6 +8,7 @@ import { firstLoopOffsetMeasures, loopBoundaries } from './loopMath';
 import useWorkstationAudio from '../../hooks/useWorkstationAudio';
 import PanKnob from './PanKnob';
 import { serializeProject, deserializeProject, downloadJSON, readJSONFile } from './projectIO';
+import { saveProject as storeSaveProject } from '../../utils/projectStore';
 import { EFFECT_DEFS, defaultParamsFor } from './effectDefs';
 import { bounceProject } from './audioBounce';
 import { exportWAV, exportMP3, trimExportBuffer } from '../../utils/audioExport';
@@ -58,6 +59,20 @@ const EDIT_BTN_MIN_PX = 60;
 
 // Hide fade overlays + handles below this rendered region width — they're unusable below ~30px.
 const FADE_UI_MIN_PX = 30;
+
+// Blank session in deserializeProject's output shape — applied by the
+// pending-project effect for "New Project". MUST mirror the useState/useRef
+// initializers below exactly, or "New Project" would differ from a fresh mount.
+const BLANK_PROJECT_DATA = {
+  name: 'untitled', bpm: 120, totalMeasures: 200,
+  tracks: [], regions: [], notes: [],
+  nextId: 1, nextRegionId: 1, nextEffectId: 1, nextNoteId: 0,
+  repairedCount: 0,
+};
+
+// Strip filesystem-hostile characters for the .voxdaw download filename.
+const sanitizeFilename = (name) =>
+  (String(name ?? '').replace(/[/\\:*?"<>|]/g, '').trim() || 'project');
 
 // Returns the snap increment (in measures) matching the smallest visible grid line at this zoom.
 // Fractional range (ppm>=150) mirrors drawGrid's beat/sub-beat thresholds (Phase 82).
@@ -111,7 +126,7 @@ export function drawGrid(canvas, { scrollLeft, viewW, viewH, ppm, zoomLevel, lef
   }
 }
 
-export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeToggle, getMoogBusNode }) {
+export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeToggle, getMoogBusNode, pendingProject }) {
   const [isPlaying,      setIsPlaying]      = useState(false);
   const [tracks,         setTracks]         = useState([]);
   const [regions,        setRegions]        = useState([]);
@@ -123,6 +138,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [bpm,            setBpm]            = useState(120);
   const [editingBpm,     setEditingBpm]     = useState(false);
   const [tempBpm,        setTempBpm]        = useState('120');
+  const [projectName,    setProjectName]    = useState('untitled');
+  const [editingName,    setEditingName]    = useState(false);
+  const [tempName,       setTempName]       = useState('untitled');
+  const [currentProjectId, setCurrentProjectId] = useState(null); // browser-store id; null until first save
   const [selectedRegionIds, setSelectedRegionIds] = useState(new Set());
   const [totalMeasures,    setTotalMeasures]    = useState(200);
   const [toastMessage,     setToastMessage]     = useState(null);
@@ -300,41 +319,70 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     setTimeout(() => setToastMessage(null), ms);
   }, []);
 
-  const handleSaveProject = useCallback(() => {
-    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes });
-    downloadJSON(payload, 'project.voxdaw');
-    showToast('saved project.voxdaw');
-  }, [bpm, totalMeasures, tracks, regions, notes, showToast]);
+  // Apply a deserialized project (deserializeProject output shape) to the
+  // running session. Shared by the [ load ] file input and the pending-project
+  // effect (open-from-homepage / New Project).
+  const applyProjectData = useCallback((data) => {
+    Tone.Transport.stop();
+    setIsPlaying(false);
+    setEditingTrackId(null);
+    setSelectedRegionIds(new Set());
+    setProjectName(data.name ?? 'untitled');
+    setBpm(data.bpm);
+    setTempBpm(String(data.bpm));
+    Tone.Transport.bpm.value = data.bpm;
+    setTotalMeasures(Math.max(24, data.totalMeasures));
+    // Reset undo/redo to the loaded project (the load itself isn't an undoable step).
+    timeTravelingRef.current = true; // make the recorder treat this commit as non-recordable
+    latestRef.current = { tracks: data.tracks, regions: data.regions, notes: data.notes };
+    burstActiveRef.current = false;
+    if (burstTimerRef.current) { clearTimeout(burstTimerRef.current); burstTimerRef.current = null; }
+    setPast([]);
+    setFuture([]);
+    setTracks(data.tracks);
+    setRegions(data.regions);
+    setNotes(data.notes);
+    nextIdRef.current       = data.nextId;
+    nextRegionIdRef.current = data.nextRegionId;
+    nextEffectIdRef.current = data.nextEffectId ?? 1;
+    // Note-counter restore is load-bearing: without it, post-load mints
+    // start at 0 and collide with loaded note ids (the ghost-note bug).
+    nextNoteIdRef.current   = data.nextNoteId ?? 0;
+  }, []);
+
+  // [ save ] writes to the browser project store (IndexedDB) — the homepage
+  // Projects grid reads from it. Producing a .voxdaw file moved to the export menu.
+  const handleSaveProject = useCallback(async () => {
+    try {
+      const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName });
+      const id = currentProjectId ?? crypto.randomUUID();
+      await storeSaveProject({
+        id, name: projectName, bpm, trackCount: tracks.length, data: payload,
+      });
+      if (!currentProjectId) setCurrentProjectId(id);
+      showToast(`saved "${projectName}"`);
+    } catch (e) {
+      console.error('save project failed', e);
+      showToast(`save failed: ${e.message}`);
+    }
+  }, [bpm, totalMeasures, tracks, regions, notes, projectName, currentProjectId, showToast]);
+
+  const handleExportProjectFile = useCallback(() => {
+    setShowExportMenu(false);
+    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName });
+    const filename = `${sanitizeFilename(projectName)}.voxdaw`;
+    downloadJSON(payload, filename);
+    showToast(`exported ${filename}`);
+  }, [bpm, totalMeasures, tracks, regions, notes, projectName, showToast]);
 
   const handleLoadProject = useCallback(async (file) => {
     if (!file) return;
     try {
       const raw = await readJSONFile(file);
       const data = deserializeProject(raw);
-      Tone.Transport.stop();
-      setIsPlaying(false);
-      setEditingTrackId(null);
-      setSelectedRegionIds(new Set());
-      setBpm(data.bpm);
-      setTempBpm(String(data.bpm));
-      Tone.Transport.bpm.value = data.bpm;
-      setTotalMeasures(Math.max(24, data.totalMeasures));
-      // Reset undo/redo to the loaded project (the load itself isn't an undoable step).
-      timeTravelingRef.current = true; // make the recorder treat this commit as non-recordable
-      latestRef.current = { tracks: data.tracks, regions: data.regions, notes: data.notes };
-      burstActiveRef.current = false;
-      if (burstTimerRef.current) { clearTimeout(burstTimerRef.current); burstTimerRef.current = null; }
-      setPast([]);
-      setFuture([]);
-      setTracks(data.tracks);
-      setRegions(data.regions);
-      setNotes(data.notes);
-      nextIdRef.current       = data.nextId;
-      nextRegionIdRef.current = data.nextRegionId;
-      nextEffectIdRef.current = data.nextEffectId ?? 1;
-      // Note-counter restore is load-bearing: without it, post-load mints
-      // start at 0 and collide with loaded note ids (the ghost-note bug).
-      nextNoteIdRef.current   = data.nextNoteId ?? 0;
+      applyProjectData(data);
+      // A raw file open isn't tied to a stored project yet — first save creates one.
+      setCurrentProjectId(null);
       showToast(data.repairedCount > 0
         ? `loaded ${file.name} (repaired ${data.repairedCount} note${data.repairedCount !== 1 ? 's' : ''})`
         : `loaded ${file.name}`);
@@ -342,7 +390,30 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       console.error('load project failed', e);
       showToast(`load failed: ${e.message}`);
     }
-  }, [showToast]);
+  }, [applyProjectData, showToast]);
+
+  // Open-from-homepage / New Project. Root bumps requestId on every request, so
+  // the same project can be re-opened (intentional reload) while StrictMode
+  // double-invocations and unrelated re-renders are no-ops.
+  const lastAppliedReqRef = useRef(0);
+  useEffect(() => {
+    if (!pendingProject || pendingProject.requestId === lastAppliedReqRef.current) return;
+    lastAppliedReqRef.current = pendingProject.requestId;
+    if (pendingProject.data) {
+      applyProjectData(pendingProject.data);
+      setCurrentProjectId(pendingProject.projectId ?? null);
+    } else {
+      applyProjectData(BLANK_PROJECT_DATA);
+      setCurrentProjectId(null);
+    }
+  }, [pendingProject, applyProjectData]);
+
+  const handleNameCommit = useCallback(() => {
+    const next = tempName.trim() || 'untitled';
+    setProjectName(next);
+    setTempName(next);
+    setEditingName(false);
+  }, [tempName]);
 
   const handleExportAudio = useCallback(async (format) => {
     setShowExportMenu(false);
@@ -2629,7 +2700,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           <button className={styles.homeBtn} onClick={onNavigateHome}>[ ⌂ home ]</button>
           <button className={styles.transportBtn} onClick={() => undoRef.current?.()} disabled={!canUndo} title="Undo (⌘Z)">↶</button>
           <button className={styles.transportBtn} onClick={() => redoRef.current?.()} disabled={!canRedo} title="Redo (⌘⇧Z)">↷</button>
-          <button className={`${styles.transportBtn} ${styles.transportTextBtn}`} onClick={handleSaveProject} title="Save project to .voxdaw">[ save ]</button>
+          <button className={`${styles.transportBtn} ${styles.transportTextBtn}`} onClick={handleSaveProject} title="Save project to this browser (appears on the homepage)">[ save ]</button>
           <button className={`${styles.transportBtn} ${styles.transportTextBtn}`} onClick={() => loadInputRef.current?.click()} title="Load project from .voxdaw">[ load ]</button>
           <div className={styles.exportWrap}>
             <button
@@ -2643,6 +2714,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               <div className={styles.exportMenu}>
                 <button className={styles.exportMenuItem} onClick={() => handleExportAudio('mp3')}>mp3</button>
                 <button className={styles.exportMenuItem} onClick={() => handleExportAudio('wav')}>wav</button>
+                <button className={styles.exportMenuItem} onClick={handleExportProjectFile}>.voxdaw</button>
               </div>
             )}
           </div>
@@ -2678,6 +2750,32 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           </button>
         </div>
         <div className={styles.transportRight}>
+          <div className={styles.meta}>
+            <span className={styles.metaLabel}>NAME</span>
+            {editingName ? (
+              <input
+                autoFocus
+                type="text"
+                className={styles.nameInput}
+                value={tempName}
+                onChange={(e) => setTempName(e.target.value)}
+                onBlur={handleNameCommit}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleNameCommit();
+                  if (e.key === 'Escape') { setTempName(projectName); setEditingName(false); }
+                }}
+              />
+            ) : (
+              <span
+                className={styles.metaValue}
+                style={{ cursor: 'text' }}
+                title="Rename project"
+                onClick={() => { setTempName(projectName); setEditingName(true); }}
+              >
+                {projectName}
+              </span>
+            )}
+          </div>
           <div className={styles.meta}>
             <span className={styles.metaLabel}>BPM</span>
             {editingBpm ? (

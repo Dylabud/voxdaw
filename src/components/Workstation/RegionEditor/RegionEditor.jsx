@@ -4,24 +4,10 @@ import styles from './RegionEditor.module.css';
 import { drawGrid, getSnapIncrement } from '../WorkstationShell';
 import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
 import { firstLoopOffsetMeasures } from '../loopMath';
-import { SYNTH_INSTRUMENTS, SAMPLED_MELODIC_NAMES, DRUM_KIT_NAMES, makeSynth, isDrumKit, chokeTargetsFor } from '../synthFactory';
+import { SYNTH_INSTRUMENTS, SAMPLED_MELODIC_NAMES, DRUM_KIT_NAMES } from '../synthFactory';
 import EffectsList from './EffectsList';
 import EffectsRack from './EffectsRack';
 import InstrumentPanel from './InstrumentPanel';
-
-// Process-wide preview-synth cache, keyed by instrument name. Keeps sampler
-// buffers warm across editor opens / instrument switches so we don't pay a
-// network re-download per interaction. Synth-type voices are also cached for
-// uniformity (they're cheap so this is incidental). Routed direct to Destination —
-// distinct from the per-region playback synths owned by useWorkstationAudio (single-writer rule).
-const previewSynthCache = new Map();
-function getPreviewSynth(name) {
-  const cached = previewSynthCache.get(name);
-  if (cached) return cached;
-  const s = makeSynth(name).toDestination();
-  previewSynthCache.set(name, s);
-  return s;
-}
 
 // 'grid' resolves dynamically against the visible piano-roll grid (Phase 116 bug 2).
 // 'off' = no snap. Fixed-fraction options listed here.
@@ -81,7 +67,6 @@ export default function RegionEditor({
   const [selectedNoteIds,   setSelectedNoteIds]   = useState(() => new Set());
   const [noteSnapDivision,  setNoteSnapDivision]  = useState('grid');
 
-  const previewSynthRef       = useRef(null);
   const activeKeyElRef        = useRef(null);
   const gridRef               = useRef(null);
   const gridCanvasRef         = useRef(null);   // pinned grid-line canvas over the piano-roll viewport
@@ -93,7 +78,6 @@ export default function RegionEditor({
   const pianoAutoScrollFrameRef = useRef(null);
 
   const notesRef              = useRef(notes);              notesRef.current = notes;
-  const instrumentRef         = useRef(instrument);         instrumentRef.current = instrument;
   const regionsRef            = useRef(regions);            regionsRef.current = regions;
   const selectedNoteIdsRef    = useRef(selectedNoteIds);    selectedNoteIdsRef.current = selectedNoteIds;
   const noteSnapRef           = useRef(noteSnapDivision);   noteSnapRef.current = noteSnapDivision;
@@ -149,12 +133,13 @@ export default function RegionEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [track?.instrument]);
 
-  // Preview synth — read from the module-level cache so samplers don't redownload
-  // on instrument switch or editor reopen. No dispose: instances live for the
-  // process lifetime, which is acceptable for a small fixed set of instruments.
+  // Prime the per-track audition synth (useWorkstationAudio) so sampled
+  // instruments start their buffer download on editor open / instrument switch
+  // instead of dead-clicking on the first preview. Idempotent (cache hit is a
+  // no-op) and feeds the existing 'audition:<trackId>' loading indicator.
   useEffect(() => {
-    previewSynthRef.current = getPreviewSynth(instrument);
-  }, [instrument]);
+    if (track?.id) auditionPrime?.(track.id);
+  }, [track?.id, track?.instrument, auditionPrime]);
 
   // Restore saved scroll position, or default to C4 at bottom on first open
   useEffect(() => {
@@ -273,24 +258,12 @@ export default function RegionEditor({
   }, []);
 
   // ── Key preview handlers ──────────────────────────────────
-  // Guarded attack: a Tone.Sampler whose buffers are still loading throws on triggerAttack.
-  // `loaded !== false` plays PolySynths (no `loaded` prop) and ready Samplers, skips unready ones.
-  const previewAttack = (note) => {
-    const s = previewSynthRef.current;
-    if (!s || s.disposed || s.loaded === false) return;
-    // Hi-hat choke mirrors the playback engine: clicking the closed hat cuts
-    // a ringing open-hat preview (safe no-op when nothing rings).
-    if (isDrumKit(instrumentRef.current)) {
-      for (const tgt of chokeTargetsFor(note)) s.triggerRelease(tgt);
-    }
-    s.triggerAttack(note);
-  };
-  // Drum previews are one-shots: no releaseAll on mouseup/drag, so a clicked
-  // cymbal rings out. Safe to skip — Sampler buffer sources self-stop at
-  // sample end; only PolySynths (which keep releaseAll) can sustain forever.
-  const previewRelease = () => {
-    if (!isDrumKit(instrumentRef.current)) previewSynthRef.current?.releaseAll();
-  };
+  // Previews go through the hook's per-track audition synth, which is connected
+  // to the track's volume node — so they ride volume → pan → FX → mute exactly
+  // like region playback. Drum choke, one-shot skip-release, and the unloaded-
+  // sampler guard all live inside the audition API.
+  const previewAttack = (note) => auditionAttack?.(track?.id, note);
+  const previewRelease = () => auditionReleaseAll?.(track?.id);
   function handleMouseDown(note, e) {
     Tone.start().then(() => previewAttack(note));
     activeKeyElRef.current?.classList.remove(styles.keyActive);
@@ -439,6 +412,20 @@ export default function RegionEditor({
 
         const updates = computeDragUpdates(dD, deltaBeats, dKey);
         dD.pendingUpdates = updates;
+        // Live pitch preview: when the anchor note crosses a key row, swap the
+        // audition voice to the new pitch. The pitch-change gate is the throttle
+        // (fires once per row crossing, not per mousemove). Resize modes clamp
+        // cdKey to 0 so only 'move' can retrigger. Drum kits: release is a
+        // no-op (one-shot), so each row crossing fires the new piece —
+        // matching side-key glissando behavior.
+        if (dD.mode === 'move') {
+          const anchor = updates.find(u => u.id === dD.anchorId);
+          if (anchor && anchor.note !== dD.lastAuditionedNote) {
+            auditionRelease?.(track?.id, dD.lastAuditionedNote);
+            auditionAttack?.(track?.id, anchor.note);
+            dD.lastAuditionedNote = anchor.note;
+          }
+        }
         for (const u of updates) {
           const r = regionsRef.current.find(rg => rg.id === u.regionId);
           if (!r) continue;
@@ -510,9 +497,8 @@ export default function RegionEditor({
     const onUp = () => {
       // Release any note auditioned on grid/note mousedown (precedes the early
       // returns below so it fires for placement, note-drag, and marquee paths).
-      // Drum kits skip it (one-shot preview) — via instrumentRef because this
-      // closure is mounted once and would otherwise capture stale state.
-      if (!isDrumKit(instrumentRef.current)) previewSynthRef.current?.releaseAll();
+      // Drum one-shots are a no-op inside auditionReleaseAll.
+      auditionReleaseAll?.(track?.id);
       // Drag end
       const dD = noteDragRef.current;
       if (dD) {
@@ -575,7 +561,8 @@ export default function RegionEditor({
       window.removeEventListener('mouseup', onUp);
       stopPianoAutoScroll();
     };
-  }, [onCommitNoteEdits, onNoteAdd, track?.id, stopPianoAutoScroll]);
+  }, [onCommitNoteEdits, onNoteAdd, track?.id, stopPianoAutoScroll,
+      auditionAttack, auditionRelease, auditionReleaseAll]);
 
   // ── Note mousedown — selection + drag arming ──
   function handleNoteMouseDown(e, note) {
@@ -631,6 +618,8 @@ export default function RegionEditor({
       clusterIds: [...nextSelection],
       initByID,
       anchorId: note.id,
+      // Seed for the live drag pitch preview (mousedown already auditioned this).
+      lastAuditionedNote: note.note,
       pendingUpdates: null,
     };
     pianoMousePosRef.current = { x: e.clientX, y: e.clientY };

@@ -3,10 +3,13 @@
 const SCHEMA_VERSION = 1;
 const KIND = 'voxdaw-project';
 
-export function serializeProject({ bpm, totalMeasures, tracks, regions, notes }) {
+export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, name }) {
   return {
     version: SCHEMA_VERSION,
     kind: KIND,
+    // Additive field (SCHEMA_VERSION intentionally NOT bumped — the strict-
+    // equality version check would reject every existing .voxdaw file).
+    name: String(name ?? 'untitled'),
     bpm,
     totalMeasures,
     tracks:  tracks.map(t => ({
@@ -98,6 +101,8 @@ export function deserializeProject(raw) {
   }
 
   return {
+    // Additive field — old files have no name; default matches a fresh session.
+    name: (typeof raw.name === 'string' && raw.name.trim()) ? raw.name.trim() : 'untitled',
     bpm,
     totalMeasures,
     tracks: tracks.map(t => ({
