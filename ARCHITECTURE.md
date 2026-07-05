@@ -260,19 +260,31 @@ All gesture routing constants and defaults live in a single module. Two independ
 ## 14. Page Routing (`src/Root.js`)
 
 The app shell is a thin state-router, not React Router. `Root.js` owns:
-- `page` state — `'home' | 'voxtool' | 'workstation'`
+- `page` state — `'home' | 'voxtool' | 'workstation' | 'moogmodular'`
 - `isDarkMode` state — persists across page navigation
+- `pendingProject` state — `{ requestId, projectId, data }` open-a-project requests for the Workstation
 
-It applies `data-theme={isDarkMode ? undefined : 'light'}` on a top-level wrapper div (descendants inherit the theme tokens) and renders one of three pages based on `page`. Each page receives `onNavigateHome` plus the theme props. **No `react-router-dom` dependency** — for a 3-page app where two are visually distinct workstations, simple state is cheaper and avoids unmount/remount cascades on the VoxTool hooks (camera permission, MediaPipe model, AudioContext, WebSocket all stay warm only as long as the relevant page is mounted).
+It applies `data-theme={isDarkMode ? undefined : 'light'}` on a top-level wrapper div (descendants inherit the theme tokens). Pages mount on first visit (a `visited` Set) and stay mounted with `display: none` for audio-engine continuity. **No `react-router-dom` dependency** — simple state is cheaper and avoids unmount/remount cascades on the VoxTool hooks (camera permission, MediaPipe model, AudioContext, WebSocket all stay warm only as long as the relevant page is mounted).
 
 ```
 index.js → <Root>
-  page='home'        → <HomePage onNavigate={setPage} />
-  page='voxtool'     → <App        onNavigateHome={…} isDarkMode={…} onThemeToggle={…} />
-  page='workstation' → <Workstation onNavigateHome={…} isDarkMode={…} onThemeToggle={…} />
+  page='home'         → <HomePage onNavigate={…} onOpenProject={…} isDarkMode={…} onThemeToggle={…} active={…} />
+  page='voxtool'      → <App              onNavigateHome={…} isDarkMode={…} onThemeToggle={…} />
+  page='workstation'  → <WorkstationShell onNavigateHome={…} isDarkMode={…} onThemeToggle={…} getMoogBusNode={…} pendingProject={…} />
+  page='moogmodular'  → <MoogModular      onNavigateHome={…} onBusReady={…} />
 ```
 
-`HomePage` is the single entry gate (the old `WelcomeModal` was folded into it and removed). `Workstation` is itself a 2-view container: a "under construction" warning page with `[ ← back ]` and `[ continue → ]`, gating entry into `<WorkstationShell />`.
+The old `Workstation.jsx` "under construction" 2-view wrapper was removed — Root renders `WorkstationShell` directly, so the shell mounts on the first workstation navigation.
+
+**Open-a-project mechanism (`pendingProject`):** because the shell stays mounted across navigations, a mount-time prop can't deliver later opens. `Root.openProject({ projectId, data })` (where `data` is `deserializeProject` output, or `null` for a blank New Project) bumps a monotonic `requestId` ref, sets `pendingProject`, and navigates. The shell's apply-effect is guarded by `lastAppliedReqRef` — idempotent under StrictMode double-invocation, while a fresh requestId always applies (re-opening the same project is an intentional reload). If the workstation was already visited, `openProject` first asks `window.confirm` before clobbering the live session.
+
+### HomePage dashboard (`src/components/HomePage/`)
+Soundtrap-style project dashboard: header (wordmark + nav buttons for VoxTool / Workstation / Moog Modular + `◑/○` theme toggle), a `PROJECTS` grid, and a footer alpha/privacy note. The grid's first cell is a dashed `+ NEW PROJECT` card (`onOpenProject({ projectId: null, data: null })`); each saved project renders a `ProjectCard.jsx` (name, `{trackCount} tracks · {bpm} bpm`, short updated-at) with a hover kebab menu: rename (inline input → `renameProject`), duplicate, download `.voxdaw` (`downloadJSON(record.data)`), delete (confirm). Card click → `getProject` → `deserializeProject` → `onOpenProject`. An `[ import .voxdaw ]` button validates via `deserializeProject`, stores a new record, then opens it. **Grid refresh:** HomePage stays mounted, so Root passes `active={page === 'home'}` and a `useEffect` re-lists on return (plus after every mutating action). IndexedDB-open failure renders an inline "storage unavailable" note instead of crashing.
+
+### Browser project store (`src/utils/projectStore.js`)
+Native IndexedDB (db `voxdaw` v1, store `projects`, keyPath `id`) behind a small promise wrapper — no dependency. Record: `{ id: crypto.randomUUID(), name, createdAt, updatedAt, bpm, trackCount, data }` where `data` is the full `serializeProject()` output (source of truth; bpm/trackCount are denormalized for card display). API: `listProjects()` (metadata only, newest first), `getProject`, `saveProject` (upsert; stamps `updatedAt`, preserves existing `createdAt` so callers never read-before-write), `deleteProject`, `renameProject` (patches both the record name and `data.name` so downloads stay correctly named). A failed `openDB()` clears the cached promise so the next call can retry.
+
+The Workstation's `[ save ]` writes here (upsert under `currentProjectId` state; first save mints the id) — producing a `.voxdaw` file moved to the export menu (`.voxdaw` item alongside mp3/wav, filename from the project name). `[ load ]` (file input) still opens raw files; it resets `currentProjectId` to `null` so the first save after a file open creates a new store record. The project `name` travels inside the `.voxdaw` file as an **additive field** (`SCHEMA_VERSION` intentionally not bumped) and is editable via a click-to-edit `NAME` block in the transport bar (the BPM-editor pattern).
 
 ---
 
@@ -564,8 +576,8 @@ Per-region synths are created lazily in `useWorkstationAudio.js`. For sampled in
 
 **Buffer cache amortization:** Tone's internal `ToneAudioBuffer` cache is keyed by URL and shared across all `Sampler` instances in the same `AudioContext`. The first region using `piano` downloads the .mp3 set; every subsequent `Sampler` constructed with the same URL map resolves `onload` essentially instantly. No app-level sampler cache is needed — sharing samplers across regions would break the per-region `fadeGain` envelope architecture.
 
-### Preview synths (`RegionEditor.jsx`)
-A module-level `previewSynthCache: Map<instrumentName, Synth|Sampler>` keeps preview voices warm across editor opens and instrument switches. Cached instances route direct to Destination — distinct from playback synths owned by `useWorkstationAudio` (single-writer rule preserved). Instances are never disposed; the cache lives for the process lifetime.
+### Piano-roll previews (`RegionEditor.jsx`)
+All piano-roll preview sounds (side-key click/glissando, grid note placement, note grab) go through the hook's **audition API** (`auditionAttack/auditionReleaseAll` from `useWorkstationAudio`) — the same per-track synth the Instrument tab uses, connected at the track's `volume` node so previews ride `volume → pan → FX → mute` and carry the per-track envelope override. Drum choke, one-shot skip-release, and the unloaded-sampler guard all live inside the API, so RegionEditor's helpers are one-liners. A priming effect (`auditionPrime(track.id)` on `[track?.id, track?.instrument]`) starts sampled-instrument buffer downloads on editor open so the first click doesn't dead-click (replaces the old module-level Destination-routed `previewSynthCache`, which is removed). **Live drag pitch preview:** during a note drag (`mode === 'move'` only), when the anchor note's computed pitch crosses a key row, `onMove` releases the previous pitch and attacks the new one — the pitch-change comparison (`dD.lastAuditionedNote`, seeded at mousedown) is the throttle, firing once per row crossing rather than per mousemove.
 
 ### Offline render (`audioBounce.js`)
 `Tone.Offline` creates a separate `AudioContext`, so realtime-context buffers cannot be reused. The bounce callback is `async` and `await Tone.loaded()` before `transport.start()` — this awaits all `Tone.Sampler` decoders created inside the callback, including the offline context's own buffer set. Without this await, sampled instruments could render silent on the first export of a session.

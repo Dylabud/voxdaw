@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from 'react';
 import HomePage from './components/HomePage/HomePage';
 import App from './App';
-import Workstation from './components/Workstation/Workstation';
+import WorkstationShell from './components/Workstation/WorkstationShell';
 import MoogModular from './components/MoogModular/MoogShell';
 
 export default function Root() {
@@ -11,9 +11,17 @@ export default function Root() {
   // Pages mount on first visit and stay alive for audio continuity.
   // Inactive pages are hidden via display:none so their audio engines keep running.
   const [visited, setVisited] = useState(() => new Set(['home']));
+  const visitedRef = useRef(visited); visitedRef.current = visited;
 
   // The Moog registers a bus-node getter here; the Workstation reads from it.
   const moogBusGetterRef = useRef(null);
+
+  // Open-a-project request for the Workstation. The shell stays mounted across
+  // navigations, so a mount-time prop can't deliver later opens — instead each
+  // request carries a fresh monotonic requestId and the shell applies it in an
+  // effect. data = deserializeProject output, or null for a blank New Project.
+  const [pendingProject, setPendingProject] = useState(null);
+  const projectRequestIdRef = useRef(0);
 
   const navigate = useCallback((nextPage) => {
     setPage(nextPage);
@@ -24,6 +32,17 @@ export default function Root() {
       return next;
     });
   }, []);
+
+  const openProject = useCallback(({ projectId, data }) => {
+    // A live workstation session gets replaced — confirm before clobbering it.
+    if (visitedRef.current.has('workstation') &&
+        !window.confirm('Replace the current workstation session? Unsaved changes will be lost.')) {
+      return;
+    }
+    projectRequestIdRef.current += 1;
+    setPendingProject({ requestId: projectRequestIdRef.current, projectId: projectId ?? null, data: data ?? null });
+    navigate('workstation');
+  }, [navigate]);
 
   const onThemeToggle = useCallback(() => setIsDarkMode(v => !v), []);
 
@@ -41,7 +60,13 @@ export default function Root() {
     >
       {/* Home — always mounted, no audio engine, cheap to keep alive */}
       <div style={hide('home')}>
-        <HomePage onNavigate={navigate} />
+        <HomePage
+          onNavigate={navigate}
+          onOpenProject={openProject}
+          isDarkMode={isDarkMode}
+          onThemeToggle={onThemeToggle}
+          active={page === 'home'}
+        />
       </div>
 
       {/* VoxTool — mounted on first visit, kept alive so its audio engine persists */}
@@ -58,11 +83,12 @@ export default function Root() {
       {/* Workstation — mounted on first visit; receives Moog bus getter for recording */}
       {visited.has('workstation') && (
         <div style={hide('workstation')}>
-          <Workstation
+          <WorkstationShell
             onNavigateHome={() => navigate('home')}
             isDarkMode={isDarkMode}
             onThemeToggle={onThemeToggle}
             getMoogBusNode={getMoogBusNode}
+            pendingProject={pendingProject}
           />
         </div>
       )}

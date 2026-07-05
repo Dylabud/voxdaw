@@ -138,9 +138,11 @@
 .chassis {
   display: flex;
   align-items: stretch;
-  justify-content: center;
+  justify-content: space-between;
   flex-wrap: wrap;
   gap: 10px;
+  width: min(1100px, 95%);
+  box-sizing: border-box;
   padding: 10px 14px;
   background: linear-gradient(180deg,
     color-mix(in srgb, var(--bg-elevated, var(--bg-panel)), #fff 4%),
