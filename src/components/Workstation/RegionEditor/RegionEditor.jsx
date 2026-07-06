@@ -56,6 +56,7 @@ export default function RegionEditor({
   onEffectToggleBypass,
   onEffectUpdate,
   isDarkMode,
+  performanceQuality,
   loadingTrackIds,
   auditionAttack,
   auditionRelease,
@@ -895,6 +896,7 @@ export default function RegionEditor({
           onRemove={onEffectRemove}
           onToggleBypass={onEffectToggleBypass}
           onUpdate={onEffectUpdate}
+          performanceQuality={performanceQuality}
         />
       )}
 

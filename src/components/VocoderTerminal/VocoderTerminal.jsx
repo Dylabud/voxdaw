@@ -67,6 +67,12 @@ export default function VocoderTerminal({ getAnalyserData, updateVocoderParams }
     const binStep = Math.floor(FFT_BINS / NUM_BARS);
 
     const draw = () => {
+      // Root keeps pages mounted display:none — skip the analyser read +
+      // canvas paint while the VoxTool page is hidden (purely visual loop).
+      if (canvas.offsetParent === null) {
+        rafRef.current = requestAnimationFrame(draw);
+        return;
+      }
       getAnalyserData(dataArray.current);
 
       ctx.fillStyle = '#0a0a0c';

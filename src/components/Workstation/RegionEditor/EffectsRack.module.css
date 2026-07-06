@@ -115,6 +115,7 @@
 .close:hover { color: var(--accent-color); }
 
 .moduleBody {
+  position: relative; /* anchors .qualityNotice */
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -122,6 +123,34 @@
   align-items: stretch;
   gap: 10px;
   padding: 12px;
+}
+
+/* Low-quality force-bypass: controls inert + dimmed, centered notice on top.
+   Header (bypass / ×) stays outside the body and remains interactive. */
+.bodyBlocked > :not(.qualityNotice) {
+  opacity: 0.35;
+  pointer-events: none;
+}
+.qualityNotice {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px;
+  text-align: center;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.qualityNoticeIcon {
+  font-size: 14px;
+  color: var(--accent-color);
 }
 
 .noParams {

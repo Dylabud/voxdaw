@@ -167,6 +167,15 @@ export const EFFECT_DEFS = {
 // Stable ordering for the Add-Effect dropdowns.
 export const EFFECT_TYPES = Object.keys(EFFECT_DEFS);
 
+// Effects whose DSP runs continuously (LFOs, feedback comb banks, granular
+// delay lines) even with silent input — LOW performance quality force-bypasses
+// these. Cheap native-node effects (filter / eq / distortion / compressor /
+// delay / bitcrusher / widener) always stay on.
+export const HEAVY_EFFECT_TYPES = new Set([
+  'reverb', 'pitchshift', 'doubler', 'autofilter', 'autowah',
+  'phaser', 'tremolo', 'vibrato', 'autopanner',
+]);
+
 // Display label for an effect type, with a safe fallback for unknown/legacy types.
 export function effectLabel(type) {
   return EFFECT_DEFS[type]?.label ?? String(type ?? 'FX');

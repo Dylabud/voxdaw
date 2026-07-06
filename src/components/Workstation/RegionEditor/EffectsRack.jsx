@@ -1,6 +1,6 @@
 import React from 'react';
 import styles from './EffectsRack.module.css';
-import { EFFECT_DEFS, EFFECT_TYPES, effectLabel } from '../effectDefs';
+import { EFFECT_DEFS, EFFECT_TYPES, HEAVY_EFFECT_TYPES, effectLabel } from '../effectDefs';
 import RotaryKnob from './RotaryKnob';
 import FxVisualizer from './FxVisualizer';
 
@@ -58,7 +58,7 @@ function formatValue(value, meta) {
   return value.toFixed(2);
 }
 
-export default function EffectsRack({ effects = [], trackId, onAdd, onRemove, onToggleBypass, onUpdate }) {
+export default function EffectsRack({ effects = [], trackId, onAdd, onRemove, onToggleBypass, onUpdate, performanceQuality = 'high' }) {
   const handleAdd = (e) => {
     const type = e.target.value;
     if (!type) return;
@@ -95,8 +95,11 @@ export default function EffectsRack({ effects = [], trackId, onAdd, onRemove, on
           const vals = Object.fromEntries(
             paramDefs.map(([k, m]) => [k, fx.params?.[k] ?? m.default]),
           );
+          // Low quality force-bypasses heavy FX in the audio hook; mirror it
+          // here: body grayed + inert (header stays live so × still works).
+          const qualityBlocked = performanceQuality === 'low' && HEAVY_EFFECT_TYPES.has(fx.type);
           return (
-            <div key={fx.id} className={`${styles.module}${fx.bypass ? ` ${styles.moduleBypassed}` : ''}`}>
+            <div key={fx.id} className={`${styles.module}${fx.bypass || qualityBlocked ? ` ${styles.moduleBypassed}` : ''}`}>
               <div className={styles.moduleHead}>
                 <button
                   type="button"
@@ -112,7 +115,13 @@ export default function EffectsRack({ effects = [], trackId, onAdd, onRemove, on
                   onClick={() => onRemove?.(trackId, fx.id)}
                 >×</button>
               </div>
-              <div className={styles.moduleBody}>
+              <div className={`${styles.moduleBody}${qualityBlocked ? ` ${styles.bodyBlocked}` : ''}`}>
+                {qualityBlocked && (
+                  <div className={styles.qualityNotice}>
+                    <span className={styles.qualityNoticeIcon} aria-hidden="true">◇</span>
+                    increase sound quality to enable {effectLabel(fx.type)}
+                  </div>
+                )}
                 <div className={styles.vizBox}>
                   <FxVisualizer type={fx.type} params={vals} />
                 </div>

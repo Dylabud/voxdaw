@@ -150,6 +150,25 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* QUALITY select — dressed as a metaValue so the transport meta column stays uniform. */
+.qualitySelect {
+  appearance: none;
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 0;
+  color: var(--accent-color);
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  text-align: right;
+  cursor: pointer;
+}
+.qualitySelect option {
+  background: var(--bg-panel);
+  color: var(--text-primary);
+}
+
 .bpmInput {
   background: transparent;
   border: none;

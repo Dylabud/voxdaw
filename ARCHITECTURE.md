@@ -377,6 +377,65 @@ source of truth, matching notes/regions). Types, labels, and **param metadata**
   version check is strict-equality, so a bump would reject every existing `.voxdaw` file; an
   additive defaulted field is backward-compatible.
 
+### CPU: render-graph pruning + performance quality (Phase 141, `useWorkstationAudio.js` / `fxChain.js` / `WorkstationShell.jsx`)
+Large projects (17 tracks × multi-FX racks) overloaded both audio and main threads because
+mute/solo/bypass were gain-only — every synth voice and FX node (incl. always-running LFOs and
+feedback loops) kept processing behind a 0-gain node. The overhaul exploits one Web Audio
+property: **the render thread only processes nodes transitively connected to the destination.**
+
+- **Mute/solo:** effect #2 (unchanged single writer of the mute node) ramps to 0 (20ms), then a
+  50ms timer disconnects the mute node from Destination — the whole track subtree leaves the
+  render set. Becoming audible reconnects while gain is still 0, then ramps up (click-free).
+  State in `muteConnByTrackIdRef` (`{connected, timer}`); timers cleared on track removal +
+  unmount. Effect #2 also maintains `audibleByTrackIdRef`, which `makePartCallback` reads at
+  fire time to skip triggering notes on inaudible tracks — no Part rebuilds on mute/solo; the
+  trackId is resolved live through `appliedRegionStateRef` because region drags don't rebuild
+  Parts (a captured trackId would go stale). Trade-off: unmuting mid-note waits for the next
+  note onset.
+- **Activity pruning (lossless — always on, all quality tiers):** an *audible* track with no
+  notes sounding is also pruned; without this, 17 audible tracks cost 17 tracks of FX DSP even
+  in a section where only 6 play (the "solo sounds fine, full mix cuts out" failure).
+  `estimateTrackTailSec(track)` — exported from `useWorkstationAudio.js` and reused by
+  `audioBounce.estimateFxTailSec` — bounds a track's ring-out past its last note end (synth
+  release incl. `track.envelope`, drum one-shot 6 s floor, non-bypassed delay feedback decay to
+  −60 dB, Freeverb `1 + roomSize*9`; clamp [2, 30]); cached per track in `tailByTrackIdRef`.
+  Every Part note fire (`noteLifecycleRef.onNoteScheduled` inside `makePartCallback`, invoked
+  BEFORE the sampler load guard so an unready-sampler skip still marks the track active) and
+  every audition attack/release calls `connectTrack(trackId)` and bumps
+  `activeUntilByTrackIdRef` to `noteEnd + tail`. A 1 Hz sweeper (effect 2b, `setInterval` —
+  wall-clock so paused/idle projects also fall to near-zero audio CPU) disconnects
+  connected+audible tracks past their window, with a `synthIsRinging` guard (PolySynth
+  `activeVoices`, Sampler private `_activeSources`) covering audition notes held past the
+  analytic window. Reconnect is click-free: an idle-pruned track's mute gain sits at 1, frozen
+  FX content is ≤ −60 dB by construction, and Part callbacks fire `lookAhead` (~0.1 s) before
+  the audible moment so the reconnect always lands first. `connectTrack` is audibility-gated
+  and the sweeper skips inaudible tracks — mute/solo connection state remains effect #2's
+  exclusive territory (single-writer preserved).
+- **FX bypass:** `makeFx.setBypass(true)` crossfades as before, then a 70ms timer disconnects
+  `graph.out` from `onGain` — the effect graph (LFOs included: they feed params of unreachable
+  nodes) stops rendering. Un-bypass reconnects before ramping. Wrappers created bypassed start
+  pruned. *Accepted limitation:* delay/reverb buffers freeze while pruned; un-bypass can
+  briefly replay a stale tail at wet level.
+- **Performance quality:** `performanceQuality` (`'high'`|`'medium'`|`'low'`, default high) in
+  `WorkstationShell`, rendered as a `QUALITY` select in the transport meta group, persisted to
+  localStorage `voxdaw.performanceQuality` (machine capability — never serialized to `.voxdaw`
+  or undo history). *medium* = PolySynth `maxPolyphony` 32→12 (quality-sync effect 3d applies
+  live; `perfQualityRef` applies at synth build; Samplers have no voice pool) + context
+  `lookAhead` 0.1→0.2s for scheduling headroom (lookAhead is context-global — VoxTool gains
+  latency while reduced). *low* = medium + force-bypass of `HEAVY_EFFECT_TYPES` (`effectDefs.js`:
+  reverb, pitchshift, doubler, autofilter, autowah, phaser, tremolo, vibrato, autopanner —
+  everything whose DSP runs continuously with silent input; cheap native-node effects stay on).
+  Effective bypass = `e.bypass || (low && heavy)`, computed in effects 1b (creation/seed) and 1c
+  (deps `[tracks, performanceQuality]`); `track.effects` is never mutated, so returning to high
+  restores the user's own bypass states. EffectsRack mirrors the block: module body grayed/inert
+  (`.bodyBlocked`) with an "increase sound quality to enable [effect]" notice; the header row
+  (bypass pill, remove ×) stays interactive.
+- **Hidden-page visual rAF loops** (Moog FFB + vocoder LED meters, VocoderTerminal spectrum
+  canvas) early-return on `offsetParent === null` (Root keeps pages mounted `display:none`).
+  The Moog TRANSPOSE CV loop is deliberately NOT gated — it drives the worklet root and must
+  keep running while the Moog plays hidden. Offline bounce is untouched (it already skipped
+  inaudible tracks and bypassed FX).
+
 ### Undo/redo history (Phase 139, `WorkstationShell.jsx`)
 Tracks **arrangement data only** (`tracks`/`regions`/`notes` — mute/solo/volume/pan/instrument live on those objects); UI state (zoom/scroll/playhead/selection) is not tracked. A **passive recorder** `useEffect([tracks, regions, notes])` records history *after* React commits, so React 18 batching coalesces a multi-setter action (e.g. split = `setRegions`+`setNotes`) into one entry — **zero changes to the ~46 mutation sites**. **Leading-edge burst coalescing** (push the pre-change snapshot on the first change of a burst, suppress further pushes for ~200ms) folds a drag's mid-flight commits + continuous volume/pan slider commits into one entry. Snapshots store array **references** (state is updated immutably). `undo`/`redo` swap snapshots between `past`/`future`/`latestRef` under a `timeTravelingRef` guard, then `silenceAll()` + `recomputeFades()` (no forced pause); capped at `MAX_HISTORY = 100`. Toolbar ↶/↷ (disabled via `canUndo`/`canRedo`) + Cmd/Ctrl+Z / Cmd/Ctrl+Shift+Z / Cmd/Ctrl+Y, input-guarded. **Gotcha (fixed):** the `setFuture`/`setPast` updater closures must capture the present (`const current = latestRef.current`) *before* `latestRef` is reassigned — reading it inside the updater (which runs later) grabbed the post-mutation value, making the first redo a no-op.
 

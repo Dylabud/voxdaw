@@ -5,35 +5,20 @@ import {
   buildRegionEvents,
   volForSliderValue,
   scheduleFadeEnvelope,
+  estimateTrackTailSec,
 } from '../../hooks/useWorkstationAudio';
 
 // Upper bound on how long the audible tracks can ring past the last note,
 // so the render window covers the full tail (trimExportBuffer then finds the
-// real endpoint by scanning). Only delay, reverb and drum-kit one-shots
-// sustain energy; everything else in the rack is millisecond-scale. Worst
-// legal delay (time 1.0, feedback 0.9) would need ~66 s to reach −60 dB —
-// the 30 s clamp is the documented compromise for such pathological settings.
+// real endpoint by scanning). Per-track math lives in estimateTrackTailSec
+// (shared with the live engine's activity pruner): synth release, drum
+// one-shots, non-bypassed delay/reverb decay to −60 dB, clamp [2, 30].
 function estimateFxTailSec(tracks) {
   const anySoloed = tracks.some(t => t.isSolo);
   let tail = 0;
   for (const t of tracks) {
     if (t.isMuted || (anySoloed && !t.isSolo)) continue;
-    // Drum one-shots ignore note duration, so a cymbal on the last note
-    // rings 3–6 s past the content end regardless of FX.
-    if (isDrumKit(t.instrument)) tail = Math.max(tail, 6);
-    for (const e of t.effects ?? []) {
-      if (e.bypass) continue;
-      const p = e.params ?? {};
-      if (e.type === 'delay' && (p.wet ?? 0) > 0) {
-        // Repeats to decay to −60 dB through the feedback loop.
-        const fb = p.feedback ?? 0;
-        const repeats = fb > 0 ? Math.ceil(Math.log(1e-3) / Math.log(fb)) : 1;
-        tail = Math.max(tail, (p.time ?? 0.25) * repeats);
-      } else if (e.type === 'reverb' && (p.wet ?? 0) > 0) {
-        // Freeverb has no analytic decay; generous comb-decay heuristic.
-        tail = Math.max(tail, 1 + (p.roomSize ?? 0.7) * 9);
-      }
-    }
+    tail = Math.max(tail, estimateTrackTailSec(t));
   }
   return Math.min(30, Math.max(2, tail));
 }

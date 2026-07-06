@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import * as Tone from 'tone';
 import { makeSynth, applyEnvelope, defaultEnvelopeFor, isSampledInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
 import { makeFx } from '../components/Workstation/fxChain';
+import { HEAVY_EFFECT_TYPES } from '../components/Workstation/effectDefs';
 import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
 
 /**
@@ -23,7 +24,19 @@ import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
  * Hook does NOT call Tone.start() — kept on the user-gesture path (handlePlayPause,
  * RegionEditor preview clicks).
  */
-export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
+// Performance-quality tiers (machine capability, not project data):
+//   high   — current behavior (default).
+//   medium — invisible savings: PolySynth voice cap 32→12 + lookAhead 0.2s.
+//   low    — medium + force-bypass HEAVY_EFFECT_TYPES (real render-graph
+//            prune via makeFx). track.effects state is never mutated, so
+//            flipping back to high restores the user's settings instantly.
+const REDUCED_MAX_POLYPHONY = 12;
+
+export default function useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality = 'high' }) {
+  // Read at synth-creation time (effect #4 / audition) so synths built while
+  // quality is reduced get the voice cap without waiting for the sync effect.
+  const perfQualityRef = useRef(performanceQuality);
+  perfQualityRef.current = performanceQuality;
   // Per-track
   const mutesByTrackIdRef         = useRef(new Map()); // trackId → Gain
   const volumesByTrackIdRef       = useRef(new Map()); // trackId → Gain
@@ -31,6 +44,67 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
   const appliedVolumeByTrackIdRef = useRef(new Map()); // trackId → last v 0..100
   const appliedPanByTrackIdRef    = useRef(new Map()); // trackId → last pan -1..+1
   const appliedEnvByTrackIdRef    = useRef(new Map()); // trackId → last envelope object (ref-compared)
+
+  // Render-graph pruning for inaudible tracks (mute/solo). The audio thread
+  // only renders nodes transitively connected to the destination, so
+  // disconnecting the mute node drops the ENTIRE track subtree (synths,
+  // fades, FX incl. always-running LFOs and feedback loops) from rendering.
+  // Effect #2 is the sole writer of both maps; Part callbacks read
+  // audibleByTrackIdRef at fire time to skip triggering wasted voices.
+  const muteConnByTrackIdRef = useRef(new Map()); // trackId → { connected, timer }
+  const audibleByTrackIdRef  = useRef(new Map()); // trackId → bool
+
+  // Activity-based pruning (third prune mechanism, lossless, all quality
+  // tiers): an AUDIBLE track with no notes sounding still renders its whole
+  // FX chain. Track a per-track "provably silent after" time (last note end
+  // + release/FX tail from estimateTrackTailSec); the 1 Hz sweeper below
+  // disconnects idle tracks and note-fire/audition reconnect them. Part
+  // callbacks fire lookAhead (~0.1s) before the audible moment, so the
+  // reconnect always lands before any sound — zero quality loss.
+  const tailByTrackIdRef        = useRef(new Map()); // trackId → tailSec (cache of estimateTrackTailSec)
+  const activeUntilByTrackIdRef = useRef(new Map()); // trackId → absolute audio time (Tone.now domain)
+
+  // Reconnects an AUDIBLE track's mute node (no-op for inaudible tracks —
+  // mute/solo connection state is owned by effect #2, and reconnecting a
+  // muted track would just render silently). Gain is untouched: an idle-
+  // pruned track's gain sits at 1, so the reconnect is instant; anything
+  // frozen in its FX buffers is ≤ −60 dB by construction (see the sweeper).
+  const connectTrack = useCallback((trackId) => {
+    if (audibleByTrackIdRef.current.get(trackId) === false) return;
+    const st = muteConnByTrackIdRef.current.get(trackId);
+    const g  = mutesByTrackIdRef.current.get(trackId);
+    if (!st || !g || g.disposed || st.connected) return;
+    g.connect(Tone.getDestination());
+    st.connected = true;
+  }, []);
+
+  const disconnectTrack = useCallback((trackId) => {
+    const st = muteConnByTrackIdRef.current.get(trackId);
+    const g  = mutesByTrackIdRef.current.get(trackId);
+    if (!st || !g || g.disposed || !st.connected) return;
+    g.disconnect();
+    st.connected = false;
+  }, []);
+
+  const bumpActivity = useCallback((trackId, untilSec) => {
+    const m = activeUntilByTrackIdRef.current;
+    m.set(trackId, Math.max(m.get(trackId) ?? 0, untilSec));
+  }, []);
+
+  // Inline-synced (the mappingsRef pattern) so Part callbacks — which live
+  // for the Part's lifetime — always call the current helpers.
+  const noteLifecycleRef = useRef({ onNoteScheduled: () => {} });
+  noteLifecycleRef.current.onNoteScheduled = (trackId, startSec, durSec) => {
+    connectTrack(trackId);
+    bumpActivity(trackId, startSec + durSec + (tailByTrackIdRef.current.get(trackId) ?? 2));
+  };
+
+  // Per-track tail cache — pure function of tracks, rebuilt whole.
+  useEffect(() => {
+    const tails = tailByTrackIdRef.current;
+    tails.clear();
+    for (const t of tracks) tails.set(t.id, estimateTrackTailSec(t));
+  }, [tracks]);
 
   // Per-track insert-FX chain (pan → wrappers → mute)
   const fxChainsByTrackIdRef     = useRef(new Map()); // trackId → [makeFx wrapper] (parallel to track.effects)
@@ -98,6 +172,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       recomputeLoadingTrackIds();
     }
     const opts = { envelope: track.envelope };
+    if (perfQualityRef.current !== 'high') opts.maxPolyphony = REDUCED_MAX_POLYPHONY;
     if (sampled) {
       opts.onLoad = () => {
         // Only clear if this load still matches the cached instrument —
@@ -116,13 +191,18 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     const synth = ensureAuditionSynth(trackId);
     // `loaded === false` skips an unready Sampler; PolySynths have no `loaded`.
     if (!synth || synth.disposed || synth.loaded === false) return;
+    // Activity pruning: an idle track's chain may be disconnected — reconnect
+    // (audible-gated inside connectTrack) and mark it ringing. Notes held
+    // past the tail window are covered by the sweeper's synthIsRinging check.
+    connectTrack(trackId);
+    bumpActivity(trackId, Tone.now() + (tailByTrackIdRef.current.get(trackId) ?? 2));
     const instrument = auditionByTrackIdRef.current.get(trackId)?.instrument;
     if (isDrumKit(instrument)) {
       // Hi-hat choke, mirroring makePartCallback — every caller gets it.
       for (const tgt of chokeTargetsFor(note)) synth.triggerRelease(tgt);
     }
     synth.triggerAttack(note, undefined, 0.8);
-  }, [ensureAuditionSynth]);
+  }, [ensureAuditionSynth, connectTrack, bumpActivity]);
 
   // Drums are one-shots: releases are no-ops so cymbals ring out (the buffer
   // sources self-stop; silenceAll's _activeSources sweep still covers them).
@@ -130,13 +210,16 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     const entry = auditionByTrackIdRef.current.get(trackId);
     if (!entry || entry.synth.disposed || isDrumKit(entry.instrument)) return;
     entry.synth.triggerRelease(note);
-  }, []);
+    // Release tail is inside the track tail estimate — keep the window open.
+    bumpActivity(trackId, Tone.now() + (tailByTrackIdRef.current.get(trackId) ?? 2));
+  }, [bumpActivity]);
 
   const auditionReleaseAll = useCallback((trackId) => {
     const entry = auditionByTrackIdRef.current.get(trackId);
     if (!entry || entry.synth.disposed || isDrumKit(entry.instrument)) return;
     entry.synth.releaseAll?.();
-  }, []);
+    bumpActivity(trackId, Tone.now() + (tailByTrackIdRef.current.get(trackId) ?? 2));
+  }, [bumpActivity]);
 
   // ── 1. Track sync — owns volume + pan + mute nodes ─────────────────────
   // Signal:  regionFadeGain → volume → pan → [FX chain, effect 1b] → mute → Destination
@@ -159,6 +242,12 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
           auditionByTrackIdRef.current.delete(id);
           if (loadingRegionsRef.current.delete(`audition:${id}`)) recomputeLoadingTrackIds();
         }
+        const conn = muteConnByTrackIdRef.current.get(id);
+        if (conn?.timer != null) clearTimeout(conn.timer);
+        muteConnByTrackIdRef.current.delete(id);
+        audibleByTrackIdRef.current.delete(id);
+        tailByTrackIdRef.current.delete(id);
+        activeUntilByTrackIdRef.current.delete(id);
         volumes.get(id)?.dispose();
         panners.get(id)?.dispose();
         mutes.get(id)?.dispose();
@@ -178,6 +267,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       mutes.set(t.id, mute);
       panners.set(t.id, pan);
       volumes.set(t.id, volume);
+      muteConnByTrackIdRef.current.set(t.id, { connected: true, timer: null });
       volApp.set(t.id, t.volume ?? 75);
       panApp.set(t.id, t.pan ?? 0);
     }
@@ -230,10 +320,16 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       // Rebuild: sever pan's output (disconnect() drops ALL its connections,
       // including the pan→mute made at creation — intended), then rewire
       // pan → w0 … wN → mute (or straight pan → mute when the rack is empty).
+      // Wrappers are created with the EFFECTIVE bypass (user bypass OR low-
+      // quality force-bypass) so a structural rebuild under low quality never
+      // momentarily runs a heavy effect.
       pan.disconnect();
       disposeChain(t.id);
+      const forceOff = perfQualityRef.current === 'low';
       const wrappers = fxList.map(e =>
-        Object.assign(makeFx(e.type, e.params, e.bypass), { fxId: e.id }));
+        Object.assign(
+          makeFx(e.type, e.params, !!e.bypass || (forceOff && HEAVY_EFFECT_TYPES.has(e.type))),
+          { fxId: e.id }));
       let prevOut = pan;
       for (const w of wrappers) {
         prevOut.connect(w.input);
@@ -245,28 +341,33 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
       // Seed applied maps — makeFx already initialized bypass gains + params,
       // so 1c/1d must not re-ramp them this commit.
       for (const e of fxList) {
-        bypApp.set(e.id, !!e.bypass);
+        bypApp.set(e.id, !!e.bypass || (forceOff && HEAVY_EFFECT_TYPES.has(e.type)));
         parApp.set(e.id, e.params);
       }
     }
   }, [tracks]);
 
   // ── 1c. FX bypass sync — sole post-init writer of the crossfade gains ─
+  // Applies the EFFECTIVE bypass: user bypass OR low-quality force-bypass of
+  // heavy FX. track.effects is never mutated, so leaving low quality restores
+  // the user's own bypass states in this same pass.
   useEffect(() => {
-    const chains = fxChainsByTrackIdRef.current;
-    const bypApp = appliedFxBypassByIdRef.current;
+    const chains   = fxChainsByTrackIdRef.current;
+    const bypApp   = appliedFxBypassByIdRef.current;
+    const forceOff = performanceQuality === 'low';
     for (const t of tracks) {
       const wrappers = chains.get(t.id);
       if (!wrappers) continue;
       for (const e of t.effects ?? []) {
-        if (bypApp.get(e.id) === !!e.bypass) continue;
+        const eff = !!e.bypass || (forceOff && HEAVY_EFFECT_TYPES.has(e.type));
+        if (bypApp.get(e.id) === eff) continue;
         const w = wrappers.find(x => x.fxId === e.id);
         if (!w) continue;
-        w.setBypass(!!e.bypass);
-        bypApp.set(e.id, !!e.bypass);
+        w.setBypass(eff);
+        bypApp.set(e.id, eff);
       }
     }
-  }, [tracks]);
+  }, [tracks, performanceQuality]);
 
   // ── 1d. FX param sync — sole post-construction writer of node params ──
   // Reference compare is a correct delta check: updateEffectSettings always
@@ -287,17 +388,69 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     }
   }, [tracks]);
 
-  // ── 2. Mute/solo sync ──────────────────────────────────────────────────
+  // ── 2. Mute/solo sync — gain ramp + render-graph pruning ──────────────
+  // An inaudible track's mute node is disconnected from Destination once its
+  // 20ms ramp has landed: unreachable subgraphs aren't rendered, so the whole
+  // track (synths, fades, FX incl. LFOs/feedback loops) stops costing audio-
+  // thread CPU. Reconnect happens while the gain is still 0, then ramps up —
+  // click-free in both directions. Voices triggered while disconnected are
+  // skipped at fire time via audibleByTrackIdRef (see makePartCallback).
   useEffect(() => {
     const mutes     = mutesByTrackIdRef.current;
+    const conns     = muteConnByTrackIdRef.current;
     const anySoloed = tracks.some(t => t.isSolo);
     for (const t of tracks) {
       const g = mutes.get(t.id);
       if (!g) continue;
       const audible = !t.isMuted && (!anySoloed || t.isSolo);
-      g.gain.rampTo(audible ? 1 : 0, 0.02);
+      audibleByTrackIdRef.current.set(t.id, audible);
+      const st = conns.get(t.id) ?? { connected: true, timer: null };
+      conns.set(t.id, st);
+      if (st.timer != null) { clearTimeout(st.timer); st.timer = null; }
+      if (audible) {
+        // No-op if connected; otherwise the track was either muted (gain 0)
+        // or idle-pruned (silent, gain 1) — reconnect is click-free either way.
+        connectTrack(t.id);
+        g.gain.rampTo(1, 0.02);
+      } else {
+        g.gain.rampTo(0, 0.02);
+        if (st.connected) {
+          st.timer = setTimeout(() => {
+            st.timer = null;
+            disconnectTrack(t.id);
+          }, 50); // > the 20ms ramp — nothing audible left to cut
+        }
+      }
     }
-  }, [tracks]);
+  }, [tracks, connectTrack, disconnectTrack]);
+
+  // ── 2b. Idle sweeper — activity-based pruning ──────────────────────────
+  // 1 Hz: disconnect audible tracks whose activity window has passed and
+  // whose synths report no live voices (belt-and-braces for held audition
+  // notes — analytic windows already cover Part-scheduled notes). Inaudible
+  // tracks are effect #2's territory and are skipped. Wall-clock based, so a
+  // paused/idle project also falls to near-zero audio CPU.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const now = Tone.now();
+      const ringing = new Set();
+      for (const [rid, st] of appliedRegionStateRef.current) {
+        if (ringing.has(st.trackId)) continue;
+        if (synthIsRinging(synthsByRegionIdRef.current.get(rid))) ringing.add(st.trackId);
+      }
+      for (const [tid, entry] of auditionByTrackIdRef.current) {
+        if (synthIsRinging(entry.synth)) ringing.add(tid);
+      }
+      for (const [tid, st] of muteConnByTrackIdRef.current) {
+        if (!st.connected) continue;
+        if (audibleByTrackIdRef.current.get(tid) === false) continue;
+        if (now <= (activeUntilByTrackIdRef.current.get(tid) ?? 0)) continue;
+        if (ringing.has(tid)) continue;
+        disconnectTrack(tid);
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [disconnectTrack]);
 
   // ── 3. Volume sync ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -353,6 +506,24 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     }
   }, [tracks, regions]);
 
+  // ── 3d. Performance-quality sync — voice cap + scheduling headroom ────
+  // medium/low cap every live PolySynth at REDUCED_MAX_POLYPHONY (Samplers
+  // have no voice pool) and raise the context lookAhead — late Tone events
+  // from a starved main thread are the "eventually plays nothing" failure
+  // mode, and more lookahead buys scheduling headroom. lookAhead is context-
+  // global: it adds gesture latency on VoxTool while quality is reduced.
+  // Synths created later get the cap at build time via perfQualityRef.
+  useEffect(() => {
+    const reduced = performanceQuality !== 'high';
+    const cap = reduced ? REDUCED_MAX_POLYPHONY : 32; // 32 = Tone.PolySynth default
+    const applyCap = (s) => {
+      if (s && !s.disposed && s.maxPolyphony !== undefined) s.maxPolyphony = cap;
+    };
+    for (const s of synthsByRegionIdRef.current.values()) applyCap(s);
+    for (const entry of auditionByTrackIdRef.current.values()) applyCap(entry.synth);
+    Tone.getContext().lookAhead = reduced ? 0.2 : 0.1;
+  }, [performanceQuality]);
+
   // ── 4. Region/Note sync — per-region synth + fade gain + Part ─────────
   useEffect(() => {
     const synths   = synthsByRegionIdRef.current;
@@ -388,6 +559,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
         recomputeLoadingTrackIds();
       }
       const opts = { envelope };
+      if (perfQualityRef.current !== 'high') opts.maxPolyphony = REDUCED_MAX_POLYPHONY;
       if (sampled) {
         opts.onLoad = () => {
           // Mark this region loaded only if it still maps to this instrument.
@@ -446,7 +618,11 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
         const events = buildRegionEvents(r, notes);
         if (events.length > 0) {
           const synth = synths.get(r.id);
-          const part = new Tone.Part(makePartCallback(synth, liveSamplerSourcesRef.current, isDrumKit(track.instrument)), events);
+          const part = new Tone.Part(
+            makePartCallback(synth, liveSamplerSourcesRef.current, isDrumKit(track.instrument),
+                             r.id, appliedRegionStateRef, audibleByTrackIdRef, noteLifecycleRef),
+            events
+          );
           part.start(0);
           parts.set(r.id, part);
         }
@@ -609,7 +785,16 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm }) {
     const fxParApp = appliedFxParamsByIdRef.current;
     const liveSrcs = liveSamplerSourcesRef.current;
     const auditions = auditionByTrackIdRef.current;
+    const muteConns = muteConnByTrackIdRef.current;
+    const audible   = audibleByTrackIdRef.current;
+    const tails     = tailByTrackIdRef.current;
+    const actives   = activeUntilByTrackIdRef.current;
     return () => {
+      for (const st of muteConns.values()) if (st.timer != null) clearTimeout(st.timer);
+      muteConns.clear();
+      audible.clear();
+      tails.clear();
+      actives.clear();
       liveSrcs.clear(); // sources die with their synths below
       Tone.Transport.stop();
       Tone.Transport.cancel(0);
@@ -671,8 +856,28 @@ export function computeFadeGainAt(r, transportSec, bpm) {
   return 1;
 }
 
-function makePartCallback(synth, liveSources, isDrum = false) {
+function makePartCallback(synth, liveSources, isDrum = false,
+                          regionId = null, regionStateRef = null, audibleTracksRef = null,
+                          noteLifecycleRef = null) {
   return (time, ev) => {
+    // Inaudible track (muted, or another track soloed): skip triggering
+    // entirely — the track subtree is disconnected from the destination
+    // (effect #2), so voices would be pure allocation/GC waste. The trackId
+    // is looked up LIVE through appliedRegionStateRef because dragging a
+    // region to another track does NOT rebuild its Part (partKey unchanged)
+    // — a trackId captured at build time would go stale. Missing entries
+    // default to audible. Trade-off: unmuting mid-note waits for the next
+    // note onset.
+    const trackId = regionStateRef?.current.get(regionId)?.trackId;
+    if (trackId != null && audibleTracksRef?.current.get(trackId) === false) return;
+    // Activity pruning: reconnect an idle-pruned (audible) track and extend
+    // its ringing window. This runs BEFORE the load guard on purpose — even
+    // a skipped unready-sampler note marks the track active, so its chain is
+    // up when the sampler finishes loading mid-playback.
+    if (trackId != null && noteLifecycleRef?.current) {
+      noteLifecycleRef.current.onNoteScheduled(
+        trackId, synth?.toSeconds(time) ?? Tone.now(), synth?.toSeconds(ev.duration) ?? 0);
+    }
     // A Tone.Sampler throws "buffer is either not set or not loaded" if triggered before
     // its buffers finish loading (instrument hot-swap or paste while the Transport runs).
     // `loaded === false` ONLY skips an unready Sampler — PolySynths have no `loaded`
@@ -710,6 +915,46 @@ function makePartCallback(synth, liveSources, isDrum = false) {
 }
 
 // ── Public helpers ────────────────────────────────────────────────────────
+
+// Per-track ring-out bound: how long a track can stay audible past its last
+// note END (synth release, drum one-shots, non-bypassed delay/reverb decay to
+// −60 dB). Pure — shared by the live activity pruner (idle sweeper) and
+// audioBounce's whole-project tail estimate. Clamp [2, 30]: the floor covers
+// ramps and short releases; the ceiling is the documented compromise for
+// pathological delay settings (time 1.0 / feedback 0.9 would need ~66 s).
+export function estimateTrackTailSec(t) {
+  // Synth release rings past the note end (drums: one-shots ignore duration
+  // entirely, so a cymbal on the last note needs the 6 s floor).
+  let tail = t.envelope?.release ?? defaultEnvelopeFor(t.instrument)?.release ?? 1;
+  if (isDrumKit(t.instrument)) tail = Math.max(tail, 6);
+  for (const e of t.effects ?? []) {
+    if (e.bypass) continue;
+    const p = e.params ?? {};
+    if (e.type === 'delay' && (p.wet ?? 0) > 0) {
+      // Repeats to decay to −60 dB through the feedback loop.
+      const fb = p.feedback ?? 0;
+      const repeats = fb > 0 ? Math.ceil(Math.log(1e-3) / Math.log(fb)) : 1;
+      tail = Math.max(tail, (p.time ?? 0.25) * repeats);
+    } else if (e.type === 'reverb' && (p.wet ?? 0) > 0) {
+      // Freeverb has no analytic decay; generous comb-decay heuristic.
+      tail = Math.max(tail, 1 + (p.roomSize ?? 0.7) * 9);
+    }
+  }
+  return Math.min(30, Math.max(2, tail));
+}
+
+// True while a synth has live voices — the sweeper's guard against pruning a
+// track whose audition note is held past the analytic window. PolySynth has
+// a public activeVoices count; Sampler falls back to the private
+// _activeSources map (optional-chained — same caveat as silenceAll: a future
+// Tone bump degrades this to "never ringing", covered by the analytic window).
+function synthIsRinging(s) {
+  if (!s || s.disposed) return false;
+  if (typeof s.activeVoices === 'number') return s.activeVoices > 0;
+  let n = 0;
+  s._activeSources?.forEach?.((srcs) => { n += srcs?.length ?? 0; });
+  return n > 0;
+}
 
 export function volForSliderValue(v) {
   const clamped = Math.max(0, Math.min(100, v));

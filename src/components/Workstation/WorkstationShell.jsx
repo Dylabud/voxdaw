@@ -148,6 +148,18 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [activeTrackId,    setActiveTrackId]    = useState(null);
   const [snapEnabled,      setSnapEnabled]      = useState(true);
   const [advancedMode,     setAdvancedMode]     = useState(false);
+  // Performance quality (high/medium/low) — machine capability, not project
+  // data: persisted in localStorage, never enters .voxdaw files or undo history.
+  const [performanceQuality, setPerformanceQuality] = useState(() => {
+    try {
+      const v = localStorage.getItem('voxdaw.performanceQuality');
+      return v === 'low' || v === 'medium' || v === 'high' ? v : 'high';
+    } catch { return 'high'; }
+  });
+  const handleQualityChange = useCallback((q) => {
+    setPerformanceQuality(q);
+    try { localStorage.setItem('voxdaw.performanceQuality', q); } catch {}
+  }, []);
 
   // ── Moog recording ──────────────────────────────────────────────────────────
   const [moogRecording, setMoogRecording] = useState(false);
@@ -500,7 +512,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const {
     silenceAll, recomputeFades, loadingTrackIds,
     auditionAttack, auditionRelease, auditionReleaseAll, auditionPrime,
-  } = useWorkstationAudio({ tracks, regions, notes, bpm });
+  } = useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality });
 
   // ── History recorder ────────────────────────────────────────
   // Passive: records AFTER React commits, so multi-setter actions (e.g. split =
@@ -2751,6 +2763,19 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         </div>
         <div className={styles.transportRight}>
           <div className={styles.meta}>
+            <span className={styles.metaLabel}>QUALITY</span>
+            <select
+              className={styles.qualitySelect}
+              value={performanceQuality}
+              onChange={(e) => handleQualityChange(e.target.value)}
+              title="Sound quality — low disables processing-heavy effects to reduce CPU load"
+            >
+              <option value="high">high</option>
+              <option value="medium">medium</option>
+              <option value="low">low</option>
+            </select>
+          </div>
+          <div className={styles.meta}>
             <span className={styles.metaLabel}>NAME</span>
             {editingName ? (
               <input
@@ -3212,6 +3237,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onEffectToggleBypass={toggleBypassEffect}
               onEffectUpdate={updateEffectSettings}
               isDarkMode={isDarkMode}
+              performanceQuality={performanceQuality}
               loadingTrackIds={loadingTrackIds}
               auditionAttack={auditionAttack}
               auditionRelease={auditionRelease}

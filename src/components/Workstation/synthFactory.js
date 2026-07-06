@@ -126,5 +126,9 @@ export function makeSynth(instrument, opts = {}) {
     }
   }
   if (opts.envelope) applyEnvelope(synth, opts.envelope);
+  // Optional voice cap (performance quality tiers) — Samplers have no voice pool.
+  if (opts.maxPolyphony != null && !(synth instanceof Tone.Sampler)) {
+    synth.maxPolyphony = opts.maxPolyphony;
+  }
   return synth;
 }

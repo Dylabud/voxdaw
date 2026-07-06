@@ -1285,6 +1285,9 @@ function FFBModule({ onParamUpdate, getAnalyserData }) {
 
     const tick = () => {
       rafRef.current = requestAnimationFrame(tick);
+      // Root keeps pages mounted display:none — purely visual loop, so skip
+      // the analyser read + LED writes while the Moog page is hidden.
+      if (ledRefs.current[0]?.offsetParent === null) return;
       const data = getAnalyserData();
       if (!data || !data.length) return;
       FFB_BANDS.forEach((band, i) => {
@@ -1405,6 +1408,9 @@ function VocoderModule({ onParamUpdate, getAnalyserData, onMicEnable, onMicDisab
 
     const tick = () => {
       rafRef.current = requestAnimationFrame(tick);
+      // Root keeps pages mounted display:none — purely visual loop, so skip
+      // the analyser read + LED writes while the Moog page is hidden.
+      if (ledRefs.current[0]?.offsetParent === null) return;
       const data = getAnalyserData();
       if (!data || !data.length) return;
       VOC_BANDS.forEach((band, i) => {

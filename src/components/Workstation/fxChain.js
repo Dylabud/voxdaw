@@ -347,6 +347,16 @@ export function makeFxGraph(type, params = {}) {
 
 // Live wrapper. Gains are INITIALIZED to the bypass state (no startup ramp),
 // so a saved project's bypassed effect starts silent-correct.
+//
+// Bypass is ALSO a render-graph prune: the audio thread only processes nodes
+// transitively connected to the destination, so once the crossfade lands,
+// graph.out is disconnected from onGain and the effect's DSP (incl. always-
+// running LFOs and feedback loops) stops costing CPU entirely — this is what
+// makes bypassing a Freeverb/PitchShift on 17 tracks actually matter.
+// Un-bypass reconnects BEFORE ramping, so it stays click-free.
+// Accepted limitation: delay/reverb buffers freeze while pruned, so
+// un-bypassing can briefly replay a stale tail at wet level (same class of
+// tradeoff as the add/remove-while-playing rewire click).
 export function makeFx(type, params = {}, bypass = false) {
   const input   = new Tone.Gain(1);
   const output  = new Tone.Gain(1);
@@ -355,10 +365,15 @@ export function makeFx(type, params = {}, bypass = false) {
   input.connect(offGain);
 
   let onGain = null;
+  let graphLive = false;   // graph.out → onGain edge present
+  let pruneTimer = null;   // pending post-crossfade disconnect
   if (graph) {
     onGain = new Tone.Gain(bypass ? 0 : 1).connect(output);
     input.connect(graph.in);
-    graph.out.connect(onGain);
+    if (!bypass) {
+      graph.out.connect(onGain); // created-bypassed wrappers start pruned
+      graphLive = true;
+    }
   }
 
   return {
@@ -367,13 +382,27 @@ export function makeFx(type, params = {}, bypass = false) {
     output,
     setBypass(b) {
       if (!graph) return; // legacy passthrough — nothing to crossfade
+      if (pruneTimer != null) { clearTimeout(pruneTimer); pruneTimer = null; }
+      if (!b && !graphLive) {
+        graph.out.connect(onGain); // onGain is still 0 — silent reconnect
+        graphLive = true;
+      }
       onGain.gain.rampTo(b ? 0 : 1, 0.05);
       offGain.gain.rampTo(b ? 1 : 0, 0.05);
+      if (b && graphLive) {
+        pruneTimer = setTimeout(() => {
+          pruneTimer = null;
+          if (!graphLive || input.disposed) return;
+          graph.out.disconnect(onGain);
+          graphLive = false;
+        }, 70); // > the 50ms crossfade — the wet path is already silent
+      }
     },
     updateParams(p) {
       graph?.apply(p, 0.02);
     },
     dispose() {
+      if (pruneTimer != null) { clearTimeout(pruneTimer); pruneTimer = null; }
       // input first (severs upstream fan-out), then the graph (kills any
       // feedback loop), then gains. Tone dispose() auto-disconnects.
       input.dispose();
