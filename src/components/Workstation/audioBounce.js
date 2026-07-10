@@ -1,6 +1,8 @@
 import * as Tone from 'tone';
 import { makeSynth, isDrumKit, chokeTargetsFor } from './synthFactory';
 import { makeFxGraph } from './fxChain';
+import { EFFECT_DEFS } from './effectDefs';
+import { automationValueAt, denorm } from './automationMath';
 import {
   buildRegionEvents,
   volForSliderValue,
@@ -21,6 +23,66 @@ function estimateFxTailSec(tracks) {
     tail = Math.max(tail, estimateTrackTailSec(t));
   }
   return Math.min(30, Math.max(2, tail));
+}
+
+// Schedule a track's automation envelopes in the OFFLINE context. The offline
+// transport starts at 0, so transport time == context time and every point
+// lands at plain `point.time * secPerMeasure` — mirrors the live scheduler in
+// useWorkstationAudio (same exp/linear rule, same coupled-wet ctx). 'set'-kind
+// (plain-setter) targets are pushed onto `stepped` for the shared ~30 Hz
+// scheduleRepeat driver built after the track loop. Automations targeting a
+// bypassed effect are skipped (offline never builds those graphs — matches
+// the live engine, where a pruned bypass graph renders nothing).
+function scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, bpm, stepped) {
+  const secPerMeasure = 4 * (60 / bpm);
+  for (const a of t.automations ?? []) {
+    const pts = a.points ?? [];
+    if (pts.length === 0) continue;
+    const tgt = a.target ?? {};
+    let entries = null;
+    let toParam = null;
+    let exp = false;
+    let setFn = null;
+    let ctx;
+    if (tgt.kind === 'volume') {
+      entries = [{ param: volume.gain, map: (v) => v }];
+      toParam = (v01) => volForSliderValue(v01 * 100);
+      exp = true; // gain floor 0.063 > 0 — matches the slider's dB curve
+    } else if (tgt.kind === 'pan') {
+      entries = [{ param: pan.pan, map: (v) => v }];
+      toParam = (v01) => v01 * 2 - 1;
+    } else if (tgt.kind === 'fx') {
+      const e = (t.effects ?? []).find(x => x.id === tgt.effectId);
+      const g = graphByFxId.get(tgt.effectId);
+      const meta = e ? EFFECT_DEFS[e.type]?.params?.[tgt.param] : null;
+      const ap = g?.autoParams?.[tgt.param];
+      if (!e || !g || !meta || !ap) continue;
+      toParam = (v01) => denorm(v01, meta);
+      ctx = { dryThru: !!e.params?.dryThru };
+      if (ap.kind === 'set') setFn = ap.set;
+      else { entries = ap.params; exp = meta.scale === 'log'; }
+    } else {
+      continue;
+    }
+
+    if (setFn) {
+      setFn(toParam(automationValueAt(pts, 0)));
+      stepped.push({ set: setFn, toParam, points: pts });
+      continue;
+    }
+    for (const { param, map } of entries) {
+      let prev = map(toParam(automationValueAt(pts, 0)), ctx);
+      param.setValueAtTime(prev, 0);
+      for (const p of pts) {
+        const at = p.time * secPerMeasure;
+        if (at <= 0) continue;
+        const val = map(toParam(p.value), ctx);
+        if (exp && val > 0 && prev > 0) param.exponentialRampToValueAtTime(val, at);
+        else                            param.linearRampToValueAtTime(val, at);
+        prev = val;
+      }
+    }
+  }
 }
 
 /**
@@ -55,6 +117,7 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = nul
     // Per-track volume → pan → [FX] → mute → destination
     const trackVolumeByTrackId = new Map();
     const audibleTrackIds = new Set();
+    const steppedAutomation = []; // 'set'-kind targets for the shared driver below
     for (const t of tracks) {
       const audible = !t.isMuted && (!anySoloed || t.isSolo);
       if (audible) audibleTrackIds.add(t.id);
@@ -64,17 +127,29 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = nul
       // Params (incl. delay dryThru) are baked at construction; Chorus/
       // AutoFilter .start() runs inside the builder — valid in this offline
       // context because the graph is constructed within the Offline callback.
+      const graphByFxId = new Map(); // fxId → graph (automation target lookup)
       let head = mute;
       for (const e of [...(t.effects ?? [])].reverse()) {
         if (e.bypass) continue;
         const g = makeFxGraph(e.type, e.params);
         if (!g) continue;
+        graphByFxId.set(e.id, g);
         g.out.connect(head);
         head = g.in;
       }
       const pan     = new Tone.Panner(Math.max(-1, Math.min(1, t.pan ?? 0))).connect(head);
       const volume  = new Tone.Gain(volForSliderValue(t.volume ?? 75)).connect(pan);
       trackVolumeByTrackId.set(t.id, volume);
+      scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, bpm, steppedAutomation);
+    }
+    if (steppedAutomation.length > 0) {
+      transport.scheduleRepeat(() => {
+        const tM = transport.seconds / (4 * (60 / bpm));
+        for (const s of steppedAutomation) {
+          const v01 = automationValueAt(s.points, tM);
+          if (v01 != null) s.set(s.toParam(v01));
+        }
+      }, 1 / 30);
     }
 
     // Per-region synth + fade gain

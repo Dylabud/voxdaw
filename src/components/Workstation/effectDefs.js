@@ -187,3 +187,65 @@ export function defaultParamsFor(type) {
     Object.entries(EFFECT_DEFS[type]?.params ?? {}).map(([k, m]) => [k, m.default]),
   );
 }
+
+// ── Automation targets ────────────────────────────────────────────────────
+// Everything numeric is automatable; toggles/selects are binary/enum params
+// that don't fit an envelope editor. Non-rampable plain setters (Chorus.depth,
+// PitchShift.pitch, drive, dampening, octaves) ARE included — the scheduler
+// drives them with a stepped ~30 Hz control-rate driver (fxChain 'set' kind).
+export function isAutomatableParam(meta) {
+  return meta.kind !== 'toggle' && meta.kind !== 'select';
+}
+
+// Display-space metadata for the two built-in track targets. Automation
+// storage is normalized 0–1; these metas define the lane's value readout and
+// (for volume) match the header slider's 0–100 feel. The audible mapping
+// (volForSliderValue dB curve) is applied hook-side.
+export const VOLUME_TARGET_META = { min: 0, max: 100, step: 1, label: 'volume' };
+export const PAN_TARGET_META    = { min: -1, max: 1, step: 0.01, label: 'pan' };
+
+// Ordered target list for a track's add-automation dropdown:
+// Volume, Pan, then every automatable param of every insert effect.
+export function automationTargetsFor(track) {
+  const out = [
+    { key: 'volume', target: { kind: 'volume' }, label: 'Volume', meta: VOLUME_TARGET_META },
+    { key: 'pan',    target: { kind: 'pan' },    label: 'Pan',    meta: PAN_TARGET_META },
+  ];
+  for (const e of track.effects ?? []) {
+    const defs = EFFECT_DEFS[e.type]?.params ?? {};
+    for (const [param, meta] of Object.entries(defs)) {
+      if (!isAutomatableParam(meta)) continue;
+      out.push({
+        key: `fx:${e.id}:${param}`,
+        target: { kind: 'fx', effectId: e.id, param },
+        label: `${effectLabel(e.type)} — ${meta.label}`,
+        meta,
+      });
+    }
+  }
+  return out;
+}
+
+// Param metadata for an existing automation's target, or null when the target
+// no longer resolves (effect removed, unknown param) — the orphan guard.
+export function metaForTarget(track, target) {
+  if (!target) return null;
+  if (target.kind === 'volume') return VOLUME_TARGET_META;
+  if (target.kind === 'pan')    return PAN_TARGET_META;
+  if (target.kind === 'fx') {
+    const e = (track.effects ?? []).find(x => x.id === target.effectId);
+    const meta = e ? EFFECT_DEFS[e.type]?.params?.[target.param] : null;
+    return meta && isAutomatableParam(meta) ? meta : null;
+  }
+  return null;
+}
+
+// Human label for an existing automation's target (header sub-rows).
+export function labelForTarget(track, target) {
+  if (!target) return '?';
+  if (target.kind === 'volume') return 'Volume';
+  if (target.kind === 'pan')    return 'Pan';
+  const e = (track.effects ?? []).find(x => x.id === target.effectId);
+  const meta = e ? EFFECT_DEFS[e.type]?.params?.[target.param] : null;
+  return e ? `${effectLabel(e.type)} — ${meta?.label ?? target.param}` : target.param;
+}

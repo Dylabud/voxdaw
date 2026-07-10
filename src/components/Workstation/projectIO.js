@@ -1,5 +1,7 @@
 // .voxdaw project serialization / deserialization.
 
+import { EFFECT_DEFS, isAutomatableParam } from './effectDefs';
+
 const SCHEMA_VERSION = 1;
 const KIND = 'voxdaw-project';
 
@@ -20,6 +22,16 @@ export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, n
         : [],
       // ADSR override (optional) — omitted when the track uses the instrument default.
       ...(t.envelope && typeof t.envelope === 'object' ? { envelope: { ...t.envelope } } : {}),
+      // Automation lanes (optional, additive — SCHEMA_VERSION intentionally NOT bumped).
+      ...(Array.isArray(t.automations) && t.automations.length
+        ? {
+            automations: t.automations.map(a => ({
+              id: a.id,
+              target: { ...a.target },
+              points: (a.points ?? []).map(p => ({ time: p.time, value: p.value })),
+            })),
+          }
+        : {}),
     })),
     regions: regions.map(r => ({
       id: r.id, trackId: r.trackId,
@@ -105,24 +117,29 @@ export function deserializeProject(raw) {
     name: (typeof raw.name === 'string' && raw.name.trim()) ? raw.name.trim() : 'untitled',
     bpm,
     totalMeasures,
-    tracks: tracks.map(t => ({
-      id: String(t.id),
-      name: String(t.name ?? 'track'),
-      instrument: String(t.instrument ?? 'fm pluck'),
-      color: String(t.color ?? '#5DCAA5'),
-      isMuted: !!t.isMuted,
-      isSolo:  !!t.isSolo,
-      volume:  typeof t.volume === 'number' ? t.volume : 75,
-      pan:     typeof t.pan    === 'number' ? Math.max(-1, Math.min(1, t.pan)) : 0,
-      effects: deserializeEffects(t.effects),
-      envelope: deserializeEnvelope(t.envelope),
-    })),
+    tracks: tracks.map(t => {
+      const effects = deserializeEffects(t.effects);
+      return {
+        id: String(t.id),
+        name: String(t.name ?? 'track'),
+        instrument: String(t.instrument ?? 'fm pluck'),
+        color: String(t.color ?? '#5DCAA5'),
+        isMuted: !!t.isMuted,
+        isSolo:  !!t.isSolo,
+        volume:  typeof t.volume === 'number' ? t.volume : 75,
+        pan:     typeof t.pan    === 'number' ? Math.max(-1, Math.min(1, t.pan)) : 0,
+        effects,
+        envelope: deserializeEnvelope(t.envelope),
+        automations: deserializeAutomations(t.automations, effects),
+      };
+    }),
     regions: outRegions,
     notes: outNotes,
     nextId:       nextSuffix(tracks),
     nextRegionId: nextSuffix(regions),
     nextEffectId: nextSuffix(tracks.flatMap(t => (Array.isArray(t.effects) ? t.effects : []))),
     nextNoteId,       // post-repair value — already past any re-minted ids
+    nextAutomationId: nextSuffix(tracks.flatMap(t => (Array.isArray(t.automations) ? t.automations : []))),
     repairedCount,
   };
 }
@@ -153,6 +170,40 @@ function deserializeEnvelope(raw) {
     if (typeof raw[k] === 'number' && isFinite(raw[k])) out[k] = raw[k];
   }
   return Object.keys(out).length ? out : undefined;
+}
+
+// Rebuild a track's automation lanes defensively (old projects → []).
+// Additive, backward-compatible — SCHEMA_VERSION intentionally NOT bumped.
+// fx targets must reference a live effect on the SAME track and an automatable
+// param in EFFECT_DEFS (regionId-authoritative-style orphan drop); points are
+// coerced numeric, value clamped 0–1, sorted by time.
+function deserializeAutomations(raw, effects) {
+  if (!Array.isArray(raw)) return [];
+  const effectById = new Map(effects.map(e => [e.id, e]));
+  const out = [];
+  for (const a of raw) {
+    if (!a || typeof a !== 'object' || !a.target || typeof a.target !== 'object') continue;
+    const kind = a.target.kind;
+    let target;
+    if (kind === 'volume' || kind === 'pan') {
+      target = { kind };
+    } else if (kind === 'fx') {
+      const e = effectById.get(String(a.target.effectId));
+      const meta = e ? EFFECT_DEFS[e.type]?.params?.[a.target.param] : null;
+      if (!meta || !isAutomatableParam(meta)) continue; // orphan / non-automatable
+      target = { kind: 'fx', effectId: e.id, param: String(a.target.param) };
+    } else {
+      continue;
+    }
+    const points = (Array.isArray(a.points) ? a.points : [])
+      .filter(p => p && typeof p === 'object'
+        && typeof p.time === 'number' && isFinite(p.time) && p.time >= 0
+        && typeof p.value === 'number' && isFinite(p.value))
+      .map(p => ({ time: p.time, value: Math.max(0, Math.min(1, p.value)) }))
+      .sort((x, y) => x.time - y.time);
+    out.push({ id: String(a.id), target, points });
+  }
+  return out;
 }
 
 function nextSuffix(items) {

@@ -1,6 +1,7 @@
 import React from 'react';
 import styles from './EffectsRack.module.css';
 import { EFFECT_DEFS, EFFECT_TYPES, HEAVY_EFFECT_TYPES, effectLabel } from '../effectDefs';
+import { toKnob, fromKnob } from '../automationMath';
 import RotaryKnob from './RotaryKnob';
 import FxVisualizer from './FxVisualizer';
 
@@ -28,21 +29,6 @@ import FxVisualizer from './FxVisualizer';
  * @param {(trackId:string, fxId:string, params:Object) => void} onUpdate
  */
 
-// Knob-space (0..1) ↔ param-value mapping. Log scale for perceptual params
-// (hz cutoffs, rates, attack): value = min * (max/min)^v; linear otherwise.
-// fromKnob quantizes to the metadata step so readouts land on clean values.
-function toKnob(value, meta) {
-  if (meta.scale === 'log') return Math.log(value / meta.min) / Math.log(meta.max / meta.min);
-  return (value - meta.min) / (meta.max - meta.min);
-}
-function fromKnob(v, meta) {
-  let out = meta.scale === 'log'
-    ? meta.min * Math.pow(meta.max / meta.min, v)
-    : meta.min + (meta.max - meta.min) * v;
-  if (meta.step) out = Math.round(out / meta.step) * meta.step;
-  return Math.min(meta.max, Math.max(meta.min, out));
-}
-
 function formatValue(value, meta) {
   if (meta.unit === 'hz') {
     if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
@@ -58,7 +44,9 @@ function formatValue(value, meta) {
   return value.toFixed(2);
 }
 
-export default function EffectsRack({ effects = [], trackId, onAdd, onRemove, onToggleBypass, onUpdate, performanceQuality = 'high' }) {
+// `automatedKeys`: Set of "fxId:param" currently owned by an automation lane —
+// those controls dim read-only ("automation takes over", single-writer rule).
+export default function EffectsRack({ effects = [], trackId, onAdd, onRemove, onToggleBypass, onUpdate, performanceQuality = 'high', automatedKeys }) {
   const handleAdd = (e) => {
     const type = e.target.value;
     if (!type) return;
@@ -131,15 +119,22 @@ export default function EffectsRack({ effects = [], trackId, onAdd, onRemove, on
                   )}
                   {paramDefs.map(([key, meta]) => {
                     const value = vals[key];
+                    const isAutomated = automatedKeys?.has(`${fx.id}:${key}`) ?? false;
+                    // delay's dryThru is coupled to wet inside the composite —
+                    // it locks whenever wet is automated.
+                    const isLocked = isAutomated
+                      || (key === 'dryThru' && (automatedKeys?.has(`${fx.id}:wet`) ?? false));
                     if (meta.kind === 'toggle') {
                       return (
                         <button
                           key={key}
                           type="button"
                           className={`${styles.paramToggle}${value ? ` ${styles.paramToggleOn}` : ''}`}
-                          title={`${meta.label} ${value ? 'on' : 'off'}`}
-                          onClick={() => onUpdate?.(trackId, fx.id, { [key]: !value })}
+                          style={isLocked ? { opacity: 0.35, pointerEvents: 'none' } : undefined}
+                          title={isLocked ? 'controlled by automation' : `${meta.label} ${value ? 'on' : 'off'}`}
+                          onClick={() => { if (!isLocked) onUpdate?.(trackId, fx.id, { [key]: !value }); }}
                           aria-pressed={!!value}
+                          aria-disabled={isLocked}
                         >{meta.label}</button>
                       );
                     }
@@ -166,6 +161,8 @@ export default function EffectsRack({ effects = [], trackId, onAdd, onRemove, on
                         onChange={v01 => onUpdate?.(trackId, fx.id, { [key]: fromKnob(v01, meta) })}
                         label={meta.label}
                         display={formatValue(value, meta)}
+                        disabled={isLocked}
+                        disabledHint="controlled by automation — delete the lane to regain manual control"
                       />
                     );
                   })}

@@ -1,0 +1,51 @@
+/* Automation sub-lane envelope editor — the SVG fills its .autoLane row
+   (WorkstationShell.module.css owns the row box; this file owns the SVG). */
+
+.svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+}
+
+.line {
+  fill: none;
+  stroke: var(--track-color, var(--accent-color));
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+
+/* Empty lane: dashed baseline at the target's current manual value. */
+.lineEmpty {
+  stroke-dasharray: 4 4;
+  opacity: 0.55;
+}
+
+/* Invisible fat twin of .line — reliable "clicked on the line" hit target. */
+.hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  pointer-events: stroke;
+  cursor: copy;
+}
+
+.point {
+  fill: var(--bg-panel);
+  stroke: var(--track-color, var(--accent-color));
+  stroke-width: 1.5;
+  cursor: grab;
+}
+.point:hover {
+  fill: var(--track-color, var(--accent-color));
+}
+
+.valueLabel {
+  fill: var(--text-primary);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+  user-select: none;
+}

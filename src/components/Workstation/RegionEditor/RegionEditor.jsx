@@ -55,6 +55,7 @@ export default function RegionEditor({
   onEffectRemove,
   onEffectToggleBypass,
   onEffectUpdate,
+  automatedFxKeys,
   isDarkMode,
   performanceQuality,
   loadingTrackIds,
@@ -897,6 +898,7 @@ export default function RegionEditor({
           onToggleBypass={onEffectToggleBypass}
           onUpdate={onEffectUpdate}
           performanceQuality={performanceQuality}
+          automatedKeys={automatedFxKeys}
         />
       )}
 

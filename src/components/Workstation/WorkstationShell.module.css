@@ -445,6 +445,87 @@
   overflow-x: clip;
 }
 
+/* ── Automation sub-lanes ─────────────────────────────────────
+   Header rows and timeline rows MUST stay height-identical (72 / 24 px incl.
+   border-bottom) — computeLaneTops() in automationMath.js assumes it. */
+.autoHeaderRow {
+  height: 72px;
+  padding: 8px 10px 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--track-color, var(--accent-color));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.autoHeaderLabel {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  text-transform: lowercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.autoHeaderDelete {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-dimmer);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.autoHeaderDelete:hover { color: var(--text-primary); }
+
+.autoAddRow {
+  height: 24px;
+  border-bottom: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--track-color, var(--accent-color));
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  flex-shrink: 0;
+}
+
+.autoAddSelect {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-dimmer);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  cursor: pointer;
+  outline: none;
+  max-width: 100%;
+}
+.autoAddSelect:hover { color: var(--accent-color); }
+.autoAddSelect option {
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  letter-spacing: normal;
+}
+
+.autoLane {
+  position: relative;
+  height: 72px;
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-x: clip;
+  background: color-mix(in srgb, var(--track-color, var(--accent-color)) 4%, transparent);
+}
+
+.autoAddStrip {
+  height: 24px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 /* ── Regions (clips) ─────────────────────────────────────── */
 .region {
   position: absolute;

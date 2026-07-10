@@ -64,11 +64,13 @@ export default function PanKnob({ value, onChange, size = 28, disabled = false }
   return (
     <div
       className={styles.knob}
-      style={{ width: size, height: size }}
+      style={{ width: size, height: size, ...(disabled ? { opacity: 0.35 } : {}) }}
       onMouseDown={handleMouseDown}
       onDoubleClick={handleDoubleClick}
       onClick={(e) => e.stopPropagation()}
-      title={`pan ${(value ?? 0).toFixed(2)} (drag horizontal; double-click to center; hold Shift for fine)`}
+      title={disabled
+        ? 'pan is automated — delete the automation lane to regain manual control'
+        : `pan ${(value ?? 0).toFixed(2)} (drag horizontal; double-click to center; hold Shift for fine)`}
     >
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
         {/* Travel arc */}

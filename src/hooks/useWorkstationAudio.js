@@ -2,7 +2,11 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import * as Tone from 'tone';
 import { makeSynth, applyEnvelope, defaultEnvelopeFor, isSampledInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
 import { makeFx } from '../components/Workstation/fxChain';
-import { HEAVY_EFFECT_TYPES } from '../components/Workstation/effectDefs';
+import { HEAVY_EFFECT_TYPES, EFFECT_DEFS, metaForTarget } from '../components/Workstation/effectDefs';
+import {
+  automationValueAt, denorm, targetKey,
+  isVolumeAutomated, isPanAutomated, automatedFxKeys,
+} from '../components/Workstation/automationMath';
 import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
 
 /**
@@ -112,6 +116,14 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   const appliedFxBypassByIdRef   = useRef(new Map()); // fxId → last bypass bool
   const appliedFxParamsByIdRef   = useRef(new Map()); // fxId → last params object reference
 
+  // Track automation (see automationMath.js). "Automation takes over": a lane
+  // with ≥1 point makes recomputeAutomation the sole writer of its target —
+  // effects #3/#3b/#1d skip those params while automated.
+  const steppedRepeatIdRef      = useRef(null);      // Transport.scheduleRepeat id — ~30 Hz set-kind driver
+  const steppedTargetsRef       = useRef([]);        // [{ set, toParam, points }] sampled by the driver
+  const prevAutomatedTargetsRef = useRef(new Map()); // "tId|targetKey" → { trackId, target } (release-restore diff)
+  const appliedAutomationKeyRef = useRef('');        // delta key so unrelated tracks-commits don't re-schedule
+
   // Refs into latest props for recomputeFades (called by shell from event handlers)
   const regionsRef = useRef(regions); regionsRef.current = regions;
   const bpmRef     = useRef(bpm);     bpmRef.current     = bpm;
@@ -220,6 +232,166 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     entry.synth.releaseAll?.();
     bumpActivity(trackId, Tone.now() + (tailByTrackIdRef.current.get(trackId) ?? 2));
   }, [bumpActivity]);
+
+  // ── Automation scheduler ────────────────────────────────────────────────
+  // Resolve an automation target to its live audio handles + value mapping.
+  //   volume → track volume Gain (same volForSliderValue curve as the slider,
+  //            gain floor 0.063 > 0 → exponential ramps are safe and match
+  //            the slider's dB feel)
+  //   pan    → Panner.pan (linear — crosses 0)
+  //   fx     → wrapper.autoParams[param] (fxChain.js): 'ramp' entries are Tone
+  //            Params scheduled natively; 'set' entries feed the stepped driver.
+  // ctx carries current track state (delay dryThru) into coupled maps so they
+  // never read a stale closure.
+  const resolveAutomationTarget = useCallback((track, target) => {
+    if (!track || !target) return null;
+    if (target.kind === 'volume') {
+      const g = volumesByTrackIdRef.current.get(track.id);
+      if (!g || g.disposed) return null;
+      return {
+        kind: 'ramp', exp: true,
+        entries: [{ param: g.gain, map: (v) => v }],
+        toParam: (v01) => volForSliderValue(v01 * 100),
+      };
+    }
+    if (target.kind === 'pan') {
+      const p = pannersByTrackIdRef.current.get(track.id);
+      if (!p || p.disposed) return null;
+      return {
+        kind: 'ramp', exp: false,
+        entries: [{ param: p.pan, map: (v) => v }],
+        toParam: (v01) => v01 * 2 - 1,
+      };
+    }
+    if (target.kind === 'fx') {
+      const e = (track.effects ?? []).find(x => x.id === target.effectId);
+      const meta = metaForTarget(track, target);
+      const w = fxChainsByTrackIdRef.current.get(track.id)?.find(x => x.fxId === target.effectId);
+      const ap = w?.autoParams?.[target.param];
+      if (!e || !meta || !ap) return null;
+      const ctx = { dryThru: !!e.params?.dryThru };
+      const toParam = (v01) => denorm(v01, meta);
+      if (ap.kind === 'set') return { kind: 'set', set: ap.set, toParam, ctx };
+      // Never exponential-ramp a param whose range can touch 0 (wet/depth);
+      // log-scale metas have min > 0 by construction.
+      return { kind: 'ramp', entries: ap.params, toParam, exp: meta.scale === 'log', ctx };
+    }
+    return null;
+  }, []);
+
+  // Re-anchor + re-schedule every automation envelope from the CURRENT
+  // transport position — the recomputeFades pattern: cancel at Tone.now(),
+  // set the envelope's current value, then schedule the remaining point ramps
+  // in absolute audio time (valid because the shell calls this right before
+  // Transport.start() on every resume path). Also (re)builds the single
+  // stepped ~30 Hz driver for 'set'-kind targets (scheduleRepeat only fires
+  // while the transport runs, so paused = held — correct).
+  //
+  // Release-restore: a target that WAS automated and no longer is gets its
+  // schedule cancelled and its applied-cache entry deleted, so effects #3/#3b
+  // (which run later in this same commit) hand ownership back by ramping to
+  // the manual slider/dial value; fx params are restored directly here (1d
+  // already ran this commit).
+  const recomputeAutomation = useCallback(() => {
+    if (steppedRepeatIdRef.current != null) {
+      Tone.Transport.clear(steppedRepeatIdRef.current);
+      steppedRepeatIdRef.current = null;
+    }
+    const stepped  = [];
+    const nowAuto  = new Map(); // "tId|targetKey" → { trackId, target }
+    const audioNow = Tone.now();
+    const nowSec   = Tone.Transport.seconds;
+    const secPerMeasure = 4 * (60 / bpmRef.current);
+
+    for (const t of tracksRef.current) {
+      for (const a of t.automations ?? []) {
+        const pts = a.points ?? [];
+        if (pts.length === 0) continue;
+        const res = resolveAutomationTarget(t, a.target);
+        if (!res) continue;
+        nowAuto.set(`${t.id}|${targetKey(a.target)}`, { trackId: t.id, target: a.target });
+        const v01Now = automationValueAt(pts, nowSec / secPerMeasure);
+        if (res.kind === 'ramp') {
+          for (const { param, map } of res.entries) {
+            const cur = map(res.toParam(v01Now), res.ctx);
+            param.cancelScheduledValues(audioNow);
+            param.setValueAtTime(cur, audioNow);
+            let prev = cur;
+            for (const p of pts) {
+              const tSec = p.time * secPerMeasure;
+              if (tSec <= nowSec) continue;
+              const val = map(res.toParam(p.value), res.ctx);
+              const at  = audioNow + (tSec - nowSec);
+              if (res.exp && val > 0 && prev > 0) param.exponentialRampToValueAtTime(val, at);
+              else                                param.linearRampToValueAtTime(val, at);
+              prev = val;
+            }
+          }
+        } else {
+          res.set(res.toParam(v01Now)); // hold correct value while paused/idle
+          stepped.push({ set: res.set, toParam: res.toParam, points: pts });
+        }
+      }
+    }
+
+    steppedTargetsRef.current = stepped;
+    if (stepped.length > 0) {
+      steppedRepeatIdRef.current = Tone.Transport.scheduleRepeat(() => {
+        const spm = 4 * (60 / bpmRef.current);
+        const tM  = Tone.Transport.seconds / spm;
+        for (const s of steppedTargetsRef.current) {
+          const v01 = automationValueAt(s.points, tM);
+          if (v01 != null) s.set(s.toParam(v01));
+        }
+      }, 1 / 30);
+    }
+
+    // Release-restore: targets automated last pass but not this one.
+    for (const [key, info] of prevAutomatedTargetsRef.current) {
+      if (nowAuto.has(key)) continue;
+      const track = tracksRef.current.find(x => x.id === info.trackId);
+      const res = track ? resolveAutomationTarget(track, info.target) : null;
+      if (!res) continue; // track/effect gone — nodes disposed, nothing to restore
+      if (res.kind === 'ramp') {
+        for (const { param } of res.entries) {
+          param.cancelScheduledValues(audioNow);
+          param.setValueAtTime(param.value, audioNow);
+        }
+      }
+      if (info.target.kind === 'volume') {
+        appliedVolumeByTrackIdRef.current.delete(track.id); // effect #3 re-owns this commit
+      } else if (info.target.kind === 'pan') {
+        appliedPanByTrackIdRef.current.delete(track.id);    // effect #3b re-owns this commit
+      } else {
+        // 1d already ran this commit — restore the manual value directly
+        // (one-shot handback; 1d stays the steady-state writer).
+        const e = (track.effects ?? []).find(x => x.id === info.target.effectId);
+        const w = fxChainsByTrackIdRef.current.get(track.id)?.find(x => x.fxId === info.target.effectId);
+        if (e && w && info.target.param in (e.params ?? {})) {
+          const p = { [info.target.param]: e.params[info.target.param] };
+          if (info.target.param === 'wet' && 'dryThru' in e.params) p.dryThru = e.params.dryThru;
+          w.updateParams(p);
+        }
+      }
+    }
+    prevAutomatedTargetsRef.current = nowAuto;
+  }, [resolveAutomationTarget]);
+
+  // Imperative live-preview for lane point drags (Zero-Re-render path): cancel
+  // any schedule and ramp to the dragged value like a knob turn; the commit's
+  // setTracks → automation-sync effect re-schedules everything on mouseup.
+  const applyAutomationValue = useCallback((trackId, target, v01) => {
+    const track = tracksRef.current.find(x => x.id === trackId);
+    const res = resolveAutomationTarget(track, target);
+    if (!res) return;
+    if (res.kind === 'set') { res.set(res.toParam(v01)); return; }
+    const audioNow = Tone.now();
+    for (const { param, map } of res.entries) {
+      param.cancelScheduledValues(audioNow);
+      param.setValueAtTime(param.value, audioNow);
+      param.linearRampToValueAtTime(map(res.toParam(v01), res.ctx), audioNow + 0.02);
+    }
+  }, [resolveAutomationTarget]);
 
   // ── 1. Track sync — owns volume + pan + mute nodes ─────────────────────
   // Signal:  regionFadeGain → volume → pan → [FX chain, effect 1b] → mute → Destination
@@ -378,15 +550,46 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     for (const t of tracks) {
       const wrappers = chains.get(t.id);
       if (!wrappers) continue;
+      // Automated params are owned by the automation scheduler — strip them
+      // (plus dryThru while wet is automated: the composite's dry gain is
+      // coupled to wet, so writing it would stomp the scheduled ramp).
+      const autoKeys = automatedFxKeys(t);
       for (const e of t.effects ?? []) {
         if (parApp.get(e.id) === e.params) continue;
         const w = wrappers.find(x => x.fxId === e.id);
         if (!w) continue;
-        w.updateParams(e.params);
+        let params = e.params;
+        if (autoKeys.size > 0) {
+          const wetAuto = autoKeys.has(`${e.id}:wet`);
+          const filtered = {};
+          let stripped = false;
+          for (const [k, v] of Object.entries(e.params ?? {})) {
+            if (autoKeys.has(`${e.id}:${k}`) || (k === 'dryThru' && wetAuto)) { stripped = true; continue; }
+            filtered[k] = v;
+          }
+          if (stripped) params = filtered;
+        }
+        w.updateParams(params);
         parApp.set(e.id, e.params);
       }
     }
   }, [tracks]);
+
+  // ── 1e. Automation sync — re-anchor/re-schedule when automation data,
+  // FX structure (1b just rebuilt wrappers this commit — schedules died with
+  // the old nodes), delay dryThru, or BPM changes. Delta-keyed so unrelated
+  // tracks-commits (slider drags, mute toggles, region edits) don't churn the
+  // schedules mid-playback. Play/seek/stop/undo re-anchoring rides
+  // recomputeFades (which calls recomputeAutomation at its end).
+  useEffect(() => {
+    const key = tracks.map(t =>
+      `${t.id}~${JSON.stringify(t.automations ?? [])}~${
+        (t.effects ?? []).map(e => `${e.id}:${e.type}:${e.params?.dryThru ? 1 : 0}`).join('|')}`
+    ).join('§') + `~${bpm}`;
+    if (appliedAutomationKeyRef.current === key) return;
+    appliedAutomationKeyRef.current = key;
+    recomputeAutomation();
+  }, [tracks, bpm, recomputeAutomation]);
 
   // ── 2. Mute/solo sync — gain ramp + render-graph pruning ──────────────
   // An inaudible track's mute node is disconnected from Destination once its
@@ -453,12 +656,15 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   }, [disconnectTrack]);
 
   // ── 3. Volume sync ─────────────────────────────────────────────────────
+  // Skips volume-automated tracks (automation takes over; deleting the cache
+  // entry means the slider value re-applies the moment automation is removed).
   useEffect(() => {
     const volumes = volumesByTrackIdRef.current;
     const volApp  = appliedVolumeByTrackIdRef.current;
     for (const t of tracks) {
       const g = volumes.get(t.id);
       if (!g) continue;
+      if (isVolumeAutomated(t)) { volApp.delete(t.id); continue; }
       const v = t.volume ?? 75;
       if (volApp.get(t.id) === v) continue;
       g.gain.rampTo(volForSliderValue(v), 0.02);
@@ -473,6 +679,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     for (const t of tracks) {
       const p = panners.get(t.id);
       if (!p) continue;
+      if (isPanAutomated(t)) { panApp.delete(t.id); continue; }
       const v = Math.max(-1, Math.min(1, t.pan ?? 0));
       if (panApp.get(t.id) === v) continue;
       p.pan.rampTo(v, 0.02);
@@ -765,7 +972,11 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
         g.linearRampToValueAtTime(fOutFloor, audioAt(endSec));
       }
     }
-  }, []);
+    // Automation rides the same re-anchor moments (play/seek/BPM/stop/undo) —
+    // recomputeFades' 7 call sites in the shell cover every transport
+    // transition, so automation needs zero new shell wiring.
+    recomputeAutomation();
+  }, [recomputeAutomation]);
 
   // ── 5. Cleanup on unmount ──────────────────────────────────────────────
   useEffect(() => {
@@ -789,13 +1000,24 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     const audible   = audibleByTrackIdRef.current;
     const tails     = tailByTrackIdRef.current;
     const actives   = activeUntilByTrackIdRef.current;
+    const steppedId = steppedRepeatIdRef;
+    const steppedTargets = steppedTargetsRef;
+    const prevAutomated = prevAutomatedTargetsRef;
+    const appliedAutoKey = appliedAutomationKeyRef;
     return () => {
+      // Transport.cancel(0) below wipes the automation schedules — reset the
+      // delta key so a remount (StrictMode's simulated one included) re-runs
+      // recomputeAutomation instead of skipping on a stale match.
+      appliedAutoKey.current = '';
       for (const st of muteConns.values()) if (st.timer != null) clearTimeout(st.timer);
       muteConns.clear();
       audible.clear();
       tails.clear();
       actives.clear();
       liveSrcs.clear(); // sources die with their synths below
+      steppedId.current = null; // Transport.cancel(0) below clears the repeat
+      steppedTargets.current = [];
+      prevAutomated.current.clear();
       Tone.Transport.stop();
       Tone.Transport.cancel(0);
       for (const id of fadeIds.values()) Tone.Transport.clear(id);
@@ -829,6 +1051,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     silenceAll, recomputeFades, loadingTrackIds,
     auditionAttack, auditionRelease, auditionReleaseAll,
     auditionPrime: ensureAuditionSynth,
+    applyAutomationValue,
   };
 }
 
@@ -922,6 +1145,19 @@ function makePartCallback(synth, liveSources, isDrum = false,
 // audioBounce's whole-project tail estimate. Clamp [2, 30]: the floor covers
 // ramps and short releases; the ceiling is the documented compromise for
 // pathological delay settings (time 1.0 / feedback 0.9 would need ~66 s).
+// Automation can push a delay/reverb param past its static value — take the
+// max over the lane's points so the analytic tail bound still holds.
+function maxAutomatedParam(t, effectId, type, param, staticVal) {
+  const meta = EFFECT_DEFS[type]?.params?.[param];
+  if (!meta) return staticVal;
+  let m = staticVal;
+  for (const a of t.automations ?? []) {
+    if (a.target?.kind !== 'fx' || a.target.effectId !== effectId || a.target.param !== param) continue;
+    for (const p of a.points ?? []) m = Math.max(m, denorm(p.value, meta));
+  }
+  return m;
+}
+
 export function estimateTrackTailSec(t) {
   // Synth release rings past the note end (drums: one-shots ignore duration
   // entirely, so a cymbal on the last note needs the 6 s floor).
@@ -930,14 +1166,15 @@ export function estimateTrackTailSec(t) {
   for (const e of t.effects ?? []) {
     if (e.bypass) continue;
     const p = e.params ?? {};
-    if (e.type === 'delay' && (p.wet ?? 0) > 0) {
+    if (e.type === 'delay' && maxAutomatedParam(t, e.id, 'delay', 'wet', p.wet ?? 0) > 0) {
       // Repeats to decay to −60 dB through the feedback loop.
-      const fb = p.feedback ?? 0;
+      const fb = maxAutomatedParam(t, e.id, 'delay', 'feedback', p.feedback ?? 0);
+      const time = maxAutomatedParam(t, e.id, 'delay', 'time', p.time ?? 0.25);
       const repeats = fb > 0 ? Math.ceil(Math.log(1e-3) / Math.log(fb)) : 1;
-      tail = Math.max(tail, (p.time ?? 0.25) * repeats);
-    } else if (e.type === 'reverb' && (p.wet ?? 0) > 0) {
+      tail = Math.max(tail, time * repeats);
+    } else if (e.type === 'reverb' && maxAutomatedParam(t, e.id, 'reverb', 'wet', p.wet ?? 0) > 0) {
       // Freeverb has no analytic decay; generous comb-decay heuristic.
-      tail = Math.max(tail, 1 + (p.roomSize ?? 0.7) * 9);
+      tail = Math.max(tail, 1 + maxAutomatedParam(t, e.id, 'reverb', 'roomSize', p.roomSize ?? 0.7) * 9);
     }
   }
   return Math.min(30, Math.max(2, tail));
