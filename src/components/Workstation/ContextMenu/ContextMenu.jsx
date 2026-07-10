@@ -46,10 +46,22 @@ const ITEMS = {
     { submenu: 'pitch', label: 'Pitch Shift' },
     'divider',
     { action: 'duplicate', label: 'Duplicate Track' },
+    // Exactly one of these two renders, chosen by the track's groupId (flat
+    // groups — a grouped track can't initiate another group).
+    { action: 'createGroup',  label: 'Create Group' },
+    { action: 'ungroupTrack', label: 'Remove from Group' },
     { submenu: 'pasteFx', label: 'Paste Effects To' },
     { submenu: 'exportFmt', label: 'Export' },
     'divider',
     { action: 'delete', label: 'Delete Track' },
+  ],
+  group: [
+    { action: 'rename', label: 'Rename' },
+    { submenu: 'color', label: 'Color' },
+    'divider',
+    { action: 'ungroup', label: 'Ungroup' },
+    'divider',
+    { action: 'delete', label: 'Delete Group + Tracks' },
   ],
 };
 
@@ -57,7 +69,7 @@ const ITEMS = {
  * Custom right-click context menu for Workstation regions, notes and tracks.
  * Fixed-position floating panel positioned at the click coordinates.
  *
- * @param {{x:number,y:number,targetType:'region'|'note'|'track',targetId:string}|null} menu
+ * @param {{x:number,y:number,targetType:'region'|'note'|'track'|'group',targetId:string}|null} menu
  * @param {() => void} onClose
  * @param {(action:string, targetType:string, targetId:string, payload?:number|string) => void} onCommand
  * @param {Array<{id:string,name:string,color:string}>} [tracks] — for the track menu's Paste-Effects-To submenu
@@ -140,7 +152,11 @@ export default function ContextMenu({ menu, onClose, onCommand, tracks = [] }) {
 
   const left = Math.min(menu.x, window.innerWidth  - MENU_W - 4);
   const top  = Math.min(menu.y, window.innerHeight - MENU_H - 4);
-  const items = ITEMS[menu.targetType] ?? [];
+  let items = ITEMS[menu.targetType] ?? [];
+  if (menu.targetType === 'track') {
+    const grouped = !!tracks.find(t => t.id === menu.targetId)?.groupId;
+    items = items.filter(it => it.action !== (grouped ? 'createGroup' : 'ungroupTrack'));
+  }
   // Flip the submenu to the left when there isn't room on the right.
   const flipLeft = menu.x + MENU_W + SUBMENU_W > window.innerWidth;
 

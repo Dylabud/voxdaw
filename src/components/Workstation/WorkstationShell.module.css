@@ -579,6 +579,66 @@
   margin-left: 6px;
 }
 
+/* ── Track groups ─────────────────────────────────────────
+   .groupRow (header column) ↔ .groupLane (timeline) heights MUST both equal
+   GROUP_H (48px, automationMath.js) — laneTops assumes it. */
+.groupRow {
+  height: 48px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 0 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--group-color, var(--accent-color));
+  background: color-mix(in srgb, var(--group-color, var(--accent-color)) 10%, var(--bg-panel));
+}
+
+.groupLane {
+  height: 48px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--group-color, var(--accent-color)) 6%, transparent);
+}
+
+.groupChevron {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+.groupChevron:hover { color: var(--accent-color); }
+
+.groupName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-primary);
+  cursor: text;
+}
+
+.groupControls {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+/* .groupVolumeSlider lives at the END of this file — it must come after the
+   .volumeSlider rules it overrides (applied together in JSX). */
+
+/* Member track rows: indent + group-color edge strip. */
+.trackRowGrouped {
+  border-left: 3px solid var(--group-color, var(--accent-color));
+  padding-left: 18px;
+}
+
 /* ── Regions (clips) ─────────────────────────────────────── */
 .region {
   position: absolute;
@@ -1077,4 +1137,11 @@
   letter-spacing: 0.08em;
   z-index: 200;
   pointer-events: none;
+}
+
+/* Group header volume slider — narrower twin of .volumeSlider (both classes
+   applied in JSX; this rule must come after the .volumeSlider rules). */
+.groupVolumeSlider {
+  width: 54px;
+  flex: 0 0 auto;
 }

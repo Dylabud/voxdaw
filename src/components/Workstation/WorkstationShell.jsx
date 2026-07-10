@@ -16,6 +16,7 @@ import {
 } from './automationMath';
 import { TEMPO_META, tempoPointsOf, buildTempoMap } from './tempoMath';
 import AutomationLane from './AutomationLane';
+import GroupModal from './GroupModal';
 import { bounceProject } from './audioBounce';
 import { exportWAV, exportMP3, trimExportBuffer } from '../../utils/audioExport';
 import { transcribeAudio } from './transcribeAudio';
@@ -51,7 +52,10 @@ function getIntersectingRegionIds(minX, maxX, minY, maxY, regions, tracks, ppm, 
       const rLeft  = r.startMeasure * ppm;
       const rRight = (r.startMeasure + r.durationMeasures) * ppm;
       const rTop   = tops[tIdx];
-      const rBot   = tops[tIdx] + TRACK_H;
+      // Row height from the cumulative table: a collapsed group member is a
+      // zero-height band (tops[i+1] === tops[i]) — invisible, not selectable.
+      const rBot   = Math.min(rTop + TRACK_H, tops[tIdx + 1] ?? (rTop + TRACK_H));
+      if (rBot <= rTop) return false;
       return rLeft < maxX && rRight > minX && rTop < maxY && rBot > minY;
     })
     .map(r => r.id);
@@ -74,8 +78,9 @@ const FADE_UI_MIN_PX = 30;
 // initializers below exactly, or "New Project" would differ from a fresh mount.
 const BLANK_PROJECT_DATA = {
   name: 'untitled', bpm: 120, totalMeasures: 200,
-  tracks: [], regions: [], notes: [], globalAutomations: [],
+  tracks: [], regions: [], notes: [], globalAutomations: [], groups: [],
   nextId: 1, nextRegionId: 1, nextEffectId: 1, nextNoteId: 0, nextAutomationId: 1,
+  nextGroupId: 1,
   repairedCount: 0,
 };
 
@@ -172,6 +177,17 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [globalAutomations, setGlobalAutomations] = useState([]);
   // The tempo lane's visibility (chevron in the global strip) — UI-only.
   const [globalLaneOpen, setGlobalLaneOpen] = useState(false);
+  // Track groups (flat, no nesting): [{ id: 'g<n>', name, color, isMuted,
+  // isSolo, volume, pan, effects, automations }] + track.groupId membership.
+  // Members are kept CONTIGUOUS in the tracks array (createGroup reorders,
+  // deserialize normalizes) — the group header row renders before the first
+  // member of each run. PROJECT DATA: undo history + additive .voxdaw field.
+  const [groups, setGroups] = useState([]);
+  // Collapsed groups (chevron) — UI-only, like openAutomationTrackIds.
+  const [collapsedGroupIds, setCollapsedGroupIds] = useState(() => new Set());
+  const [renamingGroupId, setRenamingGroupId] = useState(null);
+  // { initiatorTrackId } | null — the create-group checkbox modal.
+  const [groupModal, setGroupModal] = useState(null);
   // Performance quality (high/medium/low) — machine capability, not project
   // data: persisted in localStorage, never enters .voxdaw files or undo history.
   const [performanceQuality, setPerformanceQuality] = useState(() => {
@@ -217,8 +233,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // scroller flow. laneTops mirror the DOM flow, so every geometry consumer
   // (marquee, region drag, ghost, auto-scroll) stays correct untouched.
   const globalAreaH = GLOBAL_STRIP_H + (globalLaneOpen ? AUTO_LANE_H : 0);
-  // Cumulative row-top table — open automation sub-lanes make row Y non-uniform.
-  const laneTops = computeLaneTops(tracks, openAutomationTrackIds, globalAreaH);
+  // Cumulative row-top table — open automation sub-lanes, group header rows
+  // and collapsed groups all make row Y non-uniform.
+  const laneTops = computeLaneTops(tracks, openAutomationTrackIds, globalAreaH,
+    { collapsedIds: collapsedGroupIds });
+  const groupById = new Map(groups.map(g => [g.id, g]));
   // The (single) tempo automation, or an empty stand-in for the lane's dashed
   // baseline — the real object is created lazily by commitTempoPoints.
   const tempoAutomation = globalAutomations.find(a => a.target?.kind === 'tempo')
@@ -231,6 +250,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const nextNoteIdRef        = useRef(0);
   const nextEffectIdRef      = useRef(1);
   const nextAutomationIdRef  = useRef(1);
+  const nextGroupIdRef       = useRef(1);
   const laneTopsRef          = useRef([0]);
   const ghostRefs            = useRef({});
   const hoverRef             = useRef({ trackId: null, measure: 0 });
@@ -257,6 +277,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const selectedRegionIdsRef     = useRef(new Set());
   const selectedAnchorRef        = useRef(null);
   const globalAutomationsRef     = useRef([]);
+  const groupsRef                = useRef([]);
+  const collapsedGroupIdsRef     = useRef(new Set());
   const lastPianoScrollTopRef    = useRef(null); // null = no user scroll yet → default to C4
   const lastDragEndTimeRef       = useRef(0);
   const capturedRegionStartRef   = useRef(null);
@@ -390,6 +412,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     latestRef.current = {
       tracks: data.tracks, regions: data.regions, notes: data.notes,
       globalAutomations: data.globalAutomations ?? [],
+      groups: data.groups ?? [],
     };
     burstActiveRef.current = false;
     if (burstTimerRef.current) { clearTimeout(burstTimerRef.current); burstTimerRef.current = null; }
@@ -399,6 +422,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     setRegions(data.regions);
     setNotes(data.notes);
     setGlobalAutomations(data.globalAutomations ?? []);
+    setGroups(data.groups ?? []);
+    setCollapsedGroupIds(new Set());
+    setRenamingGroupId(null);
     nextIdRef.current       = data.nextId;
     nextRegionIdRef.current = data.nextRegionId;
     nextEffectIdRef.current = data.nextEffectId ?? 1;
@@ -406,13 +432,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     // start at 0 and collide with loaded note ids (the ghost-note bug).
     nextNoteIdRef.current   = data.nextNoteId ?? 0;
     nextAutomationIdRef.current = data.nextAutomationId ?? 1;
+    nextGroupIdRef.current  = data.nextGroupId ?? 1;
   }, []);
 
   // [ save ] writes to the browser project store (IndexedDB) — the homepage
   // Projects grid reads from it. Producing a .voxdaw file moved to the export menu.
   const handleSaveProject = useCallback(async () => {
     try {
-      const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations });
+      const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups });
       const id = currentProjectId ?? crypto.randomUUID();
       await storeSaveProject({
         id, name: projectName, bpm, trackCount: tracks.length, data: payload,
@@ -423,15 +450,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       console.error('save project failed', e);
       showToast(`save failed: ${e.message}`);
     }
-  }, [bpm, totalMeasures, tracks, regions, notes, globalAutomations, projectName, currentProjectId, showToast]);
+  }, [bpm, totalMeasures, tracks, regions, notes, globalAutomations, groups, projectName, currentProjectId, showToast]);
 
   const handleExportProjectFile = useCallback(() => {
     setShowExportMenu(false);
-    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations });
+    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups });
     const filename = `${sanitizeFilename(projectName)}.voxdaw`;
     downloadJSON(payload, filename);
     showToast(`exported ${filename}`);
-  }, [bpm, totalMeasures, tracks, regions, notes, globalAutomations, projectName, showToast]);
+  }, [bpm, totalMeasures, tracks, regions, notes, globalAutomations, groups, projectName, showToast]);
 
   const handleLoadProject = useCallback(async (file) => {
     if (!file) return;
@@ -515,6 +542,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     prev.map(t => t.id === id
       ? { ...t, isSolo: !t.isSolo, isMuted: !t.isSolo ? false : t.isMuted }
       : t));
+
   // Instrument change clears any ADSR override so the knobs snap to the new
   // instrument's defaults (and a decay/sustain override never lands on a
   // Sampler after a melodic→drum switch).
@@ -634,7 +662,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // mid-flight commits (and continuous volume/pan slider commits) into a single entry.
   // Snapshots store array refs (state is updated immutably, so they're effectively frozen).
   useEffect(() => {
-    const cur = { tracks, regions, notes, globalAutomations };
+    const cur = { tracks, regions, notes, globalAutomations, groups };
     if (timeTravelingRef.current) {            // change came from undo/redo/load → don't record
       timeTravelingRef.current = false;
       latestRef.current = cur;
@@ -648,7 +676,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     // touch these arrays) → don't record. State updates immutably, so a changed array is
     // always a new reference.
     if (baseline.tracks === cur.tracks && baseline.regions === cur.regions
-        && baseline.notes === cur.notes && baseline.globalAutomations === cur.globalAutomations) return;
+        && baseline.notes === cur.notes && baseline.globalAutomations === cur.globalAutomations
+        && baseline.groups === cur.groups) return;
     latestRef.current = cur;
     if (!burstActiveRef.current) {             // leading edge → push the pre-change snapshot
       burstActiveRef.current = true;
@@ -657,11 +686,12 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     }
     if (burstTimerRef.current) clearTimeout(burstTimerRef.current);
     burstTimerRef.current = setTimeout(() => { burstActiveRef.current = false; burstTimerRef.current = null; }, 200);
-  }, [tracks, regions, notes, globalAutomations]);
+  }, [tracks, regions, notes, globalAutomations, groups]);
 
   const applyHistory = useCallback((s) => {
     setTracks(s.tracks); setRegions(s.regions); setNotes(s.notes);
     setGlobalAutomations(s.globalAutomations ?? []);
+    setGroups(s.groups ?? []);
   }, []);
   const endBurst = useCallback(() => {
     burstActiveRef.current = false;
@@ -878,9 +908,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   const deleteTrack = useCallback((trackId) => {
     const idx = tracksRef.current.findIndex(t => t.id === trackId);
+    const dead = tracksRef.current[idx];
     const deadRegionIds = new Set(
       regionsRef.current.filter(r => r.trackId === trackId).map(r => r.id));
     setTracks(prev => prev.filter(t => t.id !== trackId));
+    // Group GC: a group whose last member dies is dropped.
+    if (dead?.groupId
+        && !tracksRef.current.some(t => t.id !== trackId && t.groupId === dead.groupId)) {
+      setGroups(prev => prev.filter(g => g.id !== dead.groupId));
+    }
     setRegions(prev => prev.filter(r => r.trackId !== trackId));
     setNotes(prev => prev.filter(n => n.trackId !== trackId));
     setSelectedRegionIds(prev => {
@@ -898,6 +934,99 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     // Audio nodes self-dispose via the useWorkstationAudio reconcilers (effects
     // #1/#1b/#4) — NO manual dispose here (it would double-dispose). Just cut
     // any voice still ringing from the removed regions (undo's precedent).
+    silenceAll();
+  }, [silenceAll]);
+
+  // ── Track groups ─────────────────────────────────────────────
+  // Creation: id minted eagerly (never inside an updater — StrictMode), the
+  // members are spliced CONTIGUOUS at the first member's position (an
+  // ungrouped track can't sit inside another group's run, so the splice never
+  // fragments one), and membership is track.groupId.
+  const createGroup = useCallback((memberIds) => {
+    const ids = new Set(memberIds);
+    if (ids.size < 2) return;
+    const n = nextGroupIdRef.current++;
+    const first = tracksRef.current.find(t => ids.has(t.id));
+    const group = {
+      id: `g${n}`, name: `group ${n}`,
+      color: first?.color ?? TRACK_COLORS[(n - 1) % TRACK_COLORS.length],
+      isMuted: false, isSolo: false, volume: 75, pan: 0, effects: [], automations: [],
+    };
+    setGroups(prev => [...prev, group]);
+    setTracks(prev => {
+      const firstIdx = prev.findIndex(t => ids.has(t.id));
+      const members  = prev.filter(t => ids.has(t.id)).map(t => ({ ...t, groupId: group.id }));
+      const rest     = prev.filter(t => !ids.has(t.id));
+      const next     = [...rest];
+      next.splice(Math.min(firstIdx, rest.length), 0, ...members);
+      return next;
+    });
+    pasteAnchorTrackIndexRef.current = null; // index-based anchor is stale after reorder
+    setGroupModal(null);
+  }, []);
+
+  const toggleGroupCollapsed = useCallback((groupId) => {
+    setCollapsedGroupIds(prev => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
+      return next;
+    });
+  }, []);
+
+  // Group mute/solo mirror the track pattern: mutually exclusive per group.
+  const toggleGroupMute = (id) => setGroups(prev =>
+    prev.map(g => g.id === id
+      ? { ...g, isMuted: !g.isMuted, isSolo: !g.isMuted ? false : g.isSolo }
+      : g));
+  const toggleGroupSolo = (id) => setGroups(prev =>
+    prev.map(g => g.id === id
+      ? { ...g, isSolo: !g.isSolo, isMuted: !g.isSolo ? false : g.isMuted }
+      : g));
+
+  const handleGroupVolumeChange = useCallback((groupId, v) => {
+    const clamped = Math.max(0, Math.min(100, Math.round(v)));
+    setGroups(prev => prev.map(g => g.id === groupId ? { ...g, volume: clamped } : g));
+  }, []);
+
+  const handleGroupPanChange = useCallback((groupId, n) => {
+    const clamped = Math.max(-1, Math.min(1, n));
+    setGroups(prev => prev.map(g => g.id === groupId ? { ...g, pan: clamped } : g));
+  }, []);
+
+  // Ungroup: dissolve the group, keep the tracks (Dylan's spec).
+  const ungroup = useCallback((groupId) => {
+    setTracks(prev => prev.map(t => t.groupId === groupId ? { ...t, groupId: undefined } : t));
+    setGroups(prev => prev.filter(g => g.id !== groupId));
+    setCollapsedGroupIds(prev => { const next = new Set(prev); next.delete(groupId); return next; });
+  }, []);
+
+  // Remove ONE track from its group; a group left with <2 members dissolves
+  // (groups are only ever formed with ≥2).
+  const removeTrackFromGroup = useCallback((trackId) => {
+    const gid = tracksRef.current.find(t => t.id === trackId)?.groupId;
+    if (!gid) return;
+    const remaining = tracksRef.current.filter(t => t.groupId === gid && t.id !== trackId);
+    if (remaining.length < 2) { ungroup(gid); return; }
+    setTracks(prev => prev.map(t => t.id === trackId ? { ...t, groupId: undefined } : t));
+  }, [ungroup]);
+
+  // Delete Group + Tracks: destructive (confirm() at the dispatch site);
+  // undoable because groups+tracks+regions+notes are all in history snapshots.
+  const deleteGroup = useCallback((groupId) => {
+    const memberIds = new Set(tracksRef.current.filter(t => t.groupId === groupId).map(t => t.id));
+    const deadRegionIds = new Set(regionsRef.current.filter(r => memberIds.has(r.trackId)).map(r => r.id));
+    setTracks(prev => prev.filter(t => !memberIds.has(t.id)));
+    setRegions(prev => prev.filter(r => !memberIds.has(r.trackId)));
+    setNotes(prev => prev.filter(n => !memberIds.has(n.trackId)));
+    setGroups(prev => prev.filter(g => g.id !== groupId));
+    setCollapsedGroupIds(prev => { const next = new Set(prev); next.delete(groupId); return next; });
+    setSelectedRegionIds(prev => new Set([...prev].filter(id => !deadRegionIds.has(id))));
+    setEditingTrackId(prev => (memberIds.has(prev) ? null : prev));
+    setRenamingTrackId(prev => (memberIds.has(prev) ? null : prev));
+    setActiveTrackId(prev => (memberIds.has(prev) ? null : prev));
+    pasteAnchorTrackIndexRef.current = null;
+    // Audio nodes self-dispose via the useWorkstationAudio reconcilers — just
+    // cut any voice still ringing from the removed regions (deleteTrack's precedent).
     silenceAll();
   }, [silenceAll]);
 
@@ -1080,9 +1209,24 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       else if (action === 'rename')       setRenamingTrackId(id);
       else if (action === 'color')        setTracks(prev => prev.map(t => t.id === id ? { ...t, color: payload } : t));
       else if (action === 'duplicate')    duplicateTrack(id);
+      else if (action === 'createGroup')  setGroupModal({ initiatorTrackId: id });
+      else if (action === 'ungroupTrack') removeTrackFromGroup(id);
       else if (action === 'pasteEffects') pasteEffectsTo(id, payload);
       else if (action === 'export')       exportTrack(id, payload ?? 'wav');
       else if (action === 'delete')       deleteTrack(id);
+      return;
+    }
+    if (type === 'group') {
+      if (action === 'rename')       setRenamingGroupId(id);
+      else if (action === 'color')   setGroups(prev => prev.map(g => g.id === id ? { ...g, color: payload } : g));
+      else if (action === 'ungroup') ungroup(id);
+      else if (action === 'delete') {
+        const g = groupsRef.current.find(x => x.id === id);
+        const count = tracksRef.current.filter(t => t.groupId === id).length;
+        if (window.confirm(`Delete group "${g?.name ?? id}" AND its ${count} track${count === 1 ? '' : 's'}? (undoable)`)) {
+          deleteGroup(id);
+        }
+      }
       return;
     }
     if (type === 'region') {
@@ -1129,7 +1273,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       else console.log('[context-menu] note', action, ids); // copy / paste (stubs)
     }
   }, [transposeRegions, transposeNotes, handleNotesDelete, splitRegionAtMeasure,
-      duplicateTrack, deleteTrack, pasteEffectsTo, exportTrack]);
+      duplicateTrack, deleteTrack, pasteEffectsTo, exportTrack,
+      removeTrackFromGroup, ungroup, deleteGroup]);
 
   // ── Ghost region ─────────────────────────────────────────────
   // Returns true if `measure` falls inside any existing region on this track.
@@ -1418,10 +1563,22 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         // Cumulative lookup (not / TRACK_H): open automation sub-lanes belong to
         // their track, so a drop anywhere in a track's strip lands on that track.
         const rawTrackDelta     = yToTrackIndex(relContent, laneTopsRef.current) - d.origTrackIndex;
-        const clampedTrackDelta = Math.max(
+        let clampedTrackDelta = Math.max(
           -minOrigTrackIndex,
           Math.min(tracksRef.current.length - 1 - maxOrigTrackIndex, rawTrackDelta)
         );
+        // Collapsed-group guard: yToTrackIndex can't RETURN a hidden track
+        // (zero-height band), but the clamp arithmetic and companion offsets
+        // can still land one on a collapsed member — keep the last valid
+        // delta instead of dropping a region into an invisible lane.
+        const isHiddenTrack = (idx) => {
+          const gid = tracksRef.current[idx]?.groupId;
+          return !!gid && collapsedGroupIdsRef.current.has(gid);
+        };
+        if (isHiddenTrack(d.origTrackIndex + clampedTrackDelta)
+            || d.companions.some(c => isHiddenTrack(c.origTrackIndex + clampedTrackDelta))) {
+          clampedTrackDelta = (d.pendingTrackIndex ?? d.origTrackIndex) - d.origTrackIndex;
+        }
         const anchorNewIdx  = d.origTrackIndex + clampedTrackDelta;
         const candTrackId   = tracksRef.current[anchorNewIdx]?.id ?? d.pendingTrackId;
         newStart = d.initStart + clampedDelta;
@@ -2031,6 +2188,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   selectedRegionIdsRef.current  = selectedRegionIds;
   selectedAnchorRef.current     = selectedAnchor;
   globalAutomationsRef.current  = globalAutomations;
+  groupsRef.current             = groups;
+  collapsedGroupIdsRef.current  = collapsedGroupIds;
   snapEnabledRef.current        = snapEnabled;
   editingTrackIdRef.current     = editingTrackId;
   laneTopsRef.current           = laneTops;
@@ -3077,10 +3236,85 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             </div>
           ) : (
             <>
-              {tracks.map((t) => (
+              {tracks.map((t, ti) => {
+                const group = t.groupId ? groupById.get(t.groupId) : null;
+                const isFirstMember = !!group && (ti === 0 || tracks[ti - 1].groupId !== t.groupId);
+                const isCollapsed = !!group && collapsedGroupIds.has(group.id);
+                return (
                 <Fragment key={t.id}>
-                <div className={`${styles.trackRow}${editingTrackId === t.id ? ` ${styles.trackRowActive}` : activeTrackId === t.id ? ` ${styles.trackRowFocused}` : ''}`}
-                  style={{ '--track-color': t.color }}
+                {/* Group header row — rendered before the run's first member;
+                    height (GROUP_H) MUST mirror the timeline's .groupLane. */}
+                {isFirstMember && (
+                  <div className={styles.groupRow}
+                    style={{ '--group-color': group.color }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'group', targetId: group.id });
+                    }}>
+                    <button
+                      className={styles.groupChevron}
+                      onClick={() => toggleGroupCollapsed(group.id)}
+                      title={isCollapsed ? 'Expand group' : 'Collapse group'}>
+                      {isCollapsed ? '▸' : '▾'}
+                    </button>
+                    <span className={styles.trackColorDot} style={{ background: group.color }} />
+                    {renamingGroupId === group.id ? (
+                      <input
+                        className={styles.trackNameInput}
+                        defaultValue={group.name}
+                        autoFocus
+                        onFocus={(e) => e.target.select()}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') e.target.blur();
+                          else if (e.key === 'Escape') { e.target.value = group.name; e.target.blur(); }
+                        }}
+                        onBlur={(e) => {
+                          const name = e.target.value.trim();
+                          if (name && name !== group.name) {
+                            setGroups(prev => prev.map(g => g.id === group.id ? { ...g, name } : g));
+                          }
+                          setRenamingGroupId(null);
+                        }}
+                      />
+                    ) : (
+                      <span className={styles.groupName} onDoubleClick={() => setRenamingGroupId(group.id)}>
+                        {group.name}
+                      </span>
+                    )}
+                    <div className={styles.groupControls}>
+                      <PanKnob
+                        value={group.pan ?? 0}
+                        onChange={(v) => handleGroupPanChange(group.id, v)}
+                        size={18}
+                        disabled={isPanAutomated(group)}
+                      />
+                      <input
+                        type="range"
+                        min={0} max={100} step={1}
+                        value={group.volume ?? 75}
+                        onChange={(e) => handleGroupVolumeChange(group.id, parseInt(e.target.value, 10))}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                        className={`${styles.volumeSlider} ${styles.groupVolumeSlider}`}
+                        disabled={isVolumeAutomated(group)}
+                        title={`group volume ${group.volume ?? 75}`}
+                      />
+                      <button
+                        className={group.isMuted ? styles.trackBtnActive : styles.trackBtn}
+                        onClick={() => toggleGroupMute(group.id)} title="Mute group">M</button>
+                      <button
+                        className={group.isSolo ? styles.trackBtnActive : styles.trackBtn}
+                        onClick={() => toggleGroupSolo(group.id)} title="Solo group">S</button>
+                    </div>
+                  </div>
+                )}
+                {!isCollapsed && (<>
+                <div className={`${styles.trackRow}${group ? ` ${styles.trackRowGrouped}` : ''}${editingTrackId === t.id ? ` ${styles.trackRowActive}` : activeTrackId === t.id ? ` ${styles.trackRowFocused}` : ''}`}
+                  style={{ '--track-color': t.color, ...(group ? { '--group-color': group.color } : {}) }}
                   onClick={() => { setActiveTrackId(t.id); pasteAnchorTrackIndexRef.current = tracksRef.current.findIndex(x => x.id === t.id); }}
                   onDoubleClick={() => setEditingTrackId(prev => prev === t.id ? null : t.id)}
                   onContextMenu={(e) => {
@@ -3203,8 +3437,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                     </div>
                   </>
                 )}
+                </>)}
                 </Fragment>
-              ))}
+                );
+              })}
               <button className={styles.addTrackGhost} onClick={handleAddTrack}>[ + add track ]</button>
             </>
           )}
@@ -3262,10 +3498,27 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             )}
 
             {/* Track lanes */}
-            {tracks.map((t) => {
+            {tracks.map((t, ti) => {
               const autoOpen = openAutomationTrackIds.has(t.id);
+              const group = t.groupId ? groupById.get(t.groupId) : null;
+              const isFirstMember = !!group && (ti === 0 || tracks[ti - 1].groupId !== t.groupId);
+              const isCollapsed = !!group && collapsedGroupIds.has(group.id);
               return (
                 <Fragment key={t.id}>
+                {/* Group lane row — inert strip (no seek/marquee), height GROUP_H
+                    mirrors the header column's .groupRow. */}
+                {isFirstMember && (
+                  <div className={styles.groupLane}
+                    style={{ '--group-color': group.color }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'group', targetId: group.id });
+                    }}
+                  />
+                )}
+                {!isCollapsed && (<>
                 <div className={styles.trackLane}
                   style={{ '--track-color': t.color }}
                   onMouseMove={(e) => handleLaneMouseMove(e, t.id)}
@@ -3528,6 +3781,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                   );
                 })}
                 {autoOpen && <div className={styles.autoAddStrip} />}
+                </>)}
                 </Fragment>
               );
             })}
@@ -3600,6 +3854,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         </button>
       </div>
       <ContextMenu menu={contextMenu} onClose={closeContextMenu} onCommand={handleContextCommand} tracks={tracks} />
+      {groupModal && (
+        <GroupModal
+          tracks={tracks}
+          groups={groups}
+          initiatorTrackId={groupModal.initiatorTrackId}
+          onCancel={() => setGroupModal(null)}
+          onCreate={createGroup}
+        />
+      )}
     </div>
   );
 }

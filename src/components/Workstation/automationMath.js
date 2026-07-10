@@ -23,6 +23,7 @@ export const TRACK_H        = 72; // main track row
 export const AUTO_LANE_H    = 72; // one automation sub-lane ("same as track height")
 export const AUTO_ADD_H     = 24; // the [+ automation] strip under the sub-lanes
 export const GLOBAL_STRIP_H = 24; // the always-present "global" row above track rows
+export const GROUP_H        = 48; // a group header row (before its first member)
 
 // ── Envelope sampling ─────────────────────────────────────────────────────
 
@@ -114,11 +115,23 @@ export function trackExtraHeight(track, openSet) {
 // automation area). Every consumer measures content-Y from the same origin
 // (below the ruler / tracks header), so as long as tops mirror the DOM flow
 // nothing else changes.
-export function computeLaneTops(tracks, openSet, topOffset = 0) {
+//
+// groupView (optional) = { collapsedIds: Set<groupId> }. A group header row
+// (GROUP_H) is emitted before the FIRST member of each contiguous group run
+// (contiguity is an invariant: createGroup reorders, deserialize normalizes);
+// a collapsed group's member rows contribute ZERO height (tops[i+1] ===
+// tops[i]), which also makes them unreachable by yToTrackIndex — its
+// `y < tops[i+1]` scan naturally skips zero-height rows.
+export function computeLaneTops(tracks, openSet, topOffset = 0, groupView = null) {
   const tops = new Array(tracks.length + 1);
   let y = topOffset;
+  let prevGroupId = null;
   for (let i = 0; i < tracks.length; i++) {
+    const gid = tracks[i].groupId ?? null;
+    if (gid && gid !== prevGroupId) y += GROUP_H; // group header row
+    prevGroupId = gid;
     tops[i] = y;
+    if (gid && groupView?.collapsedIds?.has(gid)) continue; // hidden member
     y += TRACK_H + trackExtraHeight(tracks[i], openSet);
   }
   tops[tracks.length] = y;
