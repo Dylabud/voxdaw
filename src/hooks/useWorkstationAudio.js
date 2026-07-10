@@ -7,6 +7,7 @@ import {
   automationValueAt, denorm, targetKey,
   isVolumeAutomated, isPanAutomated, automatedFxKeys,
 } from '../components/Workstation/automationMath';
+import { buildTempoMap, tempoPointsOf } from '../components/Workstation/tempoMath';
 import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
 
 /**
@@ -36,7 +37,7 @@ import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
 //            flipping back to high restores the user's settings instantly.
 const REDUCED_MAX_POLYPHONY = 12;
 
-export default function useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality = 'high' }) {
+export default function useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality = 'high', globalAutomations = [] }) {
   // Read at synth-creation time (effect #4 / audition) so synths built while
   // quality is reduced get the voice cap without waiting for the sync effect.
   const perfQualityRef = useRef(performanceQuality);
@@ -128,6 +129,17 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   const regionsRef = useRef(regions); regionsRef.current = regions;
   const bpmRef     = useRef(bpm);     bpmRef.current     = bpm;
   const tracksRef  = useRef(tracks);  tracksRef.current  = tracks;
+  const globalAutosRef = useRef(globalAutomations); globalAutosRef.current = globalAutomations;
+
+  // Tempo map (tempoMath.js) — the measures↔seconds source of truth once the
+  // global tempo lane has points. Rebuilt by recomputeTempo (which is also the
+  // SINGLE writer of Transport.bpm); consumed by recomputeFades /
+  // recomputeAutomation / scheduleFadeEnvelope / Part-callback durations.
+  // Seeded with the constant-bpm identity so pre-first-recompute consumers
+  // (effect 1e on mount) never see null.
+  const tempoMapRef = useRef(null);
+  if (tempoMapRef.current === null) tempoMapRef.current = buildTempoMap(bpm, tempoPointsOf(globalAutomations));
+  const appliedTempoKeyRef = useRef(''); // delta key for the tempo sync effect
 
   // Per-track audition synth (instrument-tab performance UI). Hook-owned so
   // it can connect into the track chain at the stable `volume` node — that
@@ -292,6 +304,35 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   // (which run later in this same commit) hand ownership back by ramping to
   // the manual slider/dial value; fx params are restored directly here (1d
   // already ran this commit).
+  // ── Tempo re-anchor — the SINGLE writer of Transport.bpm ────────────────
+  // Rebuilds the tempo map from the global tempo lane and (re)schedules the
+  // bpm curve as linear ramps from the CURRENT transport position. bpm signal
+  // automation lives in absolute audio time, so — exactly like fades and
+  // param automation — it desyncs across any pause/seek and is re-anchored by
+  // every recomputeFades call site (recomputeTempo runs FIRST there: fades and
+  // automation consume tempoMapRef). Only the future is touched (cancel at
+  // Tone.now()), so Transport.ticks never jumps. Anchor math: tempoMath.js
+  // trapezoid == TickSignal's own integration, so map seconds and transport
+  // ticks agree exactly at every anchor.
+  const recomputeTempo = useCallback(() => {
+    const map = buildTempoMap(bpmRef.current, tempoPointsOf(globalAutosRef.current));
+    tempoMapRef.current = map;
+    const sig = Tone.Transport.bpm;
+    const audioNow = Tone.now();
+    const nowM = Tone.Transport.ticks / (Tone.Transport.PPQ * 4);
+    sig.cancelScheduledValues(audioNow);
+    sig.setValueAtTime(map.bpmAtMeasure(nowM), audioNow);
+    const nowSec = map.secondsAtMeasure(nowM);
+    let prevAt = audioNow;
+    for (const a of map.anchors) {
+      if (a.measure <= nowM) continue;
+      const at = audioNow + (a.seconds - nowSec);
+      if (at <= prevAt + 1e-6) sig.setValueAtTime(a.bpm, at); // coincident points = step
+      else sig.linearRampToValueAtTime(a.bpm, at);
+      prevAt = at;
+    }
+  }, []);
+
   const recomputeAutomation = useCallback(() => {
     if (steppedRepeatIdRef.current != null) {
       Tone.Transport.clear(steppedRepeatIdRef.current);
@@ -300,8 +341,9 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     const stepped  = [];
     const nowAuto  = new Map(); // "tId|targetKey" → { trackId, target }
     const audioNow = Tone.now();
-    const nowSec   = Tone.Transport.seconds;
-    const secPerMeasure = 4 * (60 / bpmRef.current);
+    const map      = tempoMapRef.current;
+    const nowM     = Tone.Transport.ticks / (Tone.Transport.PPQ * 4);
+    const nowSec   = map.secondsAtMeasure(nowM);
 
     for (const t of tracksRef.current) {
       for (const a of t.automations ?? []) {
@@ -310,17 +352,17 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
         const res = resolveAutomationTarget(t, a.target);
         if (!res) continue;
         nowAuto.set(`${t.id}|${targetKey(a.target)}`, { trackId: t.id, target: a.target });
-        const v01Now = automationValueAt(pts, nowSec / secPerMeasure);
+        const v01Now = automationValueAt(pts, nowM);
         if (res.kind === 'ramp') {
-          for (const { param, map } of res.entries) {
-            const cur = map(res.toParam(v01Now), res.ctx);
+          for (const { param, map: entryMap } of res.entries) {
+            const cur = entryMap(res.toParam(v01Now), res.ctx);
             param.cancelScheduledValues(audioNow);
             param.setValueAtTime(cur, audioNow);
             let prev = cur;
             for (const p of pts) {
-              const tSec = p.time * secPerMeasure;
+              const tSec = map.secondsAtMeasure(p.time); // tempo-map, not constant-bpm
               if (tSec <= nowSec) continue;
-              const val = map(res.toParam(p.value), res.ctx);
+              const val = entryMap(res.toParam(p.value), res.ctx);
               const at  = audioNow + (tSec - nowSec);
               if (res.exp && val > 0 && prev > 0) param.exponentialRampToValueAtTime(val, at);
               else                                param.linearRampToValueAtTime(val, at);
@@ -337,8 +379,9 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     steppedTargetsRef.current = stepped;
     if (stepped.length > 0) {
       steppedRepeatIdRef.current = Tone.Transport.scheduleRepeat(() => {
-        const spm = 4 * (60 / bpmRef.current);
-        const tM  = Tone.Transport.seconds / spm;
+        // Ticks are canonical musical time — correct under tempo automation
+        // (seconds/constant-bpm would drift the moment the tempo lane ramps).
+        const tM = Tone.Transport.ticks / (Tone.Transport.PPQ * 4);
         for (const s of steppedTargetsRef.current) {
           const v01 = automationValueAt(s.points, tM);
           if (v01 != null) s.set(s.toParam(v01));
@@ -788,7 +831,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
 
       const prev = applied.get(r.id);
       const partKey = computePartKey(r, notes);
-      const fadeKey = computeFadeKey(r, bpm);
+      const fadeKey = computeFadeKey(r);
       const instrumentChanged = !prev || prev.instrument !== track.instrument;
       const partChanged       = !prev || prev.partKey  !== partKey;
       const fadeChanged       = !prev || prev.fadeKey  !== fadeKey;
@@ -827,7 +870,8 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
           const synth = synths.get(r.id);
           const part = new Tone.Part(
             makePartCallback(synth, liveSamplerSourcesRef.current, isDrumKit(track.instrument),
-                             r.id, appliedRegionStateRef, audibleByTrackIdRef, noteLifecycleRef),
+                             r.id, appliedRegionStateRef, audibleByTrackIdRef, noteLifecycleRef,
+                             tempoMapRef),
             events
           );
           part.start(0);
@@ -835,12 +879,13 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
         }
       }
 
-      // (Re)schedule fade envelope
+      // (Re)schedule fade envelope — durations resolve at fire time through
+      // tempoMapRef, so BPM/tempo-lane changes need no reschedule here.
       if (fadeChanged || instrumentChanged) {
         const prevEvt = fadeIds.get(r.id);
         if (prevEvt != null) Tone.Transport.clear(prevEvt);
         const fadeGain = fades.get(r.id);
-        const evtId = scheduleFadeEnvelope(fadeGain, r, bpm);
+        const evtId = scheduleFadeEnvelope(fadeGain, r, tempoMapRef);
         if (evtId != null) fadeIds.set(r.id, evtId);
         else               fadeIds.delete(r.id);
       }
@@ -934,24 +979,29 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   // time, so it's only valid right before/while the transport is playing.
   // Called by WorkstationShell on play, seek, BPM commit, and stop.
   const recomputeFades = useCallback(() => {
+    // Tempo FIRST — everything below (and recomputeAutomation at the end)
+    // consumes the freshly rebuilt tempoMapRef.
+    recomputeTempo();
+    const map     = tempoMapRef.current;
     const fades   = fadeGainsByRegionIdRef.current;
-    const nowSec  = Tone.Transport.seconds;
-    const bpm     = bpmRef.current;
+    const nowM    = Tone.Transport.ticks / (Tone.Transport.PPQ * 4);
+    const nowSec  = map.secondsAtMeasure(nowM);
     const audioNow = Tone.now();
     for (const r of regionsRef.current) {
       const fadeGain = fades.get(r.id);
       if (!fadeGain) continue;
-      const startSec  = r.startMeasure * 4 * (60 / bpm);
-      const endSec    = (r.startMeasure + r.durationMeasures) * 4 * (60 / bpm);
-      const fInSec    = (r.fadeIn  ?? 0) * 4 * (60 / bpm);
-      const fOutSec   = (r.fadeOut ?? 0) * 4 * (60 / bpm);
-      const fInFloor  = Math.max(0, Math.min(1, r.fadeInFloor  ?? 0));
+      // Region boundaries through the tempo map — a fade spanning a tempo ramp
+      // lands exactly on its measure boundaries (constant-bpm math wouldn't).
+      const startSec  = map.secondsAtMeasure(r.startMeasure);
+      const endSec    = map.secondsAtMeasure(r.startMeasure + r.durationMeasures);
+      const fInSec    = map.secondsAtMeasure(r.startMeasure + (r.fadeIn ?? 0)) - startSec;
+      const fOutSec   = endSec - map.secondsAtMeasure(r.startMeasure + r.durationMeasures - (r.fadeOut ?? 0));
       const fOutFloor = Math.max(0, Math.min(1, r.fadeOutFloor ?? 0));
 
       const g = fadeGain.gain;
       g.cancelScheduledValues(audioNow);
 
-      const currentValue = computeFadeGainAt(r, nowSec, bpm);
+      const currentValue = computeFadeGainAt(r, nowSec, map);
       g.setValueAtTime(currentValue, audioNow);
 
       if (nowSec >= endSec) continue;
@@ -976,7 +1026,20 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     // recomputeFades' 7 call sites in the shell cover every transport
     // transition, so automation needs zero new shell wiring.
     recomputeAutomation();
-  }, [recomputeAutomation]);
+  }, [recomputeTempo, recomputeAutomation]);
+
+  // ── 1f. Tempo sync — re-anchor the bpm curve (and everything that consumes
+  // the tempo map: fades + automation) when the global tempo lane or the base
+  // bpm changes. Declared here (after recomputeFades — TDZ) so it runs AFTER
+  // 1e in a shared-trigger commit; 1e's recomputeAutomation may briefly use
+  // the previous map, but this effect immediately recomputes the full chain
+  // (recomputeTempo → fades → recomputeAutomation) with the fresh one.
+  useEffect(() => {
+    const key = JSON.stringify(globalAutomations ?? []) + '~' + bpm;
+    if (appliedTempoKeyRef.current === key) return;
+    appliedTempoKeyRef.current = key;
+    recomputeFades();
+  }, [globalAutomations, bpm, recomputeFades]);
 
   // ── 5. Cleanup on unmount ──────────────────────────────────────────────
   useEffect(() => {
@@ -1004,11 +1067,19 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     const steppedTargets = steppedTargetsRef;
     const prevAutomated = prevAutomatedTargetsRef;
     const appliedAutoKey = appliedAutomationKeyRef;
+    const appliedTempoKey = appliedTempoKeyRef;
+    const bpmR = bpmRef;
     return () => {
       // Transport.cancel(0) below wipes the automation schedules — reset the
-      // delta key so a remount (StrictMode's simulated one included) re-runs
-      // recomputeAutomation instead of skipping on a stale match.
+      // delta keys so a remount (StrictMode's simulated one included) re-runs
+      // recomputeAutomation/recomputeTempo instead of skipping on stale matches.
       appliedAutoKey.current = '';
+      appliedTempoKey.current = '';
+      // Transport.cancel does NOT clear bpm-SIGNAL automation, and the
+      // Transport is a singleton shared with VoxTool (transport-clocked arp)
+      // — leftover tempo ramps would warp it. Restore the flat base bpm.
+      Tone.Transport.bpm.cancelScheduledValues(0);
+      Tone.Transport.bpm.value = bpmR.current;
       for (const st of muteConns.values()) if (st.timer != null) clearTimeout(st.timer);
       muteConns.clear();
       audible.clear();
@@ -1056,11 +1127,14 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
 }
 
 // Pure: envelope's expected linear gain at a given transport time (seconds).
-export function computeFadeGainAt(r, transportSec, bpm) {
-  const startSec  = r.startMeasure * 4 * (60 / bpm);
-  const endSec    = (r.startMeasure + r.durationMeasures) * 4 * (60 / bpm);
-  const fInSec    = (r.fadeIn  ?? 0) * 4 * (60 / bpm);
-  const fOutSec   = (r.fadeOut ?? 0) * 4 * (60 / bpm);
+// `map` is a tempoMath buildTempoMap result — boundaries land on the region's
+// measure positions through any tempo curve; the fade itself stays linear in
+// seconds (what the scheduled Web Audio ramps actually do).
+export function computeFadeGainAt(r, transportSec, map) {
+  const startSec  = map.secondsAtMeasure(r.startMeasure);
+  const endSec    = map.secondsAtMeasure(r.startMeasure + r.durationMeasures);
+  const fInSec    = map.secondsAtMeasure(r.startMeasure + (r.fadeIn ?? 0)) - startSec;
+  const fOutSec   = endSec - map.secondsAtMeasure(r.startMeasure + r.durationMeasures - (r.fadeOut ?? 0));
   const fInFloor  = Math.max(0, Math.min(1, r.fadeInFloor  ?? 0));
   const fOutFloor = Math.max(0, Math.min(1, r.fadeOutFloor ?? 0));
   if (fInSec === 0 && fOutSec === 0) return 1;
@@ -1081,8 +1155,21 @@ export function computeFadeGainAt(r, transportSec, bpm) {
 
 function makePartCallback(synth, liveSources, isDrum = false,
                           regionId = null, regionStateRef = null, audibleTracksRef = null,
-                          noteLifecycleRef = null) {
+                          noteLifecycleRef = null, mapRef = null) {
   return (time, ev) => {
+    // Note duration through the tempo map: event time/duration are "<ticks>i"
+    // strings, so the note's real length under a tempo ramp is the map's
+    // seconds difference across its tick span. toSeconds(ev.duration) is the
+    // fallback (instantaneous bpm — slightly off for notes held THROUGH a
+    // ramp).
+    const durSec = (mapRef?.current && typeof ev.duration === 'string')
+      ? (() => {
+          const beatsPerMeasure = Tone.Transport.PPQ * 4;
+          const m0 = parseInt(ev.time, 10) / beatsPerMeasure;
+          const m1 = m0 + parseInt(ev.duration, 10) / beatsPerMeasure;
+          return mapRef.current.secondsAtMeasure(m1) - mapRef.current.secondsAtMeasure(m0);
+        })()
+      : (synth?.toSeconds(ev.duration) ?? 0);
     // Inaudible track (muted, or another track soloed): skip triggering
     // entirely — the track subtree is disconnected from the destination
     // (effect #2), so voices would be pure allocation/GC waste. The trackId
@@ -1099,7 +1186,7 @@ function makePartCallback(synth, liveSources, isDrum = false,
     // up when the sampler finishes loading mid-playback.
     if (trackId != null && noteLifecycleRef?.current) {
       noteLifecycleRef.current.onNoteScheduled(
-        trackId, synth?.toSeconds(time) ?? Tone.now(), synth?.toSeconds(ev.duration) ?? 0);
+        trackId, synth?.toSeconds(time) ?? Tone.now(), durSec);
     }
     // A Tone.Sampler throws "buffer is either not set or not loaded" if triggered before
     // its buffers finish loading (instrument hot-swap or paste while the Transport runs).
@@ -1130,9 +1217,9 @@ function makePartCallback(synth, liveSources, isDrum = false,
       // Drums are one-shots: skip the note-end release so short drawn notes
       // never truncate a cymbal — the buffer source self-stops at sample end
       // (ToneBufferSource.start pre-schedules its own stop).
-      if (!isDrum) synth.triggerRelease(ev.note, t + synth.toSeconds(ev.duration));
+      if (!isDrum) synth.triggerRelease(ev.note, t + durSec);
     } else {
-      synth.triggerAttackRelease(ev.note, ev.duration, time, 0.8);
+      synth.triggerAttackRelease(ev.note, durSec, time, 0.8);
     }
   };
 }
@@ -1250,14 +1337,14 @@ export function buildRegionEvents(r, allNotes) {
 
 // Schedule the fade envelope onto a Gain at the region's transport start tick.
 // Returns the Tone.Transport schedule id (or null if nothing to schedule).
-// Caveat: the envelope is computed in absolute audio-time at fire time using
-// the bpm captured at scheduling. A BPM change mid-region desynchronizes the
-// envelope until next playback cycle. Acceptable MVP limitation.
-export function scheduleFadeEnvelope(fadeGain, r, bpm) {
+// `mapRef` is a { current: tempoMap } holder (live: tempoMapRef; offline: a
+// plain object wrapping the bounce's map). Durations are computed INSIDE the
+// fire-time callback from the CURRENT map, so a BPM change (or tempo-lane
+// edit) before the region starts no longer desyncs the envelope — the old
+// "computed at scheduling time" MVP caveat is gone.
+export function scheduleFadeEnvelope(fadeGain, r, mapRef) {
   const PPQ = Tone.Transport.PPQ;
   const startTicks = Math.round(r.startMeasure * 4 * PPQ);
-  const durSec = (m) => m * 4 * (60 / bpm);
-  const totalSec = durSec(r.durationMeasures);
   const fadeIn   = Math.max(0, Math.min(r.fadeIn  ?? 0, r.durationMeasures));
   const fadeOut  = Math.max(0, Math.min(r.fadeOut ?? 0, r.durationMeasures));
   const fInFloor  = Math.max(0, Math.min(1, r.fadeInFloor  ?? 0));
@@ -1270,16 +1357,20 @@ export function scheduleFadeEnvelope(fadeGain, r, bpm) {
     return null;
   }
 
-  // Merged-joint guard: clamp so fadeIn + fadeOut <= duration; if equal, fades meet at midpoint.
-  let fInSec  = durSec(fadeIn);
-  let fOutSec = durSec(fadeOut);
-  if (fInSec + fOutSec > totalSec) {
-    const scale = totalSec / (fInSec + fOutSec);
-    fInSec  *= scale;
-    fOutSec *= scale;
-  }
-
   const id = Tone.Transport.schedule((time) => {
+    const map = mapRef.current;
+    const startSec = map.secondsAtMeasure(r.startMeasure);
+    const endSec   = map.secondsAtMeasure(r.startMeasure + r.durationMeasures);
+    const totalSec = endSec - startSec;
+    // Fade windows through the tempo map (each measured at its own end of the
+    // region), then the merged-joint guard: fadeIn + fadeOut <= duration.
+    let fInSec  = map.secondsAtMeasure(r.startMeasure + fadeIn) - startSec;
+    let fOutSec = endSec - map.secondsAtMeasure(r.startMeasure + r.durationMeasures - fadeOut);
+    if (fInSec + fOutSec > totalSec) {
+      const scale = totalSec / (fInSec + fOutSec);
+      fInSec  *= scale;
+      fOutSec *= scale;
+    }
     const g = fadeGain.gain;
     g.cancelScheduledValues(time);
     // Fade-in
@@ -1311,6 +1402,8 @@ function computePartKey(r, notes) {
   }
   return key;
 }
-function computeFadeKey(r, bpm) {
-  return `${r.startMeasure}|${r.durationMeasures}|${r.fadeIn ?? 0}|${r.fadeOut ?? 0}|${r.fadeInFloor ?? 0}|${r.fadeOutFloor ?? 0}|${bpm}`;
+// No bpm component: envelope durations resolve at fire time via tempoMapRef,
+// so a BPM/tempo change needs no reschedule (startTicks is bpm-independent).
+function computeFadeKey(r) {
+  return `${r.startMeasure}|${r.durationMeasures}|${r.fadeIn ?? 0}|${r.fadeOut ?? 0}|${r.fadeInFloor ?? 0}|${r.fadeOutFloor ?? 0}`;
 }

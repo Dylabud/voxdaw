@@ -5,7 +5,7 @@ import { EFFECT_DEFS, isAutomatableParam } from './effectDefs';
 const SCHEMA_VERSION = 1;
 const KIND = 'voxdaw-project';
 
-export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, name }) {
+export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, name, globalAutomations }) {
   return {
     version: SCHEMA_VERSION,
     kind: KIND,
@@ -14,6 +14,16 @@ export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, n
     name: String(name ?? 'untitled'),
     bpm,
     totalMeasures,
+    // Global automation lanes (tempo) — optional, additive.
+    ...(Array.isArray(globalAutomations) && globalAutomations.length
+      ? {
+          globalAutomations: globalAutomations.map(a => ({
+            id: a.id,
+            target: { ...a.target },
+            points: (a.points ?? []).map(p => ({ time: p.time, value: p.value })),
+          })),
+        }
+      : {}),
     tracks:  tracks.map(t => ({
       id: t.id, name: t.name, instrument: t.instrument, color: t.color,
       isMuted: !!t.isMuted, isSolo: !!t.isSolo, volume: t.volume ?? 75, pan: t.pan ?? 0,
@@ -135,11 +145,16 @@ export function deserializeProject(raw) {
     }),
     regions: outRegions,
     notes: outNotes,
+    globalAutomations: deserializeGlobalAutomations(raw.globalAutomations),
     nextId:       nextSuffix(tracks),
     nextRegionId: nextSuffix(regions),
     nextEffectId: nextSuffix(tracks.flatMap(t => (Array.isArray(t.effects) ? t.effects : []))),
     nextNoteId,       // post-repair value — already past any re-minted ids
-    nextAutomationId: nextSuffix(tracks.flatMap(t => (Array.isArray(t.automations) ? t.automations : []))),
+    // Track automations and global automations share the a<n> id namespace.
+    nextAutomationId: nextSuffix([
+      ...tracks.flatMap(t => (Array.isArray(t.automations) ? t.automations : [])),
+      ...(Array.isArray(raw.globalAutomations) ? raw.globalAutomations : []),
+    ]),
     repairedCount,
   };
 }
@@ -172,11 +187,21 @@ function deserializeEnvelope(raw) {
   return Object.keys(out).length ? out : undefined;
 }
 
+// Shared point sanitizer: coerced numeric, time >= 0, value clamped 0–1,
+// sorted by time.
+function sanitizePoints(raw) {
+  return (Array.isArray(raw) ? raw : [])
+    .filter(p => p && typeof p === 'object'
+      && typeof p.time === 'number' && isFinite(p.time) && p.time >= 0
+      && typeof p.value === 'number' && isFinite(p.value))
+    .map(p => ({ time: p.time, value: Math.max(0, Math.min(1, p.value)) }))
+    .sort((x, y) => x.time - y.time);
+}
+
 // Rebuild a track's automation lanes defensively (old projects → []).
 // Additive, backward-compatible — SCHEMA_VERSION intentionally NOT bumped.
 // fx targets must reference a live effect on the SAME track and an automatable
-// param in EFFECT_DEFS (regionId-authoritative-style orphan drop); points are
-// coerced numeric, value clamped 0–1, sorted by time.
+// param in EFFECT_DEFS (regionId-authoritative-style orphan drop).
 function deserializeAutomations(raw, effects) {
   if (!Array.isArray(raw)) return [];
   const effectById = new Map(effects.map(e => [e.id, e]));
@@ -195,13 +220,19 @@ function deserializeAutomations(raw, effects) {
     } else {
       continue;
     }
-    const points = (Array.isArray(a.points) ? a.points : [])
-      .filter(p => p && typeof p === 'object'
-        && typeof p.time === 'number' && isFinite(p.time) && p.time >= 0
-        && typeof p.value === 'number' && isFinite(p.value))
-      .map(p => ({ time: p.time, value: Math.max(0, Math.min(1, p.value)) }))
-      .sort((x, y) => x.time - y.time);
-    out.push({ id: String(a.id), target, points });
+    out.push({ id: String(a.id), target, points: sanitizePoints(a.points) });
+  }
+  return out;
+}
+
+// Rebuild the project-level automation lanes (old projects → []). Only the
+// tempo target exists today; unknown kinds are dropped defensively.
+function deserializeGlobalAutomations(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const a of raw) {
+    if (!a || typeof a !== 'object' || a.target?.kind !== 'tempo') continue;
+    out.push({ id: String(a.id), target: { kind: 'tempo' }, points: sanitizePoints(a.points) });
   }
   return out;
 }

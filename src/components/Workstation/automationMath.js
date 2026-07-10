@@ -19,9 +19,10 @@
 
 // Lane geometry constants. TRACK_H must match .trackRow/.trackLane height in
 // WorkstationShell.module.css; the shell imports it from here.
-export const TRACK_H     = 72; // main track row
-export const AUTO_LANE_H = 72; // one automation sub-lane ("same as track height")
-export const AUTO_ADD_H  = 24; // the [+ automation] strip under the sub-lanes
+export const TRACK_H        = 72; // main track row
+export const AUTO_LANE_H    = 72; // one automation sub-lane ("same as track height")
+export const AUTO_ADD_H     = 24; // the [+ automation] strip under the sub-lanes
+export const GLOBAL_STRIP_H = 24; // the always-present "global" row above track rows
 
 // ── Envelope sampling ─────────────────────────────────────────────────────
 
@@ -109,9 +110,13 @@ export function trackExtraHeight(track, openSet) {
   return (track.automations?.length ?? 0) * AUTO_LANE_H + AUTO_ADD_H;
 }
 
-export function computeLaneTops(tracks, openSet) {
+// topOffset = height of rows ABOVE track 0 in the same flow (the global
+// automation area). Every consumer measures content-Y from the same origin
+// (below the ruler / tracks header), so as long as tops mirror the DOM flow
+// nothing else changes.
+export function computeLaneTops(tracks, openSet, topOffset = 0) {
   const tops = new Array(tracks.length + 1);
-  let y = 0;
+  let y = topOffset;
   for (let i = 0; i < tracks.length; i++) {
     tops[i] = y;
     y += TRACK_H + trackExtraHeight(tracks[i], openSet);

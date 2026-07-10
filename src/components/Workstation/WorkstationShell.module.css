@@ -526,6 +526,59 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 
+/* ── Global automation (tempo) rows ──────────────────────
+   Heights MUST mirror across the header column and the timeline:
+   .globalStripRow ↔ .globalStrip (24px, = GLOBAL_STRIP_H) and the open lane
+   reuses .autoHeaderRow ↔ .autoLane (72px). laneTops' topOffset assumes it. */
+.globalStripRow {
+  height: 24px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+}
+.globalChevron {
+  background: transparent;
+  border: none;
+  color: var(--text-dimmer);
+  font-size: 9px;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.globalChevron:hover { color: var(--accent-color); }
+.globalStripLabel {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--text-dimmer);
+  text-transform: uppercase;
+}
+.globalStripHint {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--accent-color);
+  opacity: 0.8;
+  margin-left: auto;
+}
+.globalTargetSelect {
+  composes: autoAddSelect;
+  color: var(--text-primary);
+}
+.globalStrip {
+  height: 24px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* Live automated tempo readout beside the base BPM value (rAF-written). */
+.bpmLive {
+  font-size: 10px;
+  color: var(--accent-color);
+  opacity: 0.85;
+  margin-left: 6px;
+}
+
 /* ── Regions (clips) ─────────────────────────────────────── */
 .region {
   position: absolute;

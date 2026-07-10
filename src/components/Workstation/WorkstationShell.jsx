@@ -11,9 +11,10 @@ import { serializeProject, deserializeProject, downloadJSON, readJSONFile } from
 import { saveProject as storeSaveProject } from '../../utils/projectStore';
 import { EFFECT_DEFS, defaultParamsFor, automationTargetsFor, labelForTarget, metaForTarget } from './effectDefs';
 import {
-  TRACK_H, computeLaneTops, yToTrackIndex, targetKey, toKnob,
+  TRACK_H, AUTO_LANE_H, GLOBAL_STRIP_H, computeLaneTops, yToTrackIndex, targetKey, toKnob, denorm,
   isVolumeAutomated, isPanAutomated, automatedFxKeys,
 } from './automationMath';
+import { TEMPO_META, tempoPointsOf, buildTempoMap } from './tempoMath';
 import AutomationLane from './AutomationLane';
 import { bounceProject } from './audioBounce';
 import { exportWAV, exportMP3, trimExportBuffer } from '../../utils/audioExport';
@@ -73,7 +74,7 @@ const FADE_UI_MIN_PX = 30;
 // initializers below exactly, or "New Project" would differ from a fresh mount.
 const BLANK_PROJECT_DATA = {
   name: 'untitled', bpm: 120, totalMeasures: 200,
-  tracks: [], regions: [], notes: [],
+  tracks: [], regions: [], notes: [], globalAutomations: [],
   nextId: 1, nextRegionId: 1, nextEffectId: 1, nextNoteId: 0, nextAutomationId: 1,
   repairedCount: 0,
 };
@@ -163,6 +164,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // Index-based (points carry no ids); the central keydown handler re-resolves
   // validity through tracksRef before deleting, so stale selections are inert.
   const [selectedAnchor, setSelectedAnchor] = useState(null); // { trackId, automationId, pointIndex } | null
+  // Global (project-wide) automation lanes — currently only { kind: 'tempo' }.
+  // PROJECT DATA (unlike openAutomationTrackIds): serialized additively in
+  // .voxdaw files and part of undo history. The audio hook is the single
+  // writer of Transport.bpm (recomputeTempo); tempoMath.buildTempoMap is the
+  // measures↔seconds source of truth everywhere.
+  const [globalAutomations, setGlobalAutomations] = useState([]);
+  // The tempo lane's visibility (chevron in the global strip) — UI-only.
+  const [globalLaneOpen, setGlobalLaneOpen] = useState(false);
   // Performance quality (high/medium/low) — machine capability, not project
   // data: persisted in localStorage, never enters .voxdaw files or undo history.
   const [performanceQuality, setPerformanceQuality] = useState(() => {
@@ -204,9 +213,17 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // don't jump (a rounded unit shifts measure m by m·Δ px far down the timeline). Grid
   // lines are kept crisp instead by per-line whole-pixel snapping in drawGrid (canvas).
   const pixelsPerMeasure = PIXELS_PER_MEASURE * zoomLevel;
-  const pxPerSec         = (pixelsPerMeasure / 4) * (bpm / 60);
+  // Global automation area height — rows above track 0 inside the same
+  // scroller flow. laneTops mirror the DOM flow, so every geometry consumer
+  // (marquee, region drag, ghost, auto-scroll) stays correct untouched.
+  const globalAreaH = GLOBAL_STRIP_H + (globalLaneOpen ? AUTO_LANE_H : 0);
   // Cumulative row-top table — open automation sub-lanes make row Y non-uniform.
-  const laneTops = computeLaneTops(tracks, openAutomationTrackIds);
+  const laneTops = computeLaneTops(tracks, openAutomationTrackIds, globalAreaH);
+  // The (single) tempo automation, or an empty stand-in for the lane's dashed
+  // baseline — the real object is created lazily by commitTempoPoints.
+  const tempoAutomation = globalAutomations.find(a => a.target?.kind === 'tempo')
+    ?? { id: '__tempo__', target: { kind: 'tempo' }, points: [] };
+  const tempoAutomated = tempoAutomation.points.length > 0;
 
   const editorWrapRef        = useRef(null);
   const nextIdRef            = useRef(1);
@@ -221,6 +238,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const playheadRef          = useRef(null);
   const pianoRollPlayheadRef = useRef(null);
   const timeRef              = useRef(null);
+  const bpmLiveRef           = useRef(null); // live tempo readout (rAF textContent — zero re-render)
   const timelineRef          = useRef(null);
   const timelineCanvasRef    = useRef(null);   // pinned grid-line canvas over the timeline viewport
   const rulerRef             = useRef(null);
@@ -238,6 +256,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const tracksRef             = useRef([]);
   const selectedRegionIdsRef     = useRef(new Set());
   const selectedAnchorRef        = useRef(null);
+  const globalAutomationsRef     = useRef([]);
   const lastPianoScrollTopRef    = useRef(null); // null = no user scroll yet → default to C4
   const lastDragEndTimeRef       = useRef(0);
   const capturedRegionStartRef   = useRef(null);
@@ -362,11 +381,16 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     setProjectName(data.name ?? 'untitled');
     setBpm(data.bpm);
     setTempBpm(String(data.bpm));
-    Tone.Transport.bpm.value = data.bpm;
+    // No direct Transport.bpm write — recomputeTempo (the signal's single
+    // writer, via the hook's tempo-sync effect on the bpm/globalAutomations
+    // change) re-anchors the curve after this commit.
     setTotalMeasures(Math.max(24, data.totalMeasures));
     // Reset undo/redo to the loaded project (the load itself isn't an undoable step).
     timeTravelingRef.current = true; // make the recorder treat this commit as non-recordable
-    latestRef.current = { tracks: data.tracks, regions: data.regions, notes: data.notes };
+    latestRef.current = {
+      tracks: data.tracks, regions: data.regions, notes: data.notes,
+      globalAutomations: data.globalAutomations ?? [],
+    };
     burstActiveRef.current = false;
     if (burstTimerRef.current) { clearTimeout(burstTimerRef.current); burstTimerRef.current = null; }
     setPast([]);
@@ -374,6 +398,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     setTracks(data.tracks);
     setRegions(data.regions);
     setNotes(data.notes);
+    setGlobalAutomations(data.globalAutomations ?? []);
     nextIdRef.current       = data.nextId;
     nextRegionIdRef.current = data.nextRegionId;
     nextEffectIdRef.current = data.nextEffectId ?? 1;
@@ -387,7 +412,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // Projects grid reads from it. Producing a .voxdaw file moved to the export menu.
   const handleSaveProject = useCallback(async () => {
     try {
-      const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName });
+      const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations });
       const id = currentProjectId ?? crypto.randomUUID();
       await storeSaveProject({
         id, name: projectName, bpm, trackCount: tracks.length, data: payload,
@@ -398,15 +423,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       console.error('save project failed', e);
       showToast(`save failed: ${e.message}`);
     }
-  }, [bpm, totalMeasures, tracks, regions, notes, projectName, currentProjectId, showToast]);
+  }, [bpm, totalMeasures, tracks, regions, notes, globalAutomations, projectName, currentProjectId, showToast]);
 
   const handleExportProjectFile = useCallback(() => {
     setShowExportMenu(false);
-    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName });
+    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations });
     const filename = `${sanitizeFilename(projectName)}.voxdaw`;
     downloadJSON(payload, filename);
     showToast(`exported ${filename}`);
-  }, [bpm, totalMeasures, tracks, regions, notes, projectName, showToast]);
+  }, [bpm, totalMeasures, tracks, regions, notes, globalAutomations, projectName, showToast]);
 
   const handleLoadProject = useCallback(async (file) => {
     if (!file) return;
@@ -454,8 +479,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     setIsBouncing(true);
     showToast('bouncing audio…', 60000);
     try {
-      const capSec = totalMeasures * 4 * (60 / bpm);
-      const { buffer, firstOnsetSec } = await bounceProject({ tracks, regions, notes, bpm, capSec });
+      // Hard right stop through the tempo map (constant-bpm math would mis-cap
+      // a project whose tempo lane speeds up or slows down).
+      const capSec = buildTempoMap(bpm, tempoPointsOf(globalAutomations)).secondsAtMeasure(totalMeasures);
+      const { buffer, firstOnsetSec } = await bounceProject({ tracks, regions, notes, bpm, globalAutomations, capSec });
       // Trim leading silence to the first note's onset and trailing silence
       // after the last audible sample; null = nothing audible to export.
       const trimmed = firstOnsetSec == null
@@ -476,7 +503,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     } finally {
       setIsBouncing(false);
     }
-  }, [tracks, regions, notes, bpm, totalMeasures, isBouncing, showToast]);
+  }, [tracks, regions, notes, bpm, globalAutomations, totalMeasures, isBouncing, showToast]);
 
   // Mute and Solo are mutually exclusive per track: turning one ON clears the
   // other; turning one OFF changes nothing else.
@@ -568,6 +595,29 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       ? { ...t, automations: (t.automations ?? []).map(a => a.id === automationId ? { ...a, points } : a) }
       : t)), []);
 
+  // Tempo-lane commit. The tempo automation is created lazily on first commit;
+  // its id is minted OUTSIDE the updater (StrictMode double-invokes updaters —
+  // an inside mint would burn two ids).
+  const commitTempoPoints = useCallback((points) => {
+    const existing = globalAutomationsRef.current.find(a => a.target?.kind === 'tempo');
+    const id = existing?.id ?? ('a' + nextAutomationIdRef.current++);
+    setGlobalAutomations(prev => prev.some(a => a.id === id)
+      ? prev.map(a => (a.id === id ? { ...a, points } : a))
+      : [...prev, { id, target: { kind: 'tempo' }, points }]);
+  }, []);
+
+  // Tempo-lane drag preview (the applyAutomationValue pattern): a short ramp
+  // on Transport.bpm during the drag; the commit's setGlobalAutomations fires
+  // the hook's tempo-sync effect, whose recomputeTempo (the signal's single
+  // steady-state writer) re-anchors the whole curve on mouseup.
+  const previewTempo = useCallback((v01) => {
+    const sig = Tone.Transport.bpm;
+    const now = Tone.now();
+    sig.cancelScheduledValues(now);
+    sig.setValueAtTime(sig.value, now);
+    sig.linearRampToValueAtTime(denorm(v01, TEMPO_META), now + 0.02);
+  }, []);
+
   // Workstation audio engine — reconciles synths/gains/parts against tracks/regions/notes.
   // Does NOT call Tone.start(); the user-gesture path (handlePlayPause, RegionEditor preview)
   // already handles that. Stops Transport + disposes nodes on unmount → clean handoff to VoxTool.
@@ -575,7 +625,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     silenceAll, recomputeFades, loadingTrackIds,
     auditionAttack, auditionRelease, auditionReleaseAll, auditionPrime,
     applyAutomationValue,
-  } = useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality });
+  } = useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality, globalAutomations });
 
   // ── History recorder ────────────────────────────────────────
   // Passive: records AFTER React commits, so multi-setter actions (e.g. split =
@@ -584,7 +634,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // mid-flight commits (and continuous volume/pan slider commits) into a single entry.
   // Snapshots store array refs (state is updated immutably, so they're effectively frozen).
   useEffect(() => {
-    const cur = { tracks, regions, notes };
+    const cur = { tracks, regions, notes, globalAutomations };
     if (timeTravelingRef.current) {            // change came from undo/redo/load → don't record
       timeTravelingRef.current = false;
       latestRef.current = cur;
@@ -597,7 +647,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     // No real change (e.g. StrictMode's mount double-invoke, or a re-render that didn't
     // touch these arrays) → don't record. State updates immutably, so a changed array is
     // always a new reference.
-    if (baseline.tracks === cur.tracks && baseline.regions === cur.regions && baseline.notes === cur.notes) return;
+    if (baseline.tracks === cur.tracks && baseline.regions === cur.regions
+        && baseline.notes === cur.notes && baseline.globalAutomations === cur.globalAutomations) return;
     latestRef.current = cur;
     if (!burstActiveRef.current) {             // leading edge → push the pre-change snapshot
       burstActiveRef.current = true;
@@ -606,9 +657,12 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     }
     if (burstTimerRef.current) clearTimeout(burstTimerRef.current);
     burstTimerRef.current = setTimeout(() => { burstActiveRef.current = false; burstTimerRef.current = null; }, 200);
-  }, [tracks, regions, notes]);
+  }, [tracks, regions, notes, globalAutomations]);
 
-  const applyHistory = useCallback((s) => { setTracks(s.tracks); setRegions(s.regions); setNotes(s.notes); }, []);
+  const applyHistory = useCallback((s) => {
+    setTracks(s.tracks); setRegions(s.regions); setNotes(s.notes);
+    setGlobalAutomations(s.globalAutomations ?? []);
+  }, []);
   const endBurst = useCallback(() => {
     burstActiveRef.current = false;
     if (burstTimerRef.current) { clearTimeout(burstTimerRef.current); burstTimerRef.current = null; }
@@ -870,9 +924,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       // Force-solo the target: bounceProject's audibility rule
       // (!isMuted && (!anySoloed || isSolo)) then renders only this track.
       const soloed = tracksRef.current.map(t => ({ ...t, isSolo: t.id === trackId, isMuted: false }));
-      const capSec = totalMeasuresRef.current * 4 * (60 / bpm);
+      const globalAutos = globalAutomationsRef.current;
+      const capSec = buildTempoMap(bpm, tempoPointsOf(globalAutos)).secondsAtMeasure(totalMeasuresRef.current);
       const { buffer, firstOnsetSec } = await bounceProject({
-        tracks: soloed, regions: regionsRef.current, notes: notesRef.current, bpm, capSec,
+        tracks: soloed, regions: regionsRef.current, notes: notesRef.current, bpm,
+        globalAutomations: globalAutos, capSec,
       });
       const trimmed = firstOnsetSec == null
         ? null
@@ -1974,6 +2030,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   totalMeasuresRef.current      = totalMeasures;
   selectedRegionIdsRef.current  = selectedRegionIds;
   selectedAnchorRef.current     = selectedAnchor;
+  globalAutomationsRef.current  = globalAutomations;
   snapEnabledRef.current        = snapEnabled;
   editingTrackIdRef.current     = editingTrackId;
   laneTopsRef.current           = laneTops;
@@ -2036,6 +2093,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (playheadRef.current)          playheadRef.current.style.transform          = `translateX(${x}px)`;
     if (pianoRollPlayheadRef.current) pianoRollPlayheadRef.current.style.transform = `translateX(${x}px)`;
     if (timeRef.current)              timeRef.current.textContent                  = formatTime(Tone.Transport.seconds);
+    // Live automated tempo (span only rendered while the tempo lane has points).
+    if (bpmLiveRef.current)           bpmLiveRef.current.textContent               = `∿${Math.round(Tone.Transport.bpm.value)}`;
   }, [pixelsPerMeasure]);
 
   // Reposition playhead when zoom changes (even while paused) — layout phase so the
@@ -2088,7 +2147,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   const handlePlayPause = useCallback(async () => {
     await Tone.start();
-    Tone.Transport.bpm.value = bpm;
+    // No direct Transport.bpm write — recomputeFades → recomputeTempo (the
+    // signal's single writer) re-anchors the bpm curve on the resume branch.
     if (Tone.Transport.state === 'started') {
       Tone.Transport.pause();
       silenceAll();
@@ -2100,7 +2160,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       Tone.Transport.start();
       setIsPlaying(true);
     }
-  }, [updatePlayhead, bpm, silenceAll, recomputeFades]);
+  }, [updatePlayhead, silenceAll, recomputeFades]);
 
   const handleStop = useCallback(() => {
     Tone.Transport.stop();
@@ -2245,16 +2305,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (isNaN(n)) n = bpm;
     n = Math.max(20, Math.min(300, n));
 
-    if (n !== bpm) {
-      // Tone's source of truth is ticks; assigning .bpm.value preserves the
-      // current tick (and therefore musical position) automatically. A manual
-      // seconds rescale here would re-convert seconds→ticks at the old bpm,
-      // perturbing ticks by bpm_old/n — invisible while paused but a visible
-      // playhead jump under the tick-driven visual loop.
-      Tone.Transport.bpm.value = n;
-      recomputeFades();
-    }
-
+    // No direct Transport.bpm write: the hook's tempo-sync effect fires on the
+    // setBpm commit and recomputeTempo (the signal's single writer) re-anchors
+    // the whole curve. Tone's source of truth is ticks, so the bpm change
+    // preserves musical position automatically — no playhead jump.
     setBpm(n);
     setTempBpm(String(n));
     setEditingBpm(false);
@@ -2266,18 +2320,21 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (!scroller) return;
     const rect = scroller.getBoundingClientRect();
     const x    = clientX - (rect.left + headerColW()) + scroller.scrollLeft;
+    // Tick-domain seek: pixels are measure-based, so x → measures → ticks is
+    // exact at ANY tempo (a seconds conversion would be wrong under the tempo
+    // lane and needlessly bpm-coupled without it).
     if (snapEnabled) {
       const snapInc      = getSnapIncrement(pixelsPerMeasure);
       const rawMeasures  = x / pixelsPerMeasure;
       const snapMeasures = Math.max(0, Math.round(rawMeasures / snapInc) * snapInc);
-      Tone.Transport.seconds = snapMeasures * 4 * (60 / bpm);
+      Tone.Transport.ticks = Math.round(snapMeasures * 4 * Tone.Transport.PPQ);
     } else {
-      Tone.Transport.seconds = Math.max(0, x / pxPerSec);
+      Tone.Transport.ticks = Math.round(Math.max(0, x / pixelsPerMeasure) * 4 * Tone.Transport.PPQ);
     }
     silenceAll(); // cut any voice still ringing from the pre-seek position (ghost note)
     recomputeFades();
     updatePlayhead();
-  }, [pxPerSec, updatePlayhead, snapEnabled, pixelsPerMeasure, bpm, recomputeFades, silenceAll]);
+  }, [updatePlayhead, snapEnabled, pixelsPerMeasure, recomputeFades, silenceAll]);
 
   const handleMouseDown = (e) => {
     // The sticky header column lives inside this scroller now — its controls
@@ -2574,6 +2631,17 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         }
         if (selectedAnchorRef.current) {
           const { trackId, automationId, pointIndex } = selectedAnchorRef.current;
+          if (trackId === '__global__') {
+            // Global (tempo) lane — keyed by kind, not id (see the lane's
+            // onSelectPoint).
+            const a = globalAutomationsRef.current.find(x => x.target?.kind === 'tempo');
+            if (a && pointIndex < (a.points?.length ?? 0)) {
+              e.preventDefault();
+              commitTempoPoints(a.points.filter((_, k) => k !== pointIndex));
+            }
+            setSelectedAnchor(null);
+            return;
+          }
           const t = tracksRef.current.find(x => x.id === trackId);
           const a = t?.automations?.find(x => x.id === automationId);
           if (a && pointIndex < (a.points?.length ?? 0)) {
@@ -2695,7 +2763,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           if (!editingTrackIdRef.current) return;
           e.preventDefault();
           const tid = editingTrackIdRef.current;
-          const anchorBeat = Tone.Transport.seconds / (60 / bpm);
+          // Ticks → beats: exact at any tempo (seconds/constant-bpm is not).
+          const anchorBeat = Tone.Transport.ticks / Tone.Transport.PPQ;
 
           let nextRegions = regionsRef.current;
           let nextNotes   = notesRef.current;
@@ -2751,8 +2820,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           setNotes(dedupePerfectOverlaps(nextNotes, newIds));
           noteSelectionApiRef.current?.setIds(newIds);
           if (Tone.Transport.state !== 'started') {
-            const maxEnd = Math.max(...pasteEnds);
-            Tone.Transport.seconds = maxEnd * (60 / bpm);
+            const maxEnd = Math.max(...pasteEnds); // beats
+            Tone.Transport.ticks = Math.round(maxEnd * Tone.Transport.PPQ);
             updatePlayhead();
           }
           return;
@@ -2811,7 +2880,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         // Phase 104/105: advance global playhead to the right edge of the pasted payload —
         // but only when transport is not playing, so the live sweep isn't interrupted (Phase 105 guard).
         if (Tone.Transport.state !== 'started') {
-          Tone.Transport.seconds = rightEdge * 4 * (60 / bpm);
+          Tone.Transport.ticks = Math.round(rightEdge * 4 * Tone.Transport.PPQ);
           updatePlayhead();
         }
         return;
@@ -2819,7 +2888,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [bpm, updatePlayhead, commitAutomationPoints]);
+  }, [bpm, updatePlayhead, commitAutomationPoints, commitTempoPoints]);
 
   return (
     <div ref={shellRef} className={styles.shell} style={{ '--left-col-width': `${leftColWidth}px` }}>
@@ -2947,6 +3016,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                 {bpm}
               </span>
             )}
+            {tempoAutomated && (
+              <span ref={bpmLiveRef} className={styles.bpmLive} title="live tempo (automated)">∿{bpm}</span>
+            )}
           </div>
           <div className={styles.meta}>
             <span className={styles.metaLabel}>TIME</span>
@@ -2976,6 +3048,27 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           {/* Track header column — sticky-left inside the scroller */}
           <div ref={trackHeadersRef} className={styles.trackHeaders}>
           <div className={styles.tracksHeader}>tracks</div>
+          {/* Global automation strip + tempo lane header — heights MUST mirror
+              the timeline side's rows (laneTops' topOffset assumes it). */}
+          <div className={styles.globalStripRow}>
+            <button
+              className={styles.globalChevron}
+              onClick={() => setGlobalLaneOpen(v => !v)}
+              title={globalLaneOpen ? 'collapse global automation' : 'expand global automation'}
+            >
+              {globalLaneOpen ? '▾' : '▸'}
+            </button>
+            <span className={styles.globalStripLabel}>global</span>
+            {tempoAutomated && !globalLaneOpen && <span className={styles.globalStripHint}>∿ tempo</span>}
+          </div>
+          {globalLaneOpen && (
+            <div className={styles.autoHeaderRow} style={{ '--track-color': 'var(--accent-color)' }}>
+              <select className={styles.globalTargetSelect} value="tempo" onChange={() => {}}>
+                <option value="tempo">tempo</option>
+              </select>
+              <span className={styles.globalStripHint}>{TEMPO_META.min}–{TEMPO_META.max} bpm</span>
+            </div>
+          )}
           {tracks.length === 0 ? (
             <div className={styles.emptyState}>
               <p className={styles.emptyTitle}>no tracks</p>
@@ -3138,6 +3231,35 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                 });
               })()}
             </div>
+
+            {/* Global automation strip + tempo lane — heights mirror the header
+                column's globalStripRow/autoHeaderRow (laneTops assumes it).
+                The strip is inert: no seek/marquee from inside it. */}
+            <div className={styles.globalStrip} onMouseDown={(e) => e.stopPropagation()} />
+            {globalLaneOpen && (
+              <div className={styles.autoLane} style={{ '--track-color': 'var(--accent-color)' }}>
+                <AutomationLane
+                  automation={tempoAutomation}
+                  meta={TEMPO_META}
+                  baselineValue01={toKnob(Math.max(TEMPO_META.min, Math.min(TEMPO_META.max, bpm)), TEMPO_META)}
+                  pixelsPerMeasure={pixelsPerMeasure}
+                  totalMeasures={totalMeasures}
+                  snapIncrement={getSnapIncrement(pixelsPerMeasure)}
+                  snapEnabledRef={snapEnabledRef}
+                  onCommitPoints={commitTempoPoints}
+                  onLivePreview={previewTempo}
+                  selectedPointIndex={
+                    // Keyed by the constant 'tempo' (not the automation id —
+                    // the id is minted on first commit AFTER selection fires).
+                    selectedAnchor?.trackId === '__global__' && selectedAnchor?.automationId === 'tempo'
+                      ? selectedAnchor.pointIndex : null
+                  }
+                  onSelectPoint={(i) => setSelectedAnchor(
+                    i == null ? null : { trackId: '__global__', automationId: 'tempo', pointIndex: i }
+                  )}
+                />
+              </div>
+            )}
 
             {/* Track lanes */}
             {tracks.map((t) => {

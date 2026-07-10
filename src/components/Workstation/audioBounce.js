@@ -3,6 +3,7 @@ import { makeSynth, isDrumKit, chokeTargetsFor } from './synthFactory';
 import { makeFxGraph } from './fxChain';
 import { EFFECT_DEFS } from './effectDefs';
 import { automationValueAt, denorm } from './automationMath';
+import { buildTempoMap, tempoPointsOf } from './tempoMath';
 import {
   buildRegionEvents,
   volForSliderValue,
@@ -27,14 +28,13 @@ function estimateFxTailSec(tracks) {
 
 // Schedule a track's automation envelopes in the OFFLINE context. The offline
 // transport starts at 0, so transport time == context time and every point
-// lands at plain `point.time * secPerMeasure` — mirrors the live scheduler in
+// lands at the tempo map's secondsAtMeasure — mirrors the live scheduler in
 // useWorkstationAudio (same exp/linear rule, same coupled-wet ctx). 'set'-kind
 // (plain-setter) targets are pushed onto `stepped` for the shared ~30 Hz
 // scheduleRepeat driver built after the track loop. Automations targeting a
 // bypassed effect are skipped (offline never builds those graphs — matches
 // the live engine, where a pruned bypass graph renders nothing).
-function scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, bpm, stepped) {
-  const secPerMeasure = 4 * (60 / bpm);
+function scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, tempoMap, stepped) {
   for (const a of t.automations ?? []) {
     const pts = a.points ?? [];
     if (pts.length === 0) continue;
@@ -74,7 +74,7 @@ function scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, bpm, stepped
       let prev = map(toParam(automationValueAt(pts, 0)), ctx);
       param.setValueAtTime(prev, 0);
       for (const p of pts) {
-        const at = p.time * secPerMeasure;
+        const at = tempoMap.secondsAtMeasure(p.time);
         if (at <= 0) continue;
         const val = map(toParam(p.value), ctx);
         if (exp && val > 0 && prev > 0) param.exponentialRampToValueAtTime(val, at);
@@ -102,16 +102,27 @@ function scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, bpm, stepped
  * across audible tracks (for export start-trim), or null if nothing audible
  * is scheduled at all.
  */
-export async function bounceProject({ tracks, regions, notes, bpm, tailSec = null, capSec = Infinity }) {
+export async function bounceProject({ tracks, regions, notes, bpm, globalAutomations = [], tailSec = null, capSec = Infinity }) {
   const rightMeasure = regions.reduce(
     (m, r) => Math.max(m, r.startMeasure + r.durationMeasures), 0,
   );
+  // Tempo map — identical math to the live engine's recomputeTempo, and the
+  // offline transport starts at 0 so map seconds == context seconds exactly.
+  const tempoMap = buildTempoMap(bpm, tempoPointsOf(globalAutomations));
   const tail = tailSec ?? estimateFxTailSec(tracks);
-  const durationSec = Math.max(0.1, Math.min(rightMeasure * 4 * (60 / bpm) + tail, capSec));
+  const durationSec = Math.max(0.1, Math.min(tempoMap.secondsAtMeasure(rightMeasure) + tail, capSec));
   let minOnsetTicks = Infinity;
 
   const buffer = await Tone.Offline(async ({ transport }) => {
-    transport.bpm.value = bpm;
+    // Schedule the same bpm curve the live transport plays (flat base bpm
+    // when the tempo lane is empty).
+    transport.bpm.value = tempoMap.anchors.length ? tempoMap.anchors[0].bpm : bpm;
+    let prevAt = 0;
+    for (const a of tempoMap.anchors) {
+      if (a.seconds <= prevAt + 1e-6) transport.bpm.setValueAtTime(a.bpm, a.seconds);
+      else transport.bpm.linearRampToValueAtTime(a.bpm, a.seconds);
+      prevAt = a.seconds;
+    }
     const anySoloed = tracks.some(t => t.isSolo);
 
     // Per-track volume → pan → [FX] → mute → destination
@@ -140,11 +151,12 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = nul
       const pan     = new Tone.Panner(Math.max(-1, Math.min(1, t.pan ?? 0))).connect(head);
       const volume  = new Tone.Gain(volForSliderValue(t.volume ?? 75)).connect(pan);
       trackVolumeByTrackId.set(t.id, volume);
-      scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, bpm, steppedAutomation);
+      scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, tempoMap, steppedAutomation);
     }
     if (steppedAutomation.length > 0) {
       transport.scheduleRepeat(() => {
-        const tM = transport.seconds / (4 * (60 / bpm));
+        // Ticks are canonical musical time — correct under the tempo curve.
+        const tM = transport.ticks / (transport.PPQ * 4);
         for (const s of steppedAutomation) {
           const v01 = automationValueAt(s.points, tM);
           if (v01 != null) s.set(s.toParam(v01));
@@ -162,7 +174,7 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = nul
       const fadeGain = new Tone.Gain(1).connect(trackVolume);
       const synth    = makeSynth(track.instrument, { envelope: track.envelope }).connect(fadeGain);
 
-      scheduleFadeEnvelope(fadeGain, r, bpm);
+      scheduleFadeEnvelope(fadeGain, r, { current: tempoMap });
 
       const events = buildRegionEvents(r, notes);
       if (events.length > 0) {
@@ -178,6 +190,15 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = nul
         // attack (one-shot — the source self-stops at buffer end, so drawn
         // note length never truncates a cymbal). Melodic path unchanged.
         const isDrum = isDrumKit(track.instrument);
+        // Melodic durations resolve through the tempo map (a note held THROUGH
+        // a tempo ramp releases at its true musical end) — mirrors the live
+        // makePartCallback. Event time/duration are "<ticks>i" strings.
+        const durSecOf = (ev) => {
+          const q = Tone.Transport.PPQ * 4;
+          const m0 = parseInt(ev.time, 10) / q;
+          const m1 = m0 + parseInt(ev.duration, 10) / q;
+          return tempoMap.secondsAtMeasure(m1) - tempoMap.secondsAtMeasure(m0);
+        };
         new Tone.Part(
           isDrum
             ? (time, ev) => {
@@ -185,7 +206,7 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = nul
                 for (const tgt of chokeTargetsFor(ev.note)) synth.triggerRelease(tgt, t);
                 synth.triggerAttack(ev.note, t, 0.8);
               }
-            : (time, ev) => synth.triggerAttackRelease(ev.note, ev.duration, time, 0.8),
+            : (time, ev) => synth.triggerAttackRelease(ev.note, durSecOf(ev), time, 0.8),
           events,
         ).start(0);
       }
@@ -200,6 +221,6 @@ export async function bounceProject({ tracks, regions, notes, bpm, tailSec = nul
 
   const firstOnsetSec = minOnsetTicks === Infinity
     ? null
-    : (minOnsetTicks / Tone.Transport.PPQ) * (60 / bpm);
+    : tempoMap.secondsAtMeasure(minOnsetTicks / (Tone.Transport.PPQ * 4));
   return { buffer: buffer.get(), firstOnsetSec };
 }
