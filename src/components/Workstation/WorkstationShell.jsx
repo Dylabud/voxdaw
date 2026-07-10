@@ -653,7 +653,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     silenceAll, recomputeFades, loadingTrackIds,
     auditionAttack, auditionRelease, auditionReleaseAll, auditionPrime,
     applyAutomationValue,
-  } = useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality, globalAutomations });
+  } = useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality, globalAutomations, groups });
 
   // ── History recorder ────────────────────────────────────────
   // Passive: records AFTER React commits, so multi-setter actions (e.g. split =
