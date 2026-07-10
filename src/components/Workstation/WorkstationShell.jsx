@@ -17,6 +17,7 @@ import {
 import { TEMPO_META, tempoPointsOf, buildTempoMap } from './tempoMath';
 import AutomationLane from './AutomationLane';
 import GroupModal from './GroupModal';
+import GroupFxPanel from './GroupFxPanel';
 import { bounceProject } from './audioBounce';
 import { exportWAV, exportMP3, trimExportBuffer } from '../../utils/audioExport';
 import { transcribeAudio } from './transcribeAudio';
@@ -188,6 +189,12 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [renamingGroupId, setRenamingGroupId] = useState(null);
   // { initiatorTrackId } | null — the create-group checkbox modal.
   const [groupModal, setGroupModal] = useState(null);
+  // Group whose effects rack is docked at the bottom (mutually exclusive with
+  // the track editor — opening one closes the other). UI-only.
+  const [editingGroupId, setEditingGroupId] = useState(null);
+  // Opening the track editor (double-click, ✎, …) evicts the group rack; the
+  // group fx button does the reverse inline.
+  useEffect(() => { if (editingTrackId != null) setEditingGroupId(null); }, [editingTrackId]);
   // Performance quality (high/medium/low) — machine capability, not project
   // data: persisted in localStorage, never enters .voxdaw files or undo history.
   const [performanceQuality, setPerformanceQuality] = useState(() => {
@@ -233,11 +240,11 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // scroller flow. laneTops mirror the DOM flow, so every geometry consumer
   // (marquee, region drag, ghost, auto-scroll) stays correct untouched.
   const globalAreaH = GLOBAL_STRIP_H + (globalLaneOpen ? AUTO_LANE_H : 0);
-  // Cumulative row-top table — open automation sub-lanes, group header rows
-  // and collapsed groups all make row Y non-uniform.
-  const laneTops = computeLaneTops(tracks, openAutomationTrackIds, globalAreaH,
-    { collapsedIds: collapsedGroupIds });
   const groupById = new Map(groups.map(g => [g.id, g]));
+  // Cumulative row-top table — open automation sub-lanes (track AND group),
+  // group header rows and collapsed groups all make row Y non-uniform.
+  const laneTops = computeLaneTops(tracks, openAutomationTrackIds, globalAreaH,
+    { collapsedIds: collapsedGroupIds, byId: groupById });
   // The (single) tempo automation, or an empty stand-in for the lane's dashed
   // baseline — the real object is created lazily by commitTempoPoints.
   const tempoAutomation = globalAutomations.find(a => a.target?.kind === 'tempo')
@@ -509,7 +516,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       // Hard right stop through the tempo map (constant-bpm math would mis-cap
       // a project whose tempo lane speeds up or slows down).
       const capSec = buildTempoMap(bpm, tempoPointsOf(globalAutomations)).secondsAtMeasure(totalMeasures);
-      const { buffer, firstOnsetSec } = await bounceProject({ tracks, regions, notes, bpm, globalAutomations, capSec });
+      const { buffer, firstOnsetSec } = await bounceProject({ tracks, regions, notes, bpm, globalAutomations, groups, capSec });
       // Trim leading silence to the first note's onset and trailing silence
       // after the last audible sample; null = nothing audible to export.
       const trimmed = firstOnsetSec == null
@@ -530,7 +537,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     } finally {
       setIsBouncing(false);
     }
-  }, [tracks, regions, notes, bpm, globalAutomations, totalMeasures, isBouncing, showToast]);
+  }, [tracks, regions, notes, bpm, globalAutomations, groups, totalMeasures, isBouncing, showToast]);
 
   // Mute and Solo are mutually exclusive per track: turning one ON clears the
   // other; turning one OFF changes nothing else.
@@ -622,6 +629,50 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     t.id === trackId
       ? { ...t, automations: (t.automations ?? []).map(a => a.id === automationId ? { ...a, points } : a) }
       : t)), []);
+
+  // ── Group effects + automation CRUD — setGroups twins of the track versions.
+  // Same eager id mints (e<n>/a<n> namespaces span tracks AND groups), same
+  // orphan-GC on effect removal, same one-lane-per-target rule.
+  const addGroupEffect = useCallback((groupId, fxType) => {
+    const def = EFFECT_DEFS[fxType];
+    if (!def) return;
+    const fx = { id: `e${nextEffectIdRef.current++}`, type: fxType, bypass: false, params: defaultParamsFor(fxType) };
+    setGroups(prev => prev.map(g =>
+      g.id === groupId ? { ...g, effects: [...(g.effects ?? []), fx] } : g));
+  }, []);
+  const removeGroupEffect = useCallback((groupId, fxId) => setGroups(prev => prev.map(g =>
+    g.id === groupId
+      ? {
+          ...g,
+          effects: (g.effects ?? []).filter(e => e.id !== fxId),
+          automations: (g.automations ?? []).filter(a => !(a.target?.kind === 'fx' && a.target.effectId === fxId)),
+        }
+      : g)), []);
+  const toggleBypassGroupEffect = useCallback((groupId, fxId) => setGroups(prev => prev.map(g =>
+    g.id === groupId
+      ? { ...g, effects: (g.effects ?? []).map(e => e.id === fxId ? { ...e, bypass: !e.bypass } : e) }
+      : g)), []);
+  const updateGroupEffectSettings = useCallback((groupId, fxId, newParams) => setGroups(prev => prev.map(g =>
+    g.id === groupId
+      ? { ...g, effects: (g.effects ?? []).map(e => e.id === fxId ? { ...e, params: { ...e.params, ...newParams } } : e) }
+      : g)), []);
+  const addGroupAutomation = useCallback((groupId, target) => {
+    const id = `a${nextAutomationIdRef.current++}`; // eager mint (StrictMode)
+    setGroups(prev => prev.map(g => {
+      if (g.id !== groupId) return g;
+      const existing = g.automations ?? [];
+      if (existing.some(a => targetKey(a.target) === targetKey(target))) return g;
+      return { ...g, automations: [...existing, { id, target, points: [] }] };
+    }));
+  }, []);
+  const removeGroupAutomation = useCallback((groupId, automationId) => setGroups(prev => prev.map(g =>
+    g.id === groupId
+      ? { ...g, automations: (g.automations ?? []).filter(a => a.id !== automationId) }
+      : g)), []);
+  const commitGroupAutomationPoints = useCallback((groupId, automationId, points) => setGroups(prev => prev.map(g =>
+    g.id === groupId
+      ? { ...g, automations: (g.automations ?? []).map(a => a.id === automationId ? { ...a, points } : a) }
+      : g)), []);
 
   // Tempo-lane commit. The tempo automation is created lazily on first commit;
   // its id is minted OUTSIDE the updater (StrictMode double-invokes updaters —
@@ -1053,11 +1104,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       // Force-solo the target: bounceProject's audibility rule
       // (!isMuted && (!anySoloed || isSolo)) then renders only this track.
       const soloed = tracksRef.current.map(t => ({ ...t, isSolo: t.id === trackId, isMuted: false }));
+      // Neutralize group mute/solo too — a muted parent group would silence
+      // the stem; the soloed track still prints THROUGH its group's FX chain
+      // (the desired bus sound).
+      const neutralGroups = groupsRef.current.map(g => ({ ...g, isMuted: false, isSolo: false }));
       const globalAutos = globalAutomationsRef.current;
       const capSec = buildTempoMap(bpm, tempoPointsOf(globalAutos)).secondsAtMeasure(totalMeasuresRef.current);
       const { buffer, firstOnsetSec } = await bounceProject({
         tracks: soloed, regions: regionsRef.current, notes: notesRef.current, bpm,
-        globalAutomations: globalAutos, capSec,
+        globalAutomations: globalAutos, groups: neutralGroups, capSec,
       });
       const trimmed = firstOnsetSec == null
         ? null
@@ -2801,11 +2856,16 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             setSelectedAnchor(null);
             return;
           }
+          // Channel = track or group (disjoint id namespaces; the commit
+          // setter differs by which list resolves the id).
           const t = tracksRef.current.find(x => x.id === trackId);
-          const a = t?.automations?.find(x => x.id === automationId);
+          const grp = t ? null : groupsRef.current.find(x => x.id === trackId);
+          const a = (t ?? grp)?.automations?.find(x => x.id === automationId);
           if (a && pointIndex < (a.points?.length ?? 0)) {
             e.preventDefault();
-            commitAutomationPoints(trackId, automationId, a.points.filter((_, k) => k !== pointIndex));
+            const pts = a.points.filter((_, k) => k !== pointIndex);
+            if (t) commitAutomationPoints(trackId, automationId, pts);
+            else   commitGroupAutomationPoints(trackId, automationId, pts);
           }
           setSelectedAnchor(null);
           return;
@@ -3047,7 +3107,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [bpm, updatePlayhead, commitAutomationPoints, commitTempoPoints]);
+  }, [bpm, updatePlayhead, commitAutomationPoints, commitGroupAutomationPoints, commitTempoPoints]);
 
   return (
     <div ref={shellRef} className={styles.shell} style={{ '--left-col-width': `${leftColWidth}px` }}>
@@ -3285,6 +3345,21 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                       </span>
                     )}
                     <div className={styles.groupControls}>
+                      <button
+                        className={openAutomationTrackIds.has(group.id) ? styles.trackBtnActive : styles.trackBtn}
+                        onClick={(e) => { e.stopPropagation(); toggleAutomationArea(group.id); }}
+                        title={openAutomationTrackIds.has(group.id) ? 'Hide group automation' : 'Show group automation'}>
+                        <svg viewBox="0 0 16 12" width="14" height="10" fill="none"
+                             stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"
+                             strokeLinejoin="round" style={{ display: 'block', margin: '0 auto' }}
+                             aria-hidden="true">
+                          <path d="M1 6 h3.2 l1.8-4.2 l4 8.4 l1.8-4.2 h3.2" />
+                        </svg>
+                      </button>
+                      <button
+                        className={editingGroupId === group.id ? styles.trackBtnActive : styles.trackBtn}
+                        onClick={() => { setEditingGroupId(prev => prev === group.id ? null : group.id); setEditingTrackId(null); }}
+                        title="Group effects rack">fx</button>
                       <PanKnob
                         value={group.pan ?? 0}
                         onChange={(v) => handleGroupPanChange(group.id, v)}
@@ -3311,6 +3386,40 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                         onClick={() => toggleGroupSolo(group.id)} title="Solo group">S</button>
                     </div>
                   </div>
+                )}
+                {/* Group automation header sub-rows — heights MUST mirror the
+                    timeline's group .autoLane / .autoAddStrip (laneTops assumes it). */}
+                {isFirstMember && openAutomationTrackIds.has(group.id) && (
+                  <>
+                    {(group.automations ?? []).map(a => (
+                      <div key={a.id} className={styles.autoHeaderRow} style={{ '--track-color': group.color }}>
+                        <span className={styles.autoHeaderLabel}>{labelForTarget(group, a.target)}</span>
+                        <button
+                          className={styles.autoHeaderDelete}
+                          title="Delete automation"
+                          onClick={() => removeGroupAutomation(group.id, a.id)}>×</button>
+                      </div>
+                    ))}
+                    <div className={styles.autoAddRow} style={{ '--track-color': group.color }}>
+                      <select
+                        className={styles.autoAddSelect}
+                        value=""
+                        aria-label="Add group automation"
+                        onChange={(e) => {
+                          const opt = automationTargetsFor(group).find(x => x.key === e.target.value);
+                          if (opt) addGroupAutomation(group.id, opt.target);
+                          e.target.value = '';
+                        }}>
+                        <option value="" disabled>+ automation</option>
+                        {(() => {
+                          const existing = new Set((group.automations ?? []).map(a => targetKey(a.target)));
+                          return automationTargetsFor(group)
+                            .filter(o => !existing.has(o.key))
+                            .map(o => <option key={o.key} value={o.key}>{o.label}</option>);
+                        })()}
+                      </select>
+                    </div>
+                  </>
                 )}
                 {!isCollapsed && (<>
                 <div className={`${styles.trackRow}${group ? ` ${styles.trackRowGrouped}` : ''}${editingTrackId === t.id ? ` ${styles.trackRowActive}` : activeTrackId === t.id ? ` ${styles.trackRowFocused}` : ''}`}
@@ -3517,6 +3626,45 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                       setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'group', targetId: group.id });
                     }}
                   />
+                )}
+                {/* Group automation sub-lanes — mirror the header column's rows. */}
+                {isFirstMember && openAutomationTrackIds.has(group.id) && (
+                  <>
+                    {(group.automations ?? []).map(a => {
+                      const meta = metaForTarget(group, a.target);
+                      if (!meta) return null; // orphan guard (deserialize also drops these)
+                      const baseline = a.target.kind === 'volume'
+                        ? (group.volume ?? 75) / 100
+                        : a.target.kind === 'pan'
+                          ? ((group.pan ?? 0) + 1) / 2
+                          : toKnob(
+                              (group.effects ?? []).find(fx => fx.id === a.target.effectId)?.params?.[a.target.param] ?? meta.default,
+                              meta);
+                      return (
+                        <div key={a.id} className={styles.autoLane} style={{ '--track-color': group.color }}>
+                          <AutomationLane
+                            automation={a}
+                            meta={meta}
+                            baselineValue01={baseline}
+                            pixelsPerMeasure={pixelsPerMeasure}
+                            totalMeasures={totalMeasures}
+                            snapIncrement={getSnapIncrement(pixelsPerMeasure)}
+                            snapEnabledRef={snapEnabledRef}
+                            onCommitPoints={(pts) => commitGroupAutomationPoints(group.id, a.id, pts)}
+                            onLivePreview={(v01) => applyAutomationValue?.(group.id, a.target, v01)}
+                            selectedPointIndex={
+                              selectedAnchor?.trackId === group.id && selectedAnchor?.automationId === a.id
+                                ? selectedAnchor.pointIndex : null
+                            }
+                            onSelectPoint={(i) => setSelectedAnchor(
+                              i == null ? null : { trackId: group.id, automationId: a.id, pointIndex: i }
+                            )}
+                          />
+                        </div>
+                      );
+                    })}
+                    <div className={styles.autoAddStrip} />
+                  </>
                 )}
                 {!isCollapsed && (<>
                 <div className={styles.trackLane}
@@ -3792,6 +3940,24 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         </div>
       </div>
       {toastMessage && <div className={styles.toast}>{toastMessage}</div>}
+
+      {/* ── Group effects rack (bottom dock, editor's slot) ── */}
+      {editingGroupId && !editingTrackId && groupById.get(editingGroupId) && (
+        <>
+          <div data-no-note-deselect className={styles.divider} onMouseDown={startDividerDrag} title="Drag to resize" />
+          <div ref={editorWrapRef} className={styles.editorWrap} style={{ height: editorHeight }}>
+            <GroupFxPanel
+              group={groupById.get(editingGroupId)}
+              performanceQuality={performanceQuality}
+              onClose={() => setEditingGroupId(null)}
+              onAdd={addGroupEffect}
+              onRemove={removeGroupEffect}
+              onToggleBypass={toggleBypassGroupEffect}
+              onUpdate={updateGroupEffectSettings}
+            />
+          </div>
+        </>
+      )}
 
       {/* ── Piano roll editor ────────────────────────────── */}
       {editingTrackId && (

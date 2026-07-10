@@ -9,19 +9,40 @@ import {
   volForSliderValue,
   scheduleFadeEnvelope,
   estimateTrackTailSec,
+  estimateGroupTailSec,
 } from '../../hooks/useWorkstationAudio';
+
+// Group-aware audibility — the live engine's effect #2 rule: a solo anywhere
+// (track or group) gates everything; a track is heard iff neither it nor its
+// group is muted AND (nothing soloed OR it/its group is soloed).
+function computeAudibility(tracks, groups) {
+  const groupById = new Map(groups.map(g => [g.id, g]));
+  const anySoloed = tracks.some(t => t.isSolo) || groups.some(g => g.isSolo);
+  const trackAudible = (t) => {
+    const grp = t.groupId ? groupById.get(t.groupId) : null;
+    return !t.isMuted && !grp?.isMuted && (!anySoloed || t.isSolo || !!grp?.isSolo);
+  };
+  const groupAudible = (g) => {
+    const memberSolo = tracks.some(t => t.groupId === g.id && t.isSolo);
+    return !g.isMuted && (!anySoloed || g.isSolo || memberSolo);
+  };
+  return { groupById, trackAudible, groupAudible };
+}
 
 // Upper bound on how long the audible tracks can ring past the last note,
 // so the render window covers the full tail (trimExportBuffer then finds the
 // real endpoint by scanning). Per-track math lives in estimateTrackTailSec
 // (shared with the live engine's activity pruner): synth release, drum
 // one-shots, non-bypassed delay/reverb decay to −60 dB, clamp [2, 30].
-function estimateFxTailSec(tracks) {
-  const anySoloed = tracks.some(t => t.isSolo);
+// A grouped track's ring-out passes through the group bus's own FX — SERIAL
+// chains ring sequentially, so the tails add before the final clamp.
+function estimateFxTailSec(tracks, groups = []) {
+  const { groupById, trackAudible } = computeAudibility(tracks, groups);
   let tail = 0;
   for (const t of tracks) {
-    if (t.isMuted || (anySoloed && !t.isSolo)) continue;
-    tail = Math.max(tail, estimateTrackTailSec(t));
+    if (!trackAudible(t)) continue;
+    const grp = t.groupId ? groupById.get(t.groupId) : null;
+    tail = Math.max(tail, estimateTrackTailSec(t) + (grp ? estimateGroupTailSec(grp) : 0));
   }
   return Math.min(30, Math.max(2, tail));
 }
@@ -102,14 +123,14 @@ function scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, tempoMap, st
  * across audible tracks (for export start-trim), or null if nothing audible
  * is scheduled at all.
  */
-export async function bounceProject({ tracks, regions, notes, bpm, globalAutomations = [], tailSec = null, capSec = Infinity }) {
+export async function bounceProject({ tracks, regions, notes, bpm, globalAutomations = [], groups = [], tailSec = null, capSec = Infinity }) {
   const rightMeasure = regions.reduce(
     (m, r) => Math.max(m, r.startMeasure + r.durationMeasures), 0,
   );
   // Tempo map — identical math to the live engine's recomputeTempo, and the
   // offline transport starts at 0 so map seconds == context seconds exactly.
   const tempoMap = buildTempoMap(bpm, tempoPointsOf(globalAutomations));
-  const tail = tailSec ?? estimateFxTailSec(tracks);
+  const tail = tailSec ?? estimateFxTailSec(tracks, groups);
   const durationSec = Math.max(0.1, Math.min(tempoMap.secondsAtMeasure(rightMeasure) + tail, capSec));
   let minOnsetTicks = Infinity;
 
@@ -123,16 +144,42 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
       else transport.bpm.linearRampToValueAtTime(a.bpm, a.seconds);
       prevAt = a.seconds;
     }
-    const anySoloed = tracks.some(t => t.isSolo);
+    const { trackAudible, groupAudible } = computeAudibility(tracks, groups);
 
-    // Per-track volume → pan → [FX] → mute → destination
     const trackVolumeByTrackId = new Map();
     const audibleTrackIds = new Set();
     const steppedAutomation = []; // 'set'-kind targets for the shared driver below
+
+    // Group buses first (mirrors the live chain): memberMutes → groupIn →
+    // groupVolume → groupPan → [group FX] → groupMute → destination. Group
+    // automation schedules on the same nodes via the shared offline scheduler.
+    const groupInById = new Map();
+    for (const g of groups) {
+      const gMute = new Tone.Gain(groupAudible(g) ? 1 : 0).toDestination();
+      const graphByFxId = new Map();
+      let gHead = gMute;
+      for (const e of [...(g.effects ?? [])].reverse()) {
+        if (e.bypass) continue;
+        const gr = makeFxGraph(e.type, e.params);
+        if (!gr) continue;
+        graphByFxId.set(e.id, gr);
+        gr.out.connect(gHead);
+        gHead = gr.in;
+      }
+      const gPan = new Tone.Panner(Math.max(-1, Math.min(1, g.pan ?? 0))).connect(gHead);
+      const gVol = new Tone.Gain(volForSliderValue(g.volume ?? 75)).connect(gPan);
+      const gIn  = new Tone.Gain(1).connect(gVol);
+      groupInById.set(g.id, gIn);
+      scheduleOfflineAutomation(g, { volume: gVol, pan: gPan, graphByFxId }, tempoMap, steppedAutomation);
+    }
+
+    // Per-track volume → pan → [FX] → mute → (group bus | destination)
     for (const t of tracks) {
-      const audible = !t.isMuted && (!anySoloed || t.isSolo);
+      const audible = trackAudible(t);
       if (audible) audibleTrackIds.add(t.id);
-      const mute    = new Tone.Gain(audible ? 1 : 0).toDestination();
+      const mute = new Tone.Gain(audible ? 1 : 0);
+      const busIn = t.groupId ? groupInById.get(t.groupId) : null;
+      if (busIn) mute.connect(busIn); else mute.toDestination();
       // Insert effects built back-to-front so `head` always points at the
       // next node downstream; bypassed/unknown effects are skipped entirely.
       // Params (incl. delay dryThru) are baked at construction; Chorus/

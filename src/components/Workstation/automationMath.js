@@ -116,19 +116,25 @@ export function trackExtraHeight(track, openSet) {
 // (below the ruler / tracks header), so as long as tops mirror the DOM flow
 // nothing else changes.
 //
-// groupView (optional) = { collapsedIds: Set<groupId> }. A group header row
-// (GROUP_H) is emitted before the FIRST member of each contiguous group run
-// (contiguity is an invariant: createGroup reorders, deserialize normalizes);
-// a collapsed group's member rows contribute ZERO height (tops[i+1] ===
-// tops[i]), which also makes them unreachable by yToTrackIndex — its
-// `y < tops[i+1]` scan naturally skips zero-height rows.
+// groupView (optional) = { collapsedIds: Set<groupId>, byId: Map<id, group> }.
+// A group header row (GROUP_H) — plus the group's own automation area when its
+// id is in openSet (group ids share the heartbeat Set; trackExtraHeight works
+// on any .automations carrier) — is emitted before the FIRST member of each
+// contiguous group run (contiguity is an invariant: createGroup reorders,
+// deserialize normalizes); a collapsed group's member rows contribute ZERO
+// height (tops[i+1] === tops[i]), which also makes them unreachable by
+// yToTrackIndex — its `y < tops[i+1]` scan naturally skips zero-height rows.
 export function computeLaneTops(tracks, openSet, topOffset = 0, groupView = null) {
   const tops = new Array(tracks.length + 1);
   let y = topOffset;
   let prevGroupId = null;
   for (let i = 0; i < tracks.length; i++) {
     const gid = tracks[i].groupId ?? null;
-    if (gid && gid !== prevGroupId) y += GROUP_H; // group header row
+    if (gid && gid !== prevGroupId) {
+      y += GROUP_H; // group header row
+      const g = groupView?.byId?.get(gid);
+      if (g) y += trackExtraHeight(g, openSet); // group automation sub-lanes + add-strip
+    }
     prevGroupId = gid;
     tops[i] = y;
     if (gid && groupView?.collapsedIds?.has(gid)) continue; // hidden member
