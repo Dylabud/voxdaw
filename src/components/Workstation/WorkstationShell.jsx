@@ -159,6 +159,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // Tracks with their automation area expanded (heartbeat toggle). UI-only:
   // never on track objects, never serialized, never in undo history.
   const [openAutomationTrackIds, setOpenAutomationTrackIds] = useState(() => new Set());
+  // Last placed/moved/clicked automation anchor — Delete/Backspace target.
+  // Index-based (points carry no ids); the central keydown handler re-resolves
+  // validity through tracksRef before deleting, so stale selections are inert.
+  const [selectedAnchor, setSelectedAnchor] = useState(null); // { trackId, automationId, pointIndex } | null
   // Performance quality (high/medium/low) — machine capability, not project
   // data: persisted in localStorage, never enters .voxdaw files or undo history.
   const [performanceQuality, setPerformanceQuality] = useState(() => {
@@ -233,6 +237,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const regionsRef            = useRef([]);
   const tracksRef             = useRef([]);
   const selectedRegionIdsRef     = useRef(new Set());
+  const selectedAnchorRef        = useRef(null);
   const lastPianoScrollTopRef    = useRef(null); // null = no user scroll yet → default to C4
   const lastDragEndTimeRef       = useRef(0);
   const capturedRegionStartRef   = useRef(null);
@@ -1968,6 +1973,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   notesRef.current              = notes;
   totalMeasuresRef.current      = totalMeasures;
   selectedRegionIdsRef.current  = selectedRegionIds;
+  selectedAnchorRef.current     = selectedAnchor;
   snapEnabledRef.current        = snapEnabled;
   editingTrackIdRef.current     = editingTrackId;
   laneTopsRef.current           = laneTops;
@@ -2510,6 +2516,19 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     };
   }, [handlePlayPause]);
 
+  // ── Anchor-selection clear on any mousedown ─────────────────
+  // Capture phase fires before every lane handler, so a click on a point
+  // clears here first and the lane's own mouseup re-selects it — clicking
+  // anywhere else simply leaves the selection cleared. Guarded so the setState
+  // only fires while something is actually selected.
+  useEffect(() => {
+    const onDown = () => {
+      if (selectedAnchorRef.current) setSelectedAnchor(null);
+    };
+    window.addEventListener('mousedown', onDown, true);
+    return () => window.removeEventListener('mousedown', onDown, true);
+  }, []);
+
   // ── Delete / Backspace / Copy / Paste keyboard handlers ─────
   useEffect(() => {
     const onKey = (e) => {
@@ -2536,7 +2555,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         return;
       }
 
-      // Delete / Backspace — notes path wins when notes selected
+      // Escape — clear automation-anchor selection (no other Escape behavior
+      // lives at shell level; RegionEditor/ContextMenu own theirs locally).
+      if (e.key === 'Escape') {
+        if (selectedAnchorRef.current) setSelectedAnchor(null);
+        return;
+      }
+
+      // Delete / Backspace — priority: notes > automation anchor > regions
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (inInput) return;
         if (hasNoteSel) {
@@ -2544,6 +2570,17 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           const ids = new Set(noteSelectionRef.current);
           setNotes(prev => prev.filter(n => !ids.has(n.id)));
           noteSelectionApiRef.current?.clear();
+          return;
+        }
+        if (selectedAnchorRef.current) {
+          const { trackId, automationId, pointIndex } = selectedAnchorRef.current;
+          const t = tracksRef.current.find(x => x.id === trackId);
+          const a = t?.automations?.find(x => x.id === automationId);
+          if (a && pointIndex < (a.points?.length ?? 0)) {
+            e.preventDefault();
+            commitAutomationPoints(trackId, automationId, a.points.filter((_, k) => k !== pointIndex));
+          }
+          setSelectedAnchor(null);
           return;
         }
         const ids = selectedRegionIdsRef.current;
@@ -2782,7 +2819,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [bpm, updatePlayhead]);
+  }, [bpm, updatePlayhead, commitAutomationPoints]);
 
   return (
     <div ref={shellRef} className={styles.shell} style={{ '--left-col-width': `${leftColWidth}px` }}>
@@ -3357,6 +3394,13 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                         snapEnabledRef={snapEnabledRef}
                         onCommitPoints={(pts) => commitAutomationPoints(t.id, a.id, pts)}
                         onLivePreview={(v01) => applyAutomationValue?.(t.id, a.target, v01)}
+                        selectedPointIndex={
+                          selectedAnchor?.trackId === t.id && selectedAnchor?.automationId === a.id
+                            ? selectedAnchor.pointIndex : null
+                        }
+                        onSelectPoint={(i) => setSelectedAnchor(
+                          i == null ? null : { trackId: t.id, automationId: a.id, pointIndex: i }
+                        )}
                       />
                     </div>
                   );

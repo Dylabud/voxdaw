@@ -22,6 +22,13 @@ import { AUTO_LANE_H, automationValueAt, denorm } from './automationMath';
  *    also get the 4px vertical deadzone (a sloppy grab doesn't nudge)
  *  - right-click / dbl-click  → delete point
  *
+ * Selection: any place/move/click reports the point's committed index via
+ * onSelectPoint (the shell highlights it and its central Delete/Backspace
+ * handler removes it). A motionless grab of an existing point selects WITHOUT
+ * committing — no state change, no no-op undo entry, and no live preview (the
+ * preview only fires once the point actually changes, so the scheduled
+ * automation is never left desynced by a bare click).
+ *
  * Empty lane (0 points): dashed line at baselineValue01 — the target's CURRENT
  * manual value (pan dial, volume slider, fx knob) — so the first anchor starts
  * from where the sound actually is.
@@ -40,6 +47,8 @@ export default function AutomationLane({
   snapEnabledRef,
   onCommitPoints,
   onLivePreview,
+  selectedPointIndex,
+  onSelectPoint,
 }) {
   const svgRef    = useRef(null);
   const lineRef   = useRef(null);
@@ -89,12 +98,17 @@ export default function AutomationLane({
 
   // One drag session. `working` is a mutable copy of the points; `idx` is the
   // dragged entry's index within it; `circleEl` is the DOM circle being moved.
-  const startDrag = (e, working, idx, circleEl, { deadzone }) => {
+  const startDrag = (e, working, idx, circleEl, { deadzone, isNew }) => {
     e.stopPropagation();
     e.preventDefault();
     const startY = e.clientY;
     let valueUnlocked = !deadzone;
     const label = labelRef.current;
+    // Dirty latch: a new point is a change by existence; an existing point only
+    // once time/value actually diverge. Gates both commit and live preview.
+    const initTime = working[idx].time;
+    const initValue = working[idx].value;
+    let dirty = !!isNew;
 
     const writeDom = () => {
       const p = working[idx];
@@ -116,15 +130,16 @@ export default function AutomationLane({
       }
     };
     writeDom();
-    onLivePreview?.(working[idx].value);
+    if (dirty) onLivePreview?.(working[idx].value);
 
     const onMove = (ev) => {
       const pos = eventPos(ev);
       working[idx].time = snapT(pos.time);
       if (!valueUnlocked && Math.abs(ev.clientY - startY) >= DEADZONE_PX) valueUnlocked = true;
       if (valueUnlocked) working[idx].value = pos.v01;
+      if (working[idx].time !== initTime || working[idx].value !== initValue) dirty = true;
       writeDom();
-      onLivePreview?.(working[idx].value);
+      if (dirty) onLivePreview?.(working[idx].value);
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -132,7 +147,9 @@ export default function AutomationLane({
       document.body.style.cursor = '';
       if (label) label.style.display = 'none';
       if (ghostRef.current) ghostRef.current.style.display = 'none';
-      onCommitPoints([...working].sort((a, b) => a.time - b.time));
+      const sorted = [...working].sort((a, b) => a.time - b.time);
+      if (dirty) onCommitPoints(sorted);
+      onSelectPoint?.(sorted.indexOf(working[idx]));
     };
     document.body.style.cursor = 'grabbing';
     window.addEventListener('mousemove', onMove);
@@ -144,7 +161,7 @@ export default function AutomationLane({
     const working = [...points.map(p => ({ ...p })), point];
     const ghost = ghostRef.current;
     if (ghost) ghost.style.display = '';
-    startDrag(e, working, working.length - 1, ghost, { deadzone });
+    startDrag(e, working, working.length - 1, ghost, { deadzone, isNew: true });
   };
 
   const handleBackgroundDown = (e) => {
@@ -169,13 +186,14 @@ export default function AutomationLane({
   const handlePointDown = (e, i) => {
     if (e.button !== 0) return;
     const working = points.map(p => ({ ...p }));
-    startDrag(e, working, i, e.currentTarget, { deadzone: true });
+    startDrag(e, working, i, e.currentTarget, { deadzone: true, isNew: false });
   };
 
   const deletePoint = (e, i) => {
     e.preventDefault();
     e.stopPropagation();
     onCommitPoints(points.filter((_, k) => k !== i));
+    onSelectPoint?.(null);
   };
 
   return (
@@ -195,7 +213,7 @@ export default function AutomationLane({
       {points.map((p, i) => (
         <circle
           key={i}
-          className={styles.point}
+          className={`${styles.point}${i === selectedPointIndex ? ` ${styles.pointSelected}` : ''}`}
           cx={p.time * pixelsPerMeasure}
           cy={yOf(p.value)}
           r={4}

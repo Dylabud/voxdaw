@@ -42,6 +42,13 @@
   fill: var(--track-color, var(--accent-color));
 }
 
+/* Selected anchor — Delete/Backspace removes it (shell's central handler). */
+.pointSelected {
+  fill: var(--track-color, var(--accent-color));
+  stroke: var(--text-primary);
+  r: 5.5px;
+}
+
 .valueLabel {
   fill: var(--text-primary);
   font-size: 9px;
