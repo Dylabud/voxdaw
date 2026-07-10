@@ -7,7 +7,7 @@ import {
   automationValueAt, denorm, targetKey,
   isVolumeAutomated, isPanAutomated, automatedFxKeys,
 } from '../components/Workstation/automationMath';
-import { buildTempoMap, tempoPointsOf } from '../components/Workstation/tempoMath';
+import { buildTempoMap, tempoPointsOf, tempoScheduleOps } from '../components/Workstation/tempoMath';
 import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
 
 /**
@@ -36,6 +36,13 @@ import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
 //            prune via makeFx). track.effects state is never mutated, so
 //            flipping back to high restores the user's settings instantly.
 const REDUCED_MAX_POLYPHONY = 12;
+
+// Effective pan of a grouped track = clampPan(track.pan + group.pan): the
+// group knob/lane is a member OFFSET, never a write to track.pan — so a
+// fully-panned member pins at the wall and returns to its own value when the
+// group un-pans. Shared by pan sync (#3b), the group-pan automation resolve,
+// and the offline bounce (audioBounce.js).
+export const clampPan = (v) => Math.max(-1, Math.min(1, v));
 
 export default function useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality = 'high', globalAutomations = [], groups = [] }) {
   // Read at synth-creation time (effect #4 / audition) so synths built while
@@ -72,18 +79,20 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   // ── Group sub-buses ─────────────────────────────────────────────────────
   // Per-group chain: memberMutes → groupIn(Gain) → groupVolume(Gain) →
   // groupPan(Panner) → [group FX wrappers] → groupMute(Gain) → Destination.
+  // groupPan is INERT GLUE pinned at 0: group pan (knob AND lane) is applied
+  // as a per-member offset on the member panners (see clampPan / #3b) — the
+  // node only remains as the FX-splice head effect 1b expects per family.
   // Track ids (t<n>) and group ids (g<n>) are disjoint namespaces, so the
   // per-effect delta maps (appliedFxBypass/Params) and the automation
   // machinery treat a group as just another channel — node lookups union the
   // track and group maps by id.
   const groupInByIdRef         = useRef(new Map()); // groupId → Gain (bus input)
   const groupVolumesByIdRef    = useRef(new Map()); // groupId → Gain
-  const groupPannersByIdRef    = useRef(new Map()); // groupId → Panner
+  const groupPannersByIdRef    = useRef(new Map()); // groupId → Panner (always 0 — chain glue)
   const groupMutesByIdRef      = useRef(new Map()); // groupId → Gain
   const groupMuteConnByIdRef   = useRef(new Map()); // groupId → { connected, timer }
   const groupAudibleByIdRef    = useRef(new Map()); // groupId → bool (effect #2 writer)
   const appliedGroupVolByIdRef = useRef(new Map()); // groupId → last 0..100
-  const appliedGroupPanByIdRef = useRef(new Map()); // groupId → last -1..+1
   const fxChainsByGroupIdRef      = useRef(new Map()); // groupId → [makeFx wrapper]
   const appliedFxKeyByGroupIdRef  = useRef(new Map()); // groupId → structural key
   const appliedOutputByTrackIdRef = useRef(new Map()); // trackId → output node last wired (membership sync)
@@ -321,13 +330,30 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       };
     }
     if (target.kind === 'pan') {
-      const p = pannersByTrackIdRef.current.get(track.id) ?? groupPannersByIdRef.current.get(track.id);
-      if (!p || p.disposed) return null;
-      return {
-        kind: 'ramp', exp: false,
-        entries: [{ param: p.pan, map: (v) => v }],
-        toParam: (v01) => v01 * 2 - 1,
-      };
+      const p = pannersByTrackIdRef.current.get(track.id);
+      if (p && !p.disposed) {
+        return {
+          kind: 'ramp', exp: false,
+          entries: [{ param: p.pan, map: (v) => v }],
+          toParam: (v01) => v01 * 2 - 1,
+        };
+      }
+      // Group pan lane = member OFFSET (the group PanKnob model): one entry
+      // per member panner, ramped to clampPan(member base + offset). A member
+      // with its own active pan lane keeps it (skipped here). The base is
+      // baked into the map closure — effect 1e's chanKey includes grouped
+      // members' pan, so a member knob turn re-schedules with the new base.
+      if (!groupsRef.current.some(g => g.id === track.id)) return null;
+      const entries = [];
+      for (const t of tracksRef.current) {
+        if (t.groupId !== track.id || isPanAutomated(t)) continue;
+        const mp = pannersByTrackIdRef.current.get(t.id);
+        if (!mp || mp.disposed) continue;
+        const base = t.pan ?? 0;
+        entries.push({ param: mp.pan, map: (v) => clampPan(base + v) });
+      }
+      if (!entries.length) return null;
+      return { kind: 'ramp', exp: false, entries, toParam: (v01) => v01 * 2 - 1 };
     }
     if (target.kind === 'fx') {
       const e = (track.effects ?? []).find(x => x.id === target.effectId);
@@ -365,26 +391,32 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   // automation lives in absolute audio time, so — exactly like fades and
   // param automation — it desyncs across any pause/seek and is re-anchored by
   // every recomputeFades call site (recomputeTempo runs FIRST there: fades and
-  // automation consume tempoMapRef). Only the future is touched (cancel at
-  // Tone.now()), so Transport.ticks never jumps. Anchor math: tempoMath.js
-  // trapezoid == TickSignal's own integration, so map seconds and transport
-  // ticks agree exactly at every anchor.
+  // automation consume tempoMapRef). cancelAndHoldAtTime (NOT
+  // cancelScheduledValues) is load-bearing: Transport.ticks is DERIVED by
+  // integrating the bpm curve, and a plain cancel mid-ramp deletes the
+  // in-flight ramp's end event — rewriting the already-PLAYED curve shape, so
+  // the tick integral (= musical position) jumps and Parts re-fire past notes;
+  // the desynced per-event tick bookkeeping then drives TickParam.getTimeOfTick
+  // into NaN/negative times → the "reading 'time' of undefined" crash inside
+  // TickSource. cancelAndHold truncates the ramp AT audioNow instead,
+  // preserving the played integral exactly. The op list comes from
+  // tempoScheduleOps (shared with the offline bounce), whose STRICTLY
+  // INCREASING event times are equally load-bearing: two differing-value bpm
+  // events at one timestamp (a stacked-point step sharing a ramp's end time)
+  // poison getTimeOfTick's ramp-endpoint lookup the same way — see
+  // TEMPO_STEP_EPS in tempoMath.js. Anchor math: tempoMath.js trapezoid ==
+  // TickSignal's own integration, so map seconds and transport ticks agree
+  // exactly at every anchor (steps land eps late — inaudible, re-anchored).
   const recomputeTempo = useCallback(() => {
     const map = buildTempoMap(bpmRef.current, tempoPointsOf(globalAutosRef.current));
     tempoMapRef.current = map;
     const sig = Tone.Transport.bpm;
     const audioNow = Tone.now();
     const nowM = Tone.Transport.ticks / (Tone.Transport.PPQ * 4);
-    sig.cancelScheduledValues(audioNow);
-    sig.setValueAtTime(map.bpmAtMeasure(nowM), audioNow);
-    const nowSec = map.secondsAtMeasure(nowM);
-    let prevAt = audioNow;
-    for (const a of map.anchors) {
-      if (a.measure <= nowM) continue;
-      const at = audioNow + (a.seconds - nowSec);
-      if (at <= prevAt + 1e-6) sig.setValueAtTime(a.bpm, at); // coincident points = step
-      else sig.linearRampToValueAtTime(a.bpm, at);
-      prevAt = at;
+    sig.cancelAndHoldAtTime(audioNow);
+    for (const op of tempoScheduleOps(map, nowM, audioNow)) {
+      if (op.kind === 'set') sig.setValueAtTime(op.bpm, op.time);
+      else sig.linearRampToValueAtTime(op.bpm, op.time);
     }
   }, []);
 
@@ -463,8 +495,13 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
         appliedVolumeByTrackIdRef.current.delete(track.id);
         appliedGroupVolByIdRef.current.delete(track.id);
       } else if (info.target.kind === 'pan') {
+        // Track lane → #3b re-owns that track this commit. Group lane
+        // (member-offset) → #3b re-owns every member — the lane's schedules
+        // lived on the MEMBER panners, so their applied entries must clear.
         appliedPanByTrackIdRef.current.delete(track.id);
-        appliedGroupPanByIdRef.current.delete(track.id);
+        for (const t of tracksRef.current) {
+          if (t.groupId === track.id) appliedPanByTrackIdRef.current.delete(t.id);
+        }
       } else {
         // 1d already ran this commit — restore the manual value directly
         // (one-shot handback; 1d stays the steady-state writer).
@@ -529,12 +566,11 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       mutesG.get(id)?.dispose();
       ins.delete(id); vols.delete(id); pans.delete(id); mutesG.delete(id);
       appliedGroupVolByIdRef.current.delete(id);
-      appliedGroupPanByIdRef.current.delete(id);
     }
     for (const g of groups) {
       if (mutesG.has(g.id)) continue;
       const mute = new Tone.Gain(1).toDestination();
-      const pan  = new Tone.Panner(g.pan ?? 0).connect(mute);
+      const pan  = new Tone.Panner(0).connect(mute); // inert glue — group pan is a member offset
       const vol  = new Tone.Gain(volForSliderValue(g.volume ?? 75)).connect(pan);
       const gin  = new Tone.Gain(1).connect(vol);
       mutesG.set(g.id, mute);
@@ -543,7 +579,6 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       ins.set(g.id, gin);
       groupMuteConnByIdRef.current.set(g.id, { connected: true, timer: null });
       appliedGroupVolByIdRef.current.set(g.id, g.volume ?? 75);
-      appliedGroupPanByIdRef.current.set(g.id, g.pan ?? 0);
     }
   }, [groups]);
 
@@ -774,8 +809,12 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   // schedules mid-playback. Play/seek/stop/undo re-anchoring rides
   // recomputeFades (which calls recomputeAutomation at its end).
   useEffect(() => {
+    // Grouped members carry `groupId:pan` in the key: a group PAN lane bakes
+    // each member's base pan into its ramp entries, so a member knob turn or
+    // membership change must re-schedule (groups have no groupId → no churn).
     const chanKey = (c) =>
       `${c.id}~${JSON.stringify(c.automations ?? [])}~${
+        c.groupId ? `${c.groupId}:${c.pan ?? 0}` : ''}~${
         (c.effects ?? []).map(e => `${e.id}:${e.type}:${e.params?.dryThru ? 1 : 0}`).join('|')}`;
     const key = [...tracks, ...groups].map(chanKey).join('§') + `~${bpm}`;
     if (appliedAutomationKeyRef.current === key) return;
@@ -913,48 +952,46 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   }, [tracks]);
 
   // ── 3b. Pan sync ───────────────────────────────────────────────────────
+  // Single manual writer of member panners, group-aware: effective pan =
+  // clampPan(track.pan + group.pan) — the group knob is a member OFFSET;
+  // track.pan is never mutated, so un-panning the group restores each
+  // member's own value exactly. Ownership: a track with its own pan lane is
+  // the scheduler's (unchanged); a member of a group with an active PAN lane
+  // is ALSO the scheduler's (the group lane ramps member panners directly).
+  // panApp stores the applied EFFECTIVE value.
   useEffect(() => {
     const panners = pannersByTrackIdRef.current;
     const panApp  = appliedPanByTrackIdRef.current;
+    const groupById = new Map(groups.map(g => [g.id, g]));
     for (const t of tracks) {
       const p = panners.get(t.id);
       if (!p) continue;
-      if (isPanAutomated(t)) { panApp.delete(t.id); continue; }
-      const v = Math.max(-1, Math.min(1, t.pan ?? 0));
+      const grp = t.groupId ? groupById.get(t.groupId) : null;
+      if (isPanAutomated(t) || (grp && isPanAutomated(grp))) { panApp.delete(t.id); continue; }
+      const v = clampPan((t.pan ?? 0) + (grp?.pan ?? 0));
       if (panApp.get(t.id) === v) continue;
       p.pan.rampTo(v, 0.02);
       panApp.set(t.id, v);
     }
-  }, [tracks]);
+  }, [tracks, groups]);
 
-  // ── 3e. Group volume/pan sync — mirrors #3/#3b on the bus nodes ────────
-  // Same "automation takes over" contract: an automated group volume/pan is
-  // owned by recomputeAutomation; deleting the cache entry means the header
-  // control re-applies the moment the lane empties.
+  // ── 3e. Group volume sync — mirrors #3 on the bus volume node ──────────
+  // Same "automation takes over" contract: an automated group volume is owned
+  // by recomputeAutomation; deleting the cache entry means the header control
+  // re-applies the moment the lane empties. Group PAN has no bus writer —
+  // knob and lane are member offsets applied via #3b / the automation
+  // scheduler (the bus Panner is inert glue at 0).
   useEffect(() => {
     for (const g of groups) {
       const vol = groupVolumesByIdRef.current.get(g.id);
-      if (vol) {
-        if (isVolumeAutomated(g)) {
-          appliedGroupVolByIdRef.current.delete(g.id);
-        } else {
-          const v = g.volume ?? 75;
-          if (appliedGroupVolByIdRef.current.get(g.id) !== v) {
-            vol.gain.rampTo(volForSliderValue(v), 0.02);
-            appliedGroupVolByIdRef.current.set(g.id, v);
-          }
-        }
-      }
-      const pan = groupPannersByIdRef.current.get(g.id);
-      if (pan) {
-        if (isPanAutomated(g)) {
-          appliedGroupPanByIdRef.current.delete(g.id);
-        } else {
-          const v = Math.max(-1, Math.min(1, g.pan ?? 0));
-          if (appliedGroupPanByIdRef.current.get(g.id) !== v) {
-            pan.pan.rampTo(v, 0.02);
-            appliedGroupPanByIdRef.current.set(g.id, v);
-          }
+      if (!vol) continue;
+      if (isVolumeAutomated(g)) {
+        appliedGroupVolByIdRef.current.delete(g.id);
+      } else {
+        const v = g.volume ?? 75;
+        if (appliedGroupVolByIdRef.current.get(g.id) !== v) {
+          vol.gain.rampTo(volForSliderValue(v), 0.02);
+          appliedGroupVolByIdRef.current.set(g.id, v);
         }
       }
     }
@@ -1306,7 +1343,6 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     const groupConns = groupMuteConnByIdRef.current;
     const groupAudible = groupAudibleByIdRef.current;
     const groupVolApp  = appliedGroupVolByIdRef.current;
-    const groupPanApp  = appliedGroupPanByIdRef.current;
     const groupChains  = fxChainsByGroupIdRef.current;
     const groupKeyApp  = appliedFxKeyByGroupIdRef.current;
     const outApp       = appliedOutputByTrackIdRef.current;
@@ -1316,11 +1352,6 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       // recomputeAutomation/recomputeTempo instead of skipping on stale matches.
       appliedAutoKey.current = '';
       appliedTempoKey.current = '';
-      // Transport.cancel does NOT clear bpm-SIGNAL automation, and the
-      // Transport is a singleton shared with VoxTool (transport-clocked arp)
-      // — leftover tempo ramps would warp it. Restore the flat base bpm.
-      Tone.Transport.bpm.cancelScheduledValues(0);
-      Tone.Transport.bpm.value = bpmR.current;
       for (const st of muteConns.values()) if (st.timer != null) clearTimeout(st.timer);
       muteConns.clear();
       audible.clear();
@@ -1331,6 +1362,15 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       steppedTargets.current = [];
       prevAutomated.current.clear();
       Tone.Transport.stop();
+      // Transport.cancel does NOT clear bpm-SIGNAL automation, and the
+      // Transport is a singleton shared with VoxTool (transport-clocked arp)
+      // — leftover tempo ramps would warp it. Restore the flat base bpm.
+      // Runs AFTER stop() so the timeline wipe never happens under a running
+      // clock (a mid-ramp cancel would corrupt the tick integral — see
+      // recomputeTempo); with the transport stopped, cancel(0) + flat reset
+      // is safe.
+      Tone.Transport.bpm.cancelScheduledValues(0);
+      Tone.Transport.bpm.value = bpmR.current;
       Tone.Transport.cancel(0);
       for (const id of fadeIds.values()) Tone.Transport.clear(id);
       for (const p of parts.values())   p.dispose();
@@ -1351,7 +1391,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       for (const n of groupMutes.values()) n.dispose();
       groupIns.clear(); groupVols.clear(); groupPans.clear(); groupMutes.clear();
       groupConns.clear(); groupAudible.clear();
-      groupVolApp.clear(); groupPanApp.clear();
+      groupVolApp.clear();
       groupChains.clear(); groupKeyApp.clear();
       outApp.clear();
       mutes.clear();

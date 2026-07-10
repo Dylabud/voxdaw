@@ -24,6 +24,16 @@ export const TEMPO_META = {
   default: 120, min: 40, max: 240, step: 1, label: 'tempo', unit: 'bpm',
 };
 
+// Minimum spacing between scheduled bpm events. Two events with DIFFERING
+// values at the same timestamp corrupt Tone's TickParam: getTimeOfTick's
+// quadratic inversion reads the ramp endpoint via getValueAtTime(after.time),
+// and Timeline.get is last-wins — a set-event sharing a ramp's end time makes
+// the inversion solve against the POST-step value, driving the discriminant
+// negative on downward steps → sqrt(NaN) → getTicksAtTime crash ("reading
+// 'time' of undefined"). 1e-3 s is ≫ Tone's EQ tolerance (1e-6) and ≥ one
+// sample, yet inaudible for tempo.
+export const TEMPO_STEP_EPS = 1e-3;
+
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
 // The tempo lane's points out of the shell's globalAutomations array (only
@@ -122,4 +132,36 @@ export function buildTempoMap(baseBpm, points, meta = TEMPO_META) {
   };
 
   return { anchors, bpmAtMeasure, secondsAtMeasure, measureAtSeconds };
+}
+
+/**
+ * Compile a tempo map into a schedule of bpm signal ops from musical position
+ * nowM, anchored at absolute time baseTime — shared by the live engine
+ * (recomputeTempo: baseTime = Tone.now() after cancelAndHoldAtTime) and the
+ * offline bounce (nowM = 0, baseTime = 0).
+ *
+ * Returns [{ kind: 'set'|'ramp', bpm, time }] with STRICTLY INCREASING times —
+ * the load-bearing invariant (see TEMPO_STEP_EPS): coincident anchors (stacked
+ * lane points) ramp to the FIRST value at its true time (the drawn line), then
+ * step to each subsequent value eps later; the leading re-anchor set sits at
+ * baseTime + eps so it never shares cancelAndHoldAtTime's internal ramp+set
+ * pair timestamp at baseTime. The ≤eps map-vs-schedule offset per step is
+ * inaudible and re-anchored away on the next recompute.
+ */
+export function tempoScheduleOps(map, nowM, baseTime, eps = TEMPO_STEP_EPS) {
+  const nowSec = map.secondsAtMeasure(nowM);
+  let prevAt = baseTime + eps;
+  const ops = [{ kind: 'set', bpm: map.bpmAtMeasure(nowM), time: prevAt }];
+  for (const a of map.anchors) {
+    if (a.measure <= nowM) continue;
+    const at = baseTime + (a.seconds - nowSec);
+    if (at <= prevAt + eps) {
+      prevAt += eps; // coincident/near-coincident anchor = a step — jump eps later
+      ops.push({ kind: 'set', bpm: a.bpm, time: prevAt });
+    } else {
+      ops.push({ kind: 'ramp', bpm: a.bpm, time: at });
+      prevAt = at;
+    }
+  }
+  return ops;
 }

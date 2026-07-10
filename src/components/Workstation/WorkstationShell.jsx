@@ -689,11 +689,18 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // on Transport.bpm during the drag; the commit's setGlobalAutomations fires
   // the hook's tempo-sync effect, whose recomputeTempo (the signal's single
   // steady-state writer) re-anchors the whole curve on mouseup.
+  // cancelAndHoldAtTime (NOT cancelScheduledValues) is load-bearing: ticks are
+  // the integral of this curve, and a plain cancel mid-ramp rewrites the
+  // already-played shape → position jumps + TickParam corruption (see
+  // recomputeTempo). The hold also pins the current value, so no setValueAtTime
+  // is needed before the ramp. Gated to a non-running transport: while playing,
+  // the preview would drag the LIVE tempo to the held point's value, stomping
+  // the scheduled curve mid-song — the playing tempo only changes on mouseup.
   const previewTempo = useCallback((v01) => {
+    if (Tone.Transport.state === 'started') return;
     const sig = Tone.Transport.bpm;
     const now = Tone.now();
-    sig.cancelScheduledValues(now);
-    sig.setValueAtTime(sig.value, now);
+    sig.cancelAndHoldAtTime(now);
     sig.linearRampToValueAtTime(denorm(v01, TEMPO_META), now + 0.02);
   }, []);
 

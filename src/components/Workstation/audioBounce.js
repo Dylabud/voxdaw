@@ -2,14 +2,15 @@ import * as Tone from 'tone';
 import { makeSynth, isDrumKit, chokeTargetsFor } from './synthFactory';
 import { makeFxGraph } from './fxChain';
 import { EFFECT_DEFS } from './effectDefs';
-import { automationValueAt, denorm } from './automationMath';
-import { buildTempoMap, tempoPointsOf } from './tempoMath';
+import { automationValueAt, denorm, isPanAutomated } from './automationMath';
+import { buildTempoMap, tempoPointsOf, tempoScheduleOps } from './tempoMath';
 import {
   buildRegionEvents,
   volForSliderValue,
   scheduleFadeEnvelope,
   estimateTrackTailSec,
   estimateGroupTailSec,
+  clampPan,
 } from '../../hooks/useWorkstationAudio';
 
 // Group-aware audibility — the live engine's effect #2 rule: a solo anywhere
@@ -55,7 +56,11 @@ function estimateFxTailSec(tracks, groups = []) {
 // scheduleRepeat driver built after the track loop. Automations targeting a
 // bypassed effect are skipped (offline never builds those graphs — matches
 // the live engine, where a pruned bypass graph renders nothing).
-function scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, tempoMap, stepped) {
+// `panEntries` (optional) overrides the pan target's entries — used for group
+// pan lanes, which are member OFFSETS ramped on the MEMBER panners (mirrors
+// the live resolveAutomationTarget group branch); the group bus Panner is
+// inert glue at 0.
+function scheduleOfflineAutomation(t, { volume, pan, panEntries = null, graphByFxId }, tempoMap, stepped) {
   for (const a of t.automations ?? []) {
     const pts = a.points ?? [];
     if (pts.length === 0) continue;
@@ -70,7 +75,8 @@ function scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, tempoMap, st
       toParam = (v01) => volForSliderValue(v01 * 100);
       exp = true; // gain floor 0.063 > 0 — matches the slider's dB curve
     } else if (tgt.kind === 'pan') {
-      entries = [{ param: pan.pan, map: (v) => v }];
+      entries = panEntries ?? [{ param: pan.pan, map: (v) => v }];
+      if (!entries.length) continue;
       toParam = (v01) => v01 * 2 - 1;
     } else if (tgt.kind === 'fx') {
       const e = (t.effects ?? []).find(x => x.id === tgt.effectId);
@@ -136,24 +142,29 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
 
   const buffer = await Tone.Offline(async ({ transport }) => {
     // Schedule the same bpm curve the live transport plays (flat base bpm
-    // when the tempo lane is empty).
-    transport.bpm.value = tempoMap.anchors.length ? tempoMap.anchors[0].bpm : bpm;
-    let prevAt = 0;
-    for (const a of tempoMap.anchors) {
-      if (a.seconds <= prevAt + 1e-6) transport.bpm.setValueAtTime(a.bpm, a.seconds);
-      else transport.bpm.linearRampToValueAtTime(a.bpm, a.seconds);
-      prevAt = a.seconds;
+    // when the tempo lane is empty). tempoScheduleOps mirrors recomputeTempo —
+    // its strictly-increasing event times are load-bearing (stacked-point
+    // steps must never share a ramp's end timestamp; see TEMPO_STEP_EPS).
+    // .value covers [0, eps) until the leading re-anchor set lands.
+    transport.bpm.value = tempoMap.bpmAtMeasure(0);
+    for (const op of tempoScheduleOps(tempoMap, 0, 0)) {
+      if (op.kind === 'set') transport.bpm.setValueAtTime(op.bpm, op.time);
+      else transport.bpm.linearRampToValueAtTime(op.bpm, op.time);
     }
     const { trackAudible, groupAudible } = computeAudibility(tracks, groups);
 
     const trackVolumeByTrackId = new Map();
+    const trackPannerByTrackId = new Map();
     const audibleTrackIds = new Set();
     const steppedAutomation = []; // 'set'-kind targets for the shared driver below
 
     // Group buses first (mirrors the live chain): memberMutes → groupIn →
-    // groupVolume → groupPan → [group FX] → groupMute → destination. Group
-    // automation schedules on the same nodes via the shared offline scheduler.
+    // groupVolume → groupPan(inert, 0) → [group FX] → groupMute → destination.
+    // Group pan (knob AND lane) is a member OFFSET applied on the member
+    // panners, so group automation scheduling is DEFERRED until after the
+    // track loop below (member panners must exist for the pan entries).
     const groupInById = new Map();
+    const pendingGroupAutomation = []; // [{ g, handles }]
     for (const g of groups) {
       const gMute = new Tone.Gain(groupAudible(g) ? 1 : 0).toDestination();
       const graphByFxId = new Map();
@@ -166,11 +177,11 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
         gr.out.connect(gHead);
         gHead = gr.in;
       }
-      const gPan = new Tone.Panner(Math.max(-1, Math.min(1, g.pan ?? 0))).connect(gHead);
+      const gPan = new Tone.Panner(0).connect(gHead); // inert glue — see clampPan
       const gVol = new Tone.Gain(volForSliderValue(g.volume ?? 75)).connect(gPan);
       const gIn  = new Tone.Gain(1).connect(gVol);
       groupInById.set(g.id, gIn);
-      scheduleOfflineAutomation(g, { volume: gVol, pan: gPan, graphByFxId }, tempoMap, steppedAutomation);
+      pendingGroupAutomation.push({ g, handles: { volume: gVol, pan: gPan, graphByFxId } });
     }
 
     // Per-track volume → pan → [FX] → mute → (group bus | destination)
@@ -195,10 +206,27 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
         g.out.connect(head);
         head = g.in;
       }
-      const pan     = new Tone.Panner(Math.max(-1, Math.min(1, t.pan ?? 0))).connect(head);
+      // Effective pan bakes the group offset (clampPan(t.pan + g.pan)); when
+      // a group pan LANE exists, its scheduler below overwrites at t=0.
+      const grp = t.groupId ? groups.find(g => g.id === t.groupId) : null;
+      const pan     = new Tone.Panner(clampPan((t.pan ?? 0) + (grp?.pan ?? 0))).connect(head);
       const volume  = new Tone.Gain(volForSliderValue(t.volume ?? 75)).connect(pan);
       trackVolumeByTrackId.set(t.id, volume);
+      trackPannerByTrackId.set(t.id, pan);
       scheduleOfflineAutomation(t, { volume, pan, graphByFxId }, tempoMap, steppedAutomation);
+    }
+    // Group automation — after the track loop so group PAN lanes can target
+    // the member panners (member offset, own-lane members keep their own).
+    for (const { g, handles } of pendingGroupAutomation) {
+      const panEntries = [];
+      for (const t of tracks) {
+        if (t.groupId !== g.id || isPanAutomated(t)) continue;
+        const mp = trackPannerByTrackId.get(t.id);
+        if (!mp) continue;
+        const base = t.pan ?? 0;
+        panEntries.push({ param: mp.pan, map: (v) => clampPan(base + v) });
+      }
+      scheduleOfflineAutomation(g, { ...handles, panEntries }, tempoMap, steppedAutomation);
     }
     if (steppedAutomation.length > 0) {
       transport.scheduleRepeat(() => {

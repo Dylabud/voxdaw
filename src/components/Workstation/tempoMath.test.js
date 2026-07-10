@@ -1,4 +1,4 @@
-import { buildTempoMap, TEMPO_META } from './tempoMath';
+import { buildTempoMap, tempoScheduleOps, TEMPO_META, TEMPO_STEP_EPS } from './tempoMath';
 
 // value normalization helper: bpm → 0..1 against TEMPO_META (linear)
 const n = (bpm) => (bpm - TEMPO_META.min) / (TEMPO_META.max - TEMPO_META.min);
@@ -92,5 +92,64 @@ describe('buildTempoMap', () => {
     const a = buildTempoMap(120, [{ time: 8, value: n(240) }, { time: 4, value: n(120) }]);
     const b = buildTempoMap(120, [{ time: 4, value: n(120) }, { time: 8, value: n(240) }]);
     expect(a.secondsAtMeasure(10)).toBeCloseTo(b.secondsAtMeasure(10), 10);
+  });
+});
+
+describe('tempoScheduleOps', () => {
+  // The load-bearing invariant: two differing-value events at one timestamp
+  // corrupt Tone's TickParam tick↔time inversion (see TEMPO_STEP_EPS).
+  const expectStrictlyIncreasing = (ops) => {
+    for (let i = 1; i < ops.length; i++) {
+      expect(ops[i].time).toBeGreaterThan(ops[i - 1].time);
+    }
+  };
+
+  test('empty map → single re-anchor set at baseTime + eps', () => {
+    const map = buildTempoMap(120, []);
+    const ops = tempoScheduleOps(map, 0, 10);
+    expect(ops).toEqual([{ kind: 'set', bpm: 120, time: 10 + TEMPO_STEP_EPS }]);
+  });
+
+  test('stacked points: ramp to the FIRST value at its true time, step to the second eps later', () => {
+    const map = buildTempoMap(120, [
+      { time: 0, value: n(120) },
+      { time: 8, value: n(200) },  // ramp into the stack (the crash repro shape)
+      { time: 8, value: n(60) },   // stacked twin — big downward step
+    ]);
+    const ops = tempoScheduleOps(map, 0, 0);
+    expectStrictlyIncreasing(ops);
+    const s8 = map.secondsAtMeasure(8);
+    const ramp = ops.find(o => o.kind === 'ramp' && Math.abs(o.bpm - 200) < 1e-9);
+    const step = ops.find(o => o.kind === 'set' && Math.abs(o.bpm - 60) < 1e-9);
+    expect(ramp.time).toBeCloseTo(s8, 10);                  // follows the drawn line
+    expect(step.time).toBeCloseTo(s8 + TEMPO_STEP_EPS, 10); // jump, never same-time
+  });
+
+  test('triple stack chains eps steps — times stay strictly increasing', () => {
+    const map = buildTempoMap(120, [
+      { time: 4, value: n(100) },
+      { time: 4, value: n(180) },
+      { time: 4, value: n(60) },
+      { time: 8, value: n(60) },
+    ]);
+    const ops = tempoScheduleOps(map, 0, 5);
+    expectStrictlyIncreasing(ops);
+    const times = ops.map(o => o.time);
+    expect(new Set(times).size).toBe(times.length); // no duplicates anywhere
+  });
+
+  test('mid-playback: only future anchors emitted, offsets measured from baseTime', () => {
+    const map = buildTempoMap(120, [
+      { time: 2, value: n(100) },
+      { time: 6, value: n(200) },
+    ]);
+    const nowM = 4; // inside the 2→6 ramp
+    const ops = tempoScheduleOps(map, nowM, 100);
+    expectStrictlyIncreasing(ops);
+    expect(ops[0]).toEqual({ kind: 'set', bpm: map.bpmAtMeasure(nowM), time: 100 + TEMPO_STEP_EPS });
+    expect(ops).toHaveLength(2); // re-anchor + the m=6 anchor only
+    expect(ops[1].kind).toBe('ramp');
+    expect(ops[1].bpm).toBeCloseTo(200, 10);
+    expect(ops[1].time).toBeCloseTo(100 + (map.secondsAtMeasure(6) - map.secondsAtMeasure(nowM)), 10);
   });
 });
