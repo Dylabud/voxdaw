@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, Fragment } from 'react';
 import * as Tone from 'tone';
 import styles from './WorkstationShell.module.css';
 import RegionEditor from './RegionEditor/RegionEditor';
@@ -9,7 +9,15 @@ import useWorkstationAudio from '../../hooks/useWorkstationAudio';
 import PanKnob from './PanKnob';
 import { serializeProject, deserializeProject, downloadJSON, readJSONFile } from './projectIO';
 import { saveProject as storeSaveProject } from '../../utils/projectStore';
-import { EFFECT_DEFS, defaultParamsFor } from './effectDefs';
+import { EFFECT_DEFS, defaultParamsFor, automationTargetsFor, labelForTarget, metaForTarget } from './effectDefs';
+import {
+  TRACK_H, AUTO_LANE_H, GLOBAL_STRIP_H, computeLaneTops, yToTrackIndex, targetKey, toKnob, denorm,
+  isVolumeAutomated, isPanAutomated, automatedFxKeys,
+} from './automationMath';
+import { TEMPO_META, tempoPointsOf, buildTempoMap } from './tempoMath';
+import AutomationLane from './AutomationLane';
+import GroupModal from './GroupModal';
+import GroupFxPanel from './GroupFxPanel';
 import { bounceProject } from './audioBounce';
 import { exportWAV, exportMP3, trimExportBuffer } from '../../utils/audioExport';
 import { transcribeAudio } from './transcribeAudio';
@@ -20,7 +28,8 @@ const PIXELS_PER_BEAT    = 25;
 const PIXELS_PER_MEASURE = PIXELS_PER_BEAT * 4;  // 100px at zoom 1
 const MAX_HISTORY        = 100;                  // undo/redo stack cap
 // BPM and totalMeasures are state inside the component
-const TRACK_H            = 72;  // matches .trackLane height in CSS
+// TRACK_H (72, matches .trackLane height in CSS) now lives in automationMath.js
+// alongside the automation sub-lane heights — one source for all Y-geometry.
 const RULER_HEIGHT       = 24;  // matches .ruler height in CSS
 const MIN_REGION         = 0.0625; // minimum region width in measures (one 16th note)
 const LOOP_EPS           = 1e-6;
@@ -35,14 +44,19 @@ const formatTime = (t) => {
 };
 
 // Returns IDs of regions whose bounding box intersects the marquee rectangle (in timeline-scroll-relative px).
-function getIntersectingRegionIds(minX, maxX, minY, maxY, regions, tracks, ppm) {
+// `tops` = computeLaneTops output — open automation sub-lanes shift rows below them,
+// so row Y comes from the cumulative table, not trackIndex * TRACK_H.
+function getIntersectingRegionIds(minX, maxX, minY, maxY, regions, tracks, ppm, tops) {
   return regions
     .filter(r => {
       const tIdx   = tracks.findIndex(t => t.id === r.trackId);
       const rLeft  = r.startMeasure * ppm;
       const rRight = (r.startMeasure + r.durationMeasures) * ppm;
-      const rTop   = tIdx * TRACK_H;
-      const rBot   = (tIdx + 1) * TRACK_H;
+      const rTop   = tops[tIdx];
+      // Row height from the cumulative table: a collapsed group member is a
+      // zero-height band (tops[i+1] === tops[i]) — invisible, not selectable.
+      const rBot   = Math.min(rTop + TRACK_H, tops[tIdx + 1] ?? (rTop + TRACK_H));
+      if (rBot <= rTop) return false;
       return rLeft < maxX && rRight > minX && rTop < maxY && rBot > minY;
     })
     .map(r => r.id);
@@ -65,8 +79,9 @@ const FADE_UI_MIN_PX = 30;
 // initializers below exactly, or "New Project" would differ from a fresh mount.
 const BLANK_PROJECT_DATA = {
   name: 'untitled', bpm: 120, totalMeasures: 200,
-  tracks: [], regions: [], notes: [],
-  nextId: 1, nextRegionId: 1, nextEffectId: 1, nextNoteId: 0,
+  tracks: [], regions: [], notes: [], globalAutomations: [], groups: [],
+  nextId: 1, nextRegionId: 1, nextEffectId: 1, nextNoteId: 0, nextAutomationId: 1,
+  nextGroupId: 1,
   repairedCount: 0,
 };
 
@@ -148,6 +163,38 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [activeTrackId,    setActiveTrackId]    = useState(null);
   const [snapEnabled,      setSnapEnabled]      = useState(true);
   const [advancedMode,     setAdvancedMode]     = useState(false);
+  // Tracks with their automation area expanded (heartbeat toggle). UI-only:
+  // never on track objects, never serialized, never in undo history.
+  const [openAutomationTrackIds, setOpenAutomationTrackIds] = useState(() => new Set());
+  // Last placed/moved/clicked automation anchor — Delete/Backspace target.
+  // Index-based (points carry no ids); the central keydown handler re-resolves
+  // validity through tracksRef before deleting, so stale selections are inert.
+  const [selectedAnchor, setSelectedAnchor] = useState(null); // { trackId, automationId, pointIndex } | null
+  // Global (project-wide) automation lanes — currently only { kind: 'tempo' }.
+  // PROJECT DATA (unlike openAutomationTrackIds): serialized additively in
+  // .voxdaw files and part of undo history. The audio hook is the single
+  // writer of Transport.bpm (recomputeTempo); tempoMath.buildTempoMap is the
+  // measures↔seconds source of truth everywhere.
+  const [globalAutomations, setGlobalAutomations] = useState([]);
+  // The tempo lane's visibility (chevron in the global strip) — UI-only.
+  const [globalLaneOpen, setGlobalLaneOpen] = useState(false);
+  // Track groups (flat, no nesting): [{ id: 'g<n>', name, color, isMuted,
+  // isSolo, volume, pan, effects, automations }] + track.groupId membership.
+  // Members are kept CONTIGUOUS in the tracks array (createGroup reorders,
+  // deserialize normalizes) — the group header row renders before the first
+  // member of each run. PROJECT DATA: undo history + additive .voxdaw field.
+  const [groups, setGroups] = useState([]);
+  // Collapsed groups (chevron) — UI-only, like openAutomationTrackIds.
+  const [collapsedGroupIds, setCollapsedGroupIds] = useState(() => new Set());
+  const [renamingGroupId, setRenamingGroupId] = useState(null);
+  // { initiatorTrackId } | null — the create-group checkbox modal.
+  const [groupModal, setGroupModal] = useState(null);
+  // Group whose effects rack is docked at the bottom (mutually exclusive with
+  // the track editor — opening one closes the other). UI-only.
+  const [editingGroupId, setEditingGroupId] = useState(null);
+  // Opening the track editor (double-click, ✎, …) evicts the group rack; the
+  // group fx button does the reverse inline.
+  useEffect(() => { if (editingTrackId != null) setEditingGroupId(null); }, [editingTrackId]);
   // Performance quality (high/medium/low) — machine capability, not project
   // data: persisted in localStorage, never enters .voxdaw files or undo history.
   const [performanceQuality, setPerformanceQuality] = useState(() => {
@@ -189,19 +236,36 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // don't jump (a rounded unit shifts measure m by m·Δ px far down the timeline). Grid
   // lines are kept crisp instead by per-line whole-pixel snapping in drawGrid (canvas).
   const pixelsPerMeasure = PIXELS_PER_MEASURE * zoomLevel;
-  const pxPerSec         = (pixelsPerMeasure / 4) * (bpm / 60);
+  // Global automation area height — rows above track 0 inside the same
+  // scroller flow. laneTops mirror the DOM flow, so every geometry consumer
+  // (marquee, region drag, ghost, auto-scroll) stays correct untouched.
+  const globalAreaH = GLOBAL_STRIP_H + (globalLaneOpen ? AUTO_LANE_H : 0);
+  const groupById = new Map(groups.map(g => [g.id, g]));
+  // Cumulative row-top table — open automation sub-lanes (track AND group),
+  // group header rows and collapsed groups all make row Y non-uniform.
+  const laneTops = computeLaneTops(tracks, openAutomationTrackIds, globalAreaH,
+    { collapsedIds: collapsedGroupIds, byId: groupById });
+  // The (single) tempo automation, or an empty stand-in for the lane's dashed
+  // baseline — the real object is created lazily by commitTempoPoints.
+  const tempoAutomation = globalAutomations.find(a => a.target?.kind === 'tempo')
+    ?? { id: '__tempo__', target: { kind: 'tempo' }, points: [] };
+  const tempoAutomated = tempoAutomation.points.length > 0;
 
   const editorWrapRef        = useRef(null);
   const nextIdRef            = useRef(1);
   const nextRegionIdRef      = useRef(1);
   const nextNoteIdRef        = useRef(0);
   const nextEffectIdRef      = useRef(1);
+  const nextAutomationIdRef  = useRef(1);
+  const nextGroupIdRef       = useRef(1);
+  const laneTopsRef          = useRef([0]);
   const ghostRefs            = useRef({});
   const hoverRef             = useRef({ trackId: null, measure: 0 });
   const dragRef              = useRef(null);
   const playheadRef          = useRef(null);
   const pianoRollPlayheadRef = useRef(null);
   const timeRef              = useRef(null);
+  const bpmLiveRef           = useRef(null); // live tempo readout (rAF textContent — zero re-render)
   const timelineRef          = useRef(null);
   const timelineCanvasRef    = useRef(null);   // pinned grid-line canvas over the timeline viewport
   const rulerRef             = useRef(null);
@@ -218,6 +282,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const regionsRef            = useRef([]);
   const tracksRef             = useRef([]);
   const selectedRegionIdsRef     = useRef(new Set());
+  const selectedAnchorRef        = useRef(null);
+  const globalAutomationsRef     = useRef([]);
+  const groupsRef                = useRef([]);
+  const collapsedGroupIdsRef     = useRef(new Set());
   const lastPianoScrollTopRef    = useRef(null); // null = no user scroll yet → default to C4
   const lastDragEndTimeRef       = useRef(0);
   const capturedRegionStartRef   = useRef(null);
@@ -342,11 +410,17 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     setProjectName(data.name ?? 'untitled');
     setBpm(data.bpm);
     setTempBpm(String(data.bpm));
-    Tone.Transport.bpm.value = data.bpm;
+    // No direct Transport.bpm write — recomputeTempo (the signal's single
+    // writer, via the hook's tempo-sync effect on the bpm/globalAutomations
+    // change) re-anchors the curve after this commit.
     setTotalMeasures(Math.max(24, data.totalMeasures));
     // Reset undo/redo to the loaded project (the load itself isn't an undoable step).
     timeTravelingRef.current = true; // make the recorder treat this commit as non-recordable
-    latestRef.current = { tracks: data.tracks, regions: data.regions, notes: data.notes };
+    latestRef.current = {
+      tracks: data.tracks, regions: data.regions, notes: data.notes,
+      globalAutomations: data.globalAutomations ?? [],
+      groups: data.groups ?? [],
+    };
     burstActiveRef.current = false;
     if (burstTimerRef.current) { clearTimeout(burstTimerRef.current); burstTimerRef.current = null; }
     setPast([]);
@@ -354,19 +428,25 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     setTracks(data.tracks);
     setRegions(data.regions);
     setNotes(data.notes);
+    setGlobalAutomations(data.globalAutomations ?? []);
+    setGroups(data.groups ?? []);
+    setCollapsedGroupIds(new Set());
+    setRenamingGroupId(null);
     nextIdRef.current       = data.nextId;
     nextRegionIdRef.current = data.nextRegionId;
     nextEffectIdRef.current = data.nextEffectId ?? 1;
     // Note-counter restore is load-bearing: without it, post-load mints
     // start at 0 and collide with loaded note ids (the ghost-note bug).
     nextNoteIdRef.current   = data.nextNoteId ?? 0;
+    nextAutomationIdRef.current = data.nextAutomationId ?? 1;
+    nextGroupIdRef.current  = data.nextGroupId ?? 1;
   }, []);
 
   // [ save ] writes to the browser project store (IndexedDB) — the homepage
   // Projects grid reads from it. Producing a .voxdaw file moved to the export menu.
   const handleSaveProject = useCallback(async () => {
     try {
-      const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName });
+      const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups });
       const id = currentProjectId ?? crypto.randomUUID();
       await storeSaveProject({
         id, name: projectName, bpm, trackCount: tracks.length, data: payload,
@@ -377,15 +457,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       console.error('save project failed', e);
       showToast(`save failed: ${e.message}`);
     }
-  }, [bpm, totalMeasures, tracks, regions, notes, projectName, currentProjectId, showToast]);
+  }, [bpm, totalMeasures, tracks, regions, notes, globalAutomations, groups, projectName, currentProjectId, showToast]);
 
   const handleExportProjectFile = useCallback(() => {
     setShowExportMenu(false);
-    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName });
+    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups });
     const filename = `${sanitizeFilename(projectName)}.voxdaw`;
     downloadJSON(payload, filename);
     showToast(`exported ${filename}`);
-  }, [bpm, totalMeasures, tracks, regions, notes, projectName, showToast]);
+  }, [bpm, totalMeasures, tracks, regions, notes, globalAutomations, groups, projectName, showToast]);
 
   const handleLoadProject = useCallback(async (file) => {
     if (!file) return;
@@ -433,8 +513,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     setIsBouncing(true);
     showToast('bouncing audio…', 60000);
     try {
-      const capSec = totalMeasures * 4 * (60 / bpm);
-      const { buffer, firstOnsetSec } = await bounceProject({ tracks, regions, notes, bpm, capSec });
+      // Hard right stop through the tempo map (constant-bpm math would mis-cap
+      // a project whose tempo lane speeds up or slows down).
+      const capSec = buildTempoMap(bpm, tempoPointsOf(globalAutomations)).secondsAtMeasure(totalMeasures);
+      const { buffer, firstOnsetSec } = await bounceProject({ tracks, regions, notes, bpm, globalAutomations, groups, capSec });
       // Trim leading silence to the first note's onset and trailing silence
       // after the last audible sample; null = nothing audible to export.
       const trimmed = firstOnsetSec == null
@@ -455,7 +537,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     } finally {
       setIsBouncing(false);
     }
-  }, [tracks, regions, notes, bpm, totalMeasures, isBouncing, showToast]);
+  }, [tracks, regions, notes, bpm, globalAutomations, groups, totalMeasures, isBouncing, showToast]);
 
   // Mute and Solo are mutually exclusive per track: turning one ON clears the
   // other; turning one OFF changes nothing else.
@@ -467,6 +549,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     prev.map(t => t.id === id
       ? { ...t, isSolo: !t.isSolo, isMuted: !t.isSolo ? false : t.isMuted }
       : t));
+
   // Instrument change clears any ADSR override so the knobs snap to the new
   // instrument's defaults (and a decay/sustain override never lands on a
   // Sampler after a melodic→drum switch).
@@ -495,8 +578,16 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     setTracks(prev => prev.map(t =>
       t.id === trackId ? { ...t, effects: [...(t.effects ?? []), fx] } : t));
   }, []);
+  // Removing an effect also GCs automations targeting it (an orphan lane would
+  // silently do nothing and confuse — regionId-authoritative repair precedent).
   const removeEffect = useCallback((trackId, fxId) => setTracks(prev => prev.map(t =>
-    t.id === trackId ? { ...t, effects: (t.effects ?? []).filter(e => e.id !== fxId) } : t)), []);
+    t.id === trackId
+      ? {
+          ...t,
+          effects: (t.effects ?? []).filter(e => e.id !== fxId),
+          automations: (t.automations ?? []).filter(a => !(a.target?.kind === 'fx' && a.target.effectId === fxId)),
+        }
+      : t)), []);
   const toggleBypassEffect = useCallback((trackId, fxId) => setTracks(prev => prev.map(t =>
     t.id === trackId
       ? { ...t, effects: (t.effects ?? []).map(e => e.id === fxId ? { ...e, bypass: !e.bypass } : e) }
@@ -506,13 +597,121 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       ? { ...t, effects: (t.effects ?? []).map(e => e.id === fxId ? { ...e, params: { ...e.params, ...newParams } } : e) }
       : t)), []);
 
+  // ── Track automation CRUD ────────────────────────────────────────────────────
+  // Automations live on the track object (track.automations) like effects, so
+  // they ride prop threading + the passive undo recorder for free (point drags
+  // coalesce into one entry via the burst coalescer). The expanded/collapsed
+  // Set is UI-only state — see openAutomationTrackIds.
+  const toggleAutomationArea = useCallback((trackId) => {
+    setOpenAutomationTrackIds(prev => {
+      const next = new Set(prev);
+      if (next.has(trackId)) next.delete(trackId);
+      else next.add(trackId);
+      return next;
+    });
+  }, []);
+  const addAutomation = useCallback((trackId, target) => {
+    // Eager mint — never inside the updater (StrictMode double-invokes updaters).
+    const id = `a${nextAutomationIdRef.current++}`;
+    setTracks(prev => prev.map(t => {
+      if (t.id !== trackId) return t;
+      const existing = t.automations ?? [];
+      if (existing.some(a => targetKey(a.target) === targetKey(target))) return t; // one lane per target
+      return { ...t, automations: [...existing, { id, target, points: [] }] };
+    }));
+  }, []);
+  const removeAutomation = useCallback((trackId, automationId) => setTracks(prev => prev.map(t =>
+    t.id === trackId
+      ? { ...t, automations: (t.automations ?? []).filter(a => a.id !== automationId) }
+      : t)), []);
+  // Single commit from a lane's mouseup (Zero-Re-render: the drag itself is DOM-only).
+  const commitAutomationPoints = useCallback((trackId, automationId, points) => setTracks(prev => prev.map(t =>
+    t.id === trackId
+      ? { ...t, automations: (t.automations ?? []).map(a => a.id === automationId ? { ...a, points } : a) }
+      : t)), []);
+
+  // ── Group effects + automation CRUD — setGroups twins of the track versions.
+  // Same eager id mints (e<n>/a<n> namespaces span tracks AND groups), same
+  // orphan-GC on effect removal, same one-lane-per-target rule.
+  const addGroupEffect = useCallback((groupId, fxType) => {
+    const def = EFFECT_DEFS[fxType];
+    if (!def) return;
+    const fx = { id: `e${nextEffectIdRef.current++}`, type: fxType, bypass: false, params: defaultParamsFor(fxType) };
+    setGroups(prev => prev.map(g =>
+      g.id === groupId ? { ...g, effects: [...(g.effects ?? []), fx] } : g));
+  }, []);
+  const removeGroupEffect = useCallback((groupId, fxId) => setGroups(prev => prev.map(g =>
+    g.id === groupId
+      ? {
+          ...g,
+          effects: (g.effects ?? []).filter(e => e.id !== fxId),
+          automations: (g.automations ?? []).filter(a => !(a.target?.kind === 'fx' && a.target.effectId === fxId)),
+        }
+      : g)), []);
+  const toggleBypassGroupEffect = useCallback((groupId, fxId) => setGroups(prev => prev.map(g =>
+    g.id === groupId
+      ? { ...g, effects: (g.effects ?? []).map(e => e.id === fxId ? { ...e, bypass: !e.bypass } : e) }
+      : g)), []);
+  const updateGroupEffectSettings = useCallback((groupId, fxId, newParams) => setGroups(prev => prev.map(g =>
+    g.id === groupId
+      ? { ...g, effects: (g.effects ?? []).map(e => e.id === fxId ? { ...e, params: { ...e.params, ...newParams } } : e) }
+      : g)), []);
+  const addGroupAutomation = useCallback((groupId, target) => {
+    const id = `a${nextAutomationIdRef.current++}`; // eager mint (StrictMode)
+    setGroups(prev => prev.map(g => {
+      if (g.id !== groupId) return g;
+      const existing = g.automations ?? [];
+      if (existing.some(a => targetKey(a.target) === targetKey(target))) return g;
+      return { ...g, automations: [...existing, { id, target, points: [] }] };
+    }));
+  }, []);
+  const removeGroupAutomation = useCallback((groupId, automationId) => setGroups(prev => prev.map(g =>
+    g.id === groupId
+      ? { ...g, automations: (g.automations ?? []).filter(a => a.id !== automationId) }
+      : g)), []);
+  const commitGroupAutomationPoints = useCallback((groupId, automationId, points) => setGroups(prev => prev.map(g =>
+    g.id === groupId
+      ? { ...g, automations: (g.automations ?? []).map(a => a.id === automationId ? { ...a, points } : a) }
+      : g)), []);
+
+  // Tempo-lane commit. The tempo automation is created lazily on first commit;
+  // its id is minted OUTSIDE the updater (StrictMode double-invokes updaters —
+  // an inside mint would burn two ids).
+  const commitTempoPoints = useCallback((points) => {
+    const existing = globalAutomationsRef.current.find(a => a.target?.kind === 'tempo');
+    const id = existing?.id ?? ('a' + nextAutomationIdRef.current++);
+    setGlobalAutomations(prev => prev.some(a => a.id === id)
+      ? prev.map(a => (a.id === id ? { ...a, points } : a))
+      : [...prev, { id, target: { kind: 'tempo' }, points }]);
+  }, []);
+
+  // Tempo-lane drag preview (the applyAutomationValue pattern): a short ramp
+  // on Transport.bpm during the drag; the commit's setGlobalAutomations fires
+  // the hook's tempo-sync effect, whose recomputeTempo (the signal's single
+  // steady-state writer) re-anchors the whole curve on mouseup.
+  // cancelAndHoldAtTime (NOT cancelScheduledValues) is load-bearing: ticks are
+  // the integral of this curve, and a plain cancel mid-ramp rewrites the
+  // already-played shape → position jumps + TickParam corruption (see
+  // recomputeTempo). The hold also pins the current value, so no setValueAtTime
+  // is needed before the ramp. Gated to a non-running transport: while playing,
+  // the preview would drag the LIVE tempo to the held point's value, stomping
+  // the scheduled curve mid-song — the playing tempo only changes on mouseup.
+  const previewTempo = useCallback((v01) => {
+    if (Tone.Transport.state === 'started') return;
+    const sig = Tone.Transport.bpm;
+    const now = Tone.now();
+    sig.cancelAndHoldAtTime(now);
+    sig.linearRampToValueAtTime(denorm(v01, TEMPO_META), now + 0.02);
+  }, []);
+
   // Workstation audio engine — reconciles synths/gains/parts against tracks/regions/notes.
   // Does NOT call Tone.start(); the user-gesture path (handlePlayPause, RegionEditor preview)
   // already handles that. Stops Transport + disposes nodes on unmount → clean handoff to VoxTool.
   const {
     silenceAll, recomputeFades, loadingTrackIds,
     auditionAttack, auditionRelease, auditionReleaseAll, auditionPrime,
-  } = useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality });
+    applyAutomationValue,
+  } = useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality, globalAutomations, groups });
 
   // ── History recorder ────────────────────────────────────────
   // Passive: records AFTER React commits, so multi-setter actions (e.g. split =
@@ -521,7 +720,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // mid-flight commits (and continuous volume/pan slider commits) into a single entry.
   // Snapshots store array refs (state is updated immutably, so they're effectively frozen).
   useEffect(() => {
-    const cur = { tracks, regions, notes };
+    const cur = { tracks, regions, notes, globalAutomations, groups };
     if (timeTravelingRef.current) {            // change came from undo/redo/load → don't record
       timeTravelingRef.current = false;
       latestRef.current = cur;
@@ -534,7 +733,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     // No real change (e.g. StrictMode's mount double-invoke, or a re-render that didn't
     // touch these arrays) → don't record. State updates immutably, so a changed array is
     // always a new reference.
-    if (baseline.tracks === cur.tracks && baseline.regions === cur.regions && baseline.notes === cur.notes) return;
+    if (baseline.tracks === cur.tracks && baseline.regions === cur.regions
+        && baseline.notes === cur.notes && baseline.globalAutomations === cur.globalAutomations
+        && baseline.groups === cur.groups) return;
     latestRef.current = cur;
     if (!burstActiveRef.current) {             // leading edge → push the pre-change snapshot
       burstActiveRef.current = true;
@@ -543,9 +744,13 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     }
     if (burstTimerRef.current) clearTimeout(burstTimerRef.current);
     burstTimerRef.current = setTimeout(() => { burstActiveRef.current = false; burstTimerRef.current = null; }, 200);
-  }, [tracks, regions, notes]);
+  }, [tracks, regions, notes, globalAutomations, groups]);
 
-  const applyHistory = useCallback((s) => { setTracks(s.tracks); setRegions(s.regions); setNotes(s.notes); }, []);
+  const applyHistory = useCallback((s) => {
+    setTracks(s.tracks); setRegions(s.regions); setNotes(s.notes);
+    setGlobalAutomations(s.globalAutomations ?? []);
+    setGroups(s.groups ?? []);
+  }, []);
   const endBurst = useCallback(() => {
     burstActiveRef.current = false;
     if (burstTimerRef.current) { clearTimeout(burstTimerRef.current); burstTimerRef.current = null; }
@@ -722,14 +927,32 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       trackId: newTrackId,
       regionId: regionIdMap.get(n.regionId),
     }));
+    // Fresh effect ids are load-bearing: the audio hook's bypass delta-check
+    // (appliedFxBypassByIdRef) is keyed by effect id — copied ids would alias
+    // bypass state across the two tracks. The old→new map lets automations
+    // follow their effect into the clone.
+    const effectIdMap = new Map();
+    const clonedEffects = (src.effects ?? []).map(fx => {
+      const nid = `e${nextEffectIdRef.current++}`;
+      effectIdMap.set(fx.id, nid);
+      return { ...fx, id: nid, params: { ...fx.params } };
+    });
     const clone = {
       ...src,
       id: newTrackId,
       name: `${src.name} copy`,
-      // Fresh effect ids are load-bearing: the audio hook's bypass delta-check
-      // (appliedFxBypassByIdRef) is keyed by effect id — copied ids would alias
-      // bypass state across the two tracks.
-      effects: (src.effects ?? []).map(fx => ({ ...fx, id: `e${nextEffectIdRef.current++}`, params: { ...fx.params } })),
+      effects: clonedEffects,
+      // Automations clone with fresh a<n> ids; fx targets are remapped through
+      // effectIdMap (an unmatched target would be an orphan — drop it).
+      automations: (src.automations ?? [])
+        .filter(a => a.target?.kind !== 'fx' || effectIdMap.has(a.target.effectId))
+        .map(a => ({
+          id: `a${nextAutomationIdRef.current++}`,
+          target: a.target.kind === 'fx'
+            ? { ...a.target, effectId: effectIdMap.get(a.target.effectId) }
+            : { ...a.target },
+          points: (a.points ?? []).map(p => ({ ...p })),
+        })),
     };
     setTracks(prev => {
       const i = prev.findIndex(t => t.id === trackId);
@@ -743,9 +966,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   const deleteTrack = useCallback((trackId) => {
     const idx = tracksRef.current.findIndex(t => t.id === trackId);
+    const dead = tracksRef.current[idx];
     const deadRegionIds = new Set(
       regionsRef.current.filter(r => r.trackId === trackId).map(r => r.id));
     setTracks(prev => prev.filter(t => t.id !== trackId));
+    // Group GC: a group whose last member dies is dropped.
+    if (dead?.groupId
+        && !tracksRef.current.some(t => t.id !== trackId && t.groupId === dead.groupId)) {
+      setGroups(prev => prev.filter(g => g.id !== dead.groupId));
+    }
     setRegions(prev => prev.filter(r => r.trackId !== trackId));
     setNotes(prev => prev.filter(n => n.trackId !== trackId));
     setSelectedRegionIds(prev => {
@@ -766,13 +995,110 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     silenceAll();
   }, [silenceAll]);
 
+  // ── Track groups ─────────────────────────────────────────────
+  // Creation: id minted eagerly (never inside an updater — StrictMode), the
+  // members are spliced CONTIGUOUS at the first member's position (an
+  // ungrouped track can't sit inside another group's run, so the splice never
+  // fragments one), and membership is track.groupId.
+  const createGroup = useCallback((memberIds) => {
+    const ids = new Set(memberIds);
+    if (ids.size < 2) return;
+    const n = nextGroupIdRef.current++;
+    const first = tracksRef.current.find(t => ids.has(t.id));
+    const group = {
+      id: `g${n}`, name: `group ${n}`,
+      color: first?.color ?? TRACK_COLORS[(n - 1) % TRACK_COLORS.length],
+      isMuted: false, isSolo: false, volume: 75, pan: 0, effects: [], automations: [],
+    };
+    setGroups(prev => [...prev, group]);
+    setTracks(prev => {
+      const firstIdx = prev.findIndex(t => ids.has(t.id));
+      const members  = prev.filter(t => ids.has(t.id)).map(t => ({ ...t, groupId: group.id }));
+      const rest     = prev.filter(t => !ids.has(t.id));
+      const next     = [...rest];
+      next.splice(Math.min(firstIdx, rest.length), 0, ...members);
+      return next;
+    });
+    pasteAnchorTrackIndexRef.current = null; // index-based anchor is stale after reorder
+    setGroupModal(null);
+  }, []);
+
+  const toggleGroupCollapsed = useCallback((groupId) => {
+    setCollapsedGroupIds(prev => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
+      return next;
+    });
+  }, []);
+
+  // Group mute/solo mirror the track pattern: mutually exclusive per group.
+  const toggleGroupMute = (id) => setGroups(prev =>
+    prev.map(g => g.id === id
+      ? { ...g, isMuted: !g.isMuted, isSolo: !g.isMuted ? false : g.isSolo }
+      : g));
+  const toggleGroupSolo = (id) => setGroups(prev =>
+    prev.map(g => g.id === id
+      ? { ...g, isSolo: !g.isSolo, isMuted: !g.isSolo ? false : g.isMuted }
+      : g));
+
+  const handleGroupVolumeChange = useCallback((groupId, v) => {
+    const clamped = Math.max(0, Math.min(100, Math.round(v)));
+    setGroups(prev => prev.map(g => g.id === groupId ? { ...g, volume: clamped } : g));
+  }, []);
+
+  const handleGroupPanChange = useCallback((groupId, n) => {
+    const clamped = Math.max(-1, Math.min(1, n));
+    setGroups(prev => prev.map(g => g.id === groupId ? { ...g, pan: clamped } : g));
+  }, []);
+
+  // Ungroup: dissolve the group, keep the tracks (Dylan's spec).
+  const ungroup = useCallback((groupId) => {
+    setTracks(prev => prev.map(t => t.groupId === groupId ? { ...t, groupId: undefined } : t));
+    setGroups(prev => prev.filter(g => g.id !== groupId));
+    setCollapsedGroupIds(prev => { const next = new Set(prev); next.delete(groupId); return next; });
+  }, []);
+
+  // Remove ONE track from its group; a group left with <2 members dissolves
+  // (groups are only ever formed with ≥2).
+  const removeTrackFromGroup = useCallback((trackId) => {
+    const gid = tracksRef.current.find(t => t.id === trackId)?.groupId;
+    if (!gid) return;
+    const remaining = tracksRef.current.filter(t => t.groupId === gid && t.id !== trackId);
+    if (remaining.length < 2) { ungroup(gid); return; }
+    setTracks(prev => prev.map(t => t.id === trackId ? { ...t, groupId: undefined } : t));
+  }, [ungroup]);
+
+  // Delete Group + Tracks: destructive (confirm() at the dispatch site);
+  // undoable because groups+tracks+regions+notes are all in history snapshots.
+  const deleteGroup = useCallback((groupId) => {
+    const memberIds = new Set(tracksRef.current.filter(t => t.groupId === groupId).map(t => t.id));
+    const deadRegionIds = new Set(regionsRef.current.filter(r => memberIds.has(r.trackId)).map(r => r.id));
+    setTracks(prev => prev.filter(t => !memberIds.has(t.id)));
+    setRegions(prev => prev.filter(r => !memberIds.has(r.trackId)));
+    setNotes(prev => prev.filter(n => !memberIds.has(n.trackId)));
+    setGroups(prev => prev.filter(g => g.id !== groupId));
+    setCollapsedGroupIds(prev => { const next = new Set(prev); next.delete(groupId); return next; });
+    setSelectedRegionIds(prev => new Set([...prev].filter(id => !deadRegionIds.has(id))));
+    setEditingTrackId(prev => (memberIds.has(prev) ? null : prev));
+    setRenamingTrackId(prev => (memberIds.has(prev) ? null : prev));
+    setActiveTrackId(prev => (memberIds.has(prev) ? null : prev));
+    pasteAnchorTrackIndexRef.current = null;
+    // Audio nodes self-dispose via the useWorkstationAudio reconcilers — just
+    // cut any voice still ringing from the removed regions (deleteTrack's precedent).
+    silenceAll();
+  }, [silenceAll]);
+
   const pasteEffectsTo = useCallback((sourceTrackId, targetTrackId) => {
     const src = tracksRef.current.find(t => t.id === sourceTrackId);
     if (!src || sourceTrackId === targetTrackId) return;
     // Fresh ids + deep-copied params per effect (same aliasing rule as duplicate).
     const cloned = (src.effects ?? []).map(fx =>
       ({ ...fx, id: `e${nextEffectIdRef.current++}`, params: { ...fx.params } }));
-    setTracks(prev => prev.map(t => t.id === targetTrackId ? { ...t, effects: cloned } : t));
+    // The target's whole rack is replaced, so its fx-targeting automations
+    // become orphans — GC them (volume/pan lanes survive).
+    setTracks(prev => prev.map(t => t.id === targetTrackId
+      ? { ...t, effects: cloned, automations: (t.automations ?? []).filter(a => a.target?.kind !== 'fx') }
+      : t));
   }, []);
 
   const exportTrack = useCallback(async (trackId, format = 'wav') => {
@@ -785,9 +1111,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       // Force-solo the target: bounceProject's audibility rule
       // (!isMuted && (!anySoloed || isSolo)) then renders only this track.
       const soloed = tracksRef.current.map(t => ({ ...t, isSolo: t.id === trackId, isMuted: false }));
-      const capSec = totalMeasuresRef.current * 4 * (60 / bpm);
+      // Neutralize group mute/solo too — a muted parent group would silence
+      // the stem; the soloed track still prints THROUGH its group's FX chain
+      // (the desired bus sound).
+      const neutralGroups = groupsRef.current.map(g => ({ ...g, isMuted: false, isSolo: false }));
+      const globalAutos = globalAutomationsRef.current;
+      const capSec = buildTempoMap(bpm, tempoPointsOf(globalAutos)).secondsAtMeasure(totalMeasuresRef.current);
       const { buffer, firstOnsetSec } = await bounceProject({
-        tracks: soloed, regions: regionsRef.current, notes: notesRef.current, bpm, capSec,
+        tracks: soloed, regions: regionsRef.current, notes: notesRef.current, bpm,
+        globalAutomations: globalAutos, groups: neutralGroups, capSec,
       });
       const trimmed = firstOnsetSec == null
         ? null
@@ -939,9 +1271,24 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       else if (action === 'rename')       setRenamingTrackId(id);
       else if (action === 'color')        setTracks(prev => prev.map(t => t.id === id ? { ...t, color: payload } : t));
       else if (action === 'duplicate')    duplicateTrack(id);
+      else if (action === 'createGroup')  setGroupModal({ initiatorTrackId: id });
+      else if (action === 'ungroupTrack') removeTrackFromGroup(id);
       else if (action === 'pasteEffects') pasteEffectsTo(id, payload);
       else if (action === 'export')       exportTrack(id, payload ?? 'wav');
       else if (action === 'delete')       deleteTrack(id);
+      return;
+    }
+    if (type === 'group') {
+      if (action === 'rename')       setRenamingGroupId(id);
+      else if (action === 'color')   setGroups(prev => prev.map(g => g.id === id ? { ...g, color: payload } : g));
+      else if (action === 'ungroup') ungroup(id);
+      else if (action === 'delete') {
+        const g = groupsRef.current.find(x => x.id === id);
+        const count = tracksRef.current.filter(t => t.groupId === id).length;
+        if (window.confirm(`Delete group "${g?.name ?? id}" AND its ${count} track${count === 1 ? '' : 's'}? (undoable)`)) {
+          deleteGroup(id);
+        }
+      }
       return;
     }
     if (type === 'region') {
@@ -988,7 +1335,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       else console.log('[context-menu] note', action, ids); // copy / paste (stubs)
     }
   }, [transposeRegions, transposeNotes, handleNotesDelete, splitRegionAtMeasure,
-      duplicateTrack, deleteTrack, pasteEffectsTo, exportTrack]);
+      duplicateTrack, deleteTrack, pasteEffectsTo, exportTrack,
+      removeTrackFromGroup, ungroup, deleteGroup]);
 
   // ── Ghost region ─────────────────────────────────────────────
   // Returns true if `measure` falls inside any existing region on this track.
@@ -1274,11 +1622,25 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         const clampedDelta = Math.max(-minInitStart, actualDelta);
 
         const relContent = e.clientY - rect.top + timelineRef.current.scrollTop - RULER_HEIGHT;
-        const rawTrackDelta     = Math.floor(relContent / TRACK_H) - d.origTrackIndex;
-        const clampedTrackDelta = Math.max(
+        // Cumulative lookup (not / TRACK_H): open automation sub-lanes belong to
+        // their track, so a drop anywhere in a track's strip lands on that track.
+        const rawTrackDelta     = yToTrackIndex(relContent, laneTopsRef.current) - d.origTrackIndex;
+        let clampedTrackDelta = Math.max(
           -minOrigTrackIndex,
           Math.min(tracksRef.current.length - 1 - maxOrigTrackIndex, rawTrackDelta)
         );
+        // Collapsed-group guard: yToTrackIndex can't RETURN a hidden track
+        // (zero-height band), but the clamp arithmetic and companion offsets
+        // can still land one on a collapsed member — keep the last valid
+        // delta instead of dropping a region into an invisible lane.
+        const isHiddenTrack = (idx) => {
+          const gid = tracksRef.current[idx]?.groupId;
+          return !!gid && collapsedGroupIdsRef.current.has(gid);
+        };
+        if (isHiddenTrack(d.origTrackIndex + clampedTrackDelta)
+            || d.companions.some(c => isHiddenTrack(c.origTrackIndex + clampedTrackDelta))) {
+          clampedTrackDelta = (d.pendingTrackIndex ?? d.origTrackIndex) - d.origTrackIndex;
+        }
         const anchorNewIdx  = d.origTrackIndex + clampedTrackDelta;
         const candTrackId   = tracksRef.current[anchorNewIdx]?.id ?? d.pendingTrackId;
         newStart = d.initStart + clampedDelta;
@@ -1298,8 +1660,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           c.pendingTrackId    = cTrackId;
           c.pendingTrackIndex = cIdx;
           if (c.el) {
+            const tops = laneTopsRef.current;
             c.el.style.left      = `${cStart * pixelsPerMeasure}px`;
-            c.el.style.transform = `translateY(${(cIdx - c.origTrackIndex) * TRACK_H}px)`;
+            c.el.style.transform = `translateY(${tops[cIdx] - tops[c.origTrackIndex]}px)`;
             c.el.style.zIndex    = '10';
             if (cTrackId !== prevCTrackId) {
               const color = tracksRef.current.find(t => t.id === cTrackId)?.color;
@@ -1494,7 +1857,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       };
 
       if (d.el) {
-        const yOffset = (d.pendingTrackIndex - d.origTrackIndex) * TRACK_H;
+        const tops = laneTopsRef.current;
+        const yOffset = tops[d.pendingTrackIndex] - tops[d.origTrackIndex];
         d.el.style.left      = `${newStart    * pixelsPerMeasure}px`;
         d.el.style.width     = `${newDuration * pixelsPerMeasure}px`;
         d.el.style.transform = `translateY(${yOffset}px)`;
@@ -1820,7 +2184,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const hitIds = getIntersectingRegionIds(
         Math.min(d.startX, currentX), Math.max(d.startX, currentX),
         Math.min(d.startY, currentY), Math.max(d.startY, currentY),
-        regionsRef.current, tracksRef.current, pixelsPerMeasure
+        regionsRef.current, tracksRef.current, pixelsPerMeasure, laneTopsRef.current
       );
       marqueeHoverIdsRef.current = new Set(hitIds);
       hitIds.forEach(id => {
@@ -1844,7 +2208,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         const minY = Math.min(d.startY, d.currentY ?? d.startY);
         const maxY = Math.max(d.startY, d.currentY ?? d.startY);
         const hitIds = getIntersectingRegionIds(minX, maxX, minY, maxY,
-          regionsRef.current, tracksRef.current, pixelsPerMeasure);
+          regionsRef.current, tracksRef.current, pixelsPerMeasure, laneTopsRef.current);
         const hit = regionsRef.current.filter(r => hitIds.includes(r.id));
         setSelectedRegionIds(new Set(hitIds));
         if (hit.length > 0) {
@@ -1884,8 +2248,13 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   notesRef.current              = notes;
   totalMeasuresRef.current      = totalMeasures;
   selectedRegionIdsRef.current  = selectedRegionIds;
+  selectedAnchorRef.current     = selectedAnchor;
+  globalAutomationsRef.current  = globalAutomations;
+  groupsRef.current             = groups;
+  collapsedGroupIdsRef.current  = collapsedGroupIds;
   snapEnabledRef.current        = snapEnabled;
   editingTrackIdRef.current     = editingTrackId;
+  laneTopsRef.current           = laneTops;
 
   // ── Left-column resizer drag ───────────────────────────────
   const startLeftColDrag = useCallback((e) => {
@@ -1945,6 +2314,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (playheadRef.current)          playheadRef.current.style.transform          = `translateX(${x}px)`;
     if (pianoRollPlayheadRef.current) pianoRollPlayheadRef.current.style.transform = `translateX(${x}px)`;
     if (timeRef.current)              timeRef.current.textContent                  = formatTime(Tone.Transport.seconds);
+    // Live automated tempo (span only rendered while the tempo lane has points).
+    if (bpmLiveRef.current)           bpmLiveRef.current.textContent               = `∿${Math.round(Tone.Transport.bpm.value)}`;
   }, [pixelsPerMeasure]);
 
   // Reposition playhead when zoom changes (even while paused) — layout phase so the
@@ -1997,7 +2368,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   const handlePlayPause = useCallback(async () => {
     await Tone.start();
-    Tone.Transport.bpm.value = bpm;
+    // No direct Transport.bpm write — recomputeFades → recomputeTempo (the
+    // signal's single writer) re-anchors the bpm curve on the resume branch.
     if (Tone.Transport.state === 'started') {
       Tone.Transport.pause();
       silenceAll();
@@ -2009,7 +2381,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       Tone.Transport.start();
       setIsPlaying(true);
     }
-  }, [updatePlayhead, bpm, silenceAll, recomputeFades]);
+  }, [updatePlayhead, silenceAll, recomputeFades]);
 
   const handleStop = useCallback(() => {
     Tone.Transport.stop();
@@ -2154,16 +2526,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (isNaN(n)) n = bpm;
     n = Math.max(20, Math.min(300, n));
 
-    if (n !== bpm) {
-      // Tone's source of truth is ticks; assigning .bpm.value preserves the
-      // current tick (and therefore musical position) automatically. A manual
-      // seconds rescale here would re-convert seconds→ticks at the old bpm,
-      // perturbing ticks by bpm_old/n — invisible while paused but a visible
-      // playhead jump under the tick-driven visual loop.
-      Tone.Transport.bpm.value = n;
-      recomputeFades();
-    }
-
+    // No direct Transport.bpm write: the hook's tempo-sync effect fires on the
+    // setBpm commit and recomputeTempo (the signal's single writer) re-anchors
+    // the whole curve. Tone's source of truth is ticks, so the bpm change
+    // preserves musical position automatically — no playhead jump.
     setBpm(n);
     setTempBpm(String(n));
     setEditingBpm(false);
@@ -2175,18 +2541,21 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (!scroller) return;
     const rect = scroller.getBoundingClientRect();
     const x    = clientX - (rect.left + headerColW()) + scroller.scrollLeft;
+    // Tick-domain seek: pixels are measure-based, so x → measures → ticks is
+    // exact at ANY tempo (a seconds conversion would be wrong under the tempo
+    // lane and needlessly bpm-coupled without it).
     if (snapEnabled) {
       const snapInc      = getSnapIncrement(pixelsPerMeasure);
       const rawMeasures  = x / pixelsPerMeasure;
       const snapMeasures = Math.max(0, Math.round(rawMeasures / snapInc) * snapInc);
-      Tone.Transport.seconds = snapMeasures * 4 * (60 / bpm);
+      Tone.Transport.ticks = Math.round(snapMeasures * 4 * Tone.Transport.PPQ);
     } else {
-      Tone.Transport.seconds = Math.max(0, x / pxPerSec);
+      Tone.Transport.ticks = Math.round(Math.max(0, x / pixelsPerMeasure) * 4 * Tone.Transport.PPQ);
     }
     silenceAll(); // cut any voice still ringing from the pre-seek position (ghost note)
     recomputeFades();
     updatePlayhead();
-  }, [pxPerSec, updatePlayhead, snapEnabled, pixelsPerMeasure, bpm, recomputeFades, silenceAll]);
+  }, [updatePlayhead, snapEnabled, pixelsPerMeasure, recomputeFades, silenceAll]);
 
   const handleMouseDown = (e) => {
     // The sticky header column lives inside this scroller now — its controls
@@ -2425,6 +2794,19 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     };
   }, [handlePlayPause]);
 
+  // ── Anchor-selection clear on any mousedown ─────────────────
+  // Capture phase fires before every lane handler, so a click on a point
+  // clears here first and the lane's own mouseup re-selects it — clicking
+  // anywhere else simply leaves the selection cleared. Guarded so the setState
+  // only fires while something is actually selected.
+  useEffect(() => {
+    const onDown = () => {
+      if (selectedAnchorRef.current) setSelectedAnchor(null);
+    };
+    window.addEventListener('mousedown', onDown, true);
+    return () => window.removeEventListener('mousedown', onDown, true);
+  }, []);
+
   // ── Delete / Backspace / Copy / Paste keyboard handlers ─────
   useEffect(() => {
     const onKey = (e) => {
@@ -2451,7 +2833,14 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         return;
       }
 
-      // Delete / Backspace — notes path wins when notes selected
+      // Escape — clear automation-anchor selection (no other Escape behavior
+      // lives at shell level; RegionEditor/ContextMenu own theirs locally).
+      if (e.key === 'Escape') {
+        if (selectedAnchorRef.current) setSelectedAnchor(null);
+        return;
+      }
+
+      // Delete / Backspace — priority: notes > automation anchor > regions
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (inInput) return;
         if (hasNoteSel) {
@@ -2459,6 +2848,33 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           const ids = new Set(noteSelectionRef.current);
           setNotes(prev => prev.filter(n => !ids.has(n.id)));
           noteSelectionApiRef.current?.clear();
+          return;
+        }
+        if (selectedAnchorRef.current) {
+          const { trackId, automationId, pointIndex } = selectedAnchorRef.current;
+          if (trackId === '__global__') {
+            // Global (tempo) lane — keyed by kind, not id (see the lane's
+            // onSelectPoint).
+            const a = globalAutomationsRef.current.find(x => x.target?.kind === 'tempo');
+            if (a && pointIndex < (a.points?.length ?? 0)) {
+              e.preventDefault();
+              commitTempoPoints(a.points.filter((_, k) => k !== pointIndex));
+            }
+            setSelectedAnchor(null);
+            return;
+          }
+          // Channel = track or group (disjoint id namespaces; the commit
+          // setter differs by which list resolves the id).
+          const t = tracksRef.current.find(x => x.id === trackId);
+          const grp = t ? null : groupsRef.current.find(x => x.id === trackId);
+          const a = (t ?? grp)?.automations?.find(x => x.id === automationId);
+          if (a && pointIndex < (a.points?.length ?? 0)) {
+            e.preventDefault();
+            const pts = a.points.filter((_, k) => k !== pointIndex);
+            if (t) commitAutomationPoints(trackId, automationId, pts);
+            else   commitGroupAutomationPoints(trackId, automationId, pts);
+          }
+          setSelectedAnchor(null);
           return;
         }
         const ids = selectedRegionIdsRef.current;
@@ -2573,7 +2989,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           if (!editingTrackIdRef.current) return;
           e.preventDefault();
           const tid = editingTrackIdRef.current;
-          const anchorBeat = Tone.Transport.seconds / (60 / bpm);
+          // Ticks → beats: exact at any tempo (seconds/constant-bpm is not).
+          const anchorBeat = Tone.Transport.ticks / Tone.Transport.PPQ;
 
           let nextRegions = regionsRef.current;
           let nextNotes   = notesRef.current;
@@ -2629,8 +3046,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           setNotes(dedupePerfectOverlaps(nextNotes, newIds));
           noteSelectionApiRef.current?.setIds(newIds);
           if (Tone.Transport.state !== 'started') {
-            const maxEnd = Math.max(...pasteEnds);
-            Tone.Transport.seconds = maxEnd * (60 / bpm);
+            const maxEnd = Math.max(...pasteEnds); // beats
+            Tone.Transport.ticks = Math.round(maxEnd * Tone.Transport.PPQ);
             updatePlayhead();
           }
           return;
@@ -2689,7 +3106,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         // Phase 104/105: advance global playhead to the right edge of the pasted payload —
         // but only when transport is not playing, so the live sweep isn't interrupted (Phase 105 guard).
         if (Tone.Transport.state !== 'started') {
-          Tone.Transport.seconds = rightEdge * 4 * (60 / bpm);
+          Tone.Transport.ticks = Math.round(rightEdge * 4 * Tone.Transport.PPQ);
           updatePlayhead();
         }
         return;
@@ -2697,7 +3114,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [bpm, updatePlayhead]);
+  }, [bpm, updatePlayhead, commitAutomationPoints, commitGroupAutomationPoints, commitTempoPoints]);
 
   return (
     <div ref={shellRef} className={styles.shell} style={{ '--left-col-width': `${leftColWidth}px` }}>
@@ -2825,6 +3242,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                 {bpm}
               </span>
             )}
+            {tempoAutomated && (
+              <span ref={bpmLiveRef} className={styles.bpmLive} title="live tempo (automated)">∿{bpm}</span>
+            )}
           </div>
           <div className={styles.meta}>
             <span className={styles.metaLabel}>TIME</span>
@@ -2854,6 +3274,27 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           {/* Track header column — sticky-left inside the scroller */}
           <div ref={trackHeadersRef} className={styles.trackHeaders}>
           <div className={styles.tracksHeader}>tracks</div>
+          {/* Global automation strip + tempo lane header — heights MUST mirror
+              the timeline side's rows (laneTops' topOffset assumes it). */}
+          <div className={styles.globalStripRow}>
+            <button
+              className={styles.globalChevron}
+              onClick={() => setGlobalLaneOpen(v => !v)}
+              title={globalLaneOpen ? 'collapse global automation' : 'expand global automation'}
+            >
+              {globalLaneOpen ? '▾' : '▸'}
+            </button>
+            <span className={styles.globalStripLabel}>global</span>
+            {tempoAutomated && !globalLaneOpen && <span className={styles.globalStripHint}>∿ tempo</span>}
+          </div>
+          {globalLaneOpen && (
+            <div className={styles.autoHeaderRow} style={{ '--track-color': 'var(--accent-color)' }}>
+              <select className={styles.globalTargetSelect} value="tempo" onChange={() => {}}>
+                <option value="tempo">tempo</option>
+              </select>
+              <span className={styles.globalStripHint}>{TEMPO_META.min}–{TEMPO_META.max} bpm</span>
+            </div>
+          )}
           {tracks.length === 0 ? (
             <div className={styles.emptyState}>
               <p className={styles.emptyTitle}>no tracks</p>
@@ -2862,9 +3303,134 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             </div>
           ) : (
             <>
-              {tracks.map((t) => (
-                <div key={t.id} className={`${styles.trackRow}${editingTrackId === t.id ? ` ${styles.trackRowActive}` : activeTrackId === t.id ? ` ${styles.trackRowFocused}` : ''}`}
-                  style={{ '--track-color': t.color }}
+              {tracks.map((t, ti) => {
+                const group = t.groupId ? groupById.get(t.groupId) : null;
+                const isFirstMember = !!group && (ti === 0 || tracks[ti - 1].groupId !== t.groupId);
+                const isCollapsed = !!group && collapsedGroupIds.has(group.id);
+                return (
+                <Fragment key={t.id}>
+                {/* Group header row — rendered before the run's first member;
+                    height (GROUP_H) MUST mirror the timeline's .groupLane. */}
+                {isFirstMember && (
+                  <div className={styles.groupRow}
+                    style={{ '--group-color': group.color }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'group', targetId: group.id });
+                    }}>
+                    <button
+                      className={styles.groupChevron}
+                      onClick={() => toggleGroupCollapsed(group.id)}
+                      title={isCollapsed ? 'Expand group' : 'Collapse group'}>
+                      {isCollapsed ? '▸' : '▾'}
+                    </button>
+                    <span className={styles.trackColorDot} style={{ background: group.color }} />
+                    {renamingGroupId === group.id ? (
+                      <input
+                        className={styles.trackNameInput}
+                        defaultValue={group.name}
+                        autoFocus
+                        onFocus={(e) => e.target.select()}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') e.target.blur();
+                          else if (e.key === 'Escape') { e.target.value = group.name; e.target.blur(); }
+                        }}
+                        onBlur={(e) => {
+                          const name = e.target.value.trim();
+                          if (name && name !== group.name) {
+                            setGroups(prev => prev.map(g => g.id === group.id ? { ...g, name } : g));
+                          }
+                          setRenamingGroupId(null);
+                        }}
+                      />
+                    ) : (
+                      <span className={styles.groupName} onDoubleClick={() => setRenamingGroupId(group.id)}>
+                        {group.name}
+                      </span>
+                    )}
+                    <div className={styles.groupControls}>
+                      <button
+                        className={openAutomationTrackIds.has(group.id) ? styles.trackBtnActive : styles.trackBtn}
+                        onClick={(e) => { e.stopPropagation(); toggleAutomationArea(group.id); }}
+                        title={openAutomationTrackIds.has(group.id) ? 'Hide group automation' : 'Show group automation'}>
+                        <svg viewBox="0 0 16 12" width="14" height="10" fill="none"
+                             stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"
+                             strokeLinejoin="round" style={{ display: 'block', margin: '0 auto' }}
+                             aria-hidden="true">
+                          <path d="M1 6 h3.2 l1.8-4.2 l4 8.4 l1.8-4.2 h3.2" />
+                        </svg>
+                      </button>
+                      <button
+                        className={editingGroupId === group.id ? styles.trackBtnActive : styles.trackBtn}
+                        onClick={() => { setEditingGroupId(prev => prev === group.id ? null : group.id); setEditingTrackId(null); }}
+                        title="Group effects rack">fx</button>
+                      <PanKnob
+                        value={group.pan ?? 0}
+                        onChange={(v) => handleGroupPanChange(group.id, v)}
+                        size={18}
+                        disabled={isPanAutomated(group)}
+                      />
+                      <input
+                        type="range"
+                        min={0} max={100} step={1}
+                        value={group.volume ?? 75}
+                        onChange={(e) => handleGroupVolumeChange(group.id, parseInt(e.target.value, 10))}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                        className={`${styles.volumeSlider} ${styles.groupVolumeSlider}`}
+                        disabled={isVolumeAutomated(group)}
+                        title={`group volume ${group.volume ?? 75}`}
+                      />
+                      <button
+                        className={group.isMuted ? styles.trackBtnActive : styles.trackBtn}
+                        onClick={() => toggleGroupMute(group.id)} title="Mute group">M</button>
+                      <button
+                        className={group.isSolo ? styles.trackBtnActive : styles.trackBtn}
+                        onClick={() => toggleGroupSolo(group.id)} title="Solo group">S</button>
+                    </div>
+                  </div>
+                )}
+                {/* Group automation header sub-rows — heights MUST mirror the
+                    timeline's group .autoLane / .autoAddStrip (laneTops assumes it). */}
+                {isFirstMember && openAutomationTrackIds.has(group.id) && (
+                  <>
+                    {(group.automations ?? []).map(a => (
+                      <div key={a.id} className={styles.autoHeaderRow} style={{ '--track-color': group.color }}>
+                        <span className={styles.autoHeaderLabel}>{labelForTarget(group, a.target)}</span>
+                        <button
+                          className={styles.autoHeaderDelete}
+                          title="Delete automation"
+                          onClick={() => removeGroupAutomation(group.id, a.id)}>×</button>
+                      </div>
+                    ))}
+                    <div className={styles.autoAddRow} style={{ '--track-color': group.color }}>
+                      <select
+                        className={styles.autoAddSelect}
+                        value=""
+                        aria-label="Add group automation"
+                        onChange={(e) => {
+                          const opt = automationTargetsFor(group).find(x => x.key === e.target.value);
+                          if (opt) addGroupAutomation(group.id, opt.target);
+                          e.target.value = '';
+                        }}>
+                        <option value="" disabled>+ automation</option>
+                        {(() => {
+                          const existing = new Set((group.automations ?? []).map(a => targetKey(a.target)));
+                          return automationTargetsFor(group)
+                            .filter(o => !existing.has(o.key))
+                            .map(o => <option key={o.key} value={o.key}>{o.label}</option>);
+                        })()}
+                      </select>
+                    </div>
+                  </>
+                )}
+                {!isCollapsed && (<>
+                <div className={`${styles.trackRow}${group ? ` ${styles.trackRowGrouped}` : ''}${editingTrackId === t.id ? ` ${styles.trackRowActive}` : activeTrackId === t.id ? ` ${styles.trackRowFocused}` : ''}`}
+                  style={{ '--track-color': t.color, ...(group ? { '--group-color': group.color } : {}) }}
                   onClick={() => { setActiveTrackId(t.id); pasteAnchorTrackIndexRef.current = tracksRef.current.findIndex(x => x.id === t.id); }}
                   onDoubleClick={() => setEditingTrackId(prev => prev === t.id ? null : t.id)}
                   onContextMenu={(e) => {
@@ -2905,10 +3471,23 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                       <button className={styles.trackInstrument} title={loadingTrackIds.has(t.id) ? 'Loading samples…' : 'Change instrument'}>{t.instrument}{loadingTrackIds.has(t.id) ? ' …' : ''}</button>
                     </div>
                     <div className={styles.trackToggles}>
+                      <button
+                        className={openAutomationTrackIds.has(t.id) ? styles.trackBtnActive : styles.trackBtn}
+                        onClick={(e) => { e.stopPropagation(); toggleAutomationArea(t.id); }}
+                        title={openAutomationTrackIds.has(t.id) ? 'Hide automation' : 'Show automation'}>
+                        {/* heartbeat pulse — inline SVG (no icon-library deps) */}
+                        <svg viewBox="0 0 16 12" width="14" height="10" fill="none"
+                             stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"
+                             strokeLinejoin="round" style={{ display: 'block', margin: '0 auto' }}
+                             aria-hidden="true">
+                          <path d="M1 6 h3.2 l1.8-4.2 l4 8.4 l1.8-4.2 h3.2" />
+                        </svg>
+                      </button>
                       <PanKnob
                         value={t.pan ?? 0}
                         onChange={(v) => handlePanChange(t.id, v)}
                         size={20}
+                        disabled={isPanAutomated(t)}
                       />
                       <button
                         className={t.isMuted ? styles.trackBtnActive : styles.trackBtn}
@@ -2933,10 +3512,51 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                     onClick={(e) => e.stopPropagation()}
                     onDoubleClick={(e) => e.stopPropagation()}
                     className={styles.volumeSlider}
-                    title={`volume ${t.volume ?? 75}`}
+                    disabled={isVolumeAutomated(t)}
+                    style={isVolumeAutomated(t) ? { opacity: 0.35 } : undefined}
+                    title={isVolumeAutomated(t)
+                      ? 'volume is automated — delete the automation lane to regain manual control'
+                      : `volume ${t.volume ?? 75}`}
                   />
                 </div>
-              ))}
+                {/* Automation header sub-rows — heights MUST mirror the timeline's
+                    .autoLane / .autoAddStrip exactly (laneTops assumes it). */}
+                {openAutomationTrackIds.has(t.id) && (
+                  <>
+                    {(t.automations ?? []).map(a => (
+                      <div key={a.id} className={styles.autoHeaderRow} style={{ '--track-color': t.color }}>
+                        <span className={styles.autoHeaderLabel}>{labelForTarget(t, a.target)}</span>
+                        <button
+                          className={styles.autoHeaderDelete}
+                          title="Delete automation"
+                          onClick={() => removeAutomation(t.id, a.id)}>×</button>
+                      </div>
+                    ))}
+                    <div className={styles.autoAddRow} style={{ '--track-color': t.color }}>
+                      <select
+                        className={styles.autoAddSelect}
+                        value=""
+                        aria-label="Add automation"
+                        onChange={(e) => {
+                          const opt = automationTargetsFor(t).find(x => x.key === e.target.value);
+                          if (opt) addAutomation(t.id, opt.target);
+                          e.target.value = '';
+                        }}>
+                        <option value="" disabled>+ automation</option>
+                        {(() => {
+                          const existing = new Set((t.automations ?? []).map(a => targetKey(a.target)));
+                          return automationTargetsFor(t)
+                            .filter(o => !existing.has(o.key))
+                            .map(o => <option key={o.key} value={o.key}>{o.label}</option>);
+                        })()}
+                      </select>
+                    </div>
+                  </>
+                )}
+                </>)}
+                </Fragment>
+                );
+              })}
               <button className={styles.addTrackGhost} onClick={handleAddTrack}>[ + add track ]</button>
             </>
           )}
@@ -2964,10 +3584,97 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               })()}
             </div>
 
+            {/* Global automation strip + tempo lane — heights mirror the header
+                column's globalStripRow/autoHeaderRow (laneTops assumes it).
+                The strip is inert: no seek/marquee from inside it. */}
+            <div className={styles.globalStrip} onMouseDown={(e) => e.stopPropagation()} />
+            {globalLaneOpen && (
+              <div className={styles.autoLane} style={{ '--track-color': 'var(--accent-color)' }}>
+                <AutomationLane
+                  automation={tempoAutomation}
+                  meta={TEMPO_META}
+                  baselineValue01={toKnob(Math.max(TEMPO_META.min, Math.min(TEMPO_META.max, bpm)), TEMPO_META)}
+                  pixelsPerMeasure={pixelsPerMeasure}
+                  totalMeasures={totalMeasures}
+                  snapIncrement={getSnapIncrement(pixelsPerMeasure)}
+                  snapEnabledRef={snapEnabledRef}
+                  onCommitPoints={commitTempoPoints}
+                  onLivePreview={previewTempo}
+                  selectedPointIndex={
+                    // Keyed by the constant 'tempo' (not the automation id —
+                    // the id is minted on first commit AFTER selection fires).
+                    selectedAnchor?.trackId === '__global__' && selectedAnchor?.automationId === 'tempo'
+                      ? selectedAnchor.pointIndex : null
+                  }
+                  onSelectPoint={(i) => setSelectedAnchor(
+                    i == null ? null : { trackId: '__global__', automationId: 'tempo', pointIndex: i }
+                  )}
+                />
+              </div>
+            )}
+
             {/* Track lanes */}
-            {tracks.map((t) => {
+            {tracks.map((t, ti) => {
+              const autoOpen = openAutomationTrackIds.has(t.id);
+              const group = t.groupId ? groupById.get(t.groupId) : null;
+              const isFirstMember = !!group && (ti === 0 || tracks[ti - 1].groupId !== t.groupId);
+              const isCollapsed = !!group && collapsedGroupIds.has(group.id);
               return (
-                <div key={t.id} className={styles.trackLane}
+                <Fragment key={t.id}>
+                {/* Group lane row — inert strip (no seek/marquee), height GROUP_H
+                    mirrors the header column's .groupRow. */}
+                {isFirstMember && (
+                  <div className={styles.groupLane}
+                    style={{ '--group-color': group.color }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'group', targetId: group.id });
+                    }}
+                  />
+                )}
+                {/* Group automation sub-lanes — mirror the header column's rows. */}
+                {isFirstMember && openAutomationTrackIds.has(group.id) && (
+                  <>
+                    {(group.automations ?? []).map(a => {
+                      const meta = metaForTarget(group, a.target);
+                      if (!meta) return null; // orphan guard (deserialize also drops these)
+                      const baseline = a.target.kind === 'volume'
+                        ? (group.volume ?? 75) / 100
+                        : a.target.kind === 'pan'
+                          ? ((group.pan ?? 0) + 1) / 2
+                          : toKnob(
+                              (group.effects ?? []).find(fx => fx.id === a.target.effectId)?.params?.[a.target.param] ?? meta.default,
+                              meta);
+                      return (
+                        <div key={a.id} className={styles.autoLane} style={{ '--track-color': group.color }}>
+                          <AutomationLane
+                            automation={a}
+                            meta={meta}
+                            baselineValue01={baseline}
+                            pixelsPerMeasure={pixelsPerMeasure}
+                            totalMeasures={totalMeasures}
+                            snapIncrement={getSnapIncrement(pixelsPerMeasure)}
+                            snapEnabledRef={snapEnabledRef}
+                            onCommitPoints={(pts) => commitGroupAutomationPoints(group.id, a.id, pts)}
+                            onLivePreview={(v01) => applyAutomationValue?.(group.id, a.target, v01)}
+                            selectedPointIndex={
+                              selectedAnchor?.trackId === group.id && selectedAnchor?.automationId === a.id
+                                ? selectedAnchor.pointIndex : null
+                            }
+                            onSelectPoint={(i) => setSelectedAnchor(
+                              i == null ? null : { trackId: group.id, automationId: a.id, pointIndex: i }
+                            )}
+                          />
+                        </div>
+                      );
+                    })}
+                    <div className={styles.autoAddStrip} />
+                  </>
+                )}
+                {!isCollapsed && (<>
+                <div className={styles.trackLane}
                   style={{ '--track-color': t.color }}
                   onMouseMove={(e) => handleLaneMouseMove(e, t.id)}
                   onMouseLeave={() => handleLaneMouseLeave(t.id)}
@@ -3193,6 +3900,44 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
                     </div>
                   ))}
                 </div>
+                {/* Automation sub-lanes — row heights mirror the header column's
+                    .autoHeaderRow / .autoAddRow (laneTops assumes it). */}
+                {autoOpen && (t.automations ?? []).map(a => {
+                  const meta = metaForTarget(t, a.target);
+                  if (!meta) return null; // orphan guard (deserialize also drops these)
+                  const baseline = a.target.kind === 'volume'
+                    ? (t.volume ?? 75) / 100
+                    : a.target.kind === 'pan'
+                      ? ((t.pan ?? 0) + 1) / 2
+                      : toKnob(
+                          (t.effects ?? []).find(fx => fx.id === a.target.effectId)?.params?.[a.target.param] ?? meta.default,
+                          meta);
+                  return (
+                    <div key={a.id} className={styles.autoLane} style={{ '--track-color': t.color }}>
+                      <AutomationLane
+                        automation={a}
+                        meta={meta}
+                        baselineValue01={baseline}
+                        pixelsPerMeasure={pixelsPerMeasure}
+                        totalMeasures={totalMeasures}
+                        snapIncrement={getSnapIncrement(pixelsPerMeasure)}
+                        snapEnabledRef={snapEnabledRef}
+                        onCommitPoints={(pts) => commitAutomationPoints(t.id, a.id, pts)}
+                        onLivePreview={(v01) => applyAutomationValue?.(t.id, a.target, v01)}
+                        selectedPointIndex={
+                          selectedAnchor?.trackId === t.id && selectedAnchor?.automationId === a.id
+                            ? selectedAnchor.pointIndex : null
+                        }
+                        onSelectPoint={(i) => setSelectedAnchor(
+                          i == null ? null : { trackId: t.id, automationId: a.id, pointIndex: i }
+                        )}
+                      />
+                    </div>
+                  );
+                })}
+                {autoOpen && <div className={styles.autoAddStrip} />}
+                </>)}
+                </Fragment>
               );
             })}
 
@@ -3202,6 +3947,24 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         </div>
       </div>
       {toastMessage && <div className={styles.toast}>{toastMessage}</div>}
+
+      {/* ── Group effects rack (bottom dock, editor's slot) ── */}
+      {editingGroupId && !editingTrackId && groupById.get(editingGroupId) && (
+        <>
+          <div data-no-note-deselect className={styles.divider} onMouseDown={startDividerDrag} title="Drag to resize" />
+          <div ref={editorWrapRef} className={styles.editorWrap} style={{ height: editorHeight }}>
+            <GroupFxPanel
+              group={groupById.get(editingGroupId)}
+              performanceQuality={performanceQuality}
+              onClose={() => setEditingGroupId(null)}
+              onAdd={addGroupEffect}
+              onRemove={removeGroupEffect}
+              onToggleBypass={toggleBypassGroupEffect}
+              onUpdate={updateGroupEffectSettings}
+            />
+          </div>
+        </>
+      )}
 
       {/* ── Piano roll editor ────────────────────────────── */}
       {editingTrackId && (
@@ -3236,6 +3999,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onEffectRemove={removeEffect}
               onEffectToggleBypass={toggleBypassEffect}
               onEffectUpdate={updateEffectSettings}
+              automatedFxKeys={editingTrack ? automatedFxKeys(editingTrack) : undefined}
               isDarkMode={isDarkMode}
               performanceQuality={performanceQuality}
               loadingTrackIds={loadingTrackIds}
@@ -3263,6 +4027,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         </button>
       </div>
       <ContextMenu menu={contextMenu} onClose={closeContextMenu} onCommand={handleContextCommand} tracks={tracks} />
+      {groupModal && (
+        <GroupModal
+          tracks={tracks}
+          groups={groups}
+          initiatorTrackId={groupModal.initiatorTrackId}
+          onCancel={() => setGroupModal(null)}
+          onCreate={createGroup}
+        />
+      )}
     </div>
   );
 }

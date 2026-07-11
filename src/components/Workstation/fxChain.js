@@ -1,4 +1,5 @@
 import * as Tone from 'tone';
+import { EFFECT_DEFS, isAutomatableParam } from './effectDefs';
 
 /**
  * Per-track insert-effect DSP factory — peer to synthFactory.js.
@@ -77,6 +78,36 @@ function applyMappedParams(node, keyMap, params, rampSec, clamps) {
   }
 }
 
+// ── Automation targets ──────────────────────────────────────────────────
+// Each graph exposes `autoParams`: state-param key → one of
+//   { kind: 'ramp', params: [{ param, map }] } — param is a Tone.Param/Signal
+//     the automation scheduler can setValueAtTime/linearRamp directly (zero
+//     main-thread cost). `map` converts the state-space value to that param's
+//     value (identity for most; the coupled delay/reverb `wet` drives TWO
+//     gains with affine maps, so linear ramps of wet stay exactly correct).
+//     Coupled maps accept an optional ctx ({ dryThru }) so the scheduler can
+//     read the CURRENT track state instead of a possibly-stale closure.
+//   { kind: 'set', set(v) } — plain setter (Chorus.depth, PitchShift.pitch,
+//     octaves, Distortion.distortion, Freeverb.dampening …); driven by the
+//     scheduler's stepped ~30 Hz control-rate loop.
+function buildAutoParams(node, type) {
+  const keyMap = KEY_MAPS[type] ?? {};
+  const clamps = VALUE_CLAMPS[type];
+  const out = {};
+  for (const [key, meta] of Object.entries(EFFECT_DEFS[type]?.params ?? {})) {
+    if (!isAutomatableParam(meta)) continue;
+    const mapped = keyMap[key] ?? key;
+    const clamp = clamps?.[key];
+    const target = node[mapped];
+    if (target != null && typeof target.rampTo === 'function') {
+      out[key] = { kind: 'ramp', params: [{ param: target, map: (v) => (clamp ? clamp(v) : v) }] };
+    } else if (mapped in node) {
+      out[key] = { kind: 'set', set: (v) => { node[mapped] = clamp ? clamp(v) : v; } };
+    }
+  }
+  return out;
+}
+
 // Single-node graph helper.
 function simpleGraph(node, type) {
   const keyMap = KEY_MAPS[type] ?? {};
@@ -85,6 +116,7 @@ function simpleGraph(node, type) {
     in: node,
     out: node,
     apply: (params, rampSec = 0) => applyMappedParams(node, keyMap, params, rampSec, clamps),
+    autoParams: buildAutoParams(node, type),
     dispose: () => node.dispose(),
   };
 }
@@ -143,10 +175,30 @@ function delayGraph(params = {}) {
       // wet and dryThru are coupled: dryLvl depends on both. Recompute from
       // the full params object (updateEffectSettings merges, so p is complete;
       // fall back to the last-applied values for legacy saves missing a key).
-      wet     = typeof p.wet === 'number' ? p.wet : wet;
-      dryThru = 'dryThru' in p ? !!p.dryThru : dryThru;
-      setLevel(wetLvl, wet, rampSec);
-      setLevel(dryLvl, dryThru ? 1 : 1 - wet, rampSec);
+      // Gated on the keys being present so an unrelated param edit can't stomp
+      // the level gains while the automation scheduler owns them.
+      if (typeof p.wet === 'number' || 'dryThru' in p) {
+        wet     = typeof p.wet === 'number' ? p.wet : wet;
+        dryThru = 'dryThru' in p ? !!p.dryThru : dryThru;
+        setLevel(wetLvl, wet, rampSec);
+        setLevel(dryLvl, dryThru ? 1 : 1 - wet, rampSec);
+      }
+    },
+    autoParams: {
+      time:     { kind: 'ramp', params: [{ param: delay.delayTime, map: (v) => v }] },
+      feedback: { kind: 'ramp', params: [{ param: fbGain.gain,     map: (v) => v }] },
+      lowCut:   { kind: 'ramp', params: [{ param: hp.frequency,    map: (v) => v }] },
+      highCut:  { kind: 'ramp', params: [{ param: lp.frequency,    map: (v) => v }] },
+      // Coupled: wet drives BOTH level gains. Both maps are affine in v, so a
+      // linear ramp of wet schedules as exactly-correct linear ramps on each.
+      // ctx.dryThru (current track state) wins over the closure fallback.
+      wet: {
+        kind: 'ramp',
+        params: [
+          { param: wetLvl.gain, map: (v) => v },
+          { param: dryLvl.gain, map: (v, ctx) => ((ctx?.dryThru ?? dryThru) ? 1 : 1 - v) },
+        ],
+      },
     },
     dispose() {
       // fbGain first — severs the feedback loop before the loop nodes go down.
@@ -205,6 +257,19 @@ function reverbGraph(params = {}) {
         setLevel(wetLvl, wet, rampSec);
         setLevel(dryLvl, 1 - wet, rampSec);
       }
+    },
+    autoParams: {
+      roomSize:  { kind: 'ramp', params: [{ param: verb.roomSize, map: (v) => v }] },
+      preDelay:  { kind: 'ramp', params: [{ param: preDelay.delayTime, map: (v) => v }] },
+      dampening: { kind: 'set',  set: (v) => { verb.dampening = v; } },
+      // Coupled wet — same affine two-gain pattern as the delay composite.
+      wet: {
+        kind: 'ramp',
+        params: [
+          { param: wetLvl.gain, map: (v) => v },
+          { param: dryLvl.gain, map: (v) => 1 - v },
+        ],
+      },
     },
     dispose() {
       inGain.dispose();
@@ -380,6 +445,7 @@ export function makeFx(type, params = {}, bypass = false) {
     type,
     input,
     output,
+    autoParams: graph?.autoParams ?? {}, // automation scheduler targets (see buildAutoParams)
     setBypass(b) {
       if (!graph) return; // legacy passthrough — nothing to crossfade
       if (pruneTimer != null) { clearTimeout(pruneTimer); pruneTimer = null; }

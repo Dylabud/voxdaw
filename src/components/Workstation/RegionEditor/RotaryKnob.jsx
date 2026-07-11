@@ -37,11 +37,11 @@ function arcPath(cx, cy, r, fromDeg, toDeg) {
   return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
 }
 
-export default function RotaryKnob({ value01, onChange, label, display, defaultValue01 = 0, size = 44 }) {
+export default function RotaryKnob({ value01, onChange, label, display, defaultValue01 = 0, size = 44, disabled = false, disabledHint }) {
   const dragRef = useRef(null); // { lastY, v } while dragging, else null
 
   const handlePointerDown = (e) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || disabled) return;
     e.preventDefault();
     // NotFoundError on an already-inactive pointerId (possible when the OS
     // retracts the pointer between down and capture) must not kill the drag —
@@ -80,7 +80,11 @@ export default function RotaryKnob({ value01, onChange, label, display, defaultV
   const [ix1, iy1] = polar(half, half, dialR * 0.9, angle);
 
   return (
-    <div className={styles.knob}>
+    <div
+      className={styles.knob}
+      style={disabled ? { opacity: 0.35, pointerEvents: 'none' } : undefined}
+      title={disabled ? disabledHint : undefined}
+    >
       <svg
         className={styles.dial}
         width={size}
@@ -91,7 +95,7 @@ export default function RotaryKnob({ value01, onChange, label, display, defaultV
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
         onLostPointerCapture={endDrag}
-        onDoubleClick={() => onChange?.(clamp01(defaultValue01))}
+        onDoubleClick={() => { if (!disabled) onChange?.(clamp01(defaultValue01)); }}
         role="slider"
         aria-label={label}
         aria-valuemin={0}
