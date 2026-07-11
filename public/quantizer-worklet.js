@@ -14,6 +14,16 @@
 //
 // Input  [0]: Hz-range CV signal (from seq-pitch-out, kbd-pitch-out, or another pitch CV)
 // Output [0]: quantized Hz signal — passes directly to vco-cv jacks
+//
+// Modulation mode (Phase 58): samples with |v| ≤ MOD_MAX are modulator-range CV
+// (LFOs output ±1 · depth — far below any musical Hz). They are mapped to a
+// ±12-semitone offset around baseHz (posted by the main thread — the FREQ knob
+// of the qnt-patched VCO) and the sum is quantized: LFO sweeps become stepped
+// scale runs. In BYPASS the sum is output unquantized (smooth sweep around base).
+// The decision is per-sample, so Hz-range pitch CV keeps its direct behavior.
+
+// Boundary between modulator-range CV (LFO ±1) and pitch CV (Hz ≥ 32.7 = C1).
+const MOD_MAX = 8;
 
 class QuantizerProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
@@ -30,12 +40,14 @@ class QuantizerProcessor extends AudioWorkletProcessor {
 
     this._bypass    = false;
     this._hadSignal = false; // for IN LED: fires only on cable connect/disconnect
+    this._baseHz    = 220;   // modulation-mode center — the qnt-patched VCO's FREQ knob
 
     this.port.onmessage = ({ data }) => {
       if (data.scale    !== undefined) this._scale    = data.scale;
       if (data.root     !== undefined) this._root     = data.root;
       if (data.octShift !== undefined) this._octShift = data.octShift;
       if (data.bypass   !== undefined) this._bypass   = data.bypass;
+      if (data.baseHz   !== undefined) this._baseHz   = data.baseHz;
     };
   }
 
@@ -86,10 +98,13 @@ class QuantizerProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    // BYPASS: pass input directly to output without quantizing.
-    // Useful for confirming cables/patching before enabling the quantizer.
+    // BYPASS: pass input (or the modulation-mode sweep) through unquantized.
+    // Useful for confirming cables/patching, or for smooth LFO slides.
     for (let i = 0; i < outputCh.length; i++) {
-      outputCh[i] = this._bypass ? inputCh[i] : this._quantize(inputCh[i]);
+      let v = inputCh[i];
+      // Modulation mode: modulator-range sample → ±12 semitones around baseHz.
+      if (Math.abs(v) <= MOD_MAX) v = this._baseHz * Math.pow(2, v);
+      outputCh[i] = this._bypass ? v : this._quantize(v);
     }
 
     // Notify the main thread when the output MIDI note changes.

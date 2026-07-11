@@ -381,3 +381,99 @@ This gives the user an immediately playable arpeggio on load, showcasing the ins
 | Moog Phase 54 ✅ | Rack densification — 960s de-stacked, I/O channel grid, components +20%, keyboard widened; controls ~28% bigger on screen | Shell (layout) |
 | GPU Fix ✅ | Black-flashing modules — replaced static cabinet `will-change` with transient promotion during camera moves | Shell (compositing) |
 | Moog Phase 12 | Visual polish (remaining) — knob tooltips on hover, module bypass switches, mobile fallback | All |
+
+---
+
+## PROPOSAL — Dynamic Rack: User-Customizable Modules (Phase 60 series)
+
+**Status: IN FLIGHT — 60a–60d shipped (see phasing table below); 60e–60f remain.**
+Decisions already made (2026-07-08): full customizability incl. duplicate modules is a must; space policy = **fit-width floor + vertical scroll** (auto-shrink stops at full-width readability; more cases grow the rack downward); design doc before implementation.
+
+### Goals / Non-Goals
+
+- **Goals:** add/remove any module from a bank; multiple instances of the same type; layout persists across sessions; patch cables work across all instances; no per-module shrink below the fit-width floor.
+- **Non-goals (this series):** drag-to-reorder modules (future), cable persistence across reloads (separate phase — needs deterministic rewire-on-load ordering), mobile layout, Workstation integration changes (`moogBus` tap unchanged).
+
+### State Model
+
+```js
+// MoogShell state, persisted to localStorage 'moog-rack-v1'
+rack = {
+  nextInstanceNum: { vco: 6, lfo: 3, … },   // monotonic per type — mint eagerly in
+                                            // handlers, never in setState updaters;
+                                            // restore + repair on load (Workstation
+                                            // projectIO lesson: duplicate ids are
+                                            // catastrophic for cable/registry keying)
+  cases: [
+    { id: 'case1', label: 'VOICE CASE',    moduleIds: ['vco1','vco2','noise1', …] },
+    { id: 'case2', label: 'PERCUSSION & FX CASE', moduleIds: [ … ] },
+  ],
+  modules: { vco1: { type: 'vco' }, … },    // instanceId → { type }
+}
+```
+
+- **Instance id = jack prefix** (`vco6` → jacks `vco6-cv`, `vco6-saw`…). Existing ids (`vco1…vco5`, `noise`, `vcf`, `qnt`…) are grandfathered as the default rack so old muscle memory and screenshots stay valid; NEW instances always mint `type<n>` with n from the counter.
+- Default rack = exactly today's 28 modules + fixed I/O + keyboard.
+
+### Module Factory Contract (`moduleFactories.js`)
+
+Each type registers one factory. `useMoogAudio` stops owning a static node graph and becomes an **instance registry**:
+
+```js
+factories[type] = {
+  create(id, shared) => ({
+    jackEntries,   // { `${id}-cv`: { type:'in', dest|isVcoCv… }, … } — merged into the live jackMap
+    api,           // (params) => void — the per-instance updateParams
+    meters,        // { `${id}`: meterNode, … } — getMeterValue(id) already resolves generically
+    hooks,         // optional: { onPowerOn, onPowerOff, rafTick } — registered with the engine loops
+    dispose(),     // disconnect + .dispose() every node; MUST be safe while cables exist
+  }),
+  width: 320,      // intrinsic px width (replaces grid fr templates)
+  maxInstances: 8, // per-type cap (CPU sanity, see table)
+  singleton: false,
+}
+```
+
+- `shared` hands factories the singleton infrastructure: master chain, Transport, worklet **modules** (added once via `addModule`; each instance makes its own `AudioWorkletNode`), glide/vibrato rAF registration.
+- **Engine API collapses** from 40+ per-instance exports (`updateVcf2Params`…) to `updateModuleParams(instanceId, params)` + `addModule(type)` / `removeModule(instanceId)`. MoogShell caches stable per-instance bound callbacks and LED getters in a ref map so `Led`/module effects never restart on unrelated renders.
+- `removeModule` order: strip cables touching `${id}-` (Phase 59 prefix logic, fires audio disconnects) → deregister jacks → `dispose()` → drop from state.
+
+### Per-Type Notes (duplicate cost & special handling)
+
+| Type | Per-instance extras | Suggested cap |
+|---|---|---|
+| VCO | glideBus + hard-sync `AudioWorkletNode` + vibrato-tick registration (`VCO_IDS` const → registry query) | 10 |
+| LFO / Noise / VCA / ENV / REV / BBD / Kick | plain node groups — cheap | 8 |
+| 914 FFB | 14 filters+gains each | 4 |
+| Vocoder | **16 bands × (BPF+rect+env+VCA) ≈ 70 nodes** + mic singleton (mic stays shared; MIC button on any instance grabs the one `Tone.UserMedia`) | 2 |
+| QNT | own `AudioWorkletNode`; knob-stepper refs (`quantizerParamsRef`, baseHz, callbacks) become per-instance maps keyed by id | 4 |
+| 960 SEQ / CHORD SEQ | own `Tone.Loop`; Transport is shared (tempo knobs all write `Transport.bpm` — last writer wins, as today with 2×960) | 4 |
+| I/O, 953 Keyboard | **fixed singletons** — not in the bank | 1 |
+
+### Layout & Camera
+
+- A **case = one row**; capacity = Σ module widths ≤ rack width at floor scale. "Add" appends to the user-selected case if it fits, else offers/creates the next case. No flex-wrap inside a case (wrap at narrow widths is exactly the Phase 55 fit() oscillation trap — widths are fixed px, so tier height is width-independent).
+- **Camera change (small, standalone):** `fit()` scale becomes `clamp(availH/natH, availW/natW, 1)` — floored at fit-width. When floored, `clampPan` already permits vertical panning; add wheel-scroll (no ctrl) → vertical pan at z=1 so the tall rack is reachable without zooming.
+- Blank-panel filler: a case's unused width renders as blank panels (authentic, keeps the wood frame visually full).
+
+### Invariants preserved
+
+Single Writer per node (per instance now); Zero-Re-render (all per-frame work stays in rAF/canvas/DOM refs; add/remove is event-driven React state like Phase 59); no static `will-change` on the cabinet; fit-stability probe must pass after every layout-affecting phase.
+
+### Phasing (each lands green on its own)
+
+| Phase | Scope |
+|---|---|
+| 60a ✅ 07-08 | Camera fit-width floor + vertical scroll (no engine changes — ships alone) |
+| 60b ✅ 07-09 | Engine instance registry + factory contract; **pilot: VCO + Noise** migrated; static graph coexists for everything else |
+| 60c ✅ 07-09 | Migrate LFO/VCA/ENV/REV/BBD/VCF + persistence-lite (type list in localStorage); Kick/914 slipped to 60d |
+| 60d ✅ 07-10 | Kick + 914 (id-keyed refs, gate actions carry `kickId`) + **per-instance hard sync** (`hardSyncNodes` id-keyed, `wireHardSyncRef` for late adds) |
+| 60e | **✅ COMPLETE 07-11 (4 parts):** 960s (id-keyed seq maps + `buildSeqLoop`, Tone.Loop lifecycle, restored-instance jackMap wipe fix) · CHORD (`buildChordSeqLoop`, per-instance snap/override) · VOCODER (~70-node factory, per-instance shift rAF, shared-mic fan-out) · QNT (per-instance worklets in `n.qntNodes`, knob-stepper machinery parameterized by owning instance, chord override as qid→csId map). Library v2's case picker was overtaken by the expansion-row design. |
+| 60f | **Cable persistence ✅ 07-11:** v2 rack store `{modules, cables}` with STABLE instance ids (`addModule(type, desiredNum)` + collision repair), `restoreCables` with jack-registry validation, idempotent connect-retry schedule for worklet-deferred jacks + StrictMode engine rebuild. **Remaining (later):** drag-to-reorder |
+
+### Risks
+
+1. **Disposal leaks / crashes** — Tone `.dispose()` while a cable's audio connection exists; mitigated by cable-strip-first ordering + try/catch disconnects (existing pattern).
+2. **Worklet-load races** — jack entries whose `dest` is a not-yet-loaded worklet node (existing `qnt-cv-in` null-until-loaded pattern generalizes: factories may return `dest: null` and patch the registry on load).
+3. **GPU budget** — more modules = larger raster area; the transient `will-change` model already handles size, but 60e should re-run the black-flash regression check at 8+ cases.
+4. **Registry/UI drift** — the registry must be the single source for what exists; MoogShell renders purely from state (no hardcoded rows after 60d).

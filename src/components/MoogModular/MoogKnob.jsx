@@ -38,7 +38,8 @@ function KnobScale({ size }) {
   );
 }
 
-export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', defaultValue = 0.5, variant = 'black' }) {
+// glow — mint pulse on the indicator line (knob-stepper / quantized mode).
+export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', defaultValue = 0.5, variant = 'black', glow = false }) {
   const bodyPx = BODY_PX[size] ?? 26;
   const wrapPx = WRAP_PX[size] ?? 48;
   const rotateDeg = MIN_DEG + value * (MAX_DEG - MIN_DEG);
@@ -78,7 +79,7 @@ export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', de
       <div className={styles.knobWrap} style={{ width: wrapPx, height: wrapPx }}>
         <KnobScale size={size} />
         <div
-          className={`${styles.knob} ${styles[`knob_${size}`]} ${variant === 'cream' ? styles.knobCream : ''}`}
+          className={`${styles.knob} ${styles[`knob_${size}`]} ${variant === 'cream' ? styles.knobCream : ''} ${glow ? styles.knobGlow : ''}`}
           style={{ transform: `rotate(${rotateDeg}deg)` }}
           onMouseDown={handleMouseDown}
           onDoubleClick={handleDoubleClick}

@@ -41,9 +41,9 @@
 }
 
 .kbdModel {
-  font-size: 18px;
+  font-size: 26px;
   font-weight: 200;
-  color: rgba(255, 255, 255, 0.40);
+  color: rgba(255, 255, 255, 0.45);
   line-height: 1;
   flex-shrink: 0;
 }
@@ -55,18 +55,20 @@
 }
 
 .kbdTitle {
-  font-size: 10px;
+  font-size: 20px;
   font-weight: 700;
-  letter-spacing: 0.3em;
-  color: #ffffff;
+  letter-spacing: 0.26em;
+  color: #ece7db;
+  text-shadow: 0 0 0.7px rgba(236, 231, 219, 0.55);
   text-transform: uppercase;
   line-height: 1;
 }
 
 .kbdSub {
-  font-size: 5.5px;
-  letter-spacing: 0.22em;
-  color: rgba(255, 255, 255, 0.50);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: rgba(234, 229, 217, 0.58);
+  text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.45);
   text-transform: uppercase;
 }
 
@@ -80,8 +82,8 @@
 
 /* Initial appearance set by CSS; live state overwritten via DOM ref */
 .midiLed {
-  width: 7px;
-  height: 7px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: rgba(93, 202, 165, 0.10);
   box-shadow: none;
@@ -89,9 +91,9 @@
 }
 
 .midiLinkLabel {
-  font-size: 5px;
+  font-size: 11px;
   letter-spacing: 0.16em;
-  color: rgba(255, 255, 255, 0.45);
+  color: rgba(234, 229, 217, 0.66);
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -109,22 +111,74 @@
   gap: 4px;
 }
 
-/* Jack — matches MoogShell.module.css visually */
+/* Jack — same photorealistic chrome socket as MoogShell.module.css .jack
+   (Phase 51 conic ring + hex nut facets + threaded recess + plug hole) */
 .jack {
-  width: 18px;
-  height: 18px;
+  width: 29px;
+  height: 29px;
   border-radius: 50%;
   flex-shrink: 0;
   position: relative;
-  background: radial-gradient(circle at 38% 32%, #1a1816 0%, #080604 50%, #020100 100%);
-  border: 2.5px solid #888078;
+  background:
+    radial-gradient(
+      ellipse at 68% 22%,
+      rgba(255, 255, 255, 0.45) 0%,
+      rgba(255, 255, 255, 0.14) 18%,
+      transparent 38%
+    ),
+    repeating-conic-gradient(
+      from 22deg,
+      rgba(255, 255, 255, 0.13) 0deg 3deg,
+      transparent 10deg 50deg,
+      rgba(0, 0, 0, 0.30) 57deg 60deg
+    ),
+    conic-gradient(
+      from 0deg,
+      #888882 0deg,
+      #b0aca6 28deg,
+      #cac6c0 52deg,
+      #bab6b0 78deg,
+      #9a9892 130deg,
+      #686862 180deg,
+      #484844 212deg,
+      #3e3e3a 228deg,
+      #484844 260deg,
+      #686864 310deg,
+      #888882 360deg
+    );
   box-shadow:
-    0 3px 8px rgba(0, 0, 0, 0.92),
-    0 1px 3px rgba(0, 0, 0, 0.75),
-    0 0 0 1px rgba(185, 178, 162, 0.22),
-    inset 0 1px 0 rgba(168, 162, 150, 0.32),
+    -2px 4px 8px rgba(0, 0, 0, 0.9),
+    0 1px 3px  rgba(0, 0, 0, 0.75),
+    0 0 0 1px rgba(0, 0, 0, 0.60);
+}
+
+.jack::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background:
+    repeating-radial-gradient(
+      circle at 50% 50%,
+      rgba(200, 195, 185, 0.10) 0px,
+      rgba(200, 195, 185, 0.10) 0.8px,
+      transparent 1.4px,
+      transparent 2.6px
+    ),
+    radial-gradient(
+      circle at 58% 32%,
+      #2e2c2a 0%,
+      #181614 38%,
+      #060504 100%
+    );
+  box-shadow:
     inset 0 2px 6px rgba(0, 0, 0, 0.98),
-    inset 0 -1px 0 rgba(160, 154, 140, 0.10);
+    inset 0 0 4px rgba(0, 0, 0, 0.80),
+    0 0 0 1px rgba(50, 48, 42, 0.45);
 }
 
 .jack::after {
@@ -133,17 +187,20 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 7px;
-  height: 7px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  background: radial-gradient(circle at 40% 35%, #141210, #010000);
-  box-shadow: inset 0 1px 4px rgba(0, 0, 0, 1);
+  background: radial-gradient(circle at 42% 38%, #0e0c0a, #000000);
+  box-shadow:
+    inset 0 1px 4px rgba(0, 0, 0, 1),
+    inset 0 0 6px rgba(0, 0, 0, 1);
 }
 
 .jackLabel {
-  font-size: 5.5px;
-  letter-spacing: 0.16em;
-  color: rgba(255, 255, 255, 0.60);
+  font-size: 16px;
+  letter-spacing: 0.12em;
+  color: rgba(234, 229, 217, 0.78);
+  text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.55);
   text-transform: uppercase;
   text-align: center;
   white-space: nowrap;
@@ -156,9 +213,9 @@
 }
 
 .kbdHintText {
-  font-size: 5px;
+  font-size: 11px;
   letter-spacing: 0.14em;
-  color: rgba(255, 255, 255, 0.35);
+  color: rgba(234, 229, 217, 0.42);
   text-transform: uppercase;
   font-style: italic;
   white-space: nowrap;
@@ -223,7 +280,7 @@
   bottom: 6px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 5px;
+  font-size: 8px;
   letter-spacing: 0.08em;
   color: #9a9080;
   user-select: none;
@@ -233,10 +290,10 @@
 /* Computer keyboard shortcut hint */
 .keyShortcut {
   position: absolute;
-  bottom: 16px;
+  bottom: 18px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 5.5px;
+  font-size: 8px;
   letter-spacing: 0.06em;
   color: #b0a898;
   font-weight: 600;
@@ -303,7 +360,7 @@
   border-radius: 3px;
   color: rgba(255, 255, 255, 0.55);
   font-family: inherit;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
   padding: 6px 10px;
