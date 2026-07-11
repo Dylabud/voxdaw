@@ -655,9 +655,9 @@ The override is applied at **every synth build** — region synths and the audit
 
 ### Component tree
 ```
-MoogShell.jsx          — cabinet, rack tiers, all module components, lights-out toggle
-├── useMoogAudio.js    — all audio DSP: nodes, jack map, loops, callbacks
-├── MoogKnob.jsx       — silver hardware knob (drag vertical, shift=fine, dblclick=reset)
+MoogShell.jsx          — cabinet, rack tiers/cases, all module components, library modal, lights-out toggle
+├── useMoogAudio.js    — all audio DSP: nodes, jack map, loops, callbacks, dynamic-instance registry
+├── MoogKnob.jsx       — black bakelite skirted knob (cream 960 variant; drag vertical, shift=fine, dblclick=reset, hover tooltip, mint glow when quantized)
 ├── Led.jsx            — zero-re-render rAF opacity LED (green/yellow/red/blue)
 ├── KeyboardModule.jsx — 61-key CV keyboard + MIDI + glide + vibrato controls
 ├── Oscilloscope.jsx   — CRT phosphor waveform display
@@ -675,7 +675,7 @@ vcoNfm   → vco.frequency   (additive FM modulation, unchanged)
 
 **MANAGED vs pass-through sources:** CV sources (seq, kbd, qnt, chord seq outputs) are MANAGED — no audio cable to glideBus; instead the Tone.Loop/rAF/onmessage callbacks write `glideBus._param.setValueAtTime(hz, time)` directly. Pass-through sources audio-connect to the glideBus (transparent at offset=0).
 
-`vcoActiveCvRef` (`{ vco1..vco5: sourceJackId|null }`) tracks which source is driving each VCO cv-in. Written by `connect()`/`disconnect()`, read by all loop callbacks and the keyboard rAF.
+`vcoActiveCvRef` (`{ vcoId: sourceJackId|null }`, all VCOs including dynamic instances) tracks which source is driving each VCO cv-in. Written by `connect()`/`disconnect()`, read by all loop callbacks and the keyboard rAF.
 
 ### Keyboard Pitch + Glide + Vibrato (rAF-based)
 A single `vibratoTick` rAF loop handles all three simultaneously for kbd-connected VCOs — no Tone.js `rampTo` scheduling (which `setValueAtTime` would cancel):
@@ -698,7 +698,7 @@ vco.oscillator → vcoNnormalGain(1) ─┐
                                       ├─ vcoNbus → vcoNMeter, jacks
 AudioWorkletNode(slave) → vcoNsyncOut(0) ─┘
 ```
-`setVcoNSyncEnabled(bool)` crossfades normalGain ↔ syncOut over 10ms. Hard sync: 5 `AudioWorkletNode` instances (`hard-sync-processor`) created from one `addModule` call — each wired `vcoNsyncIn → worklet → vcoNsyncOut`. `vcoNfm` drives `worklet.parameters.get('slaveFreq')` for FM-through-sync.
+`setVcoNSyncEnabled(bool)` (statics) / `setVcoSyncEnabledById(vcoId, bool)` (dynamics) crossfades normalGain ↔ syncOut over 10ms. Hard sync: one `AudioWorkletNode` (`hard-sync-processor`) per VCO — statics AND dynamic instances — in the id-keyed `n.hardSyncNodes` registry, each wired `vcoNsyncIn → worklet → vcoNsyncOut`; `vcoNfm` drives `worklet.parameters.get('slaveFreq')` for FM-through-sync. The worklet module loads once; a parked `wire(vcoId)` closure mints nodes for instances added later.
 
 ### Sequencer Gate Logic
 Gate-off steps write `0` to `glideBus._param` and `seqGateNode.gain._param` (native AudioParam, bypasses Tone scheduling) for VCOs connected to that sequencer's pitch output only. `seqMasterGate` is never written from loops — it was the source of cross-sequencer interference. Each sequencer is fully independent via `vcoActiveCvRef`.
@@ -712,7 +712,10 @@ Stochastic probability: `fires = step.gate && Math.random() < step.prob`. Probab
 14 bands in parallel: LP (100 Hz) + 12 bandpass at √2 intervals (125–5600 Hz) + HP (8 kHz). Architecture: `ffbIn` fans to 14 `{Tone.Filter → Tone.Gain}` pairs, all summing into `ffbSum → ffbMaster`. Band gain knobs (0–1 → amplitude), MSTR knob (0→1.5×). Activity LEDs driven by `ffbAnalyser` (FFT 512) rAF: half-octave bin range per band, dB → opacity. `FFB_BANDS` exported constant shared between `useMoogAudio.js` and `MoogShell.jsx`.
 
 ### Kick Drum (KickModule)
-`Tone.MembraneSynth` (TUNE/P.ENV/DECAY) + `Tone.NoiseSynth → highpass 2kHz → clickGain` (CLICK) in parallel into `kickOut`. `kick-gate-in` jack: `{ isGate: true, isKick: true }` — both sequencer loops detect `action.isKick` and call `kickSynth.triggerAttackRelease(tune, decay, time)` sample-accurately. `kickTrigCbRef` registered by KickModule so the LED flashes in sync with the audio callback. `kick-click-in` CV jack modulates `kickClickGain.gain` for accent.
+`Tone.MembraneSynth` (TUNE/P.ENV/DECAY) + `Tone.NoiseSynth → highpass 2kHz → clickGain` (CLICK) in parallel into `kickOut`. `kick-gate-in` jack: `{ isGate: true, isKick: true, kickId }` — the sequencer loops detect `action.isKick`, resolve the target instance via `kickId` ('kick' = static; 'kick2'+ dynamics), and call `` n[`${kid}Synth`].triggerAttackRelease(tune, decay, time) `` sample-accurately with the instance's id-keyed tune/decay. Per-instance trig callbacks flash each module's LED. `kick-click-in` CV jack modulates the instance's `ClickGain.gain` for accent.
+
+### Dynamic Rack (Phase 60 series — instances + persistence)
+Every removable module type (14) can be instantiated from the library modal with duplicates, capped per type. Engine: `addModule(type, desiredNum?)`/`removeModule(id)` — inline factories mirror the static recipes and register nodes under composed names (`vco6GlideBus`…) so all name-based lookups work unchanged; per-type state is id-keyed maps (seq/chord loops from shared builders, kick, vocoder shift, quantizer params); worklet types (hard sync, QNT) use synchronous registries + deferred `wire(id)` closures. The whole rack persists in localStorage `moog-rack-v2` `{modules, cables}` with **stable instance ids** on restore, cable re-bridge on an idempotent retry schedule, and drag-to-reorder via per-slot grip tabs. Full details: `src/components/MoogModular/MOOG_ARCHITECTURE.md` ("Dynamic Rack — AS BUILT") and MOOG_PLAN.md.
 
 ### Lights-Out Mode
 `data-lights-out="true"` on `.cabinet`. CSS attribute selectors (`cabinet[data-lights-out="true"] .class`) hide faceplates, knobs, text, jacks, cables (`PatchCableOverlay opacity:0`), keyboard (`opacity:0`). Visible: LEDs (Led.jsx rAF-driven opacity), power lamp (`.powerLampOn`), sequencer step LEDs (`.seqLedActive`), gate-on buttons (`.seqGateOn`), oscilloscope, hard sync blue LEDs (in `.vcoSyncLed`, sibling of `.selectorRow` so lights-out `selectorRow { opacity:0 }` can't cascade to it).
