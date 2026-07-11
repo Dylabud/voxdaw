@@ -469,7 +469,7 @@ Single Writer per node (per instance now); Zero-Re-render (all per-frame work st
 | 60c ✅ 07-09 | Migrate LFO/VCA/ENV/REV/BBD/VCF + persistence-lite (type list in localStorage); Kick/914 slipped to 60d |
 | 60d ✅ 07-10 | Kick + 914 (id-keyed refs, gate actions carry `kickId`) + **per-instance hard sync** (`hardSyncNodes` id-keyed, `wireHardSyncRef` for late adds) |
 | 60e | **✅ COMPLETE 07-11 (4 parts):** 960s (id-keyed seq maps + `buildSeqLoop`, Tone.Loop lifecycle, restored-instance jackMap wipe fix) · CHORD (`buildChordSeqLoop`, per-instance snap/override) · VOCODER (~70-node factory, per-instance shift rAF, shared-mic fan-out) · QNT (per-instance worklets in `n.qntNodes`, knob-stepper machinery parameterized by owning instance, chord override as qid→csId map). Library v2's case picker was overtaken by the expansion-row design. |
-| 60f | **Cable persistence ✅ 07-11:** v2 rack store `{modules, cables}` with STABLE instance ids (`addModule(type, desiredNum)` + collision repair), `restoreCables` with jack-registry validation, idempotent connect-retry schedule for worklet-deferred jacks + StrictMode engine rebuild. **Remaining (later):** drag-to-reorder |
+| 60f | **✅ COMPLETE 07-11:** cable persistence — v2 rack store `{modules, cables}` with STABLE instance ids (`addModule(type, desiredNum)` + collision repair), `restoreCables` with jack-registry validation, idempotent connect-retry schedule for worklet-deferred jacks + StrictMode engine rebuild — **and drag-to-reorder** (grip tab per expansion slot, order persists, cable-overlay reposition nudge) |
 
 ### Risks
 

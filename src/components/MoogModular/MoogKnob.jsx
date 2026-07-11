@@ -74,8 +74,13 @@ export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', de
     onChange(defaultValue);
   }, [onChange, defaultValue]);
 
+  // Native hover tooltip (Phase 12) — label + 0–10 dial reading (matches the
+  // tick numerals). Shift = fine mode, double-click = reset, documented here
+  // since there is no other in-UI affordance for either.
+  const tooltip = `${label ? label + ': ' : ''}${(value * 10).toFixed(1)} / 10 · shift = fine · double-click = reset`;
+
   return (
-    <div className={`${styles.knobGroup} ${size === 'xs' ? styles.groupXs : ''}`}>
+    <div className={`${styles.knobGroup} ${size === 'xs' ? styles.groupXs : ''}`} title={tooltip}>
       <div className={styles.knobWrap} style={{ width: wrapPx, height: wrapPx }}>
         <KnobScale size={size} />
         <div

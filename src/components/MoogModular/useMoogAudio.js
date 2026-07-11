@@ -209,12 +209,13 @@ function buildJackMap(n) {
     'vco5-sync-in':  { type: 'in',  dest: n.vco5syncIn  },
     'vco5-sync-out': { type: 'out', node: n.vco5syncOut },
     // ── Noise ──
-    'noise-wht':  { type: 'out', node: n.noiseW },
-    'noise-pnk':  { type: 'out', node: n.noiseP },
-    'noise2-wht': { type: 'out', node: n.noise2W },
-    'noise2-pnk': { type: 'out', node: n.noise2P },
-    'noise3-wht': { type: 'out', node: n.noise3W },
-    'noise3-pnk': { type: 'out', node: n.noise3P },
+    // Noise jacks tap the LEVEL gains (Phase 8b), not the raw sources.
+    'noise-wht':  { type: 'out', node: n.noiseWGain },
+    'noise-pnk':  { type: 'out', node: n.noisePGain },
+    'noise2-wht': { type: 'out', node: n.noise2WGain },
+    'noise2-pnk': { type: 'out', node: n.noise2PGain },
+    'noise3-wht': { type: 'out', node: n.noise3WGain },
+    'noise3-pnk': { type: 'out', node: n.noise3PGain },
     // ── Kick ──
     'kick-out': { type: 'out', node: n.kickOut },
     // ── 914 FFB ──
@@ -605,6 +606,15 @@ export default function useMoogAudio() {
       noise2P:     new Tone.Noise({ type: 'pink'  }),
       noise3W:     new Tone.Noise({ type: 'white' }),
       noise3P:     new Tone.Noise({ type: 'pink'  }),
+      // Noise LEVEL gains (Phase 8b) — the WHT/PNK jacks tap these, one pair
+      // per module so the LEVEL knob scales both outputs. Gain(1) = unity at
+      // the knob's 0.7 default (updateNoiseParams maps level × 1/0.7).
+      noiseWGain:  new Tone.Gain(1),
+      noisePGain:  new Tone.Gain(1),
+      noise2WGain: new Tone.Gain(1),
+      noise2PGain: new Tone.Gain(1),
+      noise3WGain: new Tone.Gain(1),
+      noise3PGain: new Tone.Gain(1),
       vcf:         new Tone.Filter({ frequency: 20000, type: 'lowpass', rolloff: -24 }),
       vcf2:        new Tone.Filter({ frequency: 20000, type: 'lowpass', rolloff: -24 }),
       vca:         new Tone.Gain(1.0),
@@ -927,6 +937,14 @@ export default function useMoogAudio() {
     // audio graph so Chrome never stops calling the worklet's process() callback.
     n.qntOut.connect(n.qntKeepAlive);
     n.qntKeepAlive.connect(Tone.Destination);
+
+    // Noise sources → LEVEL gains (Phase 8b) — the jacks tap the gains.
+    n.noiseW.connect(n.noiseWGain);
+    n.noiseP.connect(n.noisePGain);
+    n.noise2W.connect(n.noise2WGain);
+    n.noise2P.connect(n.noise2PGain);
+    n.noise3W.connect(n.noise3WGain);
+    n.noise3P.connect(n.noise3PGain);
 
     // Kick engine — MembraneSynth and click transient both feed kickOut
     n.kickSynth.connect(n.kickOut);
@@ -1625,20 +1643,24 @@ export default function useMoogAudio() {
 
     if (type === 'noise') {
       const id = `noise${num}`;
-      n[`${id}W`] = new Tone.Noise({ type: 'white' });
-      n[`${id}P`] = new Tone.Noise({ type: 'pink'  });
+      n[`${id}W`]     = new Tone.Noise({ type: 'white' });
+      n[`${id}P`]     = new Tone.Noise({ type: 'pink'  });
+      n[`${id}WGain`] = new Tone.Gain(1); // LEVEL stage (Phase 8b) — jacks tap these
+      n[`${id}PGain`] = new Tone.Gain(1);
+      n[`${id}W`].connect(n[`${id}WGain`]);
+      n[`${id}P`].connect(n[`${id}PGain`]);
       if (isPoweredRef.current) {
         try { n[`${id}W`].start(); } catch (_) {}
         try { n[`${id}P`].start(); } catch (_) {}
       }
       const jackEntries = {
-        [`${id}-wht`]: { type: 'out', node: n[`${id}W`] },
-        [`${id}-pnk`]: { type: 'out', node: n[`${id}P`] },
+        [`${id}-wht`]: { type: 'out', node: n[`${id}WGain`] },
+        [`${id}-pnk`]: { type: 'out', node: n[`${id}PGain`] },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, {
         type, num,
-        nodeNames:   [`${id}W`, `${id}P`],
+        nodeNames:   [`${id}W`, `${id}P`, `${id}WGain`, `${id}PGain`],
         sourceNames: [`${id}W`, `${id}P`],
         jackIds:     Object.keys(jackEntries),
       });
@@ -2807,6 +2829,17 @@ export default function useMoogAudio() {
     if (delay !== undefined) kbdVibratoDelayRef.current = delay; // delay = time in seconds
   }, []);
 
+  // Noise LEVEL (Phase 8b) — id-keyed ('noise' | 'noise2' | 'noise3' statics,
+  // 'noise4'+ dynamics). Knob 0–1 → gain 0–1.43× with unity at the 0.7 default,
+  // so pre-8b patches (no gain stage) sound identical until the knob moves.
+  const updateNoiseParams = useCallback((id, { level } = {}) => {
+    const n = nodesRef.current;
+    if (!n || !n[`${id}WGain`] || level === undefined) return;
+    const g = Math.max(0, level) / 0.7;
+    safeRamp(n[`${id}WGain`].gain, g, 0.02);
+    safeRamp(n[`${id}PGain`].gain, g, 0.02);
+  }, []);
+
   const setSeqGlide  = useCallback((v) => setSeqGlideById('seq', v),  [setSeqGlideById]);
   const setChordSeqGlide = useCallback((v) => setChordSeqGlideById('chordseq', v), [setChordSeqGlideById]);
   const setSeq2Glide = useCallback((v) => setSeqGlideById('seq2', v), [setSeqGlideById]);
@@ -2954,7 +2987,7 @@ export default function useMoogAudio() {
     updateChordSeqStepsById, setChordSeqStepCallbackById, setChordSeqDivisionById,
     setChordSeqRootOctaveById, setChordSeqGlideById,
     setVco1SyncEnabled, setVco2SyncEnabled, setVco3SyncEnabled, setVco4SyncEnabled, setVco5SyncEnabled,
-    setSeqGlide, setSeq2Glide, setKbdGlide, setKbdVibrato,
+    setSeqGlide, setSeq2Glide, setKbdGlide, setKbdVibrato, updateNoiseParams,
     updateFFBParams, getFFBAnalyserData,
     updateVocoderParams, getVocAnalyserData,
     enableMic, disableMic, updateExtMicParams,

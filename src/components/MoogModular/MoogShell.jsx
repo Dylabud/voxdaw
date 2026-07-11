@@ -233,9 +233,14 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
   );
 }
 
-function NoiseModule({ number = 1 }) {
+function NoiseModule({ number = 1, onParamUpdate }) {
   const [level, setLevel] = useState(0.7);
   const prefix = number === 1 ? 'noise' : `noise${number}`;
+
+  // LEVEL → per-instance W/P gain pair (Phase 8b); 0.7 default = unity.
+  useEffect(() => {
+    onParamUpdate?.(prefix, { level });
+  }, [level, prefix, onParamUpdate]);
   return (
     <div className={styles.module}>
       <Screw pos="screwTL" /><Screw pos="screwTR" />
@@ -1957,6 +1962,26 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
     updateRackStore({ cables: cables.map(c => ({ from: c.fromJackId, to: c.toJackId, color: c.color })) });
   }, []);
 
+  // Drag-to-reorder for expansion modules (Phase 60f-2). The dragged id lives
+  // in a ref (Zero-Re-render during the drag); drop moves it before the target
+  // slot, persists the new order, and forces a cable-overlay reposition —
+  // committed cables read jack rects at render time, so without the resize
+  // nudge they would keep pointing at the modules' OLD positions.
+  const dragDynIdRef = useRef(null);
+  const handleDynReorder = useCallback((draggedId, targetId) => {
+    if (!draggedId || draggedId === targetId) return;
+    const list    = [...dynModulesRef.current];
+    const fromIdx = list.findIndex(m => m.id === draggedId);
+    const toIdx   = list.findIndex(m => m.id === targetId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const [moved] = list.splice(fromIdx, 1);
+    list.splice(toIdx, 0, moved);
+    dynModulesRef.current = list;
+    updateRackStore({ modules: list.map(({ id, type, num }) => ({ id, type, num })) });
+    setDynModules(list);
+    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+  }, []);
+
   // Stable per-instance closures — created once per id so module effects and
   // Led rAF loops never restart on shell re-renders (the audio fns are stable).
   const dynBindingsRef = useRef({});
@@ -2311,9 +2336,9 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
                   {mod('vco3', <VcoModule key="vco3" number={3} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco3SyncEnabled} getLedValue={getVco3Level} quantized={quantizedVcos.includes('vco3')} />)}
                   {mod('vco4', <VcoModule key="vco4" number={4} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco4SyncEnabled} getLedValue={getVco4Level} quantized={quantizedVcos.includes('vco4')} />)}
                   {mod('vco5', <VcoModule key="vco5" number={5} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco5SyncEnabled} getLedValue={getVco5Level} quantized={quantizedVcos.includes('vco5')} />)}
-                  {mod('noise1', <NoiseModule key="noise1" number={1} />)}
-                  {mod('noise2', <NoiseModule key="noise2" number={2} />)}
-                  {mod('noise3', <NoiseModule key="noise3" number={3} />)}
+                  {mod('noise1', <NoiseModule key="noise1" number={1} onParamUpdate={audio.updateNoiseParams} />)}
+                  {mod('noise2', <NoiseModule key="noise2" number={2} onParamUpdate={audio.updateNoiseParams} />)}
+                  {mod('noise3', <NoiseModule key="noise3" number={3} onParamUpdate={audio.updateNoiseParams} />)}
                 </div>
                 <div className={`${styles.tier} ${styles.tierRow2}`}>
                   {mod('vcf1', <VcfModule key="vcf1" number={1} onParamUpdate={audio.updateVcfParams} />)}
@@ -2334,7 +2359,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
                       const b = bindingsFor(m.id);
                       const inner =
                         m.type === 'vco'   ? <VcoModule number={m.num} onParamUpdate={audio.updateVcoParams} onSyncChange={b.sync} getLedValue={b.meter} quantized={quantizedVcos.includes(m.id)} />
-                      : m.type === 'noise' ? <NoiseModule number={m.num} />
+                      : m.type === 'noise' ? <NoiseModule number={m.num} onParamUpdate={audio.updateNoiseParams} />
                       : m.type === 'vcf'   ? <VcfModule number={m.num} onParamUpdate={b.params} />
                       : m.type === 'lfo'   ? <LfoModule number={m.num} onParamUpdate={b.params} getLedValue={b.lfoLed} />
                       : m.type === 'vca'   ? <VcaModule number={m.num} onParamUpdate={b.params} />
@@ -2349,7 +2374,32 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
                       : m.type === 'qnt'   ? <QuantizerModule number={m.num} onParamUpdate={b.params} onSetCallback={b.qntCb} getTransposeData={b.qntTrp} />
                       : null;
                       return (
-                        <div key={m.id} className={styles.dynSlot} style={{ flex: `0 0 ${DYN_WIDTH[m.type]}px` }}>
+                        <div
+                          key={m.id}
+                          className={styles.dynSlot}
+                          style={{ flex: `0 0 ${DYN_WIDTH[m.type]}px` }}
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            e.currentTarget.classList.add(styles.dynSlotDropTarget);
+                          }}
+                          onDragLeave={(e) => e.currentTarget.classList.remove(styles.dynSlotDropTarget)}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            e.currentTarget.classList.remove(styles.dynSlotDropTarget);
+                            handleDynReorder(dragDynIdRef.current, m.id);
+                            dragDynIdRef.current = null;
+                          }}
+                        >
+                          <div
+                            className={styles.dynGrip}
+                            draggable
+                            title="Drag to reorder"
+                            onDragStart={(e) => {
+                              dragDynIdRef.current = m.id;
+                              if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+                            }}
+                            onDragEnd={() => { dragDynIdRef.current = null; }}
+                          >⠿</div>
                           {inner}
                         </div>
                       );

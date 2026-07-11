@@ -25,22 +25,23 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Future Phases
 
-### Moog Phase 60 series — Dynamic Rack (user-customizable modules)
-Full proposal in **MOOG_ARCHITECTURE.md → "PROPOSAL — Dynamic Rack"** (2026-07-08). **60a–60e COMPLETE + 60f cable persistence (2026-07-11): all 14 module types are dynamic** (per-instance hard-sync + quantizer worklets, Tone.Loop lifecycle, shared-mic fan-out), **and the whole custom rack — instances AND patch cables — persists across reloads** (v2 store, stable instance ids, load repair). The proposal's "library v2 case picker" was overtaken by the expansion-row design. Remaining: **drag-to-reorder** (pure UX, still deferred).
-
-### Moog Phase 8b — Noise Generator Audio Wiring
-- Three `Tone.Noise` pairs (noiseW/P, noise2W/P, noise3W/P) each through a `Tone.Gain` in `useMoogAudio.js`
-- Wire LEVEL knob → gain node per instance
-- Separate output refs for WHITE and PINK jacks for patch cable routing
-
-### Moog Phase 12 — Visual Polish
-- Knob tooltip labels on hover
-- Module-level bypass switches
-- Mobile / narrow viewport fallback
+**Roadmap clear (2026-07-11).** Every planned phase is either shipped or resolved with a logged decision — see the Completed Phases Log. New phases go here.
 
 ---
 
 ## Completed Phases Log
+
+### [2026-07-11] Moog Phases 8b + 60f-2 + 12 — Noise LEVEL Wiring, Drag-to-Reorder, Knob Tooltips (roadmap close-out)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.jsx`
+
+**Phase 8b — Noise LEVEL wiring (the knob was visual-only since Phase 1.5):** each noise module (3 static + dynamics) gets a `${id}WGain`/`${id}PGain` pair between the sources and the WHT/PNK jacks; one LEVEL knob drives both via id-keyed `updateNoiseParams(id, { level })`. **Mapping is knob 0–1 → gain 0–1.43× with unity at the 0.7 default**, so every pre-8b patch (which had no gain stage) sounds identical until the knob moves. Jacks re-point at the gains; dynamic factory + `nodeNames` updated.
+
+**Phase 60f-2 — Drag-to-reorder expansion modules:** each `dynSlot` gains a machined grip tab (`.dynGrip`, absolute-positioned so it never affects layout — the Phase 55 fit() trap; z-index 40, under the cable overlay). HTML5 DnD: dragged id in a ref (Zero-Re-render during the drag), drop splices the `dynModules` array, persists the order (array order = store order), and dispatches a `resize` on the next frame — **committed cables read jack rects at render time, so without the nudge they would keep pointing at the modules' old positions** (the overlay's existing resize reposition handles it). `e.dataTransfer` guarded for synthesized test events.
+
+**Phase 12 — resolved:** ✅ knob tooltips — native `title` on every `MoogKnob` (`"FREQ: 5.0 / 10 · shift = fine · double-click = reset"` — also the only in-UI documentation of fine mode and reset). ❌ **Module-level bypass switches — rejected as superseded:** every insert-FX module already has a transparent state (REV/BBD MIX at 0, VCF fully open, QNT BYPASS toggle exists since Phase 22) and the Phase 59 library removes whole modules; a second bypass affordance would clutter the photorealistic plates for no routing gain. ⏸ **Mobile/narrow fallback — deferred with reasons:** the 60a fit-width floor + vertical scroll already keeps narrow desktop windows usable; true mobile needs a touch-event camera (pinch/pan) and touch cable drags — a self-contained subproject — and VoxDaw is desktop-first (MediaPipe hand tracking).
+
+**Verified (Playwright, zero console/page errors):** FFB band meter driven by `noise-wht` at LEVEL default 0.57 → **0.08 at LEVEL zero → 0.61 restored**; grip-drag swapped [vco6, kick2] → [kick2, vco6] **and the order persisted across reload** (cables repositioned); tooltip text present on VCO 1's FREQ knob.
 
 ### [2026-07-11] Moog Phase 60f — Cable & Rack Persistence with Stable Instance IDs (Dynamic Rack series)
 
