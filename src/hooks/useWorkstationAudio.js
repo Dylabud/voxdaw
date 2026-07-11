@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import * as Tone from 'tone';
-import { makeSynth, applyEnvelope, defaultEnvelopeFor, isSampledInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
+import { makeSynth, makeGlideVoice, applyEnvelope, defaultEnvelopeFor, isSampledInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
 import { makeFx } from '../components/Workstation/fxChain';
 import { HEAVY_EFFECT_TYPES, EFFECT_DEFS, metaForTarget } from '../components/Workstation/effectDefs';
 import {
@@ -9,6 +9,9 @@ import {
 } from '../components/Workstation/automationMath';
 import { buildTempoMap, tempoPointsOf, tempoScheduleOps } from '../components/Workstation/tempoMath';
 import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
+import {
+  compileGlideChains, clipSegments, segmentsAreInert, planGlideSegments,
+} from '../components/Workstation/glideMath';
 
 /**
  * Workstation playback engine — peer to useAudioEngine / useVocoder / useAutotune.
@@ -36,6 +39,11 @@ import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
 //            prune via makeFx). track.effects state is never mutated, so
 //            flipping back to high restores the user's settings instantly.
 const REDUCED_MAX_POLYPHONY = 12;
+
+// Concurrent glide mono-voices per region (chains beyond the cap steal the
+// oldest voice — the REDUCED_MAX_POLYPHONY philosophy applied to glides).
+const GLIDE_VOICE_CAP_HIGH = 8;
+const GLIDE_VOICE_CAP_REDUCED = 4;
 
 // Effective pan of a grouped track = clampPan(track.pan + group.pan): the
 // group knob/lane is a member OFFSET, never a write to track.pan — so a
@@ -219,6 +227,63 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   // them at schedule time (see makePartCallback). Consumed by silenceAll.
   const liveSamplerSourcesRef  = useRef(new Set()); // ToneBufferSource
 
+  // Glide voice pools — bare mono voices (makeGlideVoice) for synth-family
+  // chain scheduling; PolySynth can't expose per-voice detune, so glide
+  // events get dedicated voices connected to the region's fadeGain (they ride
+  // fade → volume → pan → FX → mute like the region synth). LAZY: a
+  // glide-free project never allocates one. The glide scheduler is the SINGLE
+  // writer of a pool voice's detune/volume.
+  const glideVoicesByRegionIdRef = useRef(new Map()); // regionId → { instrument, voices: [{ voice, busyUntil }] }
+
+  const disposeGlidePool = useCallback((regionId) => {
+    const pool = glideVoicesByRegionIdRef.current.get(regionId);
+    if (!pool) return;
+    for (const e of pool.voices) { if (!e.voice.disposed) e.voice.dispose(); }
+    glideVoicesByRegionIdRef.current.delete(regionId);
+  }, []);
+
+  // Inline-synced (the mappingsRef pattern) so Part callbacks — which live for
+  // the Part's lifetime — always acquire through live refs.
+  const glideCtxRef = useRef({ acquire: () => null });
+  glideCtxRef.current.acquire = (regionId, tStart, tEnd) => {
+    const applied = appliedRegionStateRef.current.get(regionId);
+    const instrument = applied?.instrument;
+    const fadeGain = fadeGainsByRegionIdRef.current.get(regionId);
+    if (!instrument || !fadeGain || fadeGain.disposed) return null;
+    let pool = glideVoicesByRegionIdRef.current.get(regionId);
+    if (pool && pool.instrument !== instrument) { disposeGlidePool(regionId); pool = null; }
+    if (!pool) {
+      pool = { instrument, voices: [] };
+      glideVoicesByRegionIdRef.current.set(regionId, pool);
+    }
+    let entry = pool.voices.find(e => e.busyUntil <= tStart);
+    if (!entry) {
+      const cap = perfQualityRef.current === 'high' ? GLIDE_VOICE_CAP_HIGH : GLIDE_VOICE_CAP_REDUCED;
+      if (pool.voices.length < cap) {
+        const track = tracksRef.current.find(t => t.id === applied?.trackId);
+        const voice = makeGlideVoice(instrument, { envelope: track?.envelope ?? undefined });
+        voice.connect(fadeGain);
+        entry = { voice, busyUntil: 0 };
+        pool.voices.push(entry);
+      } else {
+        // Steal the oldest: cancel its scheduled curves and hard-release so
+        // stale future events can't replay on the reused voice.
+        entry = pool.voices.reduce((a, b) => (a.busyUntil <= b.busyUntil ? a : b));
+        const now = Tone.now();
+        const v = entry.voice;
+        v.detune.cancelScheduledValues(now);
+        v.volume.cancelScheduledValues(now);
+        const orig = v.get?.()?.envelope?.release;
+        if (orig != null) v.set({ envelope: { release: HARD_CUT_SEC } });
+        v.triggerRelease(now);
+        if (orig != null) v.set({ envelope: { release: orig } });
+      }
+    }
+    const rel = Number(entry.voice.get?.()?.envelope?.release) || 0.3;
+    entry.busyUntil = tEnd + rel;
+    return entry.voice;
+  };
+
   // Sampler-load tracking: which regions are still downloading buffers,
   // and the derived per-track set for the UI loading indicator.
   const loadingRegionsRef = useRef(new Map()); // regionId → trackId
@@ -272,7 +337,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     return synth;
   }, [recomputeLoadingTrackIds]);
 
-  const auditionAttack = useCallback((trackId, note) => {
+  const auditionAttack = useCallback((trackId, note, velocity = 0.8) => {
     const synth = ensureAuditionSynth(trackId);
     // `loaded === false` skips an unready Sampler; PolySynths have no `loaded`.
     if (!synth || synth.disposed || synth.loaded === false) return;
@@ -286,7 +351,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       // Hi-hat choke, mirroring makePartCallback — every caller gets it.
       for (const tgt of chokeTargetsFor(note)) synth.triggerRelease(tgt);
     }
-    synth.triggerAttack(note, undefined, 0.8);
+    synth.triggerAttack(note, undefined, velocity);
   }, [ensureAuditionSynth, connectTrack, bumpActivity]);
 
   // Drums are one-shots: releases are no-ops so cymbals ring out (the buffer
@@ -1019,7 +1084,11 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       const env = t.envelope ?? defaultEnvelopeFor(t.instrument);
       const audition = auditionByTrackIdRef.current.get(t.id);
       if (audition && audition.instrument === t.instrument) applyEnvelope(audition.synth, env);
-      for (const rid of regsByTrack.get(t.id) ?? []) applyEnvelope(synths.get(rid), env);
+      for (const rid of regsByTrack.get(t.id) ?? []) {
+        applyEnvelope(synths.get(rid), env);
+        const pool = glideVoicesByRegionIdRef.current.get(rid);
+        if (pool) for (const e of pool.voices) applyEnvelope(e.voice, env);
+      }
     }
   }, [tracks, regions]);
 
@@ -1059,6 +1128,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       if (evtId != null) Tone.Transport.clear(evtId);
       parts.get(id)?.dispose();
       synths.get(id)?.dispose();
+      disposeGlidePool(id); // glide voices hang off the fadeGain — free them first
       fades.get(id)?.dispose();
       parts.delete(id);
       synths.delete(id);
@@ -1114,6 +1184,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
           // Clear any pending sampler load for the prior instrument.
           if (loadingRegionsRef.current.delete(r.id)) recomputeLoadingTrackIds();
           synths.get(r.id)?.dispose();
+          disposeGlidePool(r.id); // pool voices are instrument-specific
           const synth = buildSynthForRegion(r.id, r.trackId, track.instrument, fades.get(r.id), track.envelope);
           synths.set(r.id, synth);
         }
@@ -1138,7 +1209,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
           const part = new Tone.Part(
             makePartCallback(synth, liveSamplerSourcesRef.current, isDrumKit(track.instrument),
                              r.id, appliedRegionStateRef, audibleByTrackIdRef, noteLifecycleRef,
-                             tempoMapRef),
+                             tempoMapRef, glideCtxRef),
             events
           );
           part.start(0);
@@ -1163,7 +1234,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
         : true;
       applied.set(r.id, { instrument: track.instrument, partKey, fadeKey, loaded, trackId: r.trackId });
     }
-  }, [tracks, regions, notes, bpm, recomputeLoadingTrackIds]);
+  }, [tracks, regions, notes, bpm, recomputeLoadingTrackIds, disposeGlidePool]);
 
   // Silence in-flight voices on pause/stop/seek (Tone.Transport.pause keeps
   // tails alive). Three layers:
@@ -1233,6 +1304,22 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     // stop/pause/seek. They bypass region fadeGains, so layer 2 below never
     // touches them and audition stays usable immediately after.
     for (const entry of auditionByTrackIdRef.current.values()) hardCutSynth(entry.synth);
+    // Glide pool voices: cancel their scheduled detune/volume curves (stale
+    // future events would replay after a seek-resume — Parts re-fire and
+    // schedule fresh ones) and hard-release the voice.
+    for (const pool of glideVoicesByRegionIdRef.current.values()) {
+      for (const e of pool.voices) {
+        const v = e.voice;
+        if (v.disposed) continue;
+        v.detune.cancelScheduledValues(audioNow);
+        v.volume.cancelScheduledValues(audioNow);
+        const orig = v.get?.()?.envelope?.release;
+        if (orig != null) v.set({ envelope: { release: HARD_CUT_SEC } });
+        v.triggerRelease(audioNow);
+        if (orig != null) v.set({ envelope: { release: orig } });
+        e.busyUntil = 0;
+      }
+    }
     for (const g of fadeGainsByRegionIdRef.current.values()) {
       if (!g) continue;
       g.gain.cancelScheduledValues(audioNow);
@@ -1325,6 +1412,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     const fxBypApp = appliedFxBypassByIdRef.current;
     const fxParApp = appliedFxParamsByIdRef.current;
     const liveSrcs = liveSamplerSourcesRef.current;
+    const glidePools = glideVoicesByRegionIdRef.current;
     const auditions = auditionByTrackIdRef.current;
     const muteConns = muteConnByTrackIdRef.current;
     const audible   = audibleByTrackIdRef.current;
@@ -1377,6 +1465,8 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       for (const e of auditions.values()) e.synth.dispose();
       auditions.clear();
       for (const s of synths.values())  s.dispose();
+      for (const pool of glidePools.values()) for (const e of pool.voices) e.voice.dispose();
+      glidePools.clear();
       for (const g of fades.values())   g.dispose();
       for (const g of volumes.values()) g.dispose();
       for (const p of panners.values()) p.dispose();
@@ -1446,9 +1536,88 @@ export function computeFadeGainAt(r, transportSec, map) {
   return 1;
 }
 
+// ── Glide chain schedulers (shared live + offline bounce) ──────────────────
+// Both consume a planGlideSegments() plan whose times are OFFSETS from chain
+// start; `t` is the absolute chain start in the caller's context. Tone's
+// setValueCurveAtTime is a setValueAtTime + linear-ramp series, so the
+// strictly-sequential scheduling below is safe in live and Offline contexts.
+
+export function scheduleGlideSynthVoice(voice, ev, t, plan) {
+  if (!voice || voice.disposed) return;
+  const headVel = ev.velocity ?? 100;
+  // Re-anchor this voice's params at t — kills any stale events left by a
+  // previous chain on the reused pool voice. Single writer: only this
+  // scheduler ever touches a glide voice's detune/volume.
+  voice.detune.cancelScheduledValues(t);
+  voice.volume.cancelScheduledValues(t);
+  voice.volume.setValueAtTime(0, t); // 0 dB ref — crossfades are relative to the attack velocity
+  voice.triggerAttack(ev.note, t, headVel / 120);
+  for (const op of plan.ops) {
+    voice.detune.setValueAtTime(op.baseCents, t + op.holdStartSec);
+    if (op.curve) voice.detune.setValueCurveAtTime(op.curve, t + op.glideStartSec, op.glideDurSec);
+    if (op.fromVel !== op.toVel) {
+      // Velocity crossfade in dB relative to the attack velocity, over the
+      // glide window (flat tie segments crossfade across the whole segment).
+      const start = op.curve ? op.glideStartSec : op.holdStartSec;
+      const dur   = op.curve ? op.glideDurSec   : (op.segEndSec - op.holdStartSec);
+      if (dur > 1e-4) {
+        voice.volume.setValueAtTime(Tone.gainToDb(op.fromVel / headVel), t + start);
+        voice.volume.linearRampToValueAtTime(Tone.gainToDb(op.toVel / headVel), t + start + dur);
+      }
+    }
+  }
+  voice.triggerRelease(t + plan.totalDurSec);
+}
+
+export function scheduleGlideSamplerChain(synth, liveSources, ev, t, plan) {
+  const headVel = ev.velocity ?? 100;
+  // Attack + capture, mirroring the plain sampler path (private
+  // _activeSources — same caveat and graceful fallback).
+  synth.triggerAttack(ev.note, t, headVel / 120);
+  let captured = null;
+  synth._activeSources?.forEach((srcs) => srcs.forEach((src) => {
+    if (liveSources.has(src)) return;
+    liveSources.add(src);
+    const prev = src.onended;
+    src.onended = () => { prev?.(); liveSources.delete(src); };
+    captured = src;
+  }));
+  // Release at CHAIN end (true legato — consumed members never re-attack).
+  // Ordering is load-bearing: stop() runs cancelStop(), which wipes gain
+  // events after start — schedule it BEFORE the crossfade ramps below.
+  synth.triggerRelease(ev.note, t + plan.totalDurSec);
+  if (!captured) return; // _activeSources gone (future Tone bump) → plain long note, no glide
+  // Pitch rides playbackRate: rate = r0 · 2^(cents/1200) where r0 is the
+  // Sampler's own repitch rate for this key. Accepted limitation: the source
+  // self-stops at buffer end, so a chain longer than the sample truncates.
+  const r0 = captured.playbackRate.value;
+  const gainParam = captured._gainNode?.gain ?? captured.output?.gain ?? null;
+  const atk = Number(synth.attack) || 0;
+  for (const op of plan.ops) {
+    captured.playbackRate.setValueAtTime(r0 * 2 ** (op.baseCents / 1200), t + op.holdStartSec);
+    if (op.curve) {
+      const rates = new Float32Array(op.curve.length);
+      for (let i = 0; i < op.curve.length; i++) rates[i] = r0 * 2 ** (op.curve[i] / 1200);
+      captured.playbackRate.setValueCurveAtTime(rates, t + op.glideStartSec, op.glideDurSec);
+    }
+    if (gainParam && op.fromVel !== op.toVel) {
+      // Absolute gains — velocity IS this param's start value (source.start's
+      // gain arg). Window clamped inside (attack end, stop − ε) so it never
+      // collides with OneShotSource's own fadeIn/fadeOut events.
+      const start = Math.max(op.curve ? op.glideStartSec : op.holdStartSec, atk + 0.01);
+      const end = Math.min(op.curve ? op.glideStartSec + op.glideDurSec : op.segEndSec,
+                           plan.totalDurSec - 0.01);
+      if (end - start > 1e-3) {
+        gainParam.setValueAtTime(op.fromVel / 120, t + start);
+        gainParam.linearRampToValueAtTime(op.toVel / 120, t + end);
+      }
+    }
+  }
+}
+
 function makePartCallback(synth, liveSources, isDrum = false,
                           regionId = null, regionStateRef = null, audibleTracksRef = null,
-                          noteLifecycleRef = null, mapRef = null) {
+                          noteLifecycleRef = null, mapRef = null, glideCtxRef = null) {
   return (time, ev) => {
     // Note duration through the tempo map: event time/duration are "<ticks>i"
     // strings, so the note's real length under a tempo ramp is the map's
@@ -1487,6 +1656,30 @@ function makePartCallback(synth, liveSources, isDrum = false,
     // (undefined !== false) so they always play. Re-checked at fire time, so once the
     // sampler loads, later events on the same Part play normally (no Part rebuild needed).
     if (!synth || synth.disposed || synth.loaded === false) return;
+    // Per-note velocity: 1–120 int on the event → Tone's 0–1 NormalRange.
+    const vel = (ev.velocity ?? 100) / 120;
+    // Glide chain event — dedicated scheduling path (portamento curves + true
+    // legato). Plain events carry no `glide` key, so the hot path pays exactly
+    // one undefined comparison. Drums never glide (one-shots; the UI blocks
+    // the tool, this is the defensive gate).
+    if (ev.glide !== undefined && !isDrum && mapRef?.current) {
+      const t = synth.toSeconds(time);
+      const plan = planGlideSegments({
+        headPitch: ev.note, segments: ev.glide.segments,
+        startTicks: parseInt(ev.time, 10), map: mapRef.current,
+        PPQ: Tone.Transport.PPQ,
+      });
+      if (synth._activeSources) {
+        scheduleGlideSamplerChain(synth, liveSources, ev, t, plan);
+      } else {
+        const voice = glideCtxRef?.current?.acquire?.(regionId, t, t + plan.totalDurSec);
+        if (voice) scheduleGlideSynthVoice(voice, ev, t, plan);
+        // No voice (fadeGain gone mid-teardown / no pool context): degrade to
+        // a plain note on the region synth rather than dropping the event.
+        else synth.triggerAttackRelease(ev.note, durSec, time, vel);
+      }
+      return;
+    }
     if (synth._activeSources) {
       // Tone.Sampler — split triggerAttackRelease into its exact internal steps
       // (attack at t, release at t + duration; behavior-identical) so the new
@@ -1500,7 +1693,7 @@ function makePartCallback(synth, liveSources, isDrum = false,
       // versa). Safe no-op when nothing in the group is ringing; the fade is
       // the kit's `release` (~50 ms).
       if (isDrum) for (const tgt of chokeTargetsFor(ev.note)) synth.triggerRelease(tgt, t);
-      synth.triggerAttack(ev.note, t, 0.8);
+      synth.triggerAttack(ev.note, t, vel);
       synth._activeSources.forEach((srcs) => srcs.forEach((src) => {
         if (liveSources.has(src)) return;
         liveSources.add(src);
@@ -1512,7 +1705,7 @@ function makePartCallback(synth, liveSources, isDrum = false,
       // (ToneBufferSource.start pre-schedules its own stop).
       if (!isDrum) synth.triggerRelease(ev.note, t + durSec);
     } else {
-      synth.triggerAttackRelease(ev.note, durSec, time, 0.8);
+      synth.triggerAttackRelease(ev.note, durSec, time, vel);
     }
   };
 }
@@ -1605,7 +1798,7 @@ export function buildRegionEvents(r, allNotes) {
   const windowLoB     = co * 4;          // home window: bottle beats [co, co+li)
   const windowHiB     = (co + li) * 4;
 
-  const push = (events, globalStartB, dur, note) => {
+  const push = (events, globalStartB, dur, note, velocity) => {
     if (globalStartB >= regionEndB) return false;
     const clippedEnd = Math.min(globalStartB + dur, regionEndB);
     const durBeats   = clippedEnd - globalStartB;
@@ -1614,29 +1807,71 @@ export function buildRegionEvents(r, allNotes) {
       time:     `${Math.round(globalStartB * PPQ)}i`,
       note,
       duration: `${Math.round(durBeats     * PPQ)}i`,
+      velocity: velocity ?? 100, // 1–120 int; consumed as velocity/120 at trigger
     });
     return true;
   };
 
-  const events = [];
+  // Chain unit (glide) analogue of push(): same region-end clip, but emits a
+  // `glide.segments` payload. A unit whose glide portion was clipped away
+  // entirely degrades to a plain event (segmentsAreInert) — cheaper, identical.
+  const pushUnit = (events, globalStartB, u) => {
+    if (globalStartB >= regionEndB) return false;
+    const clippedEnd = Math.min(globalStartB + u.totalBeats, regionEndB);
+    const durBeats   = clippedEnd - globalStartB;
+    if (durBeats <= 0) return true;
+    const clippedTicks = Math.round(durBeats * PPQ);
+    const segs = clipSegments(u.segments, clippedTicks);
+    const ev = {
+      time:     `${Math.round(globalStartB * PPQ)}i`,
+      note:     u.note,
+      duration: `${clippedTicks}i`,
+      velocity: u.velocity,
+    };
+    if (!segmentsAreInert(segs)) ev.glide = { segments: segs };
+    events.push(ev);
+    return true;
+  };
+
+  // Home-window notes for this region. hasGlide gates the compiler — a
+  // glide-free region takes ONE truthiness check per note and the original
+  // per-note path below (hard performance contract: unused feature = no cost).
+  const windowNotes = [];
+  let hasGlide = false;
   for (const n of allNotes) {
     if (n.regionId !== r.id) continue;
     if (n.startBeat <  windowLoB) continue;
     if (n.startBeat >= windowHiB) continue;
+    windowNotes.push(n);
+    if (n.glide) hasGlide = true;
+  }
 
+  const events = [];
+  // Chains compile ONCE in bottle-local beats, then unroll as whole units —
+  // members are connected in bottle space, so every loop iteration replays the
+  // identical chain. Chains never cross the loop-window edge by construction
+  // (a target outside the window fails resolution → unconnected glide).
+  const units = hasGlide ? compileGlideChains(windowNotes, PPQ) : null;
+
+  const emit = (globalStartB, item) => (item.segments
+    ? pushUnit(events, globalStartB, item)
+    : push(events, globalStartB, item.totalBeats ?? item.durationBeats,
+           item.note, item.velocity));
+
+  for (const item of (units ?? windowNotes)) {
     if (!looped) {
       // Single window pass — bottle origin at (startMeasure − clipOffset).
-      push(events, (r.startMeasure - co) * 4 + n.startBeat, n.durationBeats, n.note);
+      emit((r.startMeasure - co) * 4 + item.startBeat, item);
       continue;
     }
-    // Looped: replay this note at firstLoopOffset + j*li, wrapping the home cycle
-    // by the region's loopPhase (see loopMath). phase 0 ⇒ identical to the old
+    // Looped: replay at firstLoopOffset + j*li, wrapping the home cycle by the
+    // region's loopPhase (see loopMath). phase 0 ⇒ identical to the old
     // `i*baseLoop` unroll.
-    const homeLocalMeasures = n.startBeat / 4 - co;            // [0, li)
+    const homeLocalMeasures = item.startBeat / 4 - co;         // [0, li)
     const firstOffM = firstLoopOffsetMeasures(homeLocalMeasures, phase, li);
     for (let j = 0; ; j++) {
       const globalStartB = (regionStartB / 4 + firstOffM + j * li) * 4;
-      if (!push(events, globalStartB, n.durationBeats, n.note)) break;
+      if (!emit(globalStartB, item)) break;
     }
   }
   return events;
@@ -1705,7 +1940,13 @@ function computePartKey(r, notes) {
   let key = `${r.id}|${r.startMeasure}|${r.durationMeasures}|${r.clipOffset ?? 0}|${r.loopInterval ?? 'n'}|${r.loopPhase ?? 0}|${r.isMuted ? 'm' : ''}`;
   for (const n of notes) {
     if (n.regionId !== r.id) continue;
-    key += `|${n.id}:${n.note}:${n.startBeat.toFixed(4)}:${n.durationBeats.toFixed(4)}`;
+    key += `|${n.id}:${n.note}:${n.startBeat.toFixed(4)}:${n.durationBeats.toFixed(4)}:${n.velocity ?? 100}`;
+    // Glide component only when present — glide-free keys stay byte-identical
+    // (hot-path contract: an unused feature costs nothing, incl. rebuild churn).
+    if (n.glide) {
+      const g = n.glide;
+      key += `:g${g.startOffset},${g.endPitch},${g.tension},${g.connected ? 1 : 0}`;
+    }
   }
   return key;
 }

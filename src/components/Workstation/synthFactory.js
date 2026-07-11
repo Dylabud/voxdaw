@@ -63,6 +63,52 @@ export function applyEnvelope(synth, env) {
   }
 }
 
+// Voice class + constructor options for each synth-family instrument — the
+// single source both makeSynth (PolySynth wrapper) and makeGlideVoice (bare
+// mono voice for per-note glide scheduling) build from, so a glide voice is
+// timbre-identical to the track's polyphonic voices.
+function voiceSpecFor(instrument) {
+  switch (instrument) {
+    case 'fm pluck':
+      return { Voice: Tone.FMSynth, options: {
+        harmonicity: 3, modulationIndex: 10,
+        envelope: envFor('fm pluck'),
+      } };
+    case 'strings':
+      return { Voice: Tone.FMSynth, options: {
+        harmonicity: 3.5, modulationIndex: 10,
+        oscillator: { type: 'sawtooth' },
+        modulation: { type: 'sine' },
+        envelope: envFor('strings'),
+        modulationEnvelope: { attack: 0.5, decay: 0.1, sustain: 0.8, release: 0.6 },
+      } };
+    case 'am':
+      return { Voice: Tone.AMSynth, options: {
+        harmonicity: 2,
+        envelope: envFor('am'),
+      } };
+    case 'pluck':
+      return { Voice: Tone.Synth, options: {
+        oscillator: { type: 'sawtooth' },
+        envelope: envFor('pluck'),
+      } };
+    case 'sine':
+    case 'square':
+    case 'sawtooth':
+    case 'triangle':
+      return { Voice: Tone.Synth, options: {
+        oscillator: { type: instrument },
+        envelope: envFor(instrument),
+      } };
+    case 'analog':
+    default:
+      return { Voice: Tone.Synth, options: {
+        oscillator: { type: 'triangle' },
+        envelope: envFor('analog'),
+      } };
+  }
+}
+
 // Builds a fresh PolySynth or Tone.Sampler for the given instrument name.
 // Caller owns disposal and routing. For sampled instruments, pass { onLoad }
 // to be notified when buffers are decoded; Tone.Sampler silently ignores
@@ -79,51 +125,8 @@ export function makeSynth(instrument, opts = {}) {
       onload: opts.onLoad,
     });
   } else {
-    switch (instrument) {
-      case 'fm pluck':
-        synth = new Tone.PolySynth(Tone.FMSynth, {
-          harmonicity: 3, modulationIndex: 10,
-          envelope: envFor('fm pluck'),
-        });
-        break;
-      case 'strings':
-        synth = new Tone.PolySynth(Tone.FMSynth, {
-          harmonicity: 3.5, modulationIndex: 10,
-          oscillator: { type: 'sawtooth' },
-          modulation: { type: 'sine' },
-          envelope: envFor('strings'),
-          modulationEnvelope: { attack: 0.5, decay: 0.1, sustain: 0.8, release: 0.6 },
-        });
-        break;
-      case 'am':
-        synth = new Tone.PolySynth(Tone.AMSynth, {
-          harmonicity: 2,
-          envelope: envFor('am'),
-        });
-        break;
-      case 'pluck':
-        synth = new Tone.PolySynth(Tone.Synth, {
-          oscillator: { type: 'sawtooth' },
-          envelope: envFor('pluck'),
-        });
-        break;
-      case 'sine':
-      case 'square':
-      case 'sawtooth':
-      case 'triangle':
-        synth = new Tone.PolySynth(Tone.Synth, {
-          oscillator: { type: instrument },
-          envelope: envFor(instrument),
-        });
-        break;
-      case 'analog':
-      default:
-        synth = new Tone.PolySynth(Tone.Synth, {
-          oscillator: { type: 'triangle' },
-          envelope: envFor('analog'),
-        });
-        break;
-    }
+    const { Voice, options } = voiceSpecFor(instrument);
+    synth = new Tone.PolySynth(Voice, options);
   }
   if (opts.envelope) applyEnvelope(synth, opts.envelope);
   // Optional voice cap (performance quality tiers) — Samplers have no voice pool.
@@ -131,4 +134,14 @@ export function makeSynth(instrument, opts = {}) {
     synth.maxPolyphony = opts.maxPolyphony;
   }
   return synth;
+}
+
+// Bare mono voice for glide chains (synth-family instruments only). Exposes a
+// schedulable `detune` Signal (cents) that PolySynth can't provide — the glide
+// scheduler owns it exclusively (Single Writer). Caller owns routing/disposal.
+export function makeGlideVoice(instrument, opts = {}) {
+  const { Voice, options } = voiceSpecFor(instrument);
+  const voice = new Voice(options);
+  if (opts.envelope) applyEnvelope(voice, opts.envelope);
+  return voice;
 }

@@ -1,9 +1,10 @@
 import * as Tone from 'tone';
-import { makeSynth, isDrumKit, chokeTargetsFor } from './synthFactory';
+import { makeSynth, makeGlideVoice, isDrumKit, chokeTargetsFor } from './synthFactory';
 import { makeFxGraph } from './fxChain';
 import { EFFECT_DEFS } from './effectDefs';
 import { automationValueAt, denorm, isPanAutomated } from './automationMath';
 import { buildTempoMap, tempoPointsOf, tempoScheduleOps } from './tempoMath';
+import { planGlideSegments } from './glideMath';
 import {
   buildRegionEvents,
   volForSliderValue,
@@ -11,6 +12,8 @@ import {
   estimateTrackTailSec,
   estimateGroupTailSec,
   clampPan,
+  scheduleGlideSynthVoice,
+  scheduleGlideSamplerChain,
 } from '../../hooks/useWorkstationAudio';
 
 // Group-aware audibility — the live engine's effect #2 rule: a solo anywhere
@@ -274,14 +277,52 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
           const m1 = m0 + parseInt(ev.duration, 10) / q;
           return tempoMap.secondsAtMeasure(m1) - tempoMap.secondsAtMeasure(m0);
         };
+        // Per-note velocity mirrors the live makePartCallback: 1–120 int on
+        // the event → Tone's 0–1 NormalRange.
+        const velOf = (ev) => (ev.velocity ?? 100) / 120;
+        // Glide chains mirror the live path via the SAME shared schedulers.
+        // Synth family: pre-create the mono voices here (before transport
+        // start), round-robin acquired in the callback. Sampler family:
+        // scheduleGlideSamplerChain captures + curves the buffer source; the
+        // throwaway Set stands in for liveSamplerSourcesRef (nothing to
+        // silence offline). Glide-free regions build zero extra nodes and the
+        // callbacks below are byte-identical to the pre-glide behavior.
+        const glideCount = isDrum ? 0 : events.reduce((c, ev) => c + (ev.glide ? 1 : 0), 0);
+        const glideVoices = [];
+        if (glideCount > 0 && !synth._activeSources && !(synth instanceof Tone.Sampler)) {
+          const n = Math.min(glideCount, 8);
+          for (let i = 0; i < n; i++) {
+            glideVoices.push(makeGlideVoice(track.instrument, { envelope: track.envelope }).connect(fadeGain));
+          }
+        }
+        let glideRR = 0;
+        const offlineSources = new Set();
+        const scheduleGlide = (time, ev) => {
+          const t = synth.toSeconds(time);
+          const plan = planGlideSegments({
+            headPitch: ev.note, segments: ev.glide.segments,
+            startTicks: parseInt(ev.time, 10), map: tempoMap,
+            PPQ: Tone.Transport.PPQ,
+          });
+          if (synth._activeSources) {
+            scheduleGlideSamplerChain(synth, offlineSources, ev, t, plan);
+          } else if (glideVoices.length) {
+            scheduleGlideSynthVoice(glideVoices[glideRR++ % glideVoices.length], ev, t, plan);
+          } else {
+            synth.triggerAttackRelease(ev.note, durSecOf(ev), time, velOf(ev));
+          }
+        };
         new Tone.Part(
           isDrum
             ? (time, ev) => {
                 const t = synth.toSeconds(time);
                 for (const tgt of chokeTargetsFor(ev.note)) synth.triggerRelease(tgt, t);
-                synth.triggerAttack(ev.note, t, 0.8);
+                synth.triggerAttack(ev.note, t, velOf(ev));
               }
-            : (time, ev) => synth.triggerAttackRelease(ev.note, durSecOf(ev), time, 0.8),
+            : (time, ev) => {
+                if (ev.glide !== undefined) { scheduleGlide(time, ev); return; }
+                synth.triggerAttackRelease(ev.note, durSecOf(ev), time, velOf(ev));
+              },
           events,
         ).start(0);
       }

@@ -4,7 +4,11 @@ import styles from './RegionEditor.module.css';
 import { drawGrid, getSnapIncrement } from '../WorkstationShell';
 import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
 import { firstLoopOffsetMeasures } from '../loopMath';
-import { SYNTH_INSTRUMENTS, SAMPLED_MELODIC_NAMES, DRUM_KIT_NAMES } from '../synthFactory';
+import { SYNTH_INSTRUMENTS, SAMPLED_MELODIC_NAMES, DRUM_KIT_NAMES, isDrumKit } from '../synthFactory';
+import {
+  normalizeGlide, indexNotesByStartTick, resolveGlideTarget,
+  svgPathFor, tensionHandlePoint, keyIndexOf, TENSION_LIMIT,
+} from '../glideMath';
 import EffectsList from './EffectsList';
 import EffectsRack from './EffectsRack';
 import InstrumentPanel from './InstrumentPanel';
@@ -68,11 +72,19 @@ export default function RegionEditor({
   const [activeTab,         setActiveTab]         = useState('notes');
   const [selectedNoteIds,   setSelectedNoteIds]   = useState(() => new Set());
   const [noteSnapDivision,  setNoteSnapDivision]  = useState('grid');
+  // 'editor' = move/resize/draw; 'velocity' = vertical drag edits note velocity;
+  // 'glide' = per-note pitch-glide handles (notes frozen). Selection (click /
+  // shift-click / marquee) is identical in all three.
+  const [toolMode,          setToolMode]          = useState('editor');
+  // Selected connection claws (glide mode) — mutually exclusive with note
+  // selection so the Delete key is unambiguous (claw delete = disconnect).
+  const [selectedClawIds,   setSelectedClawIds]   = useState(() => new Set());
 
   const activeKeyElRef        = useRef(null);
   const gridRef               = useRef(null);
   const gridCanvasRef         = useRef(null);   // pinned grid-line canvas over the piano-roll viewport
   const noteMarqueeElRef      = useRef(null);
+  const velReadoutElRef       = useRef(null);   // singleton velocity readout (marquee pattern)
   const noteDragRef           = useRef(null);
   const noteMarqueeRef        = useRef(null);
   const editorRootRef         = useRef(null);
@@ -83,6 +95,8 @@ export default function RegionEditor({
   const regionsRef            = useRef(regions);            regionsRef.current = regions;
   const selectedNoteIdsRef    = useRef(selectedNoteIds);    selectedNoteIdsRef.current = selectedNoteIds;
   const noteSnapRef           = useRef(noteSnapDivision);   noteSnapRef.current = noteSnapDivision;
+  const toolModeRef           = useRef(toolMode);           toolModeRef.current = toolMode;
+  const selectedClawIdsRef    = useRef(selectedClawIds);    selectedClawIdsRef.current = selectedClawIds;
   const magnetOnRef           = useRef(magnetOn);           magnetOnRef.current = magnetOn;
   const pixelsPerMeasureRef   = useRef(pixelsPerMeasure);   pixelsPerMeasureRef.current = pixelsPerMeasure;
 
@@ -246,7 +260,11 @@ export default function RegionEditor({
       const inInput = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.isContentEditable;
       if (e.key === 'Escape') {
         if (inInput) return;
+        // Mid-drag the snapshot (clusterIds/initByID) keeps operating on the
+        // selection — clearing it here would desync selection from the drag.
+        if (noteDragRef.current) return;
         setSelectedNoteIds(new Set());
+        setSelectedClawIds(new Set());
         return;
       }
       if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
@@ -259,12 +277,45 @@ export default function RegionEditor({
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // Drums are one-shots — glide is meaningless; kick back to the editor if
+  // the instrument flips to a kit while the glide tool is active.
+  const isDrumTrack = isDrumKit(track?.instrument);
+  useEffect(() => {
+    if (isDrumTrack && toolMode === 'glide') setToolMode('editor');
+  }, [isDrumTrack, toolMode]);
+
+  // Claw delete — CAPTURE phase so it wins deterministically over the shell's
+  // bubble-phase note-delete listener (a selected claw means "disconnect",
+  // never "delete notes"). endPitch is retained: the host keeps gliding, the
+  // freed next note simply re-attacks.
+  useEffect(() => {
+    const onKeyCapture = (e) => {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+      const claws = selectedClawIdsRef.current;
+      if (!claws.size) return;
+      const el = document.activeElement;
+      if (el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.isContentEditable) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const updates = [];
+      for (const id of claws) {
+        const n = notesRef.current.find(x => x.id === id);
+        if (!n?.glide) continue;
+        updates.push({ id, glide: normalizeGlide({ ...n.glide, connected: false }, n.note) });
+      }
+      if (updates.length) onCommitNoteEdits?.(updates);
+      setSelectedClawIds(new Set());
+    };
+    window.addEventListener('keydown', onKeyCapture, true);
+    return () => window.removeEventListener('keydown', onKeyCapture, true);
+  }, [onCommitNoteEdits]);
+
   // ── Key preview handlers ──────────────────────────────────
   // Previews go through the hook's per-track audition synth, which is connected
   // to the track's volume node — so they ride volume → pan → FX → mute exactly
   // like region playback. Drum choke, one-shot skip-release, and the unloaded-
   // sampler guard all live inside the audition API.
-  const previewAttack = (note) => auditionAttack?.(track?.id, note);
+  const previewAttack = (note, velocity) => auditionAttack?.(track?.id, note, velocity);
   const previewRelease = () => auditionReleaseAll?.(track?.id);
   function handleMouseDown(note, e) {
     Tone.start().then(() => previewAttack(note));
@@ -385,12 +436,221 @@ export default function RegionEditor({
     return updates;
   }
 
+  // Redraw one note's glide overlay (path + handles, base + ghost iterations)
+  // from a draft glide — direct SVG attribute mutation only (Zero-Re-render).
+  // Geometry (left/width/noteY) was stamped on each <g> at render time.
+  function redrawGlideNote(id, draft) {
+    const groups = gridRef.current?.querySelectorAll(`[data-glide-note-id="${id}"]`);
+    if (!groups) return;
+    const y1 = keyIndexOf(draft.endPitch) * KEY_H + (KEY_H - 1) / 2;
+    groups.forEach(gEl => {
+      const left  = Number(gEl.dataset.left)  || 0;
+      const width = Number(gEl.dataset.width) || 1;
+      const y0    = Number(gEl.dataset.noteY) || 0;
+      const x0 = left + draft.startOffset * width;
+      const x1 = left + width;
+      gEl.querySelector('[data-glide-path]')?.setAttribute('d',
+        svgPathFor({ xFlat: left, x0, y0, x1, y1, tension: draft.tension }));
+      // querySelectorAll: each handle is a visible circle + its invisible
+      // hit twin sharing the data attribute — both must track the drag.
+      gEl.querySelectorAll('[data-glide-left]').forEach(l => {
+        l.setAttribute('cx', x0); l.setAttribute('cy', y0);
+      });
+      gEl.querySelectorAll('[data-glide-right]').forEach(r => {
+        r.setAttribute('cx', x1); r.setAttribute('cy', y1);
+      });
+      gEl.querySelectorAll('[data-glide-claw]').forEach(c => {
+        c.setAttribute('cx', x1); c.setAttribute('cy', y1);
+      });
+      const tp = tensionHandlePoint({ x0, y0, x1, y1, tension: draft.tension });
+      gEl.querySelectorAll('[data-glide-tension]').forEach(tEl => {
+        tEl.setAttribute('cx', tp.x); tEl.setAttribute('cy', tp.y);
+        tEl.style.display = y1 === y0 ? 'none' : '';
+      });
+    });
+  }
+
+  // ── Glide handle mousedown — arm a glide drag (left/right/tension) ──
+  function handleGlideHandleDown(e, note, handle) {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    // Selection mirrors the note-body rule: an unselected note collapses the
+    // selection to itself; a selected one keeps the cluster (group deltas).
+    const cur = selectedNoteIdsRef.current;
+    const nextSelection = cur.has(note.id) ? new Set(cur) : new Set([note.id]);
+    setSelectedNoteIds(nextSelection);
+    if (selectedClawIdsRef.current.size) setSelectedClawIds(new Set());
+
+    const endPitch0 = note.glide?.endPitch ?? note.note;
+    if (handle === 'glide-right') {
+      // Audition the glide target on grab; row crossings re-fire (glissando).
+      Tone.start().then(() => previewAttack(endPitch0, (note.velocity ?? 100) / 120));
+    }
+
+    const initByID = new Map();
+    for (const id of nextSelection) {
+      const n = notesRef.current.find(x => x.id === id);
+      if (!n) continue;
+      const gEl = gridRef.current?.querySelector(`[data-glide-note-id="${n.id}"][data-note-iter="0"]`);
+      initByID.set(id, {
+        note: n.note,
+        velocity: n.velocity ?? 100,
+        startOffset: n.glide?.startOffset ?? 0,
+        endKi: keyIndexOf(n.glide?.endPitch ?? n.note),
+        tension: n.glide?.tension ?? 0,
+        connected: n.glide?.connected ?? false,
+        left:  Number(gEl?.dataset.left)  || 0,
+        width: Number(gEl?.dataset.width) || 1,
+        noteY: Number(gEl?.dataset.noteY) || 0,
+      });
+    }
+    noteDragRef.current = {
+      mode: handle, // 'glide-left' | 'glide-right' | 'glide-tension'
+      startX: e.clientX,
+      startY: e.clientY,
+      startScrollLeft: pianoScrollRef.current?.scrollLeft ?? 0,
+      startScrollTop:  pianoScrollRef.current?.scrollTop  ?? 0,
+      dragStarted: false,
+      clusterIds: [...nextSelection],
+      initByID,
+      anchorId: note.id,
+      shiftKey: e.shiftKey || e.metaKey || e.ctrlKey,
+      lastAuditionedNote: handle === 'glide-right' ? endPitch0 : null,
+      pendingUpdates: null,
+    };
+    pianoMousePosRef.current = { x: e.clientX, y: e.clientY };
+    // No auto-scroll: handle drags are screen-space gestures (velocity pattern).
+  }
+
   // ── Global mousemove / mouseup for drag + marquee ──
   useEffect(() => {
+    // Connect-on-drop (right-anchor release): each edited note connects iff a
+    // UNIQUE note starts exactly at its end tick with pitch === the dropped
+    // endPitch — drag-onto connects, drag-away disconnects, the claw never
+    // lies. Shared tickOf quantization = the compiler's adjacency rule.
+    const resolveConnectOnDrop = (updates) => {
+      const PPQ = Tone.Transport.PPQ;
+      const idxByRegion = new Map();
+      return updates.map(u => {
+        const n = notesRef.current.find(x => x.id === u.id);
+        if (!n) return u;
+        const endPitch = u.glide?.endPitch ?? n.note;
+        if (!idxByRegion.has(n.regionId)) {
+          idxByRegion.set(n.regionId,
+            indexNotesByStartTick(notesRef.current.filter(x => x.regionId === n.regionId), PPQ));
+        }
+        const probe = { ...n, glide: { startOffset: 0, tension: 0, ...(u.glide ?? {}), endPitch, connected: true } };
+        const connected = !!resolveGlideTarget(probe, idxByRegion.get(n.regionId), PPQ);
+        return { id: u.id, glide: normalizeGlide({
+          startOffset: u.glide?.startOffset ?? 0,
+          endPitch,
+          tension: u.glide?.tension ?? 0,
+          connected,
+        }, n.note) };
+      });
+    };
+
     const onMove = (e) => {
       pianoMousePosRef.current = { x: e.clientX, y: e.clientY };
       // Drag path
       const dD = noteDragRef.current;
+      // Glide tool: note bodies are frozen — selection only, no movement.
+      if (dD && dD.mode === 'glide-select') return;
+      if (dD && (dD.mode === 'glide-left' || dD.mode === 'glide-right' || dD.mode === 'glide-tension')) {
+        // Screen-space deltas (no auto-scroll in glide drags). The anchor's
+        // delta applies uniformly to the whole cluster, clamped per note.
+        const dx = e.clientX - dD.startX;
+        const dy = e.clientY - dD.startY;
+        if (!dD.dragStarted && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+        if (!dD.dragStarted) {
+          dD.dragStarted = true;
+          document.body.classList.add('is-glide-dragging');
+        }
+        const anchorInit = dD.initByID.get(dD.anchorId);
+        if (!anchorInit) return;
+        // Per-mode anchor delta.
+        const dRows = Math.round(dy / KEY_H); // KEYS is high→low: down = +index
+        const dOffset = dx / Math.max(anchorInit.width, 1);
+        let dTension = 0;
+        if (dD.mode === 'glide-tension') {
+          // Handle sits at y0 + (y1−y0)(0.5 + tension/4) ⇒ tension = 4·(yH−mid)/(y1−y0).
+          const y1a = anchorInit.endKi * KEY_H + (KEY_H - 1) / 2;
+          let span = y1a - anchorInit.noteY;
+          if (Math.abs(span) < 2 * KEY_H) span = Math.sign(span || 1) * 2 * KEY_H;
+          dTension = (4 * dy) / span;
+        }
+        const updates = [];
+        for (const id of dD.clusterIds) {
+          const init = dD.initByID.get(id);
+          if (!init) continue;
+          let so = init.startOffset, ki = init.endKi, tn = init.tension;
+          if (dD.mode === 'glide-left')       so = Math.max(0, Math.min(1, init.startOffset + dOffset));
+          else if (dD.mode === 'glide-right') ki = Math.max(0, Math.min(KEYS.length - 1, init.endKi + dRows));
+          else                                tn = Math.max(-TENSION_LIMIT, Math.min(TENSION_LIMIT, init.tension + dTension));
+          const draft = { startOffset: so, endPitch: KEYS[ki].name, tension: tn, connected: init.connected };
+          updates.push({ id, glide: normalizeGlide(draft, init.note) });
+          redrawGlideNote(id, draft);
+        }
+        dD.pendingUpdates = updates;
+        if (dD.mode === 'glide-right') {
+          // Glissando audition on row crossings + endPitch readout at the anchor.
+          const anchorKi = Math.max(0, Math.min(KEYS.length - 1, anchorInit.endKi + dRows));
+          const pitch = KEYS[anchorKi].name;
+          if (pitch !== dD.lastAuditionedNote) {
+            auditionRelease?.(track?.id, dD.lastAuditionedNote);
+            auditionAttack?.(track?.id, pitch, (anchorInit.velocity ?? 100) / 120);
+            dD.lastAuditionedNote = pitch;
+          }
+          const ro = velReadoutElRef.current;
+          if (ro) {
+            ro.style.left = `${anchorInit.left + anchorInit.width + 6}px`;
+            ro.style.top  = `${anchorKi * KEY_H - 16}px`;
+            ro.style.opacity = '1';
+            ro.textContent = pitch;
+          }
+        }
+        return;
+      }
+      if (dD && dD.mode === 'velocity') {
+        // Velocity drag: pure screen-space dy (no auto-scroll in this mode, so
+        // no scroll compensation). Up = louder; 1 px = 1 velocity unit — the
+        // full 1–120 sweep fits in ~120 px. Same integer delta to the whole
+        // cluster, clamped per note. DOM-only during the drag (bar width % is
+        // iteration-agnostic, so one write covers base + region-clipped
+        // ghosts); one commit on mouseup.
+        const dy = dD.startY - e.clientY;
+        if (!dD.dragStarted && Math.abs(dy) < DRAG_THRESHOLD) return;
+        if (!dD.dragStarted) {
+          dD.dragStarted = true;
+          document.body.classList.add('is-note-dragging', 'is-velocity-dragging');
+        }
+        const delta = Math.round(dy);
+        const updates = [];
+        for (const id of dD.clusterIds) {
+          const init = dD.initByID.get(id);
+          if (!init) continue;
+          const v = Math.max(1, Math.min(120, init.velocity + delta));
+          updates.push({ id, velocity: v });
+          gridRef.current?.querySelectorAll(`[data-note-id="${id}"]`)?.forEach(el => {
+            const bar = el.querySelector('[data-vel-bar]');
+            if (bar) bar.style.width = `${(v / 120) * 100}%`;
+          });
+        }
+        dD.pendingUpdates = updates;
+        // Numeric readout above the anchor note's base iteration.
+        const anchorV = updates.find(u => u.id === dD.anchorId)?.velocity;
+        const ro = velReadoutElRef.current;
+        const anchorEl = gridRef.current?.querySelector(
+          `[data-note-id="${dD.anchorId}"][data-note-iter="0"]`);
+        if (ro && anchorEl && anchorV != null) {
+          ro.style.left = anchorEl.style.left;
+          ro.style.top  = `${(parseInt(anchorEl.style.top, 10) || 0) - 16}px`;
+          ro.style.opacity = '1';
+          ro.textContent = anchorV;
+        }
+        return;
+      }
       if (dD) {
         // Compensate for auto-scroll: while the cursor holds still at an edge, the
         // grid content scrolls underneath it, so the lane/beat under the cursor
@@ -505,8 +765,35 @@ export default function RegionEditor({
       const dD = noteDragRef.current;
       if (dD) {
         noteDragRef.current = null;
-        document.body.classList.remove('is-note-dragging');
+        document.body.classList.remove('is-note-dragging', 'is-velocity-dragging', 'is-glide-dragging');
+        const ro = velReadoutElRef.current;
+        if (ro) { ro.style.opacity = '0'; ro.textContent = ''; }
         stopPianoAutoScroll();
+        // Right-anchor release: resolve connections (drag-onto = claw grabs,
+        // drag-away = disconnect) before the commit.
+        if (dD.mode === 'glide-right' && dD.dragStarted && dD.pendingUpdates) {
+          dD.pendingUpdates = resolveConnectOnDrop(dD.pendingUpdates);
+        }
+        // Claw click (sub-threshold press on a connected right anchor):
+        // select the claw for Delete-to-disconnect. Mutually exclusive with
+        // note selection so Delete is unambiguous.
+        if (dD.mode === 'glide-right' && !dD.dragStarted) {
+          const n = notesRef.current.find(x => x.id === dD.anchorId);
+          if (n?.glide?.connected) {
+            const PPQ = Tone.Transport.PPQ;
+            const idx = indexNotesByStartTick(
+              notesRef.current.filter(x => x.regionId === n.regionId), PPQ);
+            if (resolveGlideTarget(n, idx, PPQ)) {
+              setSelectedClawIds(prev => {
+                const next = dD.shiftKey ? new Set(prev) : new Set();
+                next.add(dD.anchorId);
+                return next;
+              });
+              setSelectedNoteIds(new Set());
+              return;
+            }
+          }
+        }
         if (dD.dragStarted && dD.pendingUpdates && dD.pendingUpdates.length) {
           onCommitNoteEdits?.(dD.pendingUpdates);
         }
@@ -530,6 +817,12 @@ export default function RegionEditor({
         }
 
         if (!dM.active) {
+          // Velocity/glide tools: empty-grid click only deselects — creating
+          // notes that then can't be moved would be a foot-gun.
+          if (toolModeRef.current === 'velocity' || toolModeRef.current === 'glide') {
+            setSelectedNoteIds(new Set());
+            return;
+          }
           // Pure click — add note at start position
           const ppb = pixelsPerMeasureRef.current / 4;
           const snap = getSnapBeats();
@@ -571,14 +864,22 @@ export default function RegionEditor({
     if (e.button !== 0) return;
     e.stopPropagation();
 
-    // Audition the grabbed note's pitch (released in the window mouseup below).
-    Tone.start().then(() => previewAttack(note.note));
+    // Audition the grabbed note's pitch at its own velocity (released in the
+    // window mouseup below).
+    Tone.start().then(() => previewAttack(note.note, (note.velocity ?? 100) / 120));
 
     const rect = e.currentTarget.getBoundingClientRect();
     const xInNote = e.clientX - rect.left;
     const noteW = rect.width;
     let mode = 'move';
-    if (noteW >= 14) {
+    if (toolModeRef.current === 'velocity') {
+      // Velocity tool: no move/resize — vertical drag edits velocity.
+      mode = 'velocity';
+    } else if (toolModeRef.current === 'glide') {
+      // Glide tool: notes are frozen — the note body only selects; edits go
+      // through the SVG handles (handleGlideHandleDown).
+      mode = 'glide-select';
+    } else if (noteW >= 14) {
       if (xInNote < RESIZE_EDGE_PX) mode = 'resize-left';
       else if (xInNote > noteW - RESIZE_EDGE_PX) mode = 'resize-right';
     }
@@ -596,6 +897,7 @@ export default function RegionEditor({
       nextSelection = new Set(cur);
     }
     setSelectedNoteIds(nextSelection);
+    if (selectedClawIdsRef.current.size) setSelectedClawIds(new Set());
 
     // Snapshot cluster (use the post-mousedown selection)
     const initByID = new Map();
@@ -606,6 +908,7 @@ export default function RegionEditor({
         startBeat: n.startBeat,
         durationBeats: n.durationBeats,
         note: n.note,
+        velocity: n.velocity ?? 100,
       });
     }
     noteDragRef.current = {
@@ -625,11 +928,21 @@ export default function RegionEditor({
       pendingUpdates: null,
     };
     pianoMousePosRef.current = { x: e.clientX, y: e.clientY };
-    startPianoAutoScroll();
+    // Velocity drags are pure screen-space dy — nothing moves in grid content,
+    // so edge auto-scroll would only fight the gesture.
+    if (mode !== 'velocity') startPianoAutoScroll();
   }
 
   // Cursor hint on hover
   function handleNoteHover(e) {
+    if (toolModeRef.current === 'velocity') {
+      e.currentTarget.style.cursor = 'ns-resize';
+      return;
+    }
+    if (toolModeRef.current === 'glide') {
+      e.currentTarget.style.cursor = 'default'; // frozen — edits go through the handles
+      return;
+    }
     const rect = e.currentTarget.getBoundingClientRect();
     const xIn = e.clientX - rect.left;
     const w = rect.width;
@@ -668,8 +981,25 @@ export default function RegionEditor({
       lastHits: [],
       startingRegionId: startingRegion?.id ?? null,
     };
+    if (selectedClawIdsRef.current.size) setSelectedClawIds(new Set());
     pianoMousePosRef.current = { x: e.clientX, y: e.clientY };
     startPianoAutoScroll();
+  }
+
+  // ── Grid contextmenu — right-click anywhere in the grid opens the note
+  // menu for the current selection. Catches empty grid, region highlights,
+  // glide curves, and the SVG anchor circles (all of which bubble here —
+  // note bodies and claw hit-circles stopPropagation with their own
+  // handlers). No target filter on purpose: bubbled events are the point.
+  function handleGridContextMenu(e) {
+    e.preventDefault();
+    // Stale-id guard: the selection ref can briefly hold just-deleted ids.
+    let anchorId = null;
+    for (const id of selectedNoteIdsRef.current) {
+      if (notesRef.current.some(n => n.id === id)) { anchorId = id; break; }
+    }
+    if (!anchorId) return; // no live selection — just suppress the browser menu
+    onNoteContextMenu?.(e.clientX, e.clientY, anchorId, toolModeRef.current);
   }
 
   const ppb          = pixelsPerMeasure / 4;
@@ -691,6 +1021,29 @@ export default function RegionEditor({
         </div>
         {activeTab === 'notes' && (
           <div className={styles.editorTools}>
+            <div className={styles.toolToggle}>
+              {['editor', 'velocity', 'glide'].map(m => {
+                const drumBlocked = m === 'glide' && isDrumTrack;
+                const titles = {
+                  editor:   'Editor — move / resize / draw notes',
+                  velocity: 'Velocity tool — drag notes vertically to set velocity (1–120)',
+                  glide:    drumBlocked
+                    ? 'Drums are one-shots — glide unavailable'
+                    : 'Glide — shape per-note pitch glides; drop the right point on the next note to connect (legato)',
+                };
+                return (
+                  <button
+                    key={m}
+                    className={`${styles.toolBtn}${toolMode === m ? ` ${styles.toolBtnActive}` : ''}`}
+                    onClick={() => setToolMode(m)}
+                    disabled={drumBlocked}
+                    title={titles[m]}
+                  >
+                    {m}
+                  </button>
+                );
+              })}
+            </div>
             <label className={styles.snapLabel}>snap</label>
             <select
               className={`${styles.snapSelect}${magnetOn ? '' : ` ${styles.snapSelectDisabled}`}`}
@@ -790,6 +1143,7 @@ export default function RegionEditor({
               minHeight: PIANO_ROLL_H,
             }}
             onMouseDown={handleGridMouseDown}
+            onContextMenu={handleGridContextMenu}
           >
             <div className={styles.gridShading} style={{ minHeight: PIANO_ROLL_H }} />
 
@@ -859,7 +1213,7 @@ export default function RegionEditor({
                     key={`${n.id}-${j}`}
                     data-note-id={n.id}
                     data-note-iter={j}
-                    className={`${styles.noteBlock}${ghost ? ` ${styles.noteBlockGhost}` : ''}${!ghost && isSelected ? ` ${styles.noteSelected}` : ''}${muted ? ` ${styles.noteMuted}` : ''}`}
+                    className={`${styles.noteBlock}${ghost ? ` ${styles.noteBlockGhost}` : ''}${!ghost && isSelected ? ` ${styles.noteSelected}` : ''}${muted ? ` ${styles.noteMuted}` : ''}${toolMode === 'glide' ? ` ${styles.noteDimmed}` : ''}`}
                     style={{
                       top:    keyIndex * KEY_H,
                       // Round to a whole pixel so a note on a beat lands exactly on the
@@ -873,15 +1227,207 @@ export default function RegionEditor({
                     onContextMenu={ghost ? undefined : (e) => {
                       e.preventDefault(); e.stopPropagation();
                       if (!selectedNoteIdsRef.current.has(n.id)) setSelectedNoteIds(new Set([n.id]));
-                      onNoteContextMenu?.(e.clientX, e.clientY, n.id);
+                      // Glide mode opens the compact glide menu (connect / glide-to).
+                      onNoteContextMenu?.(e.clientX, e.clientY, n.id, toolModeRef.current);
                     }}
-                  />
+                  >
+                    {/* Velocity gauge — left-anchored, width = velocity/120 of the
+                        rendered (clipped) note. Percentage width keeps one drag
+                        write valid for base + ghost iterations alike. */}
+                    {toolMode === 'velocity' && (
+                      <div
+                        data-vel-bar
+                        className={styles.velBar}
+                        style={{ width: `${((n.velocity ?? 100) / 120) * 100}%` }}
+                      />
+                    )}
+                  </div>
                 );
               }
               return out;
             })}
 
+            {/* Glide overlay — one SVG over the whole grid (pointer-events:
+                none; handles opt back in), rendered only in glide mode.
+                Ghost loop iterations get non-interactive path copies. Each
+                <g> is stamped with its geometry so drag redraws (direct
+                attribute mutation) never re-derive region math. */}
+            {activeTab === 'notes' && toolMode === 'glide' && (
+              <svg
+                className={styles.glideSvg}
+                width={gridMinWidth}
+                height={PIANO_ROLL_H}
+                // Opt out of the click-away deselect (capture-phase window
+                // mousedown): the handles/claws are NOT inside [data-note-id]
+                // divs, so without this a handle grab wipes the selection
+                // before handleGlideHandleDown can snapshot the cluster.
+                data-no-note-deselect=""
+              >
+                {(() => {
+                  const PPQ = Tone.Transport.PPQ;
+                  const byRegion = new Map();
+                  for (const n of notes) {
+                    if (!byRegion.has(n.regionId)) byRegion.set(n.regionId, []);
+                    byRegion.get(n.regionId).push(n);
+                  }
+                  const idxByRegion = new Map(
+                    [...byRegion].map(([rid, arr]) => [rid, indexNotesByStartTick(arr, PPQ)]));
+                  // Claws render in a TOP layer after every note group: a
+                  // connected host's right anchor coincides with its target's
+                  // left anchor (that's what "connected" means), so the
+                  // later-painted target group would otherwise win every
+                  // click. The claw is a ring whose STROKE is the hit area
+                  // (pointer-events: visibleStroke) — ring edge selects/drags
+                  // the claw; the ring hole still reaches the target's left
+                  // anchor underneath.
+                  const claws = [];
+                  const groups = notes.flatMap(n => {
+                    const r = regions?.find(rg => rg.id === n.regionId);
+                    if (!r) return [];
+                    const ki0 = keyIndexOf(n.note);
+                    if (ki0 < 0) return [];
+                    const clipOffset      = r.clipOffset ?? 0;
+                    const baseLoop        = (r.loopInterval ?? null) !== null ? r.loopInterval : r.durationMeasures;
+                    const windowStartBeat = clipOffset * 4;
+                    const windowEndBeat   = (clipOffset + baseLoop) * 4;
+                    if (n.startBeat < windowStartBeat || n.startBeat >= windowEndBeat) return [];
+                    if (!(baseLoop > 0)) return [];
+                    const phase = (r.loopInterval ?? null) !== null ? (r.loopPhase ?? 0) : 0;
+                    const firstOff = firstLoopOffsetMeasures(n.startBeat / 4 - clipOffset, phase, baseLoop);
+                    const regionStartBeat = r.startMeasure * 4;
+                    const regionEndBeat   = (r.startMeasure + r.durationMeasures) * 4;
+                    const g  = n.glide;
+                    const so = g?.startOffset ?? 0;
+                    const endPitch = g?.endPitch ?? n.note;
+                    const tn = g?.tension ?? 0;
+                    const ki1 = keyIndexOf(endPitch);
+                    const y0 = ki0 * KEY_H + (KEY_H - 1) / 2;
+                    const y1 = (ki1 < 0 ? ki0 : ki1) * KEY_H + (KEY_H - 1) / 2;
+                    const connectedResolved = !!(g?.connected
+                      && resolveGlideTarget(n, idxByRegion.get(n.regionId), PPQ));
+                    const clawSelected = selectedClawIds.has(n.id);
+                    const out = [];
+                    for (let j = 0; ; j++) {
+                      const globalLeftBeat = regionStartBeat + (firstOff + j * baseLoop) * 4;
+                      if (globalLeftBeat >= regionEndBeat) break;
+                      const noteEndBeat  = globalLeftBeat + n.durationBeats;
+                      const visibleLeft  = Math.max(globalLeftBeat, regionStartBeat);
+                      const visibleRight = Math.min(noteEndBeat, regionEndBeat);
+                      if (visibleRight <= visibleLeft) continue;
+                      const ghost = j > 0;
+                      const left  = Math.round(visibleLeft * ppb);
+                      const width = Math.max((visibleRight - visibleLeft) * ppb - 1, 2);
+                      const x0 = left + so * width;
+                      const x1 = left + width;
+                      const tp = tensionHandlePoint({ x0, y0, x1, y1, tension: tn });
+                      if (!ghost && connectedResolved) {
+                        claws.push({ n, x1, y1, left, width, y0, clawSelected });
+                      }
+                      out.push(
+                        <g
+                          key={`gl-${n.id}-${j}`}
+                          data-glide-note-id={n.id}
+                          data-note-iter={j}
+                          data-left={left}
+                          data-width={width}
+                          data-note-y={y0}
+                          className={ghost ? styles.glideGhost : undefined}
+                        >
+                          <path
+                            data-glide-path
+                            className={styles.glidePath}
+                            d={svgPathFor({ xFlat: left, x0, y0, x1, y1, tension: tn })}
+                          />
+                          {!ghost && (
+                            <>
+                              {/* Visible handles stay small; each gets an
+                                  invisible r=8 hit twin painted after it (the
+                                  glideClawHit pattern) so grabs don't demand
+                                  ±4px precision — misses used to land on the
+                                  grid and trigger the empty-click deselect.
+                                  Twins share the data attribute so
+                                  redrawGlideNote moves both. */}
+                              <circle
+                                data-glide-left
+                                cx={x0} cy={y0} r={3.5}
+                                className={`${styles.glideAnchor} ${styles.glideAnchorLeft}`}
+                                onMouseDown={(e) => handleGlideHandleDown(e, n, 'glide-left')}
+                              />
+                              <circle
+                                data-glide-left
+                                cx={x0} cy={y0} r={8}
+                                className={`${styles.glideHandleHit} ${styles.glideAnchorLeft}`}
+                                onMouseDown={(e) => handleGlideHandleDown(e, n, 'glide-left')}
+                              />
+                              <circle
+                                data-glide-right
+                                cx={x1} cy={y1} r={3.5}
+                                className={`${styles.glideAnchor} ${styles.glideAnchorRight}`}
+                                onMouseDown={(e) => handleGlideHandleDown(e, n, 'glide-right')}
+                              />
+                              <circle
+                                data-glide-right
+                                cx={x1} cy={y1} r={8}
+                                className={`${styles.glideHandleHit} ${styles.glideAnchorRight}`}
+                                onMouseDown={(e) => handleGlideHandleDown(e, n, 'glide-right')}
+                              />
+                              {y1 !== y0 && (
+                                <>
+                                  <circle
+                                    data-glide-tension
+                                    cx={tp.x} cy={tp.y} r={3}
+                                    className={styles.glideTension}
+                                    onMouseDown={(e) => handleGlideHandleDown(e, n, 'glide-tension')}
+                                  />
+                                  <circle
+                                    data-glide-tension
+                                    cx={tp.x} cy={tp.y} r={8}
+                                    className={`${styles.glideHandleHit} ${styles.glideHandleHitMove}`}
+                                    onMouseDown={(e) => handleGlideHandleDown(e, n, 'glide-tension')}
+                                  />
+                                </>
+                              )}
+                            </>
+                          )}
+                        </g>
+                      );
+                    }
+                    return out;
+                  });
+                  const clawEls = claws.map(c => (
+                    <g
+                      key={`claw-${c.n.id}`}
+                      data-glide-note-id={c.n.id}
+                      data-note-iter="claw"
+                      data-left={c.left}
+                      data-width={c.width}
+                      data-note-y={c.y0}
+                    >
+                      <circle
+                        data-glide-claw
+                        cx={c.x1} cy={c.y1} r={7}
+                        className={`${styles.glideClaw}${c.clawSelected ? ` ${styles.clawSelected}` : ''}`}
+                      />
+                      <circle
+                        data-glide-claw
+                        cx={c.x1} cy={c.y1} r={7}
+                        className={styles.glideClawHit}
+                        onMouseDown={(e) => handleGlideHandleDown(e, c.n, 'glide-right')}
+                        onContextMenu={(e) => {
+                          e.preventDefault(); e.stopPropagation();
+                          if (!selectedNoteIdsRef.current.has(c.n.id)) setSelectedNoteIds(new Set([c.n.id]));
+                          onNoteContextMenu?.(e.clientX, e.clientY, c.n.id, 'glide');
+                        }}
+                      />
+                    </g>
+                  ));
+                  return [...groups, ...clawEls];
+                })()}
+              </svg>
+            )}
+
             <div ref={noteMarqueeElRef} className={styles.noteMarquee} />
+            <div ref={velReadoutElRef} className={styles.velReadout} />
             <div ref={pianoRollPlayheadRef} className={styles.playhead} />
           </div>
         )}

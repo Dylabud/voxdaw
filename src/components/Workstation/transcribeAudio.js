@@ -38,6 +38,7 @@ function frameRms(pcm, offset, len) {
  * @param {number}      bpm       - Current Workstation BPM (for seconds → beats).
  * @returns {{ note: string, startBeat: number, durationBeats: number, velocity: number }[]}
  *   Beat positions are relative to the region start (startBeat=0 = first frame of recording).
+ *   velocity is the workstation's 1–120 int scale (from the note's peak RMS).
  */
 export function transcribeAudio(nativeBuf, bpm) {
   const sr          = nativeBuf.sampleRate;
@@ -68,7 +69,7 @@ export function transcribeAudio(nativeBuf, bpm) {
         note:          run.name,
         startBeat:     run.startSec * beatsPerSec,
         durationBeats: Math.max(0.0625, durSec * beatsPerSec), // floor at 1/16th note
-        velocity:      Math.min(1, Math.max(0.1, run.peakVol * 5)),
+        velocity:      Math.max(1, Math.min(120, Math.round(Math.min(1, Math.max(0.1, run.peakVol * 5)) * 120))),
       });
     }
     run = null;

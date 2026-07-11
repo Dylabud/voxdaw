@@ -23,6 +23,7 @@ import { exportWAV, exportMP3, trimExportBuffer } from '../../utils/audioExport'
 import { transcribeAudio } from './transcribeAudio';
 import { TRACK_COLORS } from './trackColors';
 import { defaultEnvelopeFor } from './synthFactory';
+import { tickOf, normalizeGlide, retargetConnectedGlides, planChordConnections } from './glideMath';
 
 const PIXELS_PER_BEAT    = 25;
 const PIXELS_PER_MEASURE = PIXELS_PER_BEAT * 4;  // 100px at zoom 1
@@ -140,6 +141,34 @@ export function drawGrid(canvas, { scrollLeft, viewW, viewH, ppm, zoomLevel, lef
     if (show8ths)  for (const k of [1, 3, 5, 7]) line(m * ppm + k * ppm / 8, cSub);  // eighths
   }
 }
+
+// Transpose by `semis` semitones (musical: + is up). KEYS is ordered high→low
+// (buildKeys runs hiOct→loOct), so a higher pitch is a *lower* index → ki − semis.
+const shiftNoteName = (name, semis) => {
+  const ki = KEYS.findIndex(k => k.name === name);
+  if (ki < 0) return name;
+  return KEYS[Math.max(0, Math.min(KEYS.length - 1, ki - semis))].name;
+};
+// Shared by all three transpose paths (note / region / track) — glide
+// endPitch must shift with the note or every glide detunes on transpose.
+const transposeNote = (n, semis) => ({
+  ...n,
+  note: shiftNoteName(n.note, semis),
+  ...(n.glide ? { glide: { ...n.glide, endPitch: shiftNoteName(n.glide.endPitch, semis) } } : {}),
+});
+// Transpose + glide retarget pass: a host transposed away from its stationary
+// target (or vice versa) keeps its connection — endPitch is pinned to the
+// prev-resolved target's post-edit pitch. Whole-region transposes are normally
+// self-consistent no-ops here (everything shifts together), but the pass also
+// heals shiftNoteName's KEYS-bound clamping desyncing host and endPitch at the
+// range extremes.
+const transposeWithRetarget = (prev, hit, semis) => {
+  const next = prev.map(n => hit(n) ? transposeNote(n, semis) : n);
+  const rt = retargetConnectedGlides({
+    prevNotes: prev, nextNotes: next, PPQ: Tone.Transport.PPQ,
+  });
+  return rt.size ? next.map(n => rt.has(n.id) ? { ...n, glide: rt.get(n.id) } : n) : next;
+};
 
 export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeToggle, getMoogBusNode, pendingProject }) {
   const [isPlaying,      setIsPlaying]      = useState(false);
@@ -309,6 +338,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const clipboardKindRef         = useRef(null); // 'regions' | 'notes'
   const editingTrackIdRef        = useRef(null);
   const noteSelectionApiRef      = useRef(null); // { clear, setIds } from RegionEditor
+  // Note ids snapshotted when a note/glide context menu OPENS — menu commands
+  // act on this set, never on the live selection ref (a mousedown on a menu
+  // button can churn the selection before the click dispatches).
+  const menuNoteIdsRef           = useRef(null);
 
   // ── Derived editor state ───────────────────────────────────
   const editingTrack      = editingTrackId ? tracks.find(t => t.id === editingTrackId) : null;
@@ -835,6 +868,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         id: newNoteId, ...noteData,
         startBeat: startBeat - bottleOriginBeat,
         regionId: existingRegion.id,
+        velocity: noteData.velocity ?? 100,
       };
       setNotes(prev => dedupePerfectOverlaps([...prev, newNote], [newNoteId]));
     } else {
@@ -847,6 +881,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         id: newNoteId, ...noteData,
         startBeat: startBeat - measure * 4,
         regionId: newRegionId,
+        velocity: noteData.velocity ?? 100,
       };
       setRegions(merged);
       setNotes(dedupePerfectOverlaps(
@@ -863,13 +898,27 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     if (!updates || !updates.length) return;
     const map = new Map(updates.map(u => [u.id, u]));
     const touchedIds = updates.map(u => u.id);
-    setNotes(prev => dedupePerfectOverlaps(
-      prev.map(n => {
-        const u = map.get(n.id);
-        return u ? { ...n, ...u } : n;
-      }),
-      touchedIds,
-    ));
+    // Hosts whose glide was EXPLICITLY edited this commit (glide drags, claw
+    // delete, disconnect) — the retarget pass must never overwrite them. The
+    // `in` check matters: claw-delete sends `glide: undefined`, still an edit.
+    const skipHostIds = new Set(updates.filter(u => 'glide' in u).map(u => u.id));
+    const PPQ = Tone.Transport.PPQ;
+    setNotes(prev => {
+      const deduped = dedupePerfectOverlaps(
+        prev.map(n => {
+          const u = map.get(n.id);
+          return u ? { ...n, ...u } : n;
+        }),
+        touchedIds,
+      );
+      // Pin connected glides' endPitch to their (prev-resolved) targets'
+      // post-edit pitch — AFTER dedupe, so a pin never lands on a note the
+      // dedupe removed. Retarget only rewrites glide, so no second dedupe.
+      const rt = retargetConnectedGlides({ prevNotes: prev, nextNotes: deduped, PPQ, skipHostIds });
+      return rt.size
+        ? deduped.map(n => rt.has(n.id) ? { ...n, glide: rt.get(n.id) } : n)
+        : deduped;
+    });
   }, [dedupePerfectOverlaps]);
   const handleNotesDelete = useCallback((ids) => {
     const set = ids instanceof Set ? ids : new Set(ids);
@@ -882,23 +931,68 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const [contextMenu, setContextMenu] = useState(null);
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
-  // Transpose by `semis` semitones (musical: + is up). KEYS is ordered high→low
-  // (buildKeys runs hiOct→loOct), so a higher pitch is a *lower* index → ki − semis.
-  const shiftNoteName = (name, semis) => {
-    const ki = KEYS.findIndex(k => k.name === name);
-    if (ki < 0) return name;
-    return KEYS[Math.max(0, Math.min(KEYS.length - 1, ki - semis))].name;
-  };
   const transposeRegions = useCallback((regionIds, semis) => {
     const set = regionIds instanceof Set ? regionIds : new Set(regionIds);
-    setNotes(prev => prev.map(n =>
-      set.has(n.regionId) ? { ...n, note: shiftNoteName(n.note, semis) } : n));
+    setNotes(prev => transposeWithRetarget(prev, n => set.has(n.regionId), semis));
   }, []);
   const transposeNotes = useCallback((noteIds, semis) => {
     const set = noteIds instanceof Set ? noteIds : new Set(noteIds);
-    setNotes(prev => prev.map(n =>
-      set.has(n.id) ? { ...n, note: shiftNoteName(n.note, semis) } : n));
+    setNotes(prev => transposeWithRetarget(prev, n => set.has(n.id), semis));
   }, []);
+
+  // ── Glide connect / glide-to commands (glide-mode context menu) ────────
+  // Chord→chord pairing lives in glideMath.planChordConnections (pure,
+  // unit-tested): hosts group by (regionId, end tick), both sides sort
+  // pitch-descending and pair top→top; unmapped extras stay untouched.
+  const applyGlideCommand = useCallback((ids, connect) => {
+    const all = notesRef.current;
+    const plan = planChordConnections(ids, all, Tone.Transport.PPQ);
+    if (!plan.size) return;
+    const byId = new Map(all.map(n => [n.id, n]));
+    const updates = new Map(); // noteId → glide | undefined
+    for (const [hostId, endPitch] of plan) {
+      const h = byId.get(hostId);
+      updates.set(hostId, normalizeGlide({
+        startOffset: h.glide?.startOffset ?? 0,
+        endPitch,
+        tension: h.glide?.tension ?? 0,
+        connected: connect,
+      }, h.note));
+    }
+    setNotes(prev => prev.map(n => updates.has(n.id) ? { ...n, glide: updates.get(n.id) } : n));
+  }, []);
+
+  // Enable/disable state for the glide menu, computed at open time from the
+  // SAME ids snapshot the dispatch will use (menuNoteIdsRef) — flags and
+  // command provably agree. Single note: exactly ONE next note starting at
+  // this note's end tick (0 or 2+ → greyed). Multi: enabled when any selected
+  // note has ≥1 candidate.
+  const computeGlideFlags = (ids) => {
+    const all = notesRef.current;
+    const byId = new Map(all.map(n => [n.id, n]));
+    const hosts = ids.map(i => byId.get(i)).filter(Boolean);
+    const multi = hosts.length > 1;
+    const PPQ = Tone.Transport.PPQ;
+    const candCount = (h) => {
+      const endTick = tickOf(h.startBeat + h.durationBeats, PPQ);
+      let c = 0;
+      for (const x of all) {
+        if (x.regionId === h.regionId && tickOf(x.startBeat, PPQ) === endTick) c++;
+      }
+      return c;
+    };
+    const canMap = multi
+      ? hosts.some(h => candCount(h) >= 1)
+      : hosts.length === 1 && candCount(hosts[0]) === 1;
+    return {
+      multi,
+      canMap,
+      hasGlide: hosts.some(h => !!h.glide),
+      // Raw stored flag (not resolved) — matches claw-Delete semantics and
+      // lets users clean up dangling connected flags whose target is gone.
+      hasConnected: hosts.some(h => !!h.glide?.connected),
+    };
+  };
 
   // ── Track context-menu operations ──────────────────────────────
   // All plain setTracks/setRegions/setNotes mutations → auto-undoable via the
@@ -1265,8 +1359,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       if (action === 'pitch') {
         // Destructive track transpose — rewrites note names like the region
         // pitch submenu (one source of truth; undoable via the recorder).
-        setNotes(prev => prev.map(n =>
-          n.trackId === id ? { ...n, note: shiftNoteName(n.note, payload) } : n));
+        setNotes(prev => transposeWithRetarget(prev, n => n.trackId === id, payload));
       }
       else if (action === 'rename')       setRenamingTrackId(id);
       else if (action === 'color')        setTracks(prev => prev.map(t => t.id === id ? { ...t, color: payload } : t));
@@ -1326,9 +1419,25 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
         for (const s of splits) for (const pr of s.regions) nextSel.add(pr.id);
         setSelectedRegionIds(nextSel);
       } else console.log('[context-menu] region', action, ids); // copy / paste (stubs)
+    } else if (type === 'glideNote') {
+      const ids = menuNoteIdsRef.current ?? [id];
+      if (action === 'glideConnect' || action === 'glideTo') {
+        applyGlideCommand(ids, action === 'glideConnect');
+      } else if (action === 'glideDisconnect') {
+        // Outgoing connections only. Routed through handleCommitNoteEdits so
+        // it's one write path / one undo entry, and the updates carry a
+        // `glide` key → the retarget pass skips them by construction.
+        const set = new Set(ids);
+        const updates = notesRef.current
+          .filter(n => set.has(n.id) && n.glide?.connected)
+          .map(n => ({ id: n.id, glide: normalizeGlide({ ...n.glide, connected: false }, n.note) }));
+        if (updates.length) handleCommitNoteEdits(updates);
+      } else if (action === 'glideClear') {
+        const set = new Set(ids);
+        setNotes(prev => prev.map(n => set.has(n.id) && n.glide ? { ...n, glide: undefined } : n));
+      }
     } else {
-      const sel = noteSelectionRef.current;
-      const ids = sel?.has(id) ? [...sel] : [id];
+      const ids = menuNoteIdsRef.current ?? [id];
       const set = new Set(ids);
       if (action === 'delete') handleNotesDelete(set);
       else if (action === 'pitch') transposeNotes(set, payload);
@@ -1336,7 +1445,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     }
   }, [transposeRegions, transposeNotes, handleNotesDelete, splitRegionAtMeasure,
       duplicateTrack, deleteTrack, pasteEffectsTo, exportTrack,
-      removeTrackFromGroup, ungroup, deleteGroup]);
+      removeTrackFromGroup, ungroup, deleteGroup, applyGlideCommand,
+      handleCommitNoteEdits]);
 
   // ── Ghost region ─────────────────────────────────────────────
   // Returns true if `measure` falls inside any existing region on this track.
@@ -2902,6 +3012,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             return {
               note: n.note,
               durationBeats: n.durationBeats,
+              velocity: n.velocity ?? 100,
+              glide: n.glide,
               globalBeat: bottleOrigin + n.startBeat,
             };
           });
@@ -2909,6 +3021,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           notesClipboardRef.current = globals.map(g => ({
             note: g.note,
             durationBeats: g.durationBeats,
+            velocity: g.velocity,
+            ...(g.glide ? { glide: { ...g.glide } } : {}),
             relBeat: g.globalBeat - anchor,
           }));
           clipboardKindRef.current = 'notes';
@@ -2945,6 +3059,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
             return {
               note: n.note,
               durationBeats: n.durationBeats,
+              velocity: n.velocity ?? 100,
+              glide: n.glide,
               globalBeat: bottleOrigin + n.startBeat,
             };
           });
@@ -2952,6 +3068,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           notesClipboardRef.current = globals.map(g => ({
             note: g.note,
             durationBeats: g.durationBeats,
+            velocity: g.velocity,
+            ...(g.glide ? { glide: { ...g.glide } } : {}),
             relBeat: g.globalBeat - anchor,
           }));
           clipboardKindRef.current = 'notes';
@@ -3016,6 +3134,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               nextNotes = [...nextNotes, {
                 id: newId, trackId: tid, note: cn.note,
                 durationBeats: cn.durationBeats,
+                velocity: cn.velocity ?? 100,
+                ...(cn.glide ? { glide: { ...cn.glide } } : {}),
                 startBeat: globalBeat - bottleOriginBeat,
                 regionId: existing.id,
               }];
@@ -3033,6 +3153,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               nextNotes = [...nextNotes, {
                 id: newId, trackId: tid, note: cn.note,
                 durationBeats: cn.durationBeats,
+                velocity: cn.velocity ?? 100,
+                ...(cn.glide ? { glide: { ...cn.glide } } : {}),
                 startBeat: globalBeat - measure * 4,
                 regionId: newRegionId,
               }];
@@ -3979,7 +4101,16 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onNoteRemove={handleNoteRemove}
               onCommitNoteEdits={handleCommitNoteEdits}
               onNotesDelete={handleNotesDelete}
-              onNoteContextMenu={(x, y, id) => setContextMenu({ x, y, targetType: 'note', targetId: id })}
+              onNoteContextMenu={(x, y, id, mode) => {
+                // Snapshot the acted-on ids NOW — the live selection can be
+                // churned by the menu button's own mousedown before its click.
+                const sel = noteSelectionRef.current;
+                const ids = sel?.has(id) ? [...sel] : [id];
+                menuNoteIdsRef.current = ids;
+                setContextMenu(mode === 'glide'
+                  ? { x, y, targetType: 'glideNote', targetId: id, glideFlags: computeGlideFlags(ids) }
+                  : { x, y, targetType: 'note', targetId: id });
+              }}
               onNoteSelectionChange={(ids) => { noteSelectionRef.current = ids; }}
               exposeSelectionSetter={(api) => { noteSelectionApiRef.current = api; }}
               magnetOn={snapEnabled}

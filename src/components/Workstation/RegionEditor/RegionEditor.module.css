@@ -69,6 +69,36 @@
   color: var(--text-primary);
 }
 
+/* ── Editor / velocity tool toggle ───────────────────────── */
+.toolToggle {
+  display: flex;
+  border: 1px solid var(--border-mid);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.toolBtn {
+  appearance: none;
+  background: var(--bg-base);
+  border: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.toolBtn:hover {
+  color: var(--accent-color);
+}
+.toolBtnActive {
+  background: var(--accent-color);
+  color: var(--bg-base);
+}
+.toolBtnActive:hover {
+  color: var(--bg-base);
+}
+
 .tabBtn {
   appearance: none;
   background: none;
@@ -422,6 +452,116 @@
   cursor: grabbing;
 }
 :global(body.is-note-dragging) .grid { cursor: grabbing; }
+/* Velocity drags keep the ns-resize hint (after the rules above so they win). */
+:global(body.is-velocity-dragging) .noteBlock,
+:global(body.is-velocity-dragging) .grid { cursor: ns-resize; }
+
+/* ── Glide tool (piano-roll third mode) ──────────────────── */
+/* Notes are frozen + dimmed so the curves read as the foreground layer. */
+.noteDimmed { opacity: 0.55; }
+
+/* One SVG over the whole grid content. pointer-events: none lets grid clicks
+   (marquee / deselect) pass through; handles opt back in individually.
+   z-index 4 + later-in-DOM beats selected notes (also 4) so handles are
+   always clickable above note bodies. */
+.glideSvg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 4;
+  overflow: visible;
+}
+.glidePath {
+  stroke: var(--accent-color);
+  stroke-width: 1.5;
+  fill: none;
+  opacity: 0.9;
+  pointer-events: none;
+}
+.glideGhost { opacity: 0.35; }
+.glideAnchor {
+  fill: var(--bg-base);
+  stroke: var(--accent-color);
+  stroke-width: 1.5;
+  pointer-events: all;
+}
+.glideAnchor:hover { fill: var(--accent-color); }
+.glideAnchorLeft  { cursor: ew-resize; }
+.glideAnchorRight { cursor: ns-resize; }
+.glideTension {
+  fill: var(--accent-color);
+  opacity: 0.7;
+  pointer-events: all;
+  cursor: move;
+}
+.glideTension:hover { opacity: 1; }
+/* Invisible r=8 hit twins painted after each visible handle (the
+   .glideClawHit pattern) — forgiving grab targets without fattening the
+   drawn anchors. Cursor comes from the shared anchor cursor classes
+   (left/right) or .glideHandleHitMove (tension). */
+.glideHandleHit {
+  fill: transparent;
+  stroke: none;
+  pointer-events: all;
+}
+.glideHandleHitMove { cursor: move; }
+/* Connection claw — ring around the right anchor when the glide is legato-
+   connected to the next note. Rendered in a top layer (the target note's
+   left anchor sits at the same point); only the ring STROKE is clickable
+   (visibleStroke on .glideClawHit) so the hole still reaches that anchor.
+   Click the ring to select, Delete to disconnect. */
+.glideClaw {
+  fill: none;
+  stroke: var(--accent-color);
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
+.clawSelected {
+  stroke: var(--text-primary);
+  stroke-dasharray: none;
+  stroke-width: 2.5;
+}
+.glideClawHit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 6;
+  pointer-events: visibleStroke;
+  cursor: pointer;
+}
+:global(body.is-glide-dragging) .grid { cursor: crosshair; }
+
+/* ── Velocity gauge (velocity tool only) ─────────────────── */
+/* Left-anchored black line at the note's bottom; width % = velocity/120. */
+.velBar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  background: #000;
+  min-width: 2px;
+  max-width: 100%;
+  border-radius: 0 0 0 2px; /* hug the noteBlock's bottom-left corner */
+  pointer-events: none;     /* clicks land on the noteBlock */
+}
+
+/* Numeric readout above the anchor note during a velocity drag (marquee-style
+   singleton — positioned/filled imperatively, hidden at rest). */
+.velReadout {
+  position: absolute;
+  z-index: 6; /* above noteSelected(4) and marquee(5) */
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 4px;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  border: 1px solid var(--border-mid);
+  border-radius: 2px;
+  pointer-events: none;
+  opacity: 0;
+  white-space: nowrap;
+}
 
 /* ── Marquee selection box ───────────────────────────────── */
 .noteMarquee {

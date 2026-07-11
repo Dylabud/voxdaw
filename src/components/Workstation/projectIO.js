@@ -1,6 +1,7 @@
 // .voxdaw project serialization / deserialization.
 
 import { EFFECT_DEFS, isAutomatableParam } from './effectDefs';
+import { sanitizeGlide } from './glideMath';
 
 const SCHEMA_VERSION = 1;
 const KIND = 'voxdaw-project';
@@ -77,10 +78,18 @@ export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, n
       loopPhase: r.loopPhase ?? 0,
       isMuted: !!r.isMuted,
     })),
-    notes: notes.map(n => ({
-      id: n.id, trackId: n.trackId, regionId: n.regionId,
-      note: n.note, startBeat: n.startBeat, durationBeats: n.durationBeats,
-    })),
+    notes: notes.map(n => {
+      // Glide is additive too (SCHEMA_VERSION intentionally NOT bumped) and
+      // omitted entirely for inert glides — sanitizeGlide prunes defaults.
+      const glide = sanitizeGlide(n.glide, n.note);
+      return {
+        id: n.id, trackId: n.trackId, regionId: n.regionId,
+        note: n.note, startBeat: n.startBeat, durationBeats: n.durationBeats,
+        // Additive field (SCHEMA_VERSION intentionally NOT bumped) — 1–120 int.
+        velocity: sanitizeVelocity(n.velocity),
+        ...(glide ? { glide } : {}),
+      };
+    }),
   };
 }
 
@@ -136,13 +145,17 @@ export function deserializeProject(raw) {
       trackId = region.trackId;
       repairedCount++;
     }
+    const noteName = String(n.note);
+    const glide = sanitizeGlide(n.glide, noteName);
     outNotes.push({
       id,
       trackId,
       regionId: region.id,
-      note: String(n.note),
+      note: noteName,
       startBeat: Number(n.startBeat) || 0,
       durationBeats: Number(n.durationBeats) || 1,
+      velocity: sanitizeVelocity(n.velocity),
+      ...(glide ? { glide } : {}),
     });
   }
 
@@ -262,6 +275,14 @@ function deserializeEffects(raw) {
       bypass: !!e.bypass,
       params: (e.params && typeof e.params === 'object') ? { ...e.params } : {},
     }));
+}
+
+// Note velocity: 1–120 int, default 100 (old projects have no `velocity`
+// field). Additive, backward-compatible — SCHEMA_VERSION intentionally NOT
+// bumped. Shared by serialize (normalizes legacy floats) and deserialize.
+function sanitizeVelocity(raw) {
+  if (typeof raw !== 'number' || !isFinite(raw)) return 100;
+  return Math.max(1, Math.min(120, Math.round(raw)));
 }
 
 // Rebuild a track's optional ADSR override (old projects have no `envelope`

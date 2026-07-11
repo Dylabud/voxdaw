@@ -40,6 +40,15 @@ const ITEMS = {
     'divider',
     { action: 'delete', label: 'Delete' },
   ],
+  // Compact glide-mode note menu. Labels/enabled state resolve per-open from
+  // menu.glideFlags ({ multi, canMap, hasGlide }) computed by the shell.
+  glideNote: [
+    { action: 'glideConnect', label: 'Connect next note', multiLabel: 'Connect notes' },
+    { action: 'glideTo', label: 'Glide to next note (not connected)', multiLabel: 'Glide to notes (not connected)' },
+    'divider',
+    { action: 'glideDisconnect', label: 'Disconnect connection', multiLabel: 'Disconnect connections' },
+    { action: 'glideClear', label: 'Remove glide' },
+  ],
   track: [
     { action: 'rename', label: 'Rename' },
     { submenu: 'color', label: 'Color' },
@@ -178,6 +187,11 @@ export default function ContextMenu({ menu, onClose, onCommand, tracks = [] }) {
       onContextMenu={(e) => e.preventDefault()}
       onMouseEnter={onMenuEnter}
       onMouseLeave={onMenuLeave}
+      // Opt out of the piano roll's click-away deselect (a capture-phase
+      // window mousedown listener React stopPropagation can't stop): without
+      // this, pressing a menu button wipes the note selection before the
+      // button's click dispatches, collapsing multi-note commands to one note.
+      data-no-note-deselect=""
     >
       {items.map((it, i) => {
         if (it === 'divider') return <div key={`d${i}`} className={styles.divider} />;
@@ -264,15 +278,28 @@ export default function ContextMenu({ menu, onClose, onCommand, tracks = [] }) {
           );
         }
 
+        const flags = menu.glideFlags;
+        const label = flags?.multi && it.multiLabel ? it.multiLabel : it.label;
+        const disabled = flags
+          ? ((it.action === 'glideConnect' || it.action === 'glideTo') ? !flags.canMap
+             : it.action === 'glideDisconnect' ? !flags.hasConnected
+             : it.action === 'glideClear' ? !flags.hasGlide
+             : false)
+          : false;
         return (
           <button
             key={it.action}
             type="button"
-            className={styles.item}
+            className={`${styles.item}${disabled ? ` ${styles.itemDisabled}` : ''}`}
+            disabled={disabled}
+            title={disabled && (it.action === 'glideConnect' || it.action === 'glideTo')
+              ? 'needs exactly one next note starting where this note ends'
+              : undefined}
             onMouseDown={(e) => e.stopPropagation()}
-            onClick={() => { onCommand(it.action, menu.targetType, menu.targetId); onClose(); }}
+            onClick={disabled ? undefined
+              : () => { onCommand(it.action, menu.targetType, menu.targetId); onClose(); }}
           >
-            {it.label}
+            {label}
           </button>
         );
       })}
