@@ -3,6 +3,7 @@ import HomePage from './components/HomePage/HomePage';
 import App from './App';
 import WorkstationShell from './components/Workstation/WorkstationShell';
 import MoogModular from './components/MoogModular/MoogShell';
+import AIInstrumentGenerator from './components/AIGen/AIInstrumentGenerator';
 
 export default function Root() {
   const [page,       setPage]       = useState('home');
@@ -99,6 +100,17 @@ export default function Root() {
           <MoogModular
             onNavigateHome={() => navigate('home')}
             onBusReady={(getter) => { moogBusGetterRef.current = getter; }}
+          />
+        </div>
+      )}
+
+      {/* AI Instrument Generator — mounted on first visit, kept alive like the rest */}
+      {visited.has('aigen') && (
+        <div style={hide('aigen')}>
+          <AIInstrumentGenerator
+            onNavigateHome={() => navigate('home')}
+            isDarkMode={isDarkMode}
+            onThemeToggle={onThemeToggle}
           />
         </div>
       )}

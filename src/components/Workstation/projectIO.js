@@ -6,7 +6,7 @@ import { sanitizeGlide } from './glideMath';
 const SCHEMA_VERSION = 1;
 const KIND = 'voxdaw-project';
 
-export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, name, globalAutomations, groups }) {
+export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, name, globalAutomations, groups, customInstruments }) {
   return {
     version: SCHEMA_VERSION,
     kind: KIND,
@@ -15,6 +15,13 @@ export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, n
     name: String(name ?? 'untitled'),
     bpm,
     totalMeasures,
+    // Custom-instrument definitions used by this project's tracks — embedded so
+    // an imported .voxdaw reconstructs them even without the local library.
+    // Additive, SCHEMA_VERSION NOT bumped (old apps fall back to a default synth
+    // for unknown instrument ids).
+    ...(Array.isArray(customInstruments) && customInstruments.length
+      ? { customInstruments: customInstruments.map(ci => ({ id: ci.id, name: ci.name, patch: ci.patch })) }
+      : {}),
     // Global automation lanes (tempo) — optional, additive.
     ...(Array.isArray(globalAutomations) && globalAutomations.length
       ? {
@@ -203,6 +210,14 @@ export function deserializeProject(raw) {
     notes: outNotes,
     globalAutomations: deserializeGlobalAutomations(raw.globalAutomations),
     groups: liveGroups,
+    // Embedded custom-instrument defs (additive) — registered into the runtime
+    // registry by the load path before audio builds. Shape-filtered only; the
+    // registry runs sanitizePatch on each.
+    customInstruments: Array.isArray(raw.customInstruments)
+      ? raw.customInstruments
+          .filter(ci => ci && typeof ci.id === 'string' && ci.patch)
+          .map(ci => ({ id: ci.id, name: String(ci.name ?? 'Custom'), patch: ci.patch }))
+      : [],
     nextId:       nextSuffix(tracks),
     nextRegionId: nextSuffix(regions),
     nextEffectId: nextSuffix([

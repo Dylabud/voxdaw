@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import styles from './ContextMenu.module.css';
 import { TRACK_COLORS } from '../trackColors';
+import { isCustomInstrument, isInLibrary } from '../customInstruments';
 
 // Approximate dimensions used to clamp the menu inside the viewport before the
 // real element is measured. The post-mount effect refines with actual size.
@@ -60,6 +61,9 @@ const ITEMS = {
     { action: 'createGroup',  label: 'Create Group' },
     { action: 'ungroupTrack', label: 'Remove from Group' },
     { submenu: 'pasteFx', label: 'Paste Effects To' },
+    // Only rendered for custom-instrument tracks (filtered below); grayed when
+    // already in the library.
+    { action: 'addInstrument', label: 'Add Instrument' },
     { submenu: 'exportFmt', label: 'Export' },
     'divider',
     { action: 'delete', label: 'Delete Track' },
@@ -161,10 +165,13 @@ export default function ContextMenu({ menu, onClose, onCommand, tracks = [] }) {
 
   const left = Math.min(menu.x, window.innerWidth  - MENU_W - 4);
   const top  = Math.min(menu.y, window.innerHeight - MENU_H - 4);
+  const menuTrack = menu.targetType === 'track' ? tracks.find(t => t.id === menu.targetId) : null;
   let items = ITEMS[menu.targetType] ?? [];
   if (menu.targetType === 'track') {
-    const grouped = !!tracks.find(t => t.id === menu.targetId)?.groupId;
+    const grouped = !!menuTrack?.groupId;
     items = items.filter(it => it.action !== (grouped ? 'createGroup' : 'ungroupTrack'));
+    // "Add Instrument" is meaningful only for custom-instrument tracks.
+    if (!isCustomInstrument(menuTrack?.instrument)) items = items.filter(it => it.action !== 'addInstrument');
   }
   // Flip the submenu to the left when there isn't room on the right.
   const flipLeft = menu.x + MENU_W + SUBMENU_W > window.innerWidth;
@@ -280,19 +287,23 @@ export default function ContextMenu({ menu, onClose, onCommand, tracks = [] }) {
 
         const flags = menu.glideFlags;
         const label = flags?.multi && it.multiLabel ? it.multiLabel : it.label;
-        const disabled = flags
-          ? ((it.action === 'glideConnect' || it.action === 'glideTo') ? !flags.canMap
-             : it.action === 'glideDisconnect' ? !flags.hasConnected
-             : it.action === 'glideClear' ? !flags.hasGlide
-             : false)
-          : false;
+        const disabled = it.action === 'addInstrument'
+          ? isInLibrary(menuTrack?.instrument)   // already saved → grayed
+          : flags
+            ? ((it.action === 'glideConnect' || it.action === 'glideTo') ? !flags.canMap
+               : it.action === 'glideDisconnect' ? !flags.hasConnected
+               : it.action === 'glideClear' ? !flags.hasGlide
+               : false)
+            : false;
         return (
           <button
             key={it.action}
             type="button"
             className={`${styles.item}${disabled ? ` ${styles.itemDisabled}` : ''}`}
             disabled={disabled}
-            title={disabled && (it.action === 'glideConnect' || it.action === 'glideTo')
+            title={disabled && it.action === 'addInstrument'
+              ? 'already in your instruments'
+              : disabled && (it.action === 'glideConnect' || it.action === 'glideTo')
               ? 'needs exactly one next note starting where this note ends'
               : undefined}
             onMouseDown={(e) => e.stopPropagation()}

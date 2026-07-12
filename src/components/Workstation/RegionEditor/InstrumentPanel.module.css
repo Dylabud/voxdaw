@@ -290,15 +290,16 @@
   color: rgba(255, 255, 255, 0.55);
 }
 /* Pressed — physical depression: key sinks, gains an inner shadow, and takes
-   the track-color tint. Fires on both mouse :active and the keyDown class. */
-.whiteKey.keyDown,
-.whiteKey:active {
+   the track-color tint. Driven ONLY by the JS-managed .keyDown class (down /
+   glissando-enter / window mouseup). NOT :active — the browser pins :active to
+   the mousedown element for the whole drag, which would leave the origin key
+   stuck-lit while .keyDown correctly follows the glissando. */
+.whiteKey.keyDown {
   background: color-mix(in srgb, var(--track-color, var(--accent-color)) 35%, var(--piano-key-white));
   transform: translateY(2px);
   box-shadow: inset 0 3px 6px rgba(0, 0, 0, 0.3), 0 1px 1px rgba(0, 0, 0, 0.2);
 }
-.blackKey.keyDown,
-.blackKey:active {
+.blackKey.keyDown {
   background: color-mix(in srgb, var(--track-color, var(--accent-color)) 60%, var(--piano-key-black));
   transform: translateY(2px);
   box-shadow: inset 0 3px 6px rgba(0, 0, 0, 0.5);
