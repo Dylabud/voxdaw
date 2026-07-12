@@ -184,7 +184,7 @@
 
 /* Ultra-compact group: tighter knob↔label gap + tiny label (used by the dense Vocoder grid) */
 .groupXs { gap: 2px; }
-.groupXs .knobLabel { font-size: 7px; letter-spacing: 0.04em; }
+.groupXs .knobLabel { font-size: 9px; letter-spacing: 0.04em; }
 
 /* ── Indicator pointer — two-segment line ──
    Line runs from 6% (skirt rim) to 50% (knob center). The metal cap edge
@@ -231,13 +231,24 @@
 
 /* Worn heat-stamped lettering — warm off-white, soft ink-bleed edge */
 .knobLabel {
-  font-size: 13px;
+  font-size: 16px;
   letter-spacing: 0.2em;
   color: rgba(234, 229, 217, 0.80);
   text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.55);
   text-transform: uppercase;
   text-align: center;
   white-space: nowrap;
+}
+
+/* ── Quantized/snap mode (Phase 57) ──
+   The indicator line pulses mint while the QNT module is snapping this knob —
+   signals "note-stepper" behavior without touching the knob's materials. */
+.knobGlow .knobCap {
+  animation: knobGlowPulse 1.6s ease-in-out infinite;
+}
+@keyframes knobGlowPulse {
+  0%, 100% { filter: drop-shadow(0 0 2px rgba(93, 202, 165, 0.55)); }
+  50%      { filter: drop-shadow(0 0 5px rgba(93, 202, 165, 1)); }
 }
 
 /* Lights out: hide knob + label entirely */
@@ -285,9 +296,9 @@
 
 .tickNum {
   position: absolute;
-  top: -8px;
+  top: -10px;
   left: 50%;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1;
   color: rgba(255, 255, 255, 0.78);
   letter-spacing: 0;

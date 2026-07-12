@@ -176,7 +176,9 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 
 ---
 
-### 7. CP3 Mixer — Signal Combiner [Visual scaffold: Moog Phase 1.5]
+### 7. CP3 Mixer — Signal Combiner [REMOVED — Rack Expansion session 2026-06-10]
+
+> **Removed from the rack.** The component, its 5 `Tone.Gain` nodes, and its 5 jacks were deleted; the 4-channel I/O mixer (Phase 23, `io-in1..4`) covers multi-source summing. Spec retained below for historical reference.
 
 **Function:** A transistor-based summing amplifier. Takes up to 4 audio signals (typically VCO outputs) and combines them into a single output with individual channel level controls and a master output gain. At high gain settings, the transistor summing bus produces characteristic warm saturation — a primary contributor to the classic Moog "fat" sound. This is not simple clipping; it is asymmetric transistor-level compression.
 
@@ -199,7 +201,7 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 
 ---
 
-### 8. Noise Generator [Visual scaffold: Moog Phase 1.5]
+### 8. Noise Generator [Implemented: Moog Phase 8b, 2026-07-11]
 
 **Function:** Generates random electrical signals across all frequencies simultaneously. White noise has equal energy per frequency (Hz). Pink noise rolls off at −3 dB/octave, giving equal energy per octave — it sounds perceptually "flatter" and more natural. Used as a sound source (wind, ocean, percussion transients), as a random CV source for organic pitch drift, or as a test signal.
 
@@ -214,11 +216,13 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 | WHITE OUT | Output | AUDIO / CV | Flat spectrum — full-range randomness. Harsh, bright. |
 | PINK OUT | Output | AUDIO / CV | −3 dB/oct rolloff — perceptually even energy distribution. Warmer. |
 
-**Tone.js Node:** `Tone.Noise` (type: `'white'` or `'pink'`). Two separate noise instances, each through a `Tone.Gain` level node. Both run continuously once started. Phase 8b will wire the Level knob.
+**Tone.js Node:** `Tone.Noise` (type: `'white'` or `'pink'`). Two separate noise instances per module, each through a `Tone.Gain` level stage (`${id}WGain`/`${id}PGain`) that the WHT/PNK jacks tap. One LEVEL knob drives both gains via id-keyed `updateNoiseParams(id, { level })` — knob 0–1 → gain 0–1.43× with **unity at the 0.7 default** (pre-8b patches, which had no gain stage, sound identical until the knob moves). Applies to the 3 static modules and every dynamic instance.
 
 ---
 
-### 9. Multiples — Passive Signal Router [Visual scaffold: Moog Phase 1.5]
+### 9. Multiples — Passive Signal Router [REMOVED — Phases 27–29, 2026-06-08]
+
+> **Removed from the rack** (component, 8 jacks, and CSS). Jack ids are globally unique and cables cross rows freely, so fan-out is achieved by patching multiple cables from any output jack. Spec retained below for historical reference.
 
 **Function:** A purely passive (no electronics, no power) signal distribution utility. Within each bank, all 4 jacks are hardwired together. Plugging a signal into any jack of a bank routes that signal to all other jacks in the same bank simultaneously. Used to distribute a single CV or audio source to multiple destinations (e.g., one LFO simultaneously modulating both VCF cutoff and VCO 2 frequency).
 
@@ -324,17 +328,14 @@ The external-mic input was originally a standalone module (Phase 43) but was **m
 
 ## Default Signal Chain (No Patch Cables)
 
-When the page first loads, this hardwired default lets sound happen immediately before the user builds any patches:
+**True modular routing since Moog Phase 10 — there is NO hardwired audio path.** Powering on starts the sources (VCOs, noise, LFOs, internal carriers) and the sequencer clocks, but no sound reaches the speakers until the user patches a source into the I/O module (`io-in` or a mixer channel `io-in1..4`). The minimal audible patch:
 
 ```
-VCO 1 (Sawtooth) → VCF → VCA → I/O (Speakers OUT)
-                              ↑
-Envelope (Gate triggered by Sequencer Gate OUT)
-                              ↑
-Sequencer (internal clock, 8 steps, C major scale)
+vco1-saw → vcf-in → (vcf-out) → vca-in → (vca-out) → io-in
+seq-gate-out → env1-gate,  env1-out → vca-cv          ← gated sequencer arpeggio
 ```
 
-This gives the user an immediately playable arpeggio on load, showcasing the instrument before they understand patching.
+(The only survivors of the old training-wheel wiring are module-internal fixed edges — e.g. glideBus → vco.frequency, FFB fan-out — documented per module above. Persisted racks restore the user's own cables on load, Phase 60f.)
 
 ---
 
@@ -370,8 +371,8 @@ This gives the user an immediately playable arpeggio on load, showcasing the ins
 | Bug Fix ✅ | `setTargetAtTime` for VCO/VCF frequency params — eliminates exponential-ramp-from-zero crashes | VCO, VCF |
 | CV Scaling ✅ | FM + VCF CV input `Tone.Gain` scalers (×500 FM, ×5000 VCF cv, ×1000 VCF env) — LFO now audible | VCO FM, VCF |
 | Moog Phase 13 ✅ | 953 Keyboard Controller — 3-oct piano (C3–B5), pitch CV + gate out, computer keyboard (A–K) | Keyboard |
-| Moog Phase 8a | CP3 Mixer knob wiring + clipping drive WaveShaperNode | CP3 |
-| Moog Phase 8b | Noise Generator Level knob wiring | Noise |
+| Moog Phase 8a ✖ | CP3 Mixer knob wiring — obsolete: CP3 removed (Rack Expansion 2026-06-10) | CP3 |
+| Moog Phase 8b ✅ | Noise Generator LEVEL wiring — per-instance W/P gain pairs, unity at default | Noise |
 | Moog Phase 42 ✅ | 16-band spectral vocoder — patchable MOD/CARR/OUT, envelope-follower bank, MIX/HISS/BUZZ, 16-seg meter | Vocoder |
 | Moog Phase 43 ✅ | EXT IN — live mic via Tone.UserMedia (later merged into the Vocoder, Phase 48) | EXT IN |
 | Moog Phase 48 ✅ | Merged EXT IN into the Vocoder — built-in mic feeds the modulator directly | Vocoder |
@@ -380,4 +381,84 @@ This gives the user an immediately playable arpeggio on load, showcasing the ins
 | Moog Phase 53 ✅ | Viewport camera — wheel/pinch zoom 1–8× toward cursor, drag-pan, Esc reset; zero-re-render imperative transforms | Shell (interaction) |
 | Moog Phase 54 ✅ | Rack densification — 960s de-stacked, I/O channel grid, components +20%, keyboard widened; controls ~28% bigger on screen | Shell (layout) |
 | GPU Fix ✅ | Black-flashing modules — replaced static cabinet `will-change` with transient promotion during camera moves | Shell (compositing) |
-| Moog Phase 12 | Visual polish (remaining) — knob tooltips on hover, module bypass switches, mobile fallback | All |
+| Moog Phases 55–59 ✅ | Typography pass, Reverb Aura displays, QNT knob-stepper + modulation modes, case system + module library | All |
+| Moog Phase 60 series ✅ | **Dynamic Rack** — see the AS-BUILT section below | All |
+| Moog Phase 12 ✅ | Knob hover tooltips shipped; module bypass rejected as superseded (MIX-at-zero / QNT BYPASS / library removal); mobile fallback deferred (touch camera subproject, desktop-first product) | All |
+
+**Roadmap complete (2026-07-11)** — every phase shipped or resolved with a logged decision (full logs in MOOG_PLAN.md).
+
+---
+
+## Dynamic Rack — User-Customizable Modules (Phase 60 series) — AS BUILT
+
+**Status: ✅ COMPLETE (2026-07-11).** All 14 removable module types are instantiable from the library with duplicates; the whole custom rack — instances AND patch cables — persists across reloads; expansion modules drag-to-reorder. The original decisions held: full customizability incl. duplicates; space policy = **fit-width floor + vertical scroll**. Deviations from the original proposal are noted inline below; per-phase logs live in MOOG_PLAN.md.
+
+### Goals / Non-Goals
+
+- **Goals:** add/remove any module from a bank; multiple instances of the same type; layout persists across sessions; patch cables work across all instances; no per-module shrink below the fit-width floor.
+- **Non-goals (this series):** ~~drag-to-reorder, cable persistence~~ (both later SHIPPED — 60f), mobile layout, Workstation integration changes (`moogBus` tap unchanged).
+
+### State Model (as built)
+
+```js
+// localStorage 'moog-rack-v2' — one record for the whole custom rack.
+// Written ONLY from user event handlers / user-driven provider callbacks
+// (the Phase 60c StrictMode wipe lesson); v1 (types only) migrates on read.
+{
+  modules: [ { id: 'vco6', type: 'vco', num: 6 }, … ],   // array order = expansion-row order
+  cables:  [ { from: 'seq-gate-out', to: 'kick2-gate-in', color: '#e84040' }, … ],
+}
+```
+
+- **Instance id = jack prefix** (`vco6` → jacks `vco6-cv`, `vco6-saw`…). Static ids (`vco1…vco5`, `noise`, `vcf`, `qnt`…) are grandfathered as the default rack; new instances mint `type<n>` from `nextInstNumRef` (monotonic, minted eagerly in handlers). **Restore honors persisted nums** (`addModule(type, desiredNum)`, collision → fall back to minting) so cables stay valid across reloads.
+- **Deviation from the proposal:** no `cases` array — added instances render in a wrapping **expansion row** inside the Voice Case at fixed per-type widths, growing the rack into the 60a floor+scroll. Simpler, and the case picker became unnecessary.
+
+### Engine Instance Registry (as built — no separate `moduleFactories.js`)
+
+**Deviation:** factories live inline as branches of `addModule(type)` in `useMoogAudio.js` (the co-location rule), not in a registry file. Each branch mirrors its static recipe exactly and registers nodes into `nodesRef.current` **under composed names** (`vco6GlideBus`, `ffb2Filter3`, `voc2CarrVCA7`…) so every existing name-composed lookup — param updaters, `getMeterValue`, `connect()`'s glideBus path, LED getters — works on dynamics with zero changes. Per-instance bookkeeping: `dynInstancesRef` (id → `{ type, num, nodeNames, sourceNames, jackIds }`); `sourceNames` makes powerOn/powerOff generic.
+
+- **Per-type state went id-keyed maps** rather than one generic params bag: seq/chord loops (`buildSeqLoop(seqId)` / `buildChordSeqLoop(csId)` — one body serves statics + dynamics), kick tune/decay/trig-cb, vocoder shift refs, quantizer params/callbacks. Dispatch: `updateDynModuleParams(id, params)` for knob objects + dedicated `*ById` APIs where the callback shape differs (steps, LED callbacks, divisions, glide, sync).
+- **Worklet types use a synchronous registry + deferred wiring:** `n.hardSyncNodes` / `n.qntNodes` objects are assigned at node-creation; the async worklet load defines an idempotent `wire(id)` that sweeps existing instances and parks in a ref (`wireHardSyncRef` / `wireQntRef`) for instances added later. Cleanup nulls the refs so a StrictMode remount can never wire against disposed nodes.
+- **Shell bindings:** `bindingsFor(id)` caches per-instance closures (meter/params/LED/etc.) in a ref map so `Led` rAF loops and module effects never restart on unrelated renders.
+- `removeModule` order (load-bearing): LibraryModal strips cables by `${id}-` prefix (fires audio disconnects) → native worklet nodes disconnected (no dispose) and the vocoder's shared-mic input edge severed **before** the `nodeNames` dispose sweep → per-type map cleanup → registry delete.
+- **Cable restore (60f):** `MoogPatchProvider.restoreCables()` validates endpoints against the live jack registry, draws + fires the audio bridge; a `CableRestorer` (the provider's LAST child — sibling effect order guarantees jacks registered first) re-fires `connect()` on an idempotent retry schedule (0.8 s / 2.5 s) covering worklet-deferred jacks and the StrictMode engine rebuild.
+
+### Per-Type Notes (duplicate cost & special handling)
+
+| Type | Per-instance extras | Suggested cap |
+|---|---|---|
+| VCO | glideBus + hard-sync `AudioWorkletNode` + vibrato-tick registration (`VCO_IDS` const → registry query) | 10 |
+| LFO / Noise / VCA / ENV / REV / BBD / Kick | plain node groups — cheap | 8 |
+| 914 FFB | 14 filters+gains each | 4 |
+| Vocoder | **16 bands × (BPF+rect+env+VCA) ≈ 70 nodes** + mic singleton (mic stays shared; MIC button on any instance grabs the one `Tone.UserMedia`) | 2 |
+| QNT | own `AudioWorkletNode`; knob-stepper refs (`quantizerParamsRef`, baseHz, callbacks) become per-instance maps keyed by id | 4 |
+| 960 SEQ / CHORD SEQ | own `Tone.Loop`; Transport is shared (tempo knobs all write `Transport.bpm` — last writer wins, as today with 2×960) | 4 |
+| I/O, 953 Keyboard | **fixed singletons** — not in the bank | 1 |
+
+### Layout & Camera
+
+- **(As built)** added instances land in the wrapping expansion row (`.tierDyn`) at fixed per-type px widths measured against their static siblings at `FLOOR_LAYOUT_W` — flex-wrap is safe there because below the floor the layout width is pinned, so wrapping cannot oscillate with fit(). Reordering = drag the grip tab (60f-2; order persists, cable overlay repositions via a resize nudge).
+- **Camera change (small, standalone):** `fit()` scale becomes `clamp(availH/natH, availW/natW, 1)` — floored at fit-width. When floored, `clampPan` already permits vertical panning; add wheel-scroll (no ctrl) → vertical pan at z=1 so the tall rack is reachable without zooming.
+- Blank-panel filler: a case's unused width renders as blank panels (authentic, keeps the wood frame visually full).
+
+### Invariants preserved
+
+Single Writer per node (per instance now); Zero-Re-render (all per-frame work stays in rAF/canvas/DOM refs; add/remove is event-driven React state like Phase 59); no static `will-change` on the cabinet; fit-stability probe must pass after every layout-affecting phase.
+
+### Phasing (each lands green on its own)
+
+| Phase | Scope |
+|---|---|
+| 60a ✅ 07-08 | Camera fit-width floor + vertical scroll (no engine changes — ships alone) |
+| 60b ✅ 07-09 | Engine instance registry + factory contract; **pilot: VCO + Noise** migrated; static graph coexists for everything else |
+| 60c ✅ 07-09 | Migrate LFO/VCA/ENV/REV/BBD/VCF + persistence-lite (type list in localStorage); Kick/914 slipped to 60d |
+| 60d ✅ 07-10 | Kick + 914 (id-keyed refs, gate actions carry `kickId`) + **per-instance hard sync** (`hardSyncNodes` id-keyed, `wireHardSyncRef` for late adds) |
+| 60e | **✅ COMPLETE 07-11 (4 parts):** 960s (id-keyed seq maps + `buildSeqLoop`, Tone.Loop lifecycle, restored-instance jackMap wipe fix) · CHORD (`buildChordSeqLoop`, per-instance snap/override) · VOCODER (~70-node factory, per-instance shift rAF, shared-mic fan-out) · QNT (per-instance worklets in `n.qntNodes`, knob-stepper machinery parameterized by owning instance, chord override as qid→csId map). Library v2's case picker was overtaken by the expansion-row design. |
+| 60f | **✅ COMPLETE 07-11:** cable persistence — v2 rack store `{modules, cables}` with STABLE instance ids (`addModule(type, desiredNum)` + collision repair), `restoreCables` with jack-registry validation, idempotent connect-retry schedule for worklet-deferred jacks + StrictMode engine rebuild — **and drag-to-reorder** (grip tab per expansion slot, order persists, cable-overlay reposition nudge) |
+
+### Risks
+
+1. **Disposal leaks / crashes** — Tone `.dispose()` while a cable's audio connection exists; mitigated by cable-strip-first ordering + try/catch disconnects (existing pattern).
+2. **Worklet-load races** — jack entries whose `dest` is a not-yet-loaded worklet node (existing `qnt-cv-in` null-until-loaded pattern generalizes: factories may return `dest: null` and patch the registry on load).
+3. **GPU budget** — more modules = larger raster area; the transient `will-change` model already handles size, but 60e should re-run the black-flash regression check at 8+ cases.
+4. **Registry/UI drift** — the registry must be the single source for what exists; MoogShell renders purely from state (no hardcoded rows after 60d).

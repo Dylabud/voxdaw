@@ -29,7 +29,7 @@
   border: 1px solid #4a2c10;
   color: #7a5020;
   font-family: inherit;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.22em;
   text-transform: uppercase;
   padding: 5px 12px;
@@ -53,7 +53,7 @@
   border: 1px solid #4a2c10;
   color: #7a5020;
   font-family: inherit;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.22em;
   text-transform: uppercase;
   padding: 5px 12px;
@@ -65,6 +65,153 @@
   border-color: #c8a86a;
   color: #c8a86a;
 }
+/* ── Module library button — same chrome as home/lights-out buttons ── */
+.libraryBtn {
+  position: fixed;
+  top: 12px;
+  right: 140px;
+  z-index: 100;
+  appearance: none;
+  background: transparent;
+  border: 1px solid #4a2c10;
+  color: #7a5020;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 5px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.18s, color 0.18s;
+}
+.libraryBtn:hover {
+  border-color: #c8a86a;
+  color: #c8a86a;
+}
+
+/* ── Module library modal (Phase 59) — always dark, like the overlay terminals ── */
+.libOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.libPanel {
+  width: min(640px, 92vw);
+  max-height: 84vh;
+  overflow-y: auto;
+  background: #101010;
+  border: 1px solid #3a3428;
+  border-radius: 6px;
+  padding: 16px 18px 12px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.8);
+}
+
+.libHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.libTitle {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  color: #ece7db;
+  text-transform: uppercase;
+}
+
+.libClose {
+  appearance: none;
+  background: transparent;
+  border: 1px solid #3a3428;
+  color: rgba(236, 231, 219, 0.6);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.libClose:hover { border-color: #c8a86a; color: #c8a86a; }
+
+.libGroup { margin-bottom: 14px; }
+
+.libGroupLabel {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.26em;
+  color: rgba(200, 168, 106, 0.75);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.libGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.libItem {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: linear-gradient(to bottom, #181614, #121110);
+  border: 1px solid #2c2820;
+  border-radius: 3px;
+  color: rgba(236, 231, 219, 0.45);
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 7px 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.12s, color 0.12s;
+}
+.libItem:hover { border-color: #58503c; color: rgba(236, 231, 219, 0.8); }
+
+.libItemDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: rgba(93, 202, 165, 0.12);
+}
+
+/* Add-instance button — dashed border reads as an empty slot */
+.libItemAdd {
+  border-style: dashed;
+  justify-content: center;
+  color: rgba(200, 168, 106, 0.85);
+}
+.libItemAdd:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Installed module — mint status dot + brighter label */
+.libItemOn { color: rgba(236, 231, 219, 0.88); }
+.libItemOn .libItemDot {
+  background: #5DCAA5;
+  box-shadow: 0 0 5px rgba(93, 202, 165, 0.7);
+}
+
+.libFootnote {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: rgba(236, 231, 219, 0.35);
+  text-transform: uppercase;
+  text-align: center;
+  padding-top: 4px;
+  border-top: 1px solid #221e18;
+}
+
 /* In lights-out mode — button glows faintly so you can find it in the dark */
 .lightsOutActive {
   border-color: rgba(93, 202, 165, 0.28);
@@ -159,7 +306,7 @@
 }
 
 .nameplateModel {
-  font-size: 11px;
+  font-size: 14px;
   letter-spacing: 0.28em;
   color: #1a1008;
   font-weight: 700;
@@ -167,7 +314,7 @@
 }
 
 .nameplateBrand {
-  font-size: 15px;
+  font-size: 19px;
   letter-spacing: 0.42em;
   color: #0e0804;
   font-weight: 700;
@@ -175,7 +322,7 @@
 }
 
 .nameplateSerial {
-  font-size: 10px;
+  font-size: 13px;
   letter-spacing: 0.2em;
   color: #1a1008;
   opacity: 0.65;
@@ -189,8 +336,94 @@
 .rack {
   display: flex;
   flex-direction: column;
+  gap: 12px;
+  background: #0a0908;
+}
+
+/* ══════════════════════════════════════════════════════
+   CASES (Phase 59) — each tier group sits in its own
+   walnut road-case with a stamped label strip. The dark
+   .rack background shows through the 12px gaps as the
+   shadow line between stacked cases.
+   ══════════════════════════════════════════════════════ */
+.case {
+  position: relative; /* anchor for the .caseLabel strip */
+  background:
+    repeating-linear-gradient(
+      90deg,
+      transparent 0px, transparent 42px,
+      rgba(0, 0, 0, 0.06) 42px, rgba(0, 0, 0, 0.06) 43px
+    ),
+    linear-gradient(to bottom, #8a4620 0%, #7c3e1c 30%, #6a3216 60%, #542610 100%);
+  border-radius: 6px;
+  padding: 25px 7px 7px;
+  box-shadow:
+    0 0 0 1px #2e1206,
+    0 6px 16px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.4);
+}
+
+.caseLabel {
+  position: absolute;
+  top: 5px;
+  left: 14px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: rgba(240, 232, 216, 0.85);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
+}
+
+/* Expansion row (Phase 60b) — dynamic instances at fixed per-type widths.
+   Widths match the static tier-1 column sizes at the FLOOR_LAYOUT_W layout
+   width, so added modules render the same size as their static siblings.
+   flex-wrap is safe here: below the fit-width floor the layout width is
+   pinned to FLOOR_LAYOUT_W, so wrapping cannot oscillate with fit(). */
+.tierDyn {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  align-items: stretch;
+}
+.dynSlot { display: flex; position: relative; /* flex-basis set inline from DYN_WIDTH per type */ }
+.dynSlot > * { flex: 1; }
+
+/* Drag-to-reorder grip (Phase 60f-2) — a small machined tab riding the module's
+   top rail. Absolute so it never affects layout (the Phase 55 fit() trap);
+   z-index below the cable overlay (50) so cables stay clickable above it. */
+.dynGrip {
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  flex: 0 0 auto !important;
+  padding: 1px 12px;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #3a3a38, #232321);
+  border: 1px solid #171715;
+  color: rgba(234, 229, 217, 0.55);
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 2px;
+  cursor: grab;
+  user-select: none;
+}
+.dynGrip:active { cursor: grabbing; }
+.dynGrip:hover  { color: rgba(234, 229, 217, 0.9); }
+.dynSlotDropTarget { outline: 2px dashed rgba(93, 202, 165, 0.7); outline-offset: -2px; }
+
+/* Dark metal interior the module tiers mount into */
+.caseInterior {
+  display: flex;
+  flex-direction: column;
   gap: 3px;
   background: #0a0908;
+  border-radius: 3px;
+  padding: 2px;
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.75);
 }
 
 /* Dead class — no longer rendered in JSX */
@@ -218,7 +451,9 @@
 
 /* Row column templates */
 .tierRow1 { grid-template-columns: 1fr 1fr 1fr 1fr 1fr 0.6fr 0.6fr 0.6fr; }
-.tierRow2 { grid-template-columns: 1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr 0.8fr 1.6fr; }
+/* VCF gets extra width so its 4-knob row (16px labels) never wraps to a second
+   line — a wrap adds ~110px to the tier and shrinks the whole rack via fit() */
+.tierRow2 { grid-template-columns: 1.25fr 1.25fr 1fr 1fr 0.7fr 0.7fr 0.75fr 1.45fr; }
 .tierRow3 { grid-template-columns: 0.85fr 0.85fr 0.85fr 1fr 1fr 1fr 1fr max-content; }
 .tierRow4 { grid-template-columns: 1.5fr 1.5fr 1fr 0.9fr 1.1fr; }
 /* Stacks two sequencer modules vertically inside a single grid cell */
@@ -355,7 +590,7 @@
 }
 
 .plateNum {
-  font-size: 20px;
+  font-size: 26px;
   font-weight: 200;
   color: rgba(255, 255, 255, 0.45);
   line-height: 1;
@@ -369,7 +604,7 @@
 }
 
 .plateTitle {
-  font-size: 22px;
+  font-size: 27px;
   font-weight: 700;
   letter-spacing: 0.26em;
   color: #ece7db;
@@ -379,8 +614,8 @@
 }
 
 .plateSub {
-  font-size: 11px;
-  letter-spacing: 0.18em;
+  font-size: 13px;
+  letter-spacing: 0.14em;
   color: rgba(234, 229, 217, 0.58);
   text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.45);
   text-transform: uppercase;
@@ -413,8 +648,10 @@
 .knobRow {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 2px 2px 0;
+  gap: 10px;
+  /* 10px top clearance — xl/lg knob tick numerals extend 10px above the knob
+     wrap and were colliding with the plate subtitle at the new type scale */
+  padding: 10px 2px 0;
   flex-wrap: wrap;
 }
 
@@ -536,7 +773,7 @@
 }
 
 .toggleLabel {
-  font-size: 11px;
+  font-size: 14px;
   letter-spacing: 0.16em;
   color: rgba(234, 229, 217, 0.66);
   text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.5);
@@ -596,7 +833,7 @@
 }
 
 .selectorLabel {
-  font-size: 11px;
+  font-size: 14px;
   letter-spacing: 0.16em;
   color: rgba(234, 229, 217, 0.66);
   text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.5);
@@ -604,7 +841,7 @@
 }
 
 .selectorValue {
-  font-size: 17px;
+  font-size: 21px;
   letter-spacing: 0.13em;
   color: #ffffff;
   text-transform: uppercase;
@@ -642,7 +879,7 @@
 }
 
 .gateBtnLabel {
-  font-size: 11px;
+  font-size: 14px;
   letter-spacing: 0.16em;
   color: rgba(234, 229, 217, 0.66);
   text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.5);
@@ -808,7 +1045,7 @@
 }
 
 .jackLabel {
-  font-size: 13px;
+  font-size: 16px;
   letter-spacing: 0.12em;
   color: rgba(234, 229, 217, 0.78);
   text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.55);
@@ -838,14 +1075,14 @@
 }
 
 .blankLabel {
-  font-size: 10px;
+  font-size: 13px;
   letter-spacing: 0.55em;
   color: rgba(255, 255, 255, 0.60);
   text-transform: uppercase;
 }
 
 .blankSub {
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.5em;
   color: rgba(255, 255, 255, 0.40);
   text-transform: uppercase;
@@ -1018,12 +1255,12 @@
   appearance: none;
   width: 100%;
   min-width: 0;
-  height: 38px;
+  height: 42px;
   background: linear-gradient(to bottom, #1e1c18, #161412);
   border: 1px solid #38342c;
   border-radius: 2px;
   color: #ffffff;
-  font-size: 20px;
+  font-size: 24px;
   font-family: inherit;
   letter-spacing: 0.04em;
   text-align: center;
@@ -1050,12 +1287,12 @@
   appearance: none;
   width: 100%;
   min-width: 0;
-  height: 26px;
+  height: 30px;
   background: linear-gradient(to bottom, #161412, #111010);
   border: 1px solid #2c2820;
   border-radius: 2px;
   color: rgba(255, 255, 255, 0.60);
-  font-size: 13px;
+  font-size: 16px;
   font-family: inherit;
   letter-spacing: 0.04em;
   text-align: center;
@@ -1135,7 +1372,7 @@
 
 .qntLeds {
   display: flex;
-  gap: 2px;
+  gap: 7px;
   justify-content: center;
   padding: 4px 0 6px;
   flex-wrap: wrap;
@@ -1166,7 +1403,7 @@
 }
 
 .qntLedLabel {
-  font-size: 7px;
+  font-size: 10px;
   letter-spacing: 0;
   color: rgba(255, 255, 255, 0.50);
   text-align: center;
@@ -1189,7 +1426,7 @@
 }
 
 .qntMonitorLabel {
-  font-size: 6px;
+  font-size: 9px;
   letter-spacing: 0.1em;
   color: rgba(255, 255, 255, 0.50);
   text-transform: uppercase;
@@ -1207,13 +1444,13 @@
 
 /* Note name + Hz text display — DOM-mutated directly, no React state */
 .qntDisplay {
-  font-size: 10px;
+  font-size: 13px;
   font-family: 'Courier New', monospace;
   letter-spacing: 0.04em;
   color: #5DCAA5;
   flex: 1;
   text-align: center;
-  min-height: 9px;
+  min-height: 12px;
   opacity: 0.85;
 }
 
@@ -1236,7 +1473,7 @@
 }
 
 .qntExtLabel {
-  font-size: 6px;
+  font-size: 9px;
   letter-spacing: 0.1em;
   color: rgba(255, 255, 255, 0.50);
   text-transform: uppercase;
@@ -1245,7 +1482,7 @@
 
 /* Active root note derived from EXT CV — DOM-mutated by Hz analyser rAF */
 .qntExtDisplay {
-  font-size: 9px;
+  font-size: 12px;
   font-family: 'Courier New', monospace;
   letter-spacing: 0.06em;
   color: #5DCAA5;
@@ -1254,7 +1491,7 @@
 
 /* Chord quality label — DOM-mutated by chord sequencer callback (not by rAF) */
 .qntExtChordType {
-  font-size: 8px;
+  font-size: 11px;
   font-family: 'Courier New', monospace;
   letter-spacing: 0.04em;
   color: rgba(93, 202, 165, 0.7);
@@ -1386,6 +1623,17 @@
 /* Rack chassis: black */
 .cabinet[data-lights-out="true"] .rack { background: #010101; }
 
+/* Cases: walnut → black, labels off */
+.cabinet[data-lights-out="true"] .case {
+  background: #010101;
+  box-shadow: none;
+}
+.cabinet[data-lights-out="true"] .caseInterior {
+  background: #010101;
+  box-shadow: none;
+}
+.cabinet[data-lights-out="true"] .caseLabel { opacity: 0; }
+
 /* Module faceplates: black, no glow */
 .cabinet[data-lights-out="true"] .plate {
   background: #010101 !important;
@@ -1433,6 +1681,13 @@
 .cabinet[data-lights-out="true"] .hardSyncSwitch { opacity: 0; }
 .cabinet[data-lights-out="true"] .vcoSyncLed .toggleLabel { opacity: 0; }
 
+/* Aura display: kill the chrome bezel + lamp sheen (nothing to reflect in the
+   dark); the canvas halo itself stays lit — it's emissive, like the scope. */
+.cabinet[data-lights-out="true"] .auraScreen {
+  box-shadow: inset 0 0 14px rgba(0, 0, 0, 0.9);
+}
+.cabinet[data-lights-out="true"] .auraScreen::after { display: none; }
+
 /* Quantizer: hide all text; keep .qntLed, .qntInLed, .qntExtLed */
 .cabinet[data-lights-out="true"] .qntLedLabel,
 .cabinet[data-lights-out="true"] .qntMonitorLabel,
@@ -1441,6 +1696,65 @@
 .cabinet[data-lights-out="true"] .qntExtDisplay,
 .cabinet[data-lights-out="true"] .qntExtChordType { opacity: 0; }
 
+
+/* ══════════════════════════════════════════════════════
+   REVERB "AURA" DISPLAY (Phase 56)
+   Rectangular frosted-glass OLED screen in a chrome
+   bezel, sitting right of the IN/OUT jacks. Canvas
+   inside is rAF-driven; stays lit in lights-out
+   (emissive, like the oscilloscope CRT).
+   ══════════════════════════════════════════════════════ */
+
+/* Jacks left, screen right — screen bottom-aligns with the jack sockets
+   (jackRow uses align-items:flex-end for the same baseline). */
+.revBottomRow {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
+}
+
+.auraScreen {
+  width: 100px;
+  height: 60px;
+  border-radius: 5px;
+  position: relative; /* anchor for the ::after glass reflection */
+  flex-shrink: 0;
+  overflow: hidden;
+  /* near-black OLED glass with the faintest cold undertone */
+  background: radial-gradient(ellipse at 50% 42%, #0a1226 0%, #060a18 55%, #03050c 100%);
+  box-shadow:
+    inset 0 0 14px rgba(0, 0, 0, 0.9),
+    inset 0 0 3px rgba(120, 170, 255, 0.10),
+    /* chrome mounting bezel — same language as the jewel-lamp housings */
+    0 0 0 2px #767066,
+    0 0 0 3px #100e0c,
+    -2px 4px 8px rgba(0, 0, 0, 0.8),
+    /* cold ambient bleed onto the faceplate */
+    0 0 12px rgba(90, 150, 255, 0.14);
+}
+
+/* Frosted-glass sheen — catches the studio lamp upper-right like all hardware */
+.auraScreen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 5px;
+  background: radial-gradient(
+    ellipse at 68% 22%,
+    rgba(255, 255, 255, 0.10) 0%,
+    rgba(255, 255, 255, 0.03) 26%,
+    transparent 46%
+  );
+  pointer-events: none;
+}
+
+.auraCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
 
 /* ══════════════════════════════════════════════════════
    914 FIXED FILTER BANK
@@ -1501,7 +1815,7 @@
   border: 1px solid #4a2c10;
   color: #7a5020;
   font-family: inherit;
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
   padding: 5px 10px;
@@ -1551,11 +1865,15 @@
   align-items: center;
   gap: 8px;
 }
+/* Button + SIG LED sit in a row BELOW the MIX/MIC knobs — keeping them beside
+   the knobs made the vocoder's max-content column wide enough to squeeze the
+   ENV/KICK knob rows into wrapping at fit()'s narrow width phase */
 .vocMicCtrls {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: 5px;
+  justify-content: center;
+  gap: 8px;
 }
 .vocLeftJacks {
   display: flex;
@@ -1575,7 +1893,7 @@
 }
 /* Compact mic button for the condensed faceplate */
 .vocLeft .micBtn {
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.1em;
   padding: 3px 6px;
 }
@@ -1583,8 +1901,8 @@
 /* ── 16-Band Vocoder control grid — 4×3 sm-knob block (12 knobs under MIX), spread out ── */
 .vocKnobGrid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 10px 8px;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px 6px;
   justify-items: center;
   align-items: start;
   padding: 4px 2px;

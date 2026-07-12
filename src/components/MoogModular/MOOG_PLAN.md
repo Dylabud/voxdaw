@@ -25,19 +25,199 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Future Phases
 
-### Moog Phase 8b — Noise Generator Audio Wiring
-- Three `Tone.Noise` pairs (noiseW/P, noise2W/P, noise3W/P) each through a `Tone.Gain` in `useMoogAudio.js`
-- Wire LEVEL knob → gain node per instance
-- Separate output refs for WHITE and PINK jacks for patch cable routing
-
-### Moog Phase 12 — Visual Polish
-- Knob tooltip labels on hover
-- Module-level bypass switches
-- Mobile / narrow viewport fallback
+**Roadmap clear (2026-07-11).** Every planned phase is either shipped or resolved with a logged decision — see the Completed Phases Log. New phases go here.
 
 ---
 
 ## Completed Phases Log
+
+### [2026-07-11] Moog Phases 8b + 60f-2 + 12 — Noise LEVEL Wiring, Drag-to-Reorder, Knob Tooltips (roadmap close-out)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.jsx`
+
+**Phase 8b — Noise LEVEL wiring (the knob was visual-only since Phase 1.5):** each noise module (3 static + dynamics) gets a `${id}WGain`/`${id}PGain` pair between the sources and the WHT/PNK jacks; one LEVEL knob drives both via id-keyed `updateNoiseParams(id, { level })`. **Mapping is knob 0–1 → gain 0–1.43× with unity at the 0.7 default**, so every pre-8b patch (which had no gain stage) sounds identical until the knob moves. Jacks re-point at the gains; dynamic factory + `nodeNames` updated.
+
+**Phase 60f-2 — Drag-to-reorder expansion modules:** each `dynSlot` gains a machined grip tab (`.dynGrip`, absolute-positioned so it never affects layout — the Phase 55 fit() trap; z-index 40, under the cable overlay). HTML5 DnD: dragged id in a ref (Zero-Re-render during the drag), drop splices the `dynModules` array, persists the order (array order = store order), and dispatches a `resize` on the next frame — **committed cables read jack rects at render time, so without the nudge they would keep pointing at the modules' old positions** (the overlay's existing resize reposition handles it). `e.dataTransfer` guarded for synthesized test events.
+
+**Phase 12 — resolved:** ✅ knob tooltips — native `title` on every `MoogKnob` (`"FREQ: 5.0 / 10 · shift = fine · double-click = reset"` — also the only in-UI documentation of fine mode and reset). ❌ **Module-level bypass switches — rejected as superseded:** every insert-FX module already has a transparent state (REV/BBD MIX at 0, VCF fully open, QNT BYPASS toggle exists since Phase 22) and the Phase 59 library removes whole modules; a second bypass affordance would clutter the photorealistic plates for no routing gain. ⏸ **Mobile/narrow fallback — deferred with reasons:** the 60a fit-width floor + vertical scroll already keeps narrow desktop windows usable; true mobile needs a touch-event camera (pinch/pan) and touch cable drags — a self-contained subproject — and VoxDaw is desktop-first (MediaPipe hand tracking).
+
+**Verified (Playwright, zero console/page errors):** FFB band meter driven by `noise-wht` at LEVEL default 0.57 → **0.08 at LEVEL zero → 0.61 restored**; grip-drag swapped [vco6, kick2] → [kick2, vco6] **and the order persisted across reload** (cables repositioned); tooltip text present on VCO 1's FREQ knob.
+
+### [2026-07-11] Moog Phase 60f — Cable & Rack Persistence with Stable Instance IDs (Dynamic Rack series)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogPatchContext.jsx`
+
+**The whole custom rack — dynamic instances AND patch cables — now survives reloads.** The "deterministic rewire-on-load" design the proposal called for:
+
+- **Stable ids (the linchpin):** `addModule(type, desiredNum)` — the restore path passes the PERSISTED instance number so jack ids (and therefore cables) stay valid across reloads; honored only when free (collision → fall back to minting, the Workstation projectIO duplicate-id lesson) and the mint counter is bumped past it either way. User adds keep minting monotonically.
+- **v2 rack store** (`moog-rack-v2`): one record `{ modules: [{id,type,num}], cables: [{from,to,color}] }`; v1 (types only) migrates transparently on read. **Writes only from user events:** module add/remove handlers write the modules slice; a new provider callback `onCablesChanged(cables)` (fired outside setState updaters on drag-commit / click-off / library strip, and deliberately NOT by restores) writes the cables slice — the 60c StrictMode wipe rule extended to cables.
+- **`MoogPatchProvider.restoreCables(stored)`:** validates both endpoints against the live jack registry (repair — cables to removed modules are dropped), dedupes, draws in one setState, fires the audio bridge per cable. `completeDrag`/`removeCable` switched to eager `cablesRef` mirror updates (value-form setState) so same-tick strip loops read correctly.
+- **`CableRestorer`** (rendered as the provider's LAST child — sibling effects run in tree order, so its effect fires after the restored modules' Jack registration effects in the same commit): gated on `dynRestored`, restores from the store, then re-fires `audio.connect` on an **idempotent retry schedule (0.8 s / 2.5 s)**. The retries cover the two rewire-ordering gaps: (1) worklet-deferred jacks (`qnt*-cv-in` is `dest:null` until the async worklet load) and (2) the StrictMode double-mount, where the restorer's effect re-runs BEFORE the parent's engine-rebuild effect — the immediate pass no-ops against the disposed engine and the retries land on the fresh one. `connect()` dedupes committed keys, so every retry is safe.
+
+**Verified (Playwright, zero console/page errors):** 3-cable rack (dynamic kick gate + worklet-deferred `seq-pitch-out → qnt-cv-in` + plain `vco1-saw → vcf-in`) → reload → **same ids (kick2/vco6), all 3 cables redrawn, and the kick fired 12×/3 s (exact 8n)** — the audio bridge fully survived the reload; the restored worklet-deferred cable drives the QNT display (F3 174.6 Hz) proving the retry pass; clicking a cable off persists (2 after reload); removing kick2 via the library persists (kick2 gone, vco6 intact, 2 cables). **Remaining from the 60f line:** drag-to-reorder (pure UX, deferred).
+
+### [2026-07-11] Moog Phase 60e (part 4) — Dynamic QNT Instances — ALL 14 MODULE TYPES NOW DYNAMIC (Dynamic Rack series)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+**The quantizer — the deepest-entangled type (worklet + Phase 57/58 knob-stepper + chord override) — goes dynamic** (`+ QNT`, cap 4, width 442 measured). This completes the migration: every removable module type can now be instantiated from the bank.
+
+- **Per-instance worklets, hardSyncNodes-style:** `n.qntNodes` registry (assigned synchronously, keys appear at load); the quantizer load `.then()` defines an idempotent `wire(qid)` — creates the SAC-wrapped AudioWorkletNode, connects it to `${qid}Out.input`, flushes that instance's buffered config, installs a **per-instance `port.onmessage`** (display callback, lastQuantizedMidi, and glideBus writes filtered by `${qid}-cv-out`), and patches the `${qid}-cv-in` jack live — then sweeps `qntIdsRef` (covers restore-before-load) and parks in `wireQntRef` for later adds. Static rename: `quantizerOut` → `qntOut` so `${qid}Out` composes; `qntKeepAlive`/`qntTransposeAnalyser` already composed.
+- **Params/callbacks id-keyed:** `quantizerParamsRefs` / `lastQuantizedMidiRefs` / `quantizerStepCbRefs` maps; `updateQuantizerParams` → `applyQuantizerParams(qid, p)` (+ static wrapper). `updateDynModuleParams` dispatches `'qnt'` through an **inline-synced ref** (`applyQuantizerParamsRef` — the App.js mappingsRef pattern) because the applier depends on knob-stepper helpers declared after it (TDZ in the dep array otherwise).
+- **Phase 57/58 knob-stepper parameterized by instance:** new `qntIdForVco(vcoId)` derives the owning qid from `vcoActiveCvRef` (which already stores the full jack id); `qntHasCvInput(qid)`, `knobQuantizedVcoIds` (per-VCO instance resolution), `applyVcoKnobQuantize` (snaps against the owning instance's config, mirrors to ITS display), `updateVcoParams` baseHz posts to the owning instance's worklet. All connect/disconnect literals became `qnt\d*` regexes (managed-source seed, glow transitions, cv-in removal fallback).
+- **Chord override per quantizer:** `qntChordOverrideRef` string → **map qid → owning csId** (any chord seq can own any quantizer's transpose-in; last patch per quantizer wins). The chord loop pushes to every quantizer it owns; `qntOverrideTick` iterates the map with per-qid delta gates; disconnect clears only the matching owner; removing a chord seq clears every quantizer it owned; removing a quantizer clears its own entry.
+- Factory: Out + KeepAlive→Destination (the Chrome tail-time keepalive each instance needs) + TransposeAnalyser + jacks; `removeModule` disconnects the native worklet BEFORE its neighbors are disposed.
+
+**Verified (Playwright, 2 probes, zero console/page errors):** qnt2's 3 jacks live; **knob-stepper per instance** — `qnt2-cv-out → vco1-cv` lit the FREQ-knob glow, and dragging the knob stepped qnt2's display through **10 distinct C-major notes (A3→C6)**; **melody-quantize mode** — `seq-pitch-out → qnt2-cv-in` turned the glow off (worklet owns pitch) with qnt2's display following the sequencer while the static QNT stayed idle at "--"; **clicking that cable off returned knob ownership (glow back)**; removing qnt2 while patched cleared the glow and disposed cleanly; reload restored `qnt3` whose knob-stepper glow works.
+
+### [2026-07-10] Moog Phase 60e (part 3) — Dynamic VOCODER Instances (Dynamic Rack series)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+**The 16-band vocoder goes dynamic** (`+ VOCODER`, cap 2 — the ~70-node cost from the proposal table; width 586, measured). All static node names already used the `voc` prefix, so `${vid}Wet` / `${vid}CarrBPF${i}` composition needed zero renames.
+
+- **`updateVocoderParams` → `applyVocoderParams(vid, p)`** (id-keyed single writer; static export wraps `'voc'`; dynamics dispatch through `updateDynModuleParams` case `'voc'`). `getVocAnalyserData(id = 'voc')` went id-generic.
+- **Spectral-shift rAF per instance:** the SHIFT/SH RATE/SH AMP refs became id-keyed maps + `vocIdsRef` instance list; `vocShiftTick` iterates instances with per-id delta gates — each instance's 16 `CarrBPF` frequencies are scaled by its own knobs (sole writer preserved per instance).
+- **Factory mirrors the static recipe exactly** (~70 nodes: modulator pre-chain HP+comp, 16×(BPF→rect→envLP→VCA.gain), carrier ext/osc crossfade + HISS/BUZZ excitation into the bank only, wet/dry → OUT(×3) → PRESENCE → VOLUME, CLARITY bypass, FFT tap). `sourceNames` carries HissNoise/BuzzNoise/CarrOsc so powerOn/powerOff just work.
+- **Shared mic fan-out:** the singleton `extMicGain` connects into every instance's `ModRaw` (matching the static hardwire) — the MIC button on any instance grabs the one `Tone.UserMedia` and feeds all instances. **Removal order note:** `removeModule` severs `extMicGain → ${id}ModRaw` BEFORE the dispose sweep — `node.disconnect()` only drops a node's own outputs, never its inputs, so disposal alone would leave a dangling edge on the singleton.
+
+**Verified (Playwright, 2 probes, zero console/page errors):** voc2's 3 jacks live; fit stable at the 0.4917 floor; **per-instance analysis proven** — `noise-wht → voc2-mod-in` lit voc2's 16-segment meter (0.56) while the unpatched static voc stayed at the 0.08 idle floor; **end-to-end audio proven** — `vco1-saw → voc2-carr-in` + `voc2-out → io-in1` raised the I/O CH 1 meter 0.12 → 0.50; removal while 3 cables patched disposes cleanly; reload restored `voc3` whose meter lit after re-patching (jackMap preservation regression holds).
+
+### [2026-07-10] Moog Phase 60e (part 2) — Dynamic CHORD Sequencers (Dynamic Rack series)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+**The chord sequencer goes dynamic** (`+ CHORD`, cap 4, width 491 — measured), reusing the 960's template from part 1 plus the chord-specific entanglements:
+
+- **Node rename for composition:** the 5 static nodes `chordSeq{PitchOut,RootOut,ThirdOut,FifthOut,InputAnalyser}` → `chordseq*` so `${csId}PitchOut` composes for `'chordseq'` (static) and `'chordseq2'`+ (dynamic) alike.
+- **Refs → id-keyed maps** (`chordSeqStepsRefs` / `CurrentStepRefs` / `StepCbRefs` / `ChordCbRefs` / `DivisionRefs` / `RootOctaveRefs` / `GlideRefs` / `InputActiveRefs` / `LoopsRef` + `chordSeqIdsRef` instance list); **`buildChordSeqLoop(csId)`** replaces the hand-written static loop. `setChordSeqDivisionById` writes the instance's live `loop.interval` — verified: a dynamic instance at ½ BAR advanced 5 steps in 4.5 s while the static at 1 BAR advanced 2 (independent clocks).
+- **`qntChordOverrideRef` bool → owning instance id (string|null):** any chord seq's `cv-out → qnt-transpose-in` patch makes THAT instance the quantizer's root+scale writer (last patch wins; Single Writer preserved). `connect()` matches `/^chordseq\d*-cv-out$/`, `disconnect()` only clears when the OWNER's cable is removed, the loop pushes only when `override === csId`, the `qntOverrideTick` rAF reads the owner's current step, and `removeModule` clears the override if the owner is removed.
+- **`chordSnapTick` rAF generalized:** iterates `chordSeqIdsRef` — each instance's cv-in analyser snaps to ITS OWN current chord and drives ITS OWN cv-out + connected VCO glideBuses (per-id delta gates).
+- **`connect()` managed-CV:** chord outs matched by `/^(chordseq\d*)-(cv|root|3rd|5th)-out$/` with a suffix map to composed node names for glideBus seeding (replaces 4 hardcoded ternary lines).
+
+**Verified (Playwright, 2 probes, zero console/page errors):** chordseq2's 5 jacks live; fit stable at the 0.4917 floor (natH 2189); per-instance CLOCK DIV independence (see above); `chordseq2-root-out → vco1-cv` managed-source patch clean; `chordseq2-cv-out → qnt-transpose-in` override commit + removal-while-patched (2 cables incl. the override) disposes cleanly and clears ownership; reload restores a fresh instance (`chordseq3`) whose loop steps on power-on.
+
+**Remaining (60e part 3):** QNT (per-instance worklet + params/callback maps + Phase 57/58 knob-stepper coupling), VOCODER (~70-node factory, `vocShiftTick` per instance, shared mic fan-out), library v2.
+
+### [2026-07-10] Moog Phase 60e (part 1) — Dynamic 960 Sequencers + Restored-Instance JackMap Fix (Dynamic Rack series)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+**First Tone.Loop-owning type goes dynamic** (`+ 960`, cap 4, width 737 — measured against the static sibling at `FLOOR_LAYOUT_W`). The pattern established here (id-keyed state maps + a loop builder + loop lifecycle in add/removeModule) is the template for CHORD in part 2.
+
+- **Per-seq refs → id-keyed maps:** `seqStepsRefs` / `seqCurrentStepRefs` / `seqStepCbRefs` / `seqGlideRefs` / `seqLoopsRef`, keyed `'seq'` (static 1) / `'seq2'` / `'seq3'`+ (dynamic). Node names compose (`${seqId}PitchOut`, `${seqId}GateNode`).
+- **`buildSeqLoop(seqId)`** — ONE generic loop body replaces the two near-identical hand-written static loops (~110 lines deduped). Reads every per-seq value from the maps at fire time; gate actions filter by `${seqId}-gate-out`; VCO glide/gating filter by `${seqId}-pitch-out`. **Dynamic seqs have no VCA tap** (the statics' `vca-out`/`vca-out2` jacks are seq-gated taps on the VCA module); the `GateNode` write is optional-chained so it's a no-op for them — their musical gate paths are env/kick gate cables + per-VCO bus gating, which both work per-instance.
+- **Loop lifecycle:** `addModule('seq')` builds the loop and — when already powered — `start(0)`s it against the running Transport immediately; powerOn/powerOff/cleanup iterate the loop map (statics + dynamics uniformly); `removeModule` stops + disposes the instance's loop before deleting its map entries. Tempo stays Transport-global (all TEMPO knobs write `Transport.bpm`, last writer wins — the documented 2×960 behavior).
+- **`connect()` generalization:** the MANAGED-source set now recognizes any `seq\d*-pitch-out` via regex (open-ended seq ids) and seeds the glideBus from the composed `${seqId}PitchOut` node; `glideForPitchSource(srcId)` replaces the two hardcoded seq/seq2 glide ternaries (chord snap tick + quantizer port handler).
+- **JackMap wipe bug fix (latent since 60c):** the quantizer worklet's `.then()` did `jackMapRef.current = buildJackMap(n)` — a statics-only rebuild that WIPED the jack entries of any dynamic instance restored from localStorage during mount (restore runs synchronously; the worklet fetch resolves later). Cables drawn to restored instances then silently no-op'd in `connect()`. The rebuild now re-merges every registered instance's entries on top: `{ ...buildJackMap(n), ...dynEntries }`.
+- SequencerModule shows a `plateNum` badge for `number > 1` (static 960 #2 gains a "2" — two identical plates were already ambiguous).
+
+**Verified (Playwright, zero console/page errors):** seq3 jacks live; fit floors stable at 0.4917 (natH 2088); seq3's LED chase advances; `seq3-gate-out → kick-gate-in` flashed the kick **12× in 3 s (exact 8n @ 120 BPM)**; `seq3-pitch-out → vco1-cv` connects as a managed source; removing seq3 with both cables patched strips + disposes cleanly (no zombie loop callbacks); **regression test for the wipe fix: after reload, the RESTORED instance (`seq4`) was patched to the kick and flashed 12×/3 s** — before the fix this connect() was a silent no-op.
+
+**Remaining (60e part 2):** QNT (per-instance worklet + params/callback maps + Phase 57/58 knob-stepper coupling), CHORD (loop + `chordSnapTick`/`qntOverrideTick` entanglements), VOCODER (~70-node factory, `vocShiftTick` per instance, shared mic fan-out).
+
+### [2026-07-10] Moog Phase 60d — Dynamic KICK + 914 FFB + Per-Instance Hard Sync (Dynamic Rack series)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+**Bank now offers 10 types** (`+ KICK` cap 8 / 360px, `+ 914` cap 4 / 526px — widths measured against the static siblings at `FLOOR_LAYOUT_W`). The 60c leftovers with callback/loop entanglements are now dynamic:
+
+- **KICK — id-keyed state:** `kickTuneRef`/`kickDecayRef`/`kickTrigCbRef` converted from single values to objects keyed by kick id (`'kick'` = the static module; dynamics are `kick2`+). New `applyKickParams(kid, p)` single writer — static `updateKickParams` delegates to `'kick'`, dynamics dispatch through `updateDynModuleParams`; `triggerKickById` / `setKickTrigCallbackById` exports for per-instance TRIG buttons and LED flash callbacks. **Gate actions now carry `kickId`** (`connect()` copies it from the jack entry, defaulting to `'kick'`), and both seq-loop trigger sites resolve `n[`${kid}Synth`]` + per-id tune/decay/flash at fire time. `KickModule` gained a `number` prop (jack prefix = engine instance id).
+- **914 FFB:** factory mirrors the static recipe (In/Sum/Master/Analyser + 14 filter→gain pairs); `getFFBAnalyserData(id = 'ffb')` went id-generic via name composition (`'ffbAnalyser'`/`'ffb2Analyser'`); `updateDynModuleParams` case `'ffb'` maps bands/master. `FFBModule` gained `number`.
+- **Per-instance HARD SYNC:** `n.hardSyncNodes` converted from a `VCO_IDX_MAP`-indexed array to an **id-keyed object assigned synchronously at node creation** (all 7 write sites now key by `vcoId`; `VCO_IDX_MAP` deleted). The worklet-load `.then()` wires via an idempotent `wire(vcoId)` swept over `allVcoIdsRef` — covering dynamic VCOs added before the async load resolves (the localStorage restore runs first) — then parks the closure in `wireHardSyncRef` so `addModule` wires later instances inline. **Cleanup nulls `wireHardSyncRef` so a StrictMode remount can never wire against the previous mount's disposed nodes.** Dynamic VCO factory now creates `syncIn`/`syncOut` + sync jacks; `setVcoSyncEnabledById` crossfades with per-id state in `dynVcoSyncRef`; powerOn restores and powerOff force-gates dynamic syncOuts (the "worklet runs forever" trap the statics already guard). Expansion-row VcoModules receive `onSyncChange` so they render the full sync row. `removeModule` disconnects the instance's worklet (native node — no dispose) **before** disposing its syncIn/syncOut neighbors.
+- `updateDynModuleParams` guard relaxed from `n[id]` to registry-presence — kick/ffb compose ALL their node names (`kick2Synth`, `ffb2In`…); no bare `n[id]` exists for them.
+
+**Verified (Playwright, 3 probes, zero console/page errors):** fit stable 0.4919 default → floors at 0.4917 expanded (natH 2138, stable across 1.5s); all 8 dynamic jacks live; `seq-gate-out → kick2-gate-in` flashed the kick LED **12× in 3 s = exactly 8n at 120 BPM** (per-id gate routing confirmed); `noise-wht → ffb2-in` lit the per-instance band LEDs (0.57 peak); vco6 sync toggle crossfaded normal→worklet with the meter LED staying hot (0.55→0.63) and restoring on toggle-off; **power cycle: OFF gates the dynamic worklet to silence (0.63→0.12), ON restores the enabled sync state**; removing kick2 while patched stripped the cable then disposed cleanly; reload restored instances with fresh ids (`vco7` — StrictMode double-mount mints new ids by design, per 60c).
+
+**Still static-only (Phase 60e):** QNT / 960 / CHORD / VOCODER — per-instance quantizer worklet + knob-stepper maps, `Tone.Loop` lifecycle, singleton mic.
+
+### [2026-07-09] Moog Phase 60c — Dynamic Instances for 6 More Types + Rack Persistence (Dynamic Rack series)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+
+**Bank now offers 8 types:** VCO, NOISE, VCF, LFO, VCA, ENV, REV, BBD — each with per-type caps and expansion-row widths (`DYN_TYPES`). Factories mirror the static recipes exactly (VCF + 3 CV scaler gains; LFO + modGain + WaveAnalyser; ENV + Meter with `envId`-tagged gate jack — `triggerGate`/`updateEnvParams` are already id-generic; REV mints `reverb<n>` ids + post-reverb Aura analyser; BBD mints `chorus<n>` — ChorusModule gained a `number` prop). New generic APIs: `updateDynModuleParams(id, params)` (dispatch by instance type, mappings copied from the static updaters), `getLfoInstantById(id)` (name-composed — works for static + dynamic), `getReverbAuraData` now accepts instance ids. Shell caches per-instance bindings (`bindingsFor(id)`: meter/lfoLed/aura/params closures) so Led rAF loops and module effects never restart. Verified: dynamic→dynamic patching works (lfo3-sin → vcf3-cv1 cable committed + audio-bridged).
+
+**Persistence (60e-lite):** the type list persists in localStorage `moog-rack-dyn-v1` and restores on mount (fresh ids minted; cables not persisted — 60f). **Hard-won rule: persistence writes happen ONLY from user event handlers, never from a mount-phase effect.** A save-on-change effect observes stale-empty state under StrictMode's double-mount and wipes the stored list before the restore's setState flushes (restore run 2 then reads the wiped storage → data loss — this exact bug was caught in verification). The restore effect prefers the synchronous `dynModulesRef` mirror (StrictMode remount) over storage, and re-adds instances to the fresh engine. Verified: add 5 types → reload → all restored with live jacks; remove one → reload → 4 persist; zero errors.
+
+**Still static-only (Phase 60d):** KICK + 914 (callback/loop entanglements), QNT/960/CHORD/VOCODER (worklets, Tone.Loops, singleton mic), per-instance HARD SYNC for dynamic VCOs.
+
+### [2026-07-09] Moog Phase 60b — Engine Instance Registry + VCO/Noise Pilot (Dynamic Rack series)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+
+**Users can now add and remove real module instances.** Library modal gained an EXPANSION section: `+ VCO` (cap 10) / `+ NOISE` (cap 8) buttons and a removable list of live instances; new modules render in an expansion row inside the Voice Case at fixed per-type widths (435/262px — matching static siblings at `FLOOR_LAYOUT_W`), wrapping onto new lines that grow the rack into the 60a floor+scroll.
+
+**Engine (`useMoogAudio.js`):** `addModule(type)` / `removeModule(id)` + registries (`dynInstancesRef`, `allVcoIdsRef`, `nextInstNumRef` — monotonic mint, ids never reused). **Key design: instance nodes are registered into `nodesRef.current` under the same composed names as the static graph** (`vco6`, `vco6GlideBus`, `vco6Meter`, `vco6fm`…), so every existing name-composed lookup — `updateVcoParams`, `getMeterValue`, `connect()`'s glideBus/isVcoCv path, knob-stepper — works on dynamic instances with zero changes. All 9 `for (const vcoId of VCO_IDS)` sites (seq/seq2/chordseq loops, vibrato rAF, qnt port fanout) + 3 Phase-57/58 helpers now iterate `allVcoIdsRef.current`. Power on/off starts/stops dynamic sources; unmount cleanup disposes them via the existing `Object.values(n)` sweep and resets the registries (StrictMode-safe). **Removal order is load-bearing:** LibraryModal strips cables by `${id}-` prefix (firing audio disconnects) BEFORE `removeModule` disposes — never dispose a patched node. Dynamic VCOs ship without HARD SYNC (per-instance worklet = Phase 60d); `?.` guards make the absent sync node a no-op everywhere.
+
+**Verified (Playwright, full flow):** add VCO6+NOISE4 → natH 1799→2125, scale floors at 0.4917 (modules keep full size); dynamic jacks live; **qnt-cv-out → vco6-cv lights the knob-stepper glow on the dynamic VCO** (Phase 57/58 machinery works through the combined list); removing VCO6 while patched strips the cable then disposes cleanly; re-add mints vco7 (no id reuse); zero console/page errors.
+
+### [2026-07-08] Moog Phase 60a — Camera Fit-Width Floor + Vertical Scroll (Dynamic Rack series)
+
+**Files modified:** `MoogShell.jsx` (camera effect only)
+
+First phase of the Dynamic Rack series (proposal in MOOG_ARCHITECTURE.md). `fit()` scale is now `clamp(availH/natH, availW/FLOOR_LAYOUT_W, 1)` — auto-shrink stops at the scale that renders a **`FLOOR_LAYOUT_W = 3010`**-wide layout at exactly screen width (chosen just under the default rack's 3009px layout width at 1512×945, so today's rack is byte-identical: 0.4919 height-fit still wins by a hair). When the floor engages (any added case, or a shorter window): the rack overflows the viewport bottom and becomes **vertically pannable at z=1** — plain wheel scrolls (`overflowsV()` gate; ctrl/pinch still zooms; once zoomed, wheel zooms as always so default-rack UX is unchanged), empty-faceplate drag pans (grab cursor extended to the floored state), Esc/double-click returns a scrolled rack to the top (reset guard now checks tx/ty, not just z). `clampPan` needed no changes — it already handled taller-than-viewport content.
+
+**Verified (Playwright):** default 1512×945 — scale 0.4919, stable, no grab cursor, plain wheel zooms (unchanged). Short 1512×700 — scale floors at exactly 0.4917 (=1480/3010) instead of shrinking to 0.3558; wheel scrolls ty 0→−200; drag pans to the −244.6 clamp; Esc returns to 0; scroll clamps at top; zero errors.
+
+### [2026-07-08] Moog Phase 59 — Case System: Aesthetic + Module Library (Gemini directive, descoped with Dylan's approval)
+
+**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`
+
+**Dylan-approved scope (via option question):** case *aesthetic* + module *library over the fixed inventory*; **fit camera kept** (Gemini's "forbid transform:scale" rejected — native scale is 2930×1685px, ~⅓ visible on a laptop). **Rejected:** dynamic module instantiation (a useMoogAudio rewrite — every node is statically created/wired; per-module lifecycle means jack-registry rebuilds + cable preservation + node disposal), implicit "global bus routing" (jack ids are already globally unique — cables cross rows today), per-module "✕" buttons (clutter on photorealistic faceplates; the library modal handles both directions), and RackManager/CaseContainer/ModuleRegistry as separate files (three case wrappers + one modal inside MoogShell.jsx match the existing single-file structure).
+
+**Case aesthetic:** the 4 tiers now sit in 3 walnut road-cases inside the cabinet — VOICE CASE (rows 1–2), PERCUSSION & FX CASE (row 3), SEQUENCER CASE (row 4) — each with a stamped label strip, wood-grain frame, dark `.caseInterior` mounting area, and 12px rail gaps (`.rack` gap). Lights-out blacks the wood + labels. **Cost: natH 1685→1799, fit scale 0.525→0.492 (~6% smaller modules)** — accepted tradeoff for the approved look.
+
+**Module library:** `MODULE_REGISTRY` (28 removable modules; I/O + keyboard fixed) with per-module jack-id prefixes chosen collision-free (`'vca-'` cannot match `'vca2-…'`). `hiddenModules` Set in MoogShell (session-only); hidden modules render `<BlankPanel />` **in the same grid cell** so tier templates and row heights never change (Phase 55 oscillation trap avoided — verified fit stayed byte-identical through remove/re-add). `LibraryModal` lives inside MoogPatchProvider: removal strips every cable touching the module's jacks via `removeCable(id)` (each firing the audio-bridge disconnect — so e.g. removing QNT correctly restores knob pitch/glow through the existing disconnect handlers), then hides. Modal is always-dark (overlay-terminal rule), grouped by case, mint status dots.
+
+**Verified (Playwright):** fit stable+consistent (0.4919) before/during/after; removing QNT stripped its live cable (1→0) and rendered 1 blank panel; re-install restored it; zero console/page errors.
+
+### [2026-07-08] Moog Phase 58 — Quantizer Modulation Mode (stepped LFO pitch; Gemini directive, mostly rejected)
+
+**Files modified:** `public/quantizer-worklet.js`, `useMoogAudio.js`
+
+**The patch `lfo-sin → qnt-cv-in` + `qnt-cv-out → vcoN-cv` now produces stepped scale runs.** The worklet gained modulation mode: per-sample, input with |v| ≤ `MOD_MAX = 8` is modulator-range CV (LFOs emit ±1·depth; real pitch CV is ≥ 32.7 Hz) and maps to `baseHz · 2^v` — ±12 semitones around a center — before quantization; Hz-range input keeps the existing direct behavior. `baseHz` = the qnt-patched VCO's FREQ knob (posted from `updateVcoParams` + seeded at cable connect; last-moved knob wins if several VCOs share qnt-cv-out), so the knob transposes the sweep center live and LFO DEPTH sets sweep width (full = ±1 octave). **BYPASS outputs the unquantized sweep** (`baseHz · 2^v` raw) — smooth slides back without unpatching, per the directive's intent. Verified live: quantized pass = 15 distinct readouts, all C-major tones centered on 220 Hz; bypass pass = 25 readouts including chromatic off-scale values; zero errors.
+
+**Gemini directives rejected:** (1) the literal "CV summing bus" (knob+kbd+LFO+qnt summed, routed through QNT) — pitch sources are Hz-valued and exclusively owned (`vcoActiveCvRef`, Single Writer); summing two Hz signals is pitch garbage, and all 5 VCOs share ONE worklet, so implicit routing would force identical pitch on every patched VCO. (2) Implicit insertion of the quantizer when an LFO is patched directly to `vco-cv` — hidden rewiring breaks the modular patch metaphor; the explicit LFO→QNT→VCO patch is the supported path (and now actually works). (3) "Add a QNT BYPASS switch" — it has existed since the QNT module shipped; no work done. Phase number stale again ("50" → 58).
+
+### [2026-07-08] Moog Phase 57 — VCO Knob-Stepper Mode (Quantized FREQ knob; Gemini directive, corrected)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogKnob.jsx`, `MoogKnob.module.css`
+
+Patching `qnt-cv-out → vcoN-cv` with **nothing feeding `qnt-cv-in`** puts that VCO's FREQ knob in note-stepper mode: the knob stays live but its Hz is snapped through the quantizer's current scale/root/oct config before hitting the glideBus, so it steps note-to-note. The QNT display/LEDs mirror each snapped note. The FREQ knob's indicator line pulses mint (`MoogKnob glow` prop → `.knobGlow .knobCap` drop-shadow animation). BYPASS reverts the knob to continuous and kills the glow.
+
+**Mode ownership (Single Writer):** the glideBus writer for a qnt-patched VCO is exactly one of: worklet `port.onmessage` (when a CV source feeds `qnt-cv-in` — the existing melody-quantize path, unchanged) or the knob-stepper path (when the quantizer is idle). Transitions re-apply/notify at every boundary: connect/disconnect of `qnt-cv-out→vco-cv`, connect/disconnect of `*→qnt-cv-in` (`qntHasCvInput()` scans connection keys), and `updateQuantizerParams` (config changes re-snap live; bypass toggles the glow via `notifyKnobQuantize`).
+
+**Gemini spec corrections:** no `quantizeValue()` exists — quantization lives in the AudioWorklet on the audio-rate CV path and never sees knob values; added `quantizeHzJs()` as a JS mirror (nearest in-scale MIDI note + octShift). Gemini's premise "QNT patched → quantize the knob" unconditionally would have broken the existing melody-quantize patch (kbd→qnt-in, qnt-out→vco-cv) and double-written the glideBus; the no-input-patched condition makes the modes mutually exclusive. Phase number was stale again ("49" → this is 57).
+
+**UI plumbing:** `setVcoQuantizedCallback(fn)` fires `fn(vcoIds[])` on every mode-boundary change (and immediately on registration); MoogShell holds `quantizedVcos` React state (event-driven, not per-frame — Zero-Re-render applies to rAF loops) → `quantized` prop → FREQ knob `glow`.
+
+**Verified (Playwright, full flow):** power on → patch qnt→vco1 → glow ON; dragging FREQ steps the QNT display through discrete in-scale notes (A3→B3→D4→E4→F4… in C-MAJ); BYPASS ON → glow off / OFF → glow back; patching kbd→qnt-in → glow off (worklet owns pitch); clicking that cable off → glow returns. Zero console/page errors.
+
+### [2026-07-07] Moog Phase 56 — Reverb "Aura" Display (Gemini directive, corrected)
+
+**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `useMoogAudio.js`
+
+Both REV modules gained a rectangular 100×60 frosted-glass OLED screen in the bottom-right slack beside the IN/OUT jacks (`revBottomRow`: jacks left, screen right, bottom-aligned): a rotating ice-blue **wireframe gridded sphere** (Dylan iterated from the initial circular halo; chose Gemini's blue over the green-phosphor alternative). **Sphere radius tracks ROOM (roomSize)**; **spin rate tracks MIX (wet) + live FFT energy**; per-vertex shimmer is signal-only (each vertex's radial jitter reads its own FFT bin, so the grid ripples with the actual spectrum). Spin angle is **integrated per frame** (`angle += dt * speed`, dt clamped to 0.1s for tab-return gaps) — a naive `t * speed` would snap the rotation discontinuously whenever MIX changes. Idle = small dim deep-blue sphere; active = expanded sky-blue/white. 6 meridians × 5 parallels × 28 segments, per-segment depth-based alpha/width (back lines fade → reads as 3D), mild perspective, fixed 0.42-rad axis tilt. Chrome bezel matches the jewel-lamp housings; lamp-aligned glass sheen; lights-out kills the bezel but keeps the emissive sphere (oscilloscope rule).
+
+**Gemini spec corrections applied:** it referenced `Tone.Reverb` with `.mix`/`.decay` — the actual nodes are `Tone.Freeverb` (`wet`/`roomSize`, no decay param), so mappings were remapped wet→size, roomSize→activity. It said "replace the knob feedback" — knobs kept (they're the only control affordance); display added above them. There is no `ReverbModule.jsx` (it's in MoogShell.jsx), there are TWO reverbs (both got displays via one `getReverbAuraData(num)` getter), and its "Phase 48" number was stale.
+
+**Implementation:** `reverbAnalyser`/`reverb2Analyser` (`Tone.Analyser('fft', 256)`) tap each reverb's **output** (dead-end side connections) so the halo keeps shimmering through the tail after the source stops. `AuraDisplay` component: 144px canvas backing (2× for zoom), rAF loop with `offsetParent === null` hidden-page skip, knob values read through ref mirrors (`wetRef`/`roomRef`) so the loop never restarts or stale-captures — zero React state per frame. Halo = 48-point jittered loop (per-point sinusoid + FFT bin), smoothed through quadratic midpoints, drawn as interior radial haze + 3 stroke passes (wide/faint → tight/bright) for the frosted glow. Verified: natH unchanged (1685, fit scale 0.5252 stable+consistent — the display fits inside the REV modules' tier-2 slack), zero console errors, screenshot shows idle + active states.
+
+### [2026-07-07] Moog Phase 55 — Typography Legibility Pass (Dylan-driven)
+
+**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.module.css`, `Led.module.css`, `KeyboardModule.module.css`
+
+Dylan: "the words are hard to read — increase the size of all words, lettering, numbers, and the wave symbols, without overlap; adjust modules to use the extra space."
+
+**Type scale raised everywhere** (~1.25× on medium text, up to 1.8× on the tiny lettering): plate titles 22→27, subs 11→13, knob labels 13→16, jack labels 13→16, selector values 17→21, toggle/gate labels 11→14, tick numerals 8→10, LED labels 7→10, quantizer LED/monitor/EXT text 6–10→9–13, chord-seq buttons 20/13→24/16 (heights 42/30), nameplate 11/15/10→14/19/13, mic + chrome buttons 8–9→10–11. WaveIcon SVGs 22×9→31×13 (viewBox unchanged, stroke thickens proportionally). 953 keyboard strip: title 10→20, sub/MIDI/hint 5–5.5→11, jack labels 5.5→16, key note/shortcut 5→8; **strip jacks replaced with the Phase-51 photorealistic chrome socket** (29px conic ring + hex-nut facets + threaded recess — the old 18px bordered jack was a stale pre-redesign copy).
+
+**Height givebacks so fit() barely drops** (natH would have hit 1854 / scale 0.477; final **1685 / 0.525** vs 1744 / 0.539 before): VCO sync jacks moved from a dedicated jack row into the sync-switch row (−57px tier 1); LFO's 2+4 jack rows merged to one 6-jack row; VCA's LOG/LIN toggle merged into the knob row; vocoder knob grid 4×3→6×2 (mic button + SIG LED moved under the MIX/MIC knobs to keep the max-content column narrow); CHORD's two jack rows merged to one 5-jack row; tierRow2 rebalanced (`1.25 1.25 1 1 0.7 0.7 0.75 1.45`) so VCF's 4-knob row never wraps; `.knobRow` gap 14→10.
+
+**Two hard-won invariants:**
+1. **`.knobRow` has `padding-top: 10px`** — xl/lg tick numerals extend 10px above the knob wrap and collide with the plate subtitle otherwise.
+2. **fit() width-compensation oscillation:** fit() sets `width = availW/s0`, so two candidate layouts exist (~2758px vs ~2930px at 1512×945). Any row that wraps at the narrow width but not the wide one makes natH differ between them and fit() **flip-flops forever** (ResizeObserver loop). Two such rows were found and fixed: VCF's knob row (fixed by "RES" label — "RESONANCE" at 16px is 119px wide — plus the tier-2 rebalance) and the ENV/KICK knob rows (fixed by slimming the vocoder's max-content column). **When adding labels/knobs to a row, verify `885/natH ≈ applied scale` stays consistent and stable across a 1.5s wait** — the Playwright probe in this session's workflow does exactly that.
+
+**Verified (Playwright):** scale stable + consistent across time, zero console errors, full-rack + per-module zoom screenshots checked for overlap (QNT chromatic LED labels needed `gap: 7px`; subtitle/tick-numeral clearance confirmed on VCF).
 
 ### [2026-07-04] Bug Fix — Black-Flashing Modules (GPU layer thrash from Phase 53's `will-change`)
 

@@ -1,70 +1,40 @@
-# Getting Started with Create React App
+# VoxDaw
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+A browser-based music-making suite built on React, [Tone.js](https://tonejs.github.io/), and [MediaPipe](https://developers.google.com/mediapipe) — no plugins, no installs, everything runs in the page.
 
-## Available Scripts
+> **Status: alpha.** Actively developed; projects are stored locally in your browser (IndexedDB) and as `.voxdaw` files.
 
-In the project directory, you can run:
+## The three instruments
 
-### `npm start`
+| Page | What it is |
+|---|---|
+| **VoxTool** | Gesture-controlled synthesizer: your webcam + MediaPipe hand tracking drive pitch, chords, filter, arpeggiator, vocoder, and autotune in real time. Fully user-configurable signal/trigger routing. |
+| **Workstation** | A DAW: multitrack arrangement with piano-roll editing, per-track insert effects (16 types), sampled + synth instruments (incl. three drum kits), ADSR overrides, WAV/MP3/`.voxdaw` export, and audio transcription from the Moog. |
+| **Moog Modular** | A photorealistic 1960s System 55-style modular synth: drag patch cables between 14 module types (VCOs, VCFs, LFOs, envelopes, 960 sequencers, chord sequencer, CV quantizer, 16-band vocoder, 914 filter bank, kick…), add/remove/duplicate modules from a library, and the whole custom rack — modules **and** cables — persists across reloads. Hard sync and CV quantization run in AudioWorklets. |
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+Projects live on a homepage dashboard (create, rename, duplicate, import/export `.voxdaw`).
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## Running it
 
-### `npm test`
+```bash
+npm install
+npm start        # dev server on http://localhost:3000
+npm run build    # production build
+npm test         # Jest + React Testing Library (watch mode)
+```
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+Chrome is the primary target (Web Audio + AudioWorklet + MediaPipe). Grant camera access for VoxTool and microphone access for the vocoder/autotune features. Headphones recommended when using the mic.
 
-### `npm run build`
+## Documentation
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+| File | Contents |
+|---|---|
+| `CLAUDE.md` | Coding standards, architectural invariants (Zero-Re-render Rule, Single Writer per node), and the condensed architecture reference |
+| `ARCHITECTURE.md` | Full technical architecture: audio graphs, data flow, per-subsystem design |
+| `PLAN.md` | Project state and completed-work log |
+| `src/components/MoogModular/MOOG_ARCHITECTURE.md` | Moog module specs, signal flow, and the Dynamic Rack as-built design |
+| `src/components/MoogModular/MOOG_PLAN.md` | The Moog sub-project's phase-by-phase log |
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+## Stack
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
-
-### `npm run eject`
-
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+React 18 (CRA) · Tone.js 15 · MediaPipe Tasks Vision (hand landmarks) · pitchfinder (YIN pitch detection) · lamejs (MP3 encode) · native Web Audio AudioWorklets (hard sync, CV quantizer) · IndexedDB (project store)
