@@ -132,7 +132,10 @@ function scheduleOfflineAutomation(t, { volume, pan, panEntries = null, graphByF
  * across audible tracks (for export start-trim), or null if nothing audible
  * is scheduled at all.
  */
-export async function bounceProject({ tracks, regions, notes, bpm, globalAutomations = [], groups = [], tailSec = null, capSec = Infinity }) {
+export async function bounceProject({ tracks, regions, notes, bpm, globalAutomations = [], groups = [], audioBuffers = new Map(), tailSec = null, capSec = Infinity }) {
+  // Recorded Moog audio lives in a regionId → native AudioBuffer map (session
+  // only — not persisted). Look-up tolerates a Map or a plain object.
+  const getBuf = (id) => (audioBuffers instanceof Map ? audioBuffers.get(id) : audioBuffers?.[id]) || null;
   const rightMeasure = regions.reduce(
     (m, r) => Math.max(m, r.startMeasure + r.durationMeasures), 0,
   );
@@ -140,7 +143,19 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
   // offline transport starts at 0 so map seconds == context seconds exactly.
   const tempoMap = buildTempoMap(bpm, tempoPointsOf(globalAutomations));
   const tail = tailSec ?? estimateFxTailSec(tracks, groups);
-  const durationSec = Math.max(0.1, Math.min(tempoMap.secondsAtMeasure(rightMeasure) + tail, capSec));
+  // Content end = the note-based right edge, extended by any recorded buffer that
+  // rings past its region (the live Tone.Player plays the whole buffer from the
+  // region start regardless of drawn length). Only audible tracks extend it.
+  const { trackAudible: trackAudibleForDur } = computeAudibility(tracks, groups);
+  let contentEndSec = tempoMap.secondsAtMeasure(rightMeasure);
+  for (const r of regions) {
+    if (!r.hasAudio) continue;
+    const buf = getBuf(r.id);
+    const track = tracks.find(t => t.id === r.trackId);
+    if (!buf || !track || !trackAudibleForDur(track)) continue;
+    contentEndSec = Math.max(contentEndSec, tempoMap.secondsAtMeasure(r.startMeasure) + buf.duration);
+  }
+  const durationSec = Math.max(0.1, Math.min(contentEndSec + tail, capSec));
   let minOnsetTicks = Infinity;
 
   const buffer = await Tone.Offline(async ({ transport }) => {
@@ -248,6 +263,20 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
       if (!trackVolume) continue;
       const track = tracks.find(t => t.id === r.trackId);
       if (!track) continue;
+
+      // Recorded Moog audio region: render the captured buffer instead of the
+      // transcription notes — raw to destination (matching the live Tone.Player),
+      // gated on track audibility so mute/solo apply. A missing buffer falls
+      // through to the note path (the transcription persists; the buffer does not).
+      const recBuf = r.hasAudio ? getBuf(r.id) : null;
+      if (recBuf) {
+        if (audibleTrackIds.has(r.trackId)) {
+          const startSec = tempoMap.secondsAtMeasure(r.startMeasure);
+          new Tone.Player(recBuf).toDestination().start(startSec);
+          minOnsetTicks = Math.min(minOnsetTicks, r.startMeasure * Tone.Transport.PPQ * 4);
+        }
+        continue; // no synth, no transcription notes — the buffer is the sound
+      }
 
       const fadeGain = new Tone.Gain(1).connect(trackVolume);
       const synth    = makeSynth(track.instrument, { envelope: track.envelope }).connect(fadeGain);

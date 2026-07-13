@@ -40,14 +40,17 @@ function Jack({ id, label }) {
   );
 }
 
-function ToggleSwitch({ labels = ['OFF', 'ON'] }) {
+// `active` reflects a real on/off state (true → lever up toward labels[1]; false →
+// down toward labels[0]); omit it for a purely decorative switch (Phase 65).
+function ToggleSwitch({ labels = ['OFF', 'ON'], active, title }) {
+  const on = active === true, off = active === false;
   return (
-    <div className={styles.toggleGroup}>
-      <span className={styles.toggleLabel}>{labels[1]}</span>
-      <div className={styles.toggle}>
+    <div className={styles.toggleGroup} title={title}>
+      <span className={`${styles.toggleLabel} ${on ? styles.toggleLabelActive : ''}`}>{labels[1]}</span>
+      <div className={`${styles.toggle} ${on ? styles.toggleOn : ''} ${off ? styles.toggleOff : ''}`}>
         <div className={styles.toggleLever} />
       </div>
-      <span className={styles.toggleLabel}>{labels[0]}</span>
+      <span className={`${styles.toggleLabel} ${off ? styles.toggleLabelActive : ''}`}>{labels[0]}</span>
     </div>
   );
 }
@@ -149,18 +152,19 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
   // VCO2/VCO3 start slightly detuned for classic analog thickness
   const defaultFine = number === 2 ? 0.52 : number === 3 ? 0.48 : number === 5 ? 0.51 : 0.5;
 
-  const [freqBase,    setFreqBase]    = useState(0.5);
-  const [fineTune,    setFineTune]    = useState(defaultFine);
-  const [rangeOctave, setRangeOctave] = useState(0);
-  const [syncOn,      setSyncOn]      = useState(false);
+  const vcoId = `vco${number}`;
+  const p     = vcoId;
+  const saved = useSavedSettings(vcoId);
+  const [freqBase,    setFreqBase]    = useState(saved.freqBase    ?? 0.5);
+  const [fineTune,    setFineTune]    = useState(saved.fineTune    ?? defaultFine);
+  const [rangeOctave, setRangeOctave] = useState(saved.rangeOctave ?? 0);
+  const [syncOn,      setSyncOn]      = useState(saved.syncOn      ?? false);
+  useModulePersist(vcoId, { freqBase, fineTune, rangeOctave, syncOn });
 
   // Sync LED getter — ref-backed so the stable useCallback never stale-captures syncOn.
   const syncOnRef = useRef(false);
   useEffect(() => { syncOnRef.current = syncOn; }, [syncOn]);
   const getSyncLed = useCallback(() => syncOnRef.current ? 1 : 0, []);
-
-  const vcoId = `vco${number}`;
-  const p     = vcoId;
 
   useEffect(() => {
     if (!onParamUpdate) return;
@@ -170,14 +174,18 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
     onParamUpdate(vcoId, { hz: finalHz, detune });
   }, [freqBase, fineTune, rangeOctave, vcoId, onParamUpdate]);
 
+  // Apply the HARD SYNC enable state to the engine on mount AND on change — not
+  // just on user toggle. Without the mount application, a `syncOn` restored from
+  // a saved setup (Phase 63) shows the switch ON but never engages the engine
+  // (syncOut gain stays 0) → "hard sync not working" after a reload/load.
+  useEffect(() => {
+    onSyncChange?.(syncOn);
+  }, [syncOn, onSyncChange]);
+
   const cycleRange = () =>
     setRangeOctave(prev => RANGE_STEPS[(RANGE_STEPS.indexOf(prev) + 1) % RANGE_STEPS.length]);
 
-  const handleSyncToggle = () => {
-    const next = !syncOn;
-    setSyncOn(next);
-    onSyncChange?.(next);
-  };
+  const handleSyncToggle = () => setSyncOn(v => !v);
 
   return (
     <div className={styles.module}>
@@ -234,8 +242,10 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
 }
 
 function NoiseModule({ number = 1, onParamUpdate }) {
-  const [level, setLevel] = useState(0.7);
   const prefix = number === 1 ? 'noise' : `noise${number}`;
+  const saved = useSavedSettings(prefix);
+  const [level, setLevel] = useState(saved.level ?? 0.7);
+  useModulePersist(prefix, { level });
 
   // LEVEL → per-instance W/P gain pair (Phase 8b); 0.7 default = unity.
   useEffect(() => {
@@ -270,12 +280,13 @@ function NoiseModule({ number = 1, onParamUpdate }) {
 // onParamUpdate({ cutoff, resonance }) is the audio update callback from useMoogAudio.
 // envAmt and kbdTracking are visual-only in this phase (Phase 6 will wire them).
 function VcfModule({ onParamUpdate, number = 1 }) {
-  const [cutoff, setCutoff] = useState(1.0);   // fully open — matches vcf init at 20kHz
-  const [res, setRes]       = useState(0.0);
-  const [envAmt, setEnvAmt] = useState(0.5);   // visual only
-  const [kbd, setKbd]       = useState(0.0);   // visual only
-
   const p = number === 1 ? 'vcf' : `vcf${number}`;
+  const saved = useSavedSettings(p);
+  const [cutoff, setCutoff] = useState(saved.cutoff ?? 1.0);   // fully open — matches vcf init at 20kHz
+  const [res, setRes]       = useState(saved.res    ?? 0.0);
+  const [envAmt, setEnvAmt] = useState(saved.envAmt ?? 0.5);   // visual only
+  const [kbd, setKbd]       = useState(saved.kbd    ?? 0.0);   // visual only
+  useModulePersist(p, { cutoff, res, envAmt, kbd });
 
   useEffect(() => {
     if (!onParamUpdate) return;
@@ -323,15 +334,29 @@ function VcfModule({ onParamUpdate, number = 1 }) {
 // the default type for the currently-running LFO signal.
 const LFO_WAVE_TYPES  = ['sine', 'triangle', 'square', 'sawtooth'];
 const LFO_WAVE_LABELS = { sine: 'SIN', triangle: 'TRI', square: 'SQR', sawtooth: 'SAW' };
+// Mirror of useMoogAudio's LFO_SYNC_DIVS labels — RATE knob (0..1) → division shown
+// when a clock is patched into SYNC (Phase 65). Keep in step with lfoDivForRate.
+const LFO_SYNC_LABELS = ['4 BAR', '2 BAR', '1 BAR', '1/2', '1/4', '1/8'];
+const lfoSyncLabelForRate = (rate) =>
+  LFO_SYNC_LABELS[Math.min(LFO_SYNC_LABELS.length - 1, Math.max(0, Math.floor((rate ?? 0.3) * LFO_SYNC_LABELS.length)))];
 
 // onParamUpdate({ rate, depth, type }) wires knobs and wave selector to useMoogAudio.
 // getLedValue() — stable getter (pre-bound in MoogShell) for the LFO level meter.
 function LfoModule({ onParamUpdate, getLedValue, number = 1 }) {
-  const [rate,     setRate]     = useState(0.3);
-  const [depth,    setDepth]    = useState(0.5);
-  const [modDepth, setModDepth] = useState(0.0);
-  const [waveType, setWaveType] = useState('sine');
   const p = number === 1 ? 'lfo' : `lfo${number}`;
+  const saved = useSavedSettings(p);
+  const [rate,     setRate]     = useState(saved.rate     ?? 0.3);
+  const [depth,    setDepth]    = useState(saved.depth    ?? 0.5);
+  const [modDepth, setModDepth] = useState(saved.modDepth ?? 0.0);
+  const [waveType, setWaveType] = useState(saved.waveType ?? 'sine');
+  useModulePersist(p, { rate, depth, modDepth, waveType });
+
+  // Tempo-sync engages when a clock is patched into this LFO's SYNC jack (Phase
+  // 65). In sync mode RATE selects a musical division and MOD becomes the OFFSET
+  // (start phase). The audio side keys off the cable in connect()/disconnect().
+  const { cables } = useMoogPatch();
+  const syncJack = `${p}-sync`;
+  const synced = cables.some(c => c.toJackId === syncJack || c.fromJackId === syncJack);
 
   useEffect(() => {
     if (!onParamUpdate) return;
@@ -355,16 +380,25 @@ function LfoModule({ onParamUpdate, getLedValue, number = 1 }) {
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
             <Led getValue={getLedValue} color="yellow" />
-            <MoogKnob label="RATE"  size="lg" value={rate}     onChange={setRate}     defaultValue={0.3} />
-            <MoogKnob label="DEPTH" size="md" value={depth}    onChange={setDepth}    defaultValue={0.5} />
-            <MoogKnob label="MOD"   size="sm" value={modDepth} onChange={setModDepth} defaultValue={0.0} />
+            <MoogKnob label={synced ? 'DIV' : 'RATE'} size="lg" value={rate}     onChange={setRate}     defaultValue={0.3} />
+            <MoogKnob label="DEPTH"                    size="md" value={depth}    onChange={setDepth}    defaultValue={0.5} />
+            <MoogKnob label={synced ? 'OFFSET' : 'MOD'} size="sm" value={modDepth} onChange={setModDepth} defaultValue={0.0} />
           </div>
           <div className={styles.selectorRow}>
             <div className={styles.selectorGroup} onClick={cycleWave} title="Click to cycle waveform">
               <span className={styles.selectorLabel}>WAVE</span>
               <span className={styles.selectorValue}>{LFO_WAVE_LABELS[waveType]}</span>
             </div>
-            <ToggleSwitch labels={['FREE', 'SYNC']} />
+            {synced && (
+              <div className={styles.selectorGroup} title="LFO cycle length — the RATE knob selects it while synced">
+                <span className={styles.selectorLabel}>SYNC</span>
+                <span className={styles.selectorValue}>{lfoSyncLabelForRate(rate)}</span>
+              </div>
+            )}
+            <ToggleSwitch labels={['FREE', 'SYNC']} active={synced}
+              title={synced
+                ? 'Locked to Transport tempo — unpatch SYNC to free-run'
+                : 'Patch a clock (e.g. SEQ) into SYNC to lock the LFO to tempo'} />
           </div>
           <PlateDivider />
           {/* Inputs (SYNC deferred, FM rate-mod CV) + waveform tap outputs on one row */}
@@ -413,6 +447,9 @@ function AuraDisplay({ getData, wetRef, roomRef }) {
       raf = requestAnimationFrame(tick);
       const t = performance.now() * 0.001;
       if (canvas.offsetParent === null) { lastT = t; return; } // Root keeps hidden pages mounted
+      // Phase 61: skip while the module's contents are content-visibility
+      // skipped — the buffer isn't composited and the projection math is wasted.
+      if (canvas.checkVisibility && !canvas.checkVisibility({ contentVisibilityAuto: true })) { lastT = t; return; }
       const dt = Math.min(0.1, t - lastT); // clamp long-gap deltas (tab return)
       lastT = t;
       const data = getData?.(); // Float32Array of dB values, or null when unpowered
@@ -526,9 +563,11 @@ function AuraDisplay({ getData, wetRef, roomRef }) {
 // wet=0 on mount so the module is transparent until the user raises MIX.
 // getAuraData() — stable FFT getter (pre-bound in MoogShell) for the Aura display.
 function ReverbModule({ onParamUpdate, getAuraData, number = 1 }) {
-  const [roomSize, setRoomSize] = useState(0.7);
-  const [wet,      setWet]      = useState(0.0);
   const p = number === 1 ? 'reverb' : `reverb${number}`;
+  const saved = useSavedSettings(p);
+  const [roomSize, setRoomSize] = useState(saved.roomSize ?? 0.7);
+  const [wet,      setWet]      = useState(saved.wet      ?? 0.0);
+  useModulePersist(p, { roomSize, wet });
 
   // Ref mirrors for the Aura rAF loop — the loop reads these each frame so it
   // never stale-captures knob state and never restarts on knob changes.
@@ -578,9 +617,11 @@ function ReverbModule({ onParamUpdate, getAuraData, number = 1 }) {
 // Set GAIN=0 and patch an envelope to vca-cv for full gating behavior.
 // ENV AMT knob is visual-only this phase.
 function VcaModule({ onParamUpdate, number = 1 }) {
-  const [gain, setGain]     = useState(0.5);
-  const [envAmt, setEnvAmt] = useState(1.0); // visual only
   const p = number === 1 ? 'vca' : `vca${number}`;
+  const saved = useSavedSettings(p);
+  const [gain, setGain]     = useState(saved.gain   ?? 0.5);
+  const [envAmt, setEnvAmt] = useState(saved.envAmt ?? 1.0); // visual only
+  useModulePersist(p, { gain, envAmt });
 
   useEffect(() => {
     if (!onParamUpdate) return;
@@ -622,12 +663,13 @@ function VcaModule({ onParamUpdate, number = 1 }) {
 // getLedValue() — stable getter (pre-bound in MoogShell) for this envelope's level meter.
 // All knob values are normalized 0–1; useMoogAudio applies the exponential time mapping.
 function EnvelopeModule({ label, onParamUpdate, onGate, getLedValue }) {
-  const [attack,  setAttack]  = useState(0.1);
-  const [decay,   setDecay]   = useState(0.3);
-  const [sustain, setSustain] = useState(0.7);
-  const [release, setRelease] = useState(0.4);
-
   const envId = label.toLowerCase().replace(/\s+/g, ''); // "env1" or "env2"
+  const saved = useSavedSettings(envId);
+  const [attack,  setAttack]  = useState(saved.attack  ?? 0.1);
+  const [decay,   setDecay]   = useState(saved.decay   ?? 0.3);
+  const [sustain, setSustain] = useState(saved.sustain ?? 0.7);
+  const [release, setRelease] = useState(saved.release ?? 0.4);
+  useModulePersist(envId, { attack, decay, sustain, release });
 
   useEffect(() => {
     if (!onParamUpdate) return;
@@ -752,28 +794,72 @@ const DYN_TYPES = [
   { type: 'chordseq', label: '+ CHORD', max: 4, width: 491 },
   { type: 'voc',   label: '+ VOCODER', max: 2,  width: 586 },
   { type: 'qnt',   label: '+ QNT',    max: 4,  width: 442 },
+  { type: 'vowel', label: '+ VOWEL',  max: 4,  width: 360 },
 ];
 const DYN_WIDTH = Object.fromEntries(DYN_TYPES.map(t => [t.type, t.width]));
 
 // ── Rack store (Phase 60f) ── one localStorage record for the whole custom
-// rack: { modules: [{ id, type, num }], cables: [{ from, to, color }] }.
-// Writes happen ONLY from user event handlers / user-driven provider callbacks
-// (the Phase 60c StrictMode wipe lesson). v1 (types only, no cables) migrates
-// transparently on read.
+// rack: { modules: [{ id, type, num }], cables: [{ from, to, color }],
+//         settings: { [instanceId]: {knob/switch values} } }.
+// `settings` (Phase 63) persists every module's knob/switch positions keyed by
+// canonical instance id (the jack prefix — `vco1`, `vcf`, `seq2`…). Writes
+// happen ONLY from user event handlers / user-driven provider callbacks (the
+// Phase 60c StrictMode wipe lesson — `useModulePersist` enforces this by only
+// writing when a value differs from what's stored). v1 (types only, no cables)
+// migrates transparently on read.
 const RACK_STORE_KEY = 'moog-rack-v2';
+
+// Phase 61b: the content-visibility culling manager only engages above this
+// cabinet layout height. Below it (default rack 1799 px, modest customs), the
+// rack idles fine uncalled and scrolls smoothest fully rendered — culling
+// there only churns Layerize passes and makes scrolling choppy. Between the
+// default 1799 and a genuinely large rack's 3415; layout px, zoom-independent.
+const CULL_MIN_NATH = 2500;
 function readRackStore() {
   try {
     const v2 = JSON.parse(localStorage.getItem(RACK_STORE_KEY) ?? 'null');
-    if (v2) return { modules: v2.modules ?? [], cables: v2.cables ?? [] };
+    if (v2) return { modules: v2.modules ?? [], cables: v2.cables ?? [], settings: v2.settings ?? {} };
     const v1 = JSON.parse(localStorage.getItem('moog-rack-dyn-v1') ?? 'null');
-    if (v1) return { modules: v1.modules ?? [], cables: [] }; // v1: types only → ids re-mint
+    if (v1) return { modules: v1.modules ?? [], cables: [], settings: {} }; // v1: types only → ids re-mint
   } catch (_) {}
-  return { modules: [], cables: [] };
+  return { modules: [], cables: [], settings: {} };
 }
 function updateRackStore(patch) {
   try {
     localStorage.setItem(RACK_STORE_KEY, JSON.stringify({ ...readRackStore(), ...patch }));
   } catch (_) {}
+}
+
+// ── Per-module settings persistence (Phase 63) ────────────────────────────
+// Every module keeps its knob/switch positions in local useState. These helpers
+// let a module (1) seed that state from the store on mount and (2) persist
+// changes back, so a reload / .moog load restores the exact patch — not just
+// which modules and cables exist (Phase 60f) but every control position too.
+function readModuleSettings(id) {
+  return readRackStore().settings?.[id] ?? {};
+}
+function writeModuleSettings(id, values) {
+  updateRackStore({ settings: { ...(readRackStore().settings ?? {}), [id]: values } });
+}
+// Read a module's saved settings ONCE at mount (lazy) — used to seed useState
+// defaults. Returns {} for a never-touched module → each field falls back to
+// its own default via `?? default`.
+function useSavedSettings(id) {
+  return useState(() => readModuleSettings(id))[0];
+}
+// Persist `values` (the module's full current control snapshot) whenever it
+// changes, debounced 200 ms to coalesce a knob drag into one write. Writes ONLY
+// when the snapshot differs from what's stored — so mount-time seeding (and
+// StrictMode's double-effect) never writes, honoring the "user events only"
+// rule (Phase 60c). JSON-string dep covers nested arrays (seq steps, FFB bands).
+function useModulePersist(id, values) {
+  const json = JSON.stringify(values);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (JSON.stringify(readModuleSettings(id)) !== json) writeModuleSettings(id, JSON.parse(json));
+    }, 200);
+    return () => clearTimeout(t);
+  }, [id, json]);
 }
 
 // Restores persisted cables once the dynamic instances are live (Phase 60f),
@@ -902,8 +988,10 @@ function LibraryModal({ open, onClose, hidden, onToggle, dynModules, onAddInstan
 // getChLevels     — array of 4 stable getters for per-channel activity LEDs.
 // onChannelVolChange(channelIndex, value) — single writer for ioCh1–ioCh4.gain.
 function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue, getChLevels, onChannelVolChange }) {
-  const [masterVol, setMasterVol] = useState(0.7);
-  const [chVols, setChVols] = useState([0.8, 0.8, 0.8, 0.8]);
+  const saved = useSavedSettings('io'); // singleton
+  const [masterVol, setMasterVol] = useState(saved.masterVol ?? 0.7);
+  const [chVols, setChVols] = useState(saved.chVols ?? [0.8, 0.8, 0.8, 0.8]);
+  useModulePersist('io', { masterVol, chVols });
 
   useEffect(() => {
     if (!onParamUpdate) return;
@@ -991,10 +1079,12 @@ const OCT_STEPS    = [-3, -2, -1, 0, 1, 2, 3];
 // LED array is 12 DOM nodes mutated directly (Zero-Re-render Rule).
 function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, getTransposeData, chordMapRef }) {
   const p = number === 1 ? 'qnt' : `qnt${number}`; // jack prefix = engine instance id
-  const [scale,    setScale]    = useState('MAJ');
-  const [root,     setRoot]     = useState(0);   // 0 = C
-  const [octShift, setOctShift] = useState(0);   // −3 to +3 octaves
-  const [bypass,   setBypass]   = useState(false);
+  const saved = useSavedSettings(p);
+  const [scale,    setScale]    = useState(saved.scale    ?? 'MAJ');
+  const [root,     setRoot]     = useState(saved.root     ?? 0);   // 0 = C
+  const [octShift, setOctShift] = useState(saved.octShift ?? 0);   // −3 to +3 octaves
+  const [bypass,   setBypass]   = useState(saved.bypass   ?? false);
+  useModulePersist(p, { scale, root, octShift, bypass });
 
   const ledRefs    = useRef([]);   // 12 LED DOM elements
   const activeLed  = useRef(-1);   // currently lit LED index
@@ -1223,15 +1313,17 @@ const ROOT_OCT_LABELS = { '-3': '-3', '-2': '-2', '-1': '-1', '0': '0', '1': '+1
 
 function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onSetCallback, onRootOctaveChange, onGlideChange }) {
   const p = number === 1 ? 'chordseq' : `chordseq${number}`; // jack prefix = engine instance id
-  const [steps, setSteps] = useState(() =>
+  const saved = useSavedSettings(p);
+  const [steps, setSteps] = useState(() => saved.steps ??
     Array.from({ length: 8 }, (_, i) => ({
       rootClass: [9, 9, 5, 5, 0, 0, 4, 4][i],
       chordType: ['CMIN','CMIN','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ'][i],
     }))
   );
-  const [division,   setDivision]   = useState('1m');
-  const [rootOctave, setRootOctave] = useState(0);
-  const [glide,      setGlide]      = useState(0); // glide time in seconds (0–1.5)
+  const [division,   setDivision]   = useState(saved.division   ?? '1m');
+  const [rootOctave, setRootOctave] = useState(saved.rootOctave ?? 0);
+  const [glide,      setGlide]      = useState(saved.glide      ?? 0); // glide time in seconds (0–1.5)
+  useModulePersist(p, { steps, division, rootOctave, glide });
 
   const ledRefs     = useRef([]);
   const prevStepRef = useRef(-1);
@@ -1364,11 +1456,13 @@ function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onSetCall
 // state writes in the audio hot path, consistent with the Zero-Re-render Rule.
 function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, onGlideChange, number = 1 }) {
   const p = number === 1 ? 'seq' : `seq${number}`;
-  const [steps, setSteps] = useState(() =>
+  const saved = useSavedSettings(p);
+  const [steps, setSteps] = useState(() => saved.steps ??
     Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true, prob: 1 }))
   );
-  const [tempo, setTempoState] = useState(120);
-  const [glide, setGlide]       = useState(0);
+  const [tempo, setTempoState] = useState(saved.tempo ?? 120);
+  const [glide, setGlide]       = useState(saved.glide ?? 0);
+  useModulePersist(p, { steps, tempo, glide });
   const ledRefs    = useRef([]);
   const prevStepRef = useRef(-1);
 
@@ -1506,10 +1600,12 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, onGlideC
 // Rate LED pulses at the same frequency as the chorus LFO by reading rateHzRef
 // in a stable getter closure — no React state writes in the rAF loop.
 function ChorusModule({ onParamUpdate, number = 1 }) {
-  const [rate,  setRate]  = useState(0.3);
-  const [depth, setDepth] = useState(0.5);
-  const [wet,   setWet]   = useState(0.0);
   const p = number === 1 ? 'chorus' : `chorus${number}`;
+  const saved = useSavedSettings(p);
+  const [rate,  setRate]  = useState(saved.rate  ?? 0.3);
+  const [depth, setDepth] = useState(saved.depth ?? 0.5);
+  const [wet,   setWet]   = useState(saved.wet   ?? 0.0);
+  useModulePersist(p, { rate, depth, wet });
 
   const rateHzRef = useRef(0.1 * Math.pow(50, 0.3));
 
@@ -1552,18 +1648,127 @@ function ChorusModule({ onParamUpdate, number = 1 }) {
   );
 }
 
+// ──────────── Vowel / Formant filter bank (Phase 64) ────────────
+
+const VOWEL_LETTERS = ['A', 'E', 'I', 'O', 'U'];
+
+// Formant "Space Display" — log-frequency spectrum of the module output, drawn
+// on the Aura-style OLED screen. The bandpass resonances appear as the formant
+// bumps, so the display literally shows the vowel shape being produced. Same
+// zero-re-render canvas-in-rAF pattern as AuraDisplay (skips while hidden /
+// content-visibility-culled).
+const VOW_W = 208, VOW_H = 92;
+const VOW_FMIN = 150, VOW_FMAX = 5000;
+function FormantDisplay({ getData }) {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    let raf;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      if (canvas.offsetParent === null) return;
+      if (canvas.checkVisibility && !canvas.checkVisibility({ contentVisibilityAuto: true })) return;
+      ctx.clearRect(0, 0, VOW_W, VOW_H);
+      // faint baseline grid
+      ctx.strokeStyle = 'rgba(93,202,165,0.10)';
+      ctx.lineWidth = 1;
+      for (let gx = 0; gx <= 4; gx++) { const x = (gx / 4) * VOW_W; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, VOW_H); ctx.stroke(); }
+
+      const data = getData?.(); // Float32Array of FFT dB values, or null (unpowered)
+      if (!data || !data.length) return;
+      const nyquist = 22050;
+      const hzPerBin = nyquist / data.length;
+      ctx.beginPath();
+      ctx.moveTo(0, VOW_H);
+      for (let px = 0; px < VOW_W; px++) {
+        const frac = px / (VOW_W - 1);
+        const freq = VOW_FMIN * Math.pow(VOW_FMAX / VOW_FMIN, frac); // log-frequency x
+        const bin  = Math.min(data.length - 1, Math.round(freq / hzPerBin));
+        const v    = Math.max(0, Math.min(1, (data[bin] + 90) / 78)); // dB → 0..1
+        ctx.lineTo(px, VOW_H - v * (VOW_H - 4));
+      }
+      ctx.lineTo(VOW_W, VOW_H);
+      ctx.closePath();
+      const grad = ctx.createLinearGradient(0, 0, 0, VOW_H);
+      grad.addColorStop(0, 'rgba(93,202,165,0.42)');
+      grad.addColorStop(1, 'rgba(93,202,165,0.04)');
+      ctx.fillStyle = grad;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(120,230,190,0.95)';
+      ctx.lineWidth = 1.4;
+      ctx.shadowBlur = 5;
+      ctx.shadowColor = 'rgba(93,202,165,0.8)';
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    };
+    tick();
+    return () => cancelAnimationFrame(raf);
+  }, [getData]);
+  return (
+    <div className={styles.auraScreen}>
+      <canvas ref={canvasRef} width={VOW_W} height={VOW_H} className={styles.auraCanvas} />
+    </div>
+  );
+}
+
+// onParamUpdate({ vowel, shape }) — VOWEL morphs A→E→I→O→U (0..1), SHAPE scales
+// the whole formant set (vocal-tract length). getAnalyserData() feeds the display.
+function VowelModule({ number = 1, onParamUpdate, getAnalyserData }) {
+  const p = `vowel${number}`; // dynamic-only; id = jack prefix
+  const saved = useSavedSettings(p);
+  const [vowel, setVowel] = useState(saved.vowel ?? 0.5); // 0.5 → 'I'
+  const [shape, setShape] = useState(saved.shape ?? 0.5); // 0.5 → tract scale 1.0
+  useModulePersist(p, { vowel, shape });
+
+  useEffect(() => { onParamUpdate?.({ vowel, shape }); }, [vowel, shape, onParamUpdate]);
+
+  const letter = VOWEL_LETTERS[Math.max(0, Math.min(4, Math.round(vowel * 4)))];
+
+  return (
+    <div className={styles.module}>
+      <Screw pos="screwTL" /><Screw pos="screwTR" />
+      <Screw pos="screwBL" /><Screw pos="screwBR" />
+      <div className={styles.plate}>
+        <div className={styles.plateHeader}>
+          {number > 1 && <span className={styles.plateNum}>{number}</span>}
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>VOWEL</span>
+            <span className={styles.plateSub}>FORMANT FILTER BANK</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          <div className={styles.knobRow}>
+            <MoogKnob label={`VOWEL · ${letter}`} size="lg" value={vowel} onChange={setVowel} defaultValue={0.5} />
+            <MoogKnob label="SHAPE" size="md" value={shape} onChange={setShape} defaultValue={0.5} />
+          </div>
+          <FormantDisplay getData={getAnalyserData} />
+          <PlateDivider />
+          <div className={styles.jackRow}>
+            <Jack id={`${p}-in`}     label="IN" />
+            <Jack id={`${p}-cv-in`}  label="FORM CV" />
+            <Jack id={`${p}-out`}    label="OUT" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ──────────── Kick Drum ────────────
 
 // onParamUpdate({ tune, pitchEnv, decay, click }) — wires knobs to useMoogAudio.
 // onTrigger(onFlash) — fires the kick manually; onFlash() pulses the LED.
 // onSetTrigCallback(fn) — registers the LED flash so the sequencer gate also pulses it.
 function KickModule({ number = 1, onParamUpdate, onTrigger, onSetTrigCallback }) {
-  const [tune,     setTune]     = useState(0.2);  // 0–1 → 40–200 Hz
-  const [pitchEnv, setPitchEnv] = useState(0.7);  // 0–1 → 0–5 octaves drop
-  const [decay,    setDecay]    = useState(0.35); // 0–1 → 0.05–2 s
-  const [click,    setClick]    = useState(0.3);  // 0–1 gain
-
   const p = number === 1 ? 'kick' : `kick${number}`; // jack prefix = engine instance id
+  const saved = useSavedSettings(p);
+  const [tune,     setTune]     = useState(saved.tune     ?? 0.2);  // 0–1 → 40–200 Hz
+  const [pitchEnv, setPitchEnv] = useState(saved.pitchEnv ?? 0.7);  // 0–1 → 0–5 octaves drop
+  const [decay,    setDecay]    = useState(saved.decay    ?? 0.35); // 0–1 → 0.05–2 s
+  const [click,    setClick]    = useState(saved.click    ?? 0.3);  // 0–1 gain
+  useModulePersist(p, { tune, pitchEnv, decay, click });
 
   const ledRef     = useRef(null);
   const flashTimer = useRef(null);
@@ -1642,10 +1847,11 @@ function KickModule({ number = 1, onParamUpdate, onTrigger, onSetTrigCallback })
 // onParamUpdate({ bands: number[], master: number }) — wires sliders to useMoogAudio.
 // getAnalyserData() — stable getter for the FFT input analyser; used to drive LEDs.
 function FFBModule({ number = 1, onParamUpdate, getAnalyserData }) {
-  const [bands,  setBands]  = useState(() => Array(FFB_BANDS.length).fill(0.75));
-  const [master, setMaster] = useState(1.0);
-
   const p = number === 1 ? 'ffb' : `ffb${number}`; // jack prefix = engine instance id
+  const saved = useSavedSettings(p);
+  const [bands,  setBands]  = useState(() => saved.bands ?? Array(FFB_BANDS.length).fill(0.75));
+  const [master, setMaster] = useState(saved.master ?? 1.0);
+  useModulePersist(p, { bands, master });
 
   // DOM refs for per-band LEDs — written by rAF loop (Zero-Re-render Rule)
   const ledRefs = useRef([]);
@@ -1662,6 +1868,7 @@ function FFBModule({ number = 1, onParamUpdate, getAnalyserData }) {
     const SAMPLE_RATE = 44100;
     const FFT_SIZE    = 512;
     const BIN_HZ      = SAMPLE_RATE / FFT_SIZE;
+    const lastVals    = new Array(FFB_BANDS.length).fill(-1); // Phase 61 dedupe
 
     const tick = () => {
       rafRef.current = requestAnimationFrame(tick);
@@ -1680,7 +1887,9 @@ function FFBModule({ number = 1, onParamUpdate, getAnalyserData }) {
         for (let b = lo; b <= hi; b++) if (data[b] > peak) peak = data[b];
         // Map −80 dB→0 to 0 dB→1; most musical material stays in −60 to −6 range
         const brightness = Math.max(0, Math.min(1, (peak + 80) / 80));
-        el.style.opacity = String(0.08 + brightness * 0.92);
+        // Phase 61: quantize + skip-if-unchanged — idle bands stop invalidating paint
+        const q = Math.round((0.08 + brightness * 0.92) * 64) / 64;
+        if (q !== lastVals[i]) { lastVals[i] = q; el.style.opacity = String(q); }
       });
     };
     tick();
@@ -1739,21 +1948,23 @@ function FFBModule({ number = 1, onParamUpdate, getAnalyserData }) {
 // Patch MOD (modulator: voice/drum/sequence) + CARR (carrier: VCOs) in, take OUT to the mixer.
 function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable, onMicDisable, onMicGainChange, getMicLevel }) {
   const p = number === 1 ? 'voc' : `voc${number}`; // jack prefix = engine instance id
-  const [micGain, setMicGain]       = useState(0.5);  // built-in mic input level
-  const [micStatus, setMicStatus]   = useState('off'); // 'off' | 'connecting' | 'on' | 'error'
-  const [mix, setMix]               = useState(1.0);
-  const [volume, setVolume]         = useState(0.5);  // 0.5 = nominal (×3 internal makeup → 3×)
-  const [carrierMix, setCarrierMix] = useState(0.0);  // 0 = external carrier only
-  const [pwidth, setPwidth]         = useState(0.5);  // 0.5 = square
-  const [shift, setShift]           = useState(0.5);  // 0.5 = no shift
-  const [res, setRes]               = useState(0.5);  // 0.5 ≈ base Q
-  const [shiftRate, setShiftRate]   = useState(0.5);
-  const [shiftAmp, setShiftAmp]     = useState(0.0);
-  const [decay, setDecay]           = useState(0.5);  // 0.5 ≈ base env speed
-  const [presence, setPresence]     = useState(0.0);  // 2.7 kHz cut-through boost
-  const [clarity, setClarity]       = useState(0.0);
-  const [hiss, setHiss]             = useState(0.0);
-  const [buzz, setBuzz]             = useState(0.0);
+  const saved = useSavedSettings(p);
+  const [micGain, setMicGain]       = useState(saved.micGain    ?? 0.5);  // built-in mic input level
+  const [micStatus, setMicStatus]   = useState('off'); // 'off' | 'connecting' | 'on' | 'error' — runtime, not persisted
+  const [mix, setMix]               = useState(saved.mix        ?? 1.0);
+  const [volume, setVolume]         = useState(saved.volume     ?? 0.5);  // 0.5 = nominal (×3 internal makeup → 3×)
+  const [carrierMix, setCarrierMix] = useState(saved.carrierMix ?? 0.0);  // 0 = external carrier only
+  const [pwidth, setPwidth]         = useState(saved.pwidth     ?? 0.5);  // 0.5 = square
+  const [shift, setShift]           = useState(saved.shift      ?? 0.5);  // 0.5 = no shift
+  const [res, setRes]               = useState(saved.res        ?? 0.5);  // 0.5 ≈ base Q
+  const [shiftRate, setShiftRate]   = useState(saved.shiftRate  ?? 0.5);
+  const [shiftAmp, setShiftAmp]     = useState(saved.shiftAmp   ?? 0.0);
+  const [decay, setDecay]           = useState(saved.decay      ?? 0.5);  // 0.5 ≈ base env speed
+  const [presence, setPresence]     = useState(saved.presence   ?? 0.0);  // 2.7 kHz cut-through boost
+  const [clarity, setClarity]       = useState(saved.clarity    ?? 0.0);
+  const [hiss, setHiss]             = useState(saved.hiss       ?? 0.0);
+  const [buzz, setBuzz]             = useState(saved.buzz       ?? 0.0);
+  useModulePersist(p, { micGain, mix, volume, carrierMix, pwidth, shift, res, shiftRate, shiftAmp, decay, presence, clarity, hiss, buzz });
 
   // DOM refs for the 16 spectrum LEDs — written by rAF loop (Zero-Re-render Rule).
   const ledRefs = useRef([]);
@@ -1786,7 +1997,8 @@ function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable
   // (FFT 512 → 256 bins, ~86 Hz/bin, dB → 0–1 over a half-octave window per band center).
   useEffect(() => {
     if (!getAnalyserData) return;
-    const BIN_HZ = 44100 / 512;
+    const BIN_HZ   = 44100 / 512;
+    const lastVals = new Array(VOC_BANDS.length).fill(-1); // Phase 61 dedupe
 
     const tick = () => {
       rafRef.current = requestAnimationFrame(tick);
@@ -1803,7 +2015,9 @@ function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable
         let peak = -100;
         for (let b = lo; b <= hi; b++) if (data[b] > peak) peak = data[b];
         const brightness = Math.max(0, Math.min(1, (peak + 80) / 80));
-        el.style.opacity = String(0.08 + brightness * 0.92);
+        // Phase 61: quantize + skip-if-unchanged — idle bands stop invalidating paint
+        const q = Math.round((0.08 + brightness * 0.92) * 64) / 64;
+        if (q !== lastVals[i]) { lastVals[i] = q; el.style.opacity = String(q); }
       });
     };
     tick();
@@ -1878,11 +2092,19 @@ function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable
 
 // ──────────── Main shell ────────────
 
-// onBusReady(getter) — called once on mount to hand the Workstation a function
-// that returns the live Tone.Gain moogBus node for recording.
-export default function MoogShell({ onNavigateHome, onBusReady }) {
+// onBusReady(api) — called once on mount to hand the Workstation a small control
+// surface: { getBusNode, resetSequencers, isPowered } (Phase 66 widened it from a
+// bare bus getter). recordingActiveRef — a shared ref the Workstation flips true
+// while recording the Moog; KeyboardModule reads it to let QWERTY through the
+// hidden-page guard so the user can play the Moog live into the take.
+export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveRef }) {
   const audio      = useMoogAudio();
   const cabinetRef = useRef(null);
+  // Phase 61: the camera closure's live view object (mutated in place) and the
+  // module visibility manager — wired ref-to-ref so neither effect depends on
+  // the other's lifecycle.
+  const cameraViewRef = useRef(null);
+  const moduleVisRef  = useRef(null);
   const [lightsOut, setLightsOut] = useState(false);
   // VCOs whose FREQ knob is in quantized/note-stepper mode (Phase 57). Updated
   // by useMoogAudio on patch/bypass changes — event-driven, not per-frame, so
@@ -1962,6 +2184,54 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
     updateRackStore({ cables: cables.map(c => ({ from: c.fromJackId, to: c.toJackId, color: c.color })) });
   }, []);
 
+  // ── Workspace persistence (Phase 63): .moog file export/import + reset ──
+  // SAVE/LOAD/RESET all reuse the Phase 60f restore path: the store already
+  // holds the entire setup (modules + cables + per-module settings), so SAVE
+  // serializes it, LOAD writes it + reloads (the mount-time restore rebuilds
+  // everything, seeding each module from `settings`), and RESET clears it +
+  // reloads to the pristine default rack. The reload is deliberate — it reuses
+  // the proven, StrictMode-safe restore path instead of an error-prone in-place
+  // teardown/rebuild, and gives the "fresh instrument start" the reset needs.
+  const fileInputRef = useRef(null);
+  const saveSetup = useCallback(() => {
+    const blob = new Blob([JSON.stringify(readRackStore(), null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = `moog-setup-${new Date().toISOString().slice(0, 10)}.moog`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, []);
+  const loadSetup = useCallback((e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-selecting the same file later
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!parsed || !Array.isArray(parsed.modules)) throw new Error('not a valid .moog setup file');
+        localStorage.setItem(RACK_STORE_KEY, JSON.stringify({
+          modules:  parsed.modules  ?? [],
+          cables:   parsed.cables   ?? [],
+          settings: parsed.settings ?? {},
+        }));
+        try { sessionStorage.setItem('voxdaw-return-page', 'moogmodular'); } catch (_) {}
+        window.location.reload();
+      } catch (err) {
+        window.alert(`Could not load setup: ${err.message}`);
+      }
+    };
+    reader.readAsText(file);
+  }, []);
+  const resetWorkspace = useCallback(() => {
+    if (!window.confirm('Reset the workspace? This clears all modules, patch cables and knob positions and returns the rack to its default startup state.')) return;
+    localStorage.removeItem(RACK_STORE_KEY);
+    localStorage.removeItem('moog-rack-dyn-v1');
+    try { sessionStorage.setItem('voxdaw-return-page', 'moogmodular'); } catch (_) {}
+    window.location.reload();
+  }, []);
+
   // Drag-to-reorder for expansion modules (Phase 60f-2). The dragged id lives
   // in a ref (Zero-Re-render during the drag); drop moves it before the target
   // slot, persists the new order, and forces a cable-overlay reposition —
@@ -2005,6 +2275,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
     vocData:      () => audio.getVocAnalyserData(id),
     qntCb:        (fn) => audio.setQuantizerCallbackById(id, fn),
     qntTrp:       () => audio.getQntTransposeData(id),
+    vowelData:    () => audio.getVowelAnalyserData(id),
   });
 
   useEffect(() => {
@@ -2012,11 +2283,16 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
     return () => audio.setVcoQuantizedCallback(null);
   }, [audio.setVcoQuantizedCallback]);
 
-  // Register the bus getter with Root.js so the Workstation can tap Moog audio.
-  // audio.getMoogBusNode is a stable useCallback ref — effect fires once.
+  // Register the Moog control surface with Root.js so the Workstation can tap
+  // audio, restart the sequence, and check power. All three are stable useCallback
+  // refs, so this effect fires once.
   useEffect(() => {
-    onBusReady?.(() => audio.getMoogBusNode());
-  }, [onBusReady, audio.getMoogBusNode]);
+    onBusReady?.({
+      getBusNode:      () => audio.getMoogBusNode(),
+      resetSequencers: audio.resetSequencers,
+      isPowered:       audio.getIsPowered,
+    });
+  }, [onBusReady, audio.getMoogBusNode, audio.resetSequencers, audio.getIsPowered]);
 
   // Chord map ref — DOM ref to the chord type span inside QuantizerModule's EXT row.
   // The chord callback writes here directly (no React re-render).
@@ -2082,6 +2358,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
 
     // s0 = fit scale · z = user zoom · tx/ty = pan (screen px) · ox/oy = layout origin
     const view = { s0: 1, z: 1, tx: 0, ty: 0, natW: 0, natH: 0, availW: 0, availH: 0, ox: 16, oy: 44 };
+    cameraViewRef.current = view; // Phase 61: visibility manager reads this live object
     el.style.transformOrigin = '0 0';
 
     // Fit-width floor (Phase 60a): auto-shrink never goes below the scale that
@@ -2102,6 +2379,11 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
     // tab-return re-raster flashed modules black while tiles rebuilt. Releasing
     // also re-rasters the rack at the current zoom scale (crisper when zoomed).
     let wcTimer = null;
+    // Smooth Retina scrolling is handled structurally by per-MODULE layer
+    // promotion (`.module { will-change: transform }`, Phase 61d) — a pan
+    // translates ~30 cached module textures instead of blending 130 knob
+    // layers, so every component stays visible, full-res and animating with no
+    // lag. This transient cabinet promotion just covers the pan itself.
     const touchWillChange = () => {
       el.style.willChange = 'transform';
       clearTimeout(wcTimer);
@@ -2113,6 +2395,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
       // Pannable affordance — cursor is inherited, so interactive children
       // (knobs ns-resize, jacks/keys/buttons pointer) still show their own.
       el.style.cursor = (view.z > 1.001 || overflowsV()) ? 'grab' : '';
+      moduleVisRef.current?.update(); // Phase 61: every camera move re-bands visibility
     };
 
     // Keep the rack glued to the viewport: no gaps on the pannable axes,
@@ -2278,6 +2561,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
       clearTimeout(fitTimer);
       clearTimeout(wcTimer);
       ro.disconnect();
+      cameraViewRef.current = null; // Phase 61: a remount mints a fresh view object
       shell.removeEventListener('wheel', onWheel);
       el.removeEventListener('mousedown', onMouseDown);
       el.removeEventListener('dblclick', onDblClick);
@@ -2287,6 +2571,155 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
       window.removeEventListener('resize', fit);
     };
   }, []);
+
+  // ── Phase 61: camera-driven module visibility (content-visibility) ──
+  // On a VERY LARGE custom rack, per-frame visual writes (LED opacity, meter
+  // segments, canvas draws) re-run compositor layerization at a cost that
+  // scales with the rack's total paint complexity (~31 ms at 31 added modules
+  // — the page locks near 30 fps while powered, even idle). content-visibility
+  // removes off-viewport module CONTENTS from the paint artifact, collapsing
+  // that per-run cost. The camera owns the promote/demote boundary: modules
+  // within ~0.5 viewport of the visible band are pinned 'visible' (promoted
+  // ≤2/frame, a screen ahead), returning to 'auto' past 1.0 viewport; after
+  // 1.2 s idle a tight 0.05-viewport sweep maximizes skipping. Far state is
+  // 'auto' not 'hidden' — a banding miss degrades to browser-rendered content,
+  // never a visual hole. contain-intrinsic-size is stamped from each module's
+  // measured box so skipping changes NOTHING about layout (fit() natural
+  // height byte-identical, jack rects stay valid, ResizeObserver can't feed
+  // back). All state in-closure; every write direct (Zero-Re-render Rule).
+  //
+  // **Phase 61b — SIZE GATE (Dylan-reported scroll regression):** toggling a
+  // module's content-visibility invalidates the layer tree → one Layerize pass
+  // per toggle. During a scroll the band moves every frame, so the manager
+  // churns toggles → a Layerize every frame → the main thread saturates and
+  // (because the wheel handler is non-passive main-thread) wheel input lags —
+  // choppy scrolling. On a small rack this is PURE COST: it idles fine (~8 ms)
+  // without culling, and force-rendering every module scrolls perfectly smooth
+  // (matches the "lights out is smooth" observation). Measured: default rack
+  // (1799 px / 29 modules) scroll p95 83 ms with the manager vs 16 ms with it
+  // off. So the manager engages only when the rack is tall enough that idle
+  // culling actually pays — default rack stays fully rendered and smooth.
+  // (NOTE: `will-change: transform` on knobs is CORRECT and stays — removing
+  // it forces repaint-on-pan and made large-rack scroll *worse*, p95 58→117 ms.)
+  useEffect(() => {
+    const cab = cabinetRef.current;
+    if (!cab) return;
+    const clearAll = () => {
+      for (const el of cab.querySelectorAll(`.${styles.module}`)) el.style.contentVisibility = '';
+    };
+    // Layerization pressure only exists while POWERED — that's when the LED /
+    // meter / canvas loops write every frame. Unpowered racks pay nothing at
+    // idle and scroll best with everything rendered, so the manager engages
+    // only with the power on (and clears any leftover skipping on power-off).
+    if (!audio.isPowered) { clearAll(); return; }
+    // Size gate: small/modest racks scroll smoothest fully rendered (see above).
+    // offsetHeight is the true layout height (transform is visual-only) and is
+    // zoom/viewport-independent, so the gate is stable across window sizes.
+    if (cab.offsetHeight <= CULL_MIN_NATH) { clearAll(); return; }
+    let entries  = [];
+    let rafId    = null;
+    let disposed = false;
+
+    const measure = () => {
+      const cabRect = cab.getBoundingClientRect();
+      const natW    = cab.offsetWidth;
+      if (!cabRect.width || !natW) return; // page hidden (display:none)
+      const scale = cabRect.width / natW;  // screen→layout, the getSvgCoords trick
+      entries = [...cab.querySelectorAll(`.${styles.module}`)].map(el => {
+        const r   = el.getBoundingClientRect();
+        const top = (r.top - cabRect.top) / scale;
+        const h   = r.height / scale;
+        // Exact intrinsic size — a skipped module keeps its rendered box
+        // (skipped boxes report the intrinsic size, so re-measures are stable).
+        el.style.containIntrinsicSize = `${(r.width / scale).toFixed(1)}px ${h.toFixed(1)}px`;
+        return { el, top, bottom: top + h, on: el.style.contentVisibility !== 'auto' };
+      });
+    };
+
+    // First-render of a module's contents is a main-thread paint burst;
+    // slicing to ≤2 promotions per frame bounds each burst, and the 1-viewport
+    // lead means it always lands before the module can scroll into view.
+    // Demotions are discards — all processed immediately.
+    const step = () => {
+      rafId = null;
+      let promoted = 0, pending = false;
+      for (const e of entries) {
+        if (e.want === undefined) continue;
+        if (e.want === e.on) { e.want = undefined; continue; }
+        if (!e.want) {
+          e.el.style.contentVisibility = 'auto';
+          e.on = false; e.want = undefined;
+        } else if (promoted < 2) {
+          e.el.style.contentVisibility = 'visible';
+          e.on = true; e.want = undefined; promoted++;
+        } else pending = true;
+      }
+      if (pending) rafId = requestAnimationFrame(step);
+    };
+
+    // Activity-adaptive bands. At the fit-width floor one viewport is ~1800
+    // layout px — half the default-plus rack — so a fixed generous margin
+    // would keep everything rendered and win nothing. Instead: while the
+    // camera moves, promote 0.5 viewports ahead (scroll protection) and only
+    // demote past 1.0 (hysteresis); once the camera has been still for 1.2 s,
+    // sweep to a deep 0.15-viewport band — idle racks reach maximum skipping.
+    // The far state is 'auto', so even a fling that outruns re-promotion gets
+    // browser-rendered content, never a hole.
+    const MOVE_PROMOTE = 0.5;
+    const MOVE_DEMOTE  = 1.0;
+    const IDLE_BAND    = 0.05;
+    const IDLE_MS      = 1200;
+    let idleTimer = null;
+
+    const band = (promoteM, demoteM) => {
+      const view = cameraViewRef.current;
+      if (!view || !entries.length) return;
+      const S = view.s0 * view.z;
+      if (!S || !view.availH) return;
+      const topL = -view.ty / S;               // visible band in layout px
+      const botL = (view.availH - view.ty) / S;
+      const vh   = view.availH / S;            // one viewport height
+      let queued = false;
+      for (const e of entries) {
+        const near = e.bottom > topL - vh * promoteM && e.top < botL + vh * promoteM;
+        const far  = e.bottom < topL - vh * demoteM  || e.top  > botL + vh * demoteM;
+        if (!e.on && near)    { e.want = true;  queued = true; }
+        else if (e.on && far) { e.want = false; queued = true; }
+      }
+      if (queued && rafId === null) rafId = requestAnimationFrame(step);
+    };
+
+    const update = () => {
+      band(MOVE_PROMOTE, MOVE_DEMOTE);
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => band(IDLE_BAND, IDLE_BAND), IDLE_MS);
+    };
+
+    measure();
+    update();
+    // Late font loads can shift module heights — re-stamp intrinsic sizes.
+    document.fonts.ready.then(() => { if (!disposed) { measure(); update(); } });
+
+    // Cabinet size changes (fit()'s width compensation on window resize)
+    // rewrap the expansion row and move modules — re-measure. Intrinsic-size
+    // writes never change a rendered box, so this cannot loop the observer.
+    let roTimer = null;
+    const ro = new ResizeObserver(() => {
+      clearTimeout(roTimer);
+      roTimer = setTimeout(() => { if (!disposed) { measure(); update(); } }, 60);
+    });
+    ro.observe(cab);
+
+    moduleVisRef.current = { update };
+    return () => {
+      disposed = true;
+      clearTimeout(roTimer);
+      clearTimeout(idleTimer);
+      ro.disconnect();
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      moduleVisRef.current = null;
+    };
+  }, [dynModules, hiddenModules, audio.isPowered]);
 
   return (
     <MoogPatchProvider onCableAdded={audio.connect} onCableRemoved={audio.disconnect} onCablesChanged={handleCablesChanged}>
@@ -2301,6 +2734,14 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
         <button className={styles.libraryBtn} onClick={() => setLibraryOpen(true)}>
           ⊞ library
         </button>
+        {/* Workspace toolbar (Phase 63) — save / load the whole rack as a .moog
+            file, or reset to the default startup rack. */}
+        <div className={styles.workspaceBar}>
+          <button className={styles.wsBtn} onClick={resetWorkspace} title="Clear all modules, cables and knob positions; return to the default rack">⟲ reset</button>
+          <button className={styles.wsBtn} onClick={saveSetup} title="Download the entire rack (modules, cables, all knob positions) as a .moog file">▼ save setup</button>
+          <button className={styles.wsBtn} onClick={() => fileInputRef.current?.click()} title="Load a .moog setup file, replacing the current rack">▲ load setup</button>
+          <input ref={fileInputRef} type="file" accept=".moog,application/json" onChange={loadSetup} style={{ display: 'none' }} />
+        </div>
         <LibraryModal
           open={libraryOpen}
           onClose={() => setLibraryOpen(false)}
@@ -2372,6 +2813,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
                       : m.type === 'chordseq' ? <ChordSeqModule number={m.num} onStepsChange={b.chordSteps} onDivisionChange={b.chordDiv} onSetCallback={b.chordStepCb} onRootOctaveChange={b.chordRootOct} onGlideChange={b.chordGlide} />
                       : m.type === 'voc'   ? <VocoderModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vocData} onMicEnable={audio.enableMic} onMicDisable={audio.disableMic} onMicGainChange={audio.updateExtMicParams} getMicLevel={getExtMicLevel} />
                       : m.type === 'qnt'   ? <QuantizerModule number={m.num} onParamUpdate={b.params} onSetCallback={b.qntCb} getTransposeData={b.qntTrp} />
+                      : m.type === 'vowel' ? <VowelModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vowelData} />
                       : null;
                       return (
                         <div
@@ -2490,7 +2932,7 @@ export default function MoogShell({ onNavigateHome, onBusReady }) {
           <div className={styles.kbdBarrier} />
 
           {/* 953 Keyboard Controller — sits below the rack, spans full cabinet width */}
-          <KeyboardModule onUpdate={audio.updateKeyboard} onGlideChange={audio.setKbdGlide} onVibratoChange={audio.setKbdVibrato} />
+          <KeyboardModule onUpdate={audio.updateKeyboard} onGlideChange={audio.setKbdGlide} onVibratoChange={audio.setKbdVibrato} externalActiveRef={recordingActiveRef} />
         </div>
       </div>
       {/* LAST child on purpose: sibling effects run in tree order, so the

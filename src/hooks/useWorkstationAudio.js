@@ -1199,11 +1199,13 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
         }
       }
 
-      // (Re)build Part
+      // (Re)build Part. A region with a live Moog recording (hasAudio) plays via
+      // its Tone.Player in WorkstationShell — its transcription notes are silenced
+      // here so the two don't layer (the transcription is for piano-roll editing).
       if (partChanged || instrumentChanged) {
         const existing = parts.get(r.id);
         if (existing) { existing.dispose(); parts.delete(r.id); }
-        const events = buildRegionEvents(r, notes);
+        const events = r.hasAudio ? [] : buildRegionEvents(r, notes);
         if (events.length > 0) {
           const synth = synths.get(r.id);
           const part = new Tone.Part(
@@ -1936,8 +1938,10 @@ export function scheduleFadeEnvelope(fadeGain, r, mapRef) {
 
 // Internal — change-detection keys
 function computePartKey(r, notes) {
-  // Anything that buildRegionEvents reads.
-  let key = `${r.id}|${r.startMeasure}|${r.durationMeasures}|${r.clipOffset ?? 0}|${r.loopInterval ?? 'n'}|${r.loopPhase ?? 0}|${r.isMuted ? 'm' : ''}`;
+  // Anything that buildRegionEvents reads. `hasAudio` is included so a region
+  // that gains/loses a live Moog recording rebuilds its Part — its transcription
+  // notes are silenced while the recorded audio plays (they're edit-only).
+  let key = `${r.id}|${r.startMeasure}|${r.durationMeasures}|${r.clipOffset ?? 0}|${r.loopInterval ?? 'n'}|${r.loopPhase ?? 0}|${r.isMuted ? 'm' : ''}|${r.hasAudio ? 'A' : ''}`;
   for (const n of notes) {
     if (n.regionId !== r.id) continue;
     key += `|${n.id}:${n.note}:${n.startBeat.toFixed(4)}:${n.durationBeats.toFixed(4)}:${n.velocity ?? 100}`;

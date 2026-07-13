@@ -38,7 +38,12 @@
   cursor: ns-resize;
   user-select: none;
   touch-action: none;
-  will-change: transform;
+  /* Phase 61d: no permanent `will-change: transform` here. A per-knob layer
+     (~130 across the rack) made a Retina pan composite 130 full-res textures
+     every frame — the scroll bottleneck. Layer promotion moved up to `.module`
+     (MoogShell.module.css); knobs paint into their module's cached layer.
+     MoogKnob.jsx re-promotes ONLY the knob being dragged (transient
+     will-change) so live rotation stays crisp. */
   background:
     /* 1. Matte-black body shoulder — ring between metal cap and flutes */
     radial-gradient(

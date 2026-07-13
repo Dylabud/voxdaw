@@ -60,7 +60,7 @@ const KB_NOTE_MAP = Object.fromEntries(
 
 // ──────────── Component ────────────
 
-export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChange }) {
+export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChange, externalActiveRef }) {
   const { registerJack, unregisterJack, startDrag } = useMoogPatch();
 
   const [pressedNote, setPressedNote] = useState(null);
@@ -255,8 +255,10 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
     const down = (e) => {
       // Root keeps visited pages mounted under display:none — don't play the
       // hidden Moog while typing on another page (offsetParent is null under
-      // a display:none ancestor; the module is never position:fixed).
-      if (rootRef.current?.offsetParent === null) return;
+      // a display:none ancestor; the module is never position:fixed). EXCEPTION:
+      // while the Workstation is recording the Moog (externalActiveRef), QWERTY is
+      // allowed through so the user can play the Moog live into the take (Phase 66).
+      if (rootRef.current?.offsetParent === null && !externalActiveRef?.current) return;
       if (e.repeat) return;
       if (e.target.closest('input,textarea,select')) return;
       const noteData = KB_NOTE_MAP[e.key.toLowerCase()];
@@ -268,7 +270,7 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
       onUpdate?.(noteData.hz, true);
     };
     const up = (e) => {
-      if (rootRef.current?.offsetParent === null) return;
+      if (rootRef.current?.offsetParent === null && !externalActiveRef?.current) return;
       const noteData = KB_NOTE_MAP[e.key.toLowerCase()];
       if (!noteData || pressedNoteRef.current !== noteData.name) return;
       pressedByMouseRef.current = false;

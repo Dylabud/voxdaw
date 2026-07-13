@@ -12,12 +12,19 @@ export default function Led({ getValue, color = 'green', label }) {
   useEffect(() => {
     const el = elRef.current;
     if (!el || !getValue) return;
+    let last = -1;
 
     function tick() {
       rafRef.current = requestAnimationFrame(tick);
       const raw = getValue() ?? 0;
       const val = isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0;
-      el.style.opacity = String(0.12 + val * 0.88);
+      // Phase 61: quantize to 1/64 steps (imperceptible) and skip identical
+      // writes — an unchanged style string never invalidates paint, so a
+      // steady or silent LED stops re-triggering compositor layerization.
+      const q = Math.round((0.12 + val * 0.88) * 64) / 64;
+      if (q === last) return;
+      last = q;
+      el.style.opacity = String(q);
     }
 
     tick();

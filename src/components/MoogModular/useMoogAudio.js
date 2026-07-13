@@ -1,5 +1,5 @@
 import * as Tone from 'tone';
-import { useRef, useState, useCallback, useEffect } from 'react';
+import { useRef, useState, useCallback, useEffect, useLayoutEffect } from 'react';
 
 // Sequencer pitch range — same as VCO FREQ knob (C1–C6)
 const SEQ_HZ_MIN  = 32.703;
@@ -8,6 +8,62 @@ const VCO_IDS     = ['vco1', 'vco2', 'vco3', 'vco4', 'vco5'];
 // Dynamic instance-id prefixes that differ from their type name (jack-prefix
 // compatibility with the static modules: reverb2-in, chorus2-in).
 const DYN_ID_PREFIX = { rev: 'reverb', bbd: 'chorus' };
+
+// ── VOWEL / FORMANT module (Phase 64) ──
+// A 3-formant resonant filter bank (F1/F2/F3 parallel bandpass) that colours a
+// raw signal into a vowel. Center frequencies (Hz) are the classic male-voice
+// formant table for the five primary vowels; the VOWEL knob morphs between
+// adjacent columns, SHAPE scales all three (vocal-tract length), and a
+// FORMANT-CV input offsets the morph. Per-formant Q + relative gain are fixed
+// (F1 dominant, giving the vowel its perceived body).
+const VOWEL_ORDER = ['A', 'E', 'I', 'O', 'U'];
+const VOWEL_FORMANTS = {            // [F1, F2, F3] Hz
+  A: [730, 1090, 2440],
+  E: [530, 1840, 2480],
+  I: [270, 2290, 3010],
+  O: [570, 840,  2410],
+  U: [300, 870,  2240],
+};
+const VOWEL_Q    = [11, 13, 15];    // per-formant resonance (higher = more vocal)
+const VOWEL_GAIN = [1.0, 0.55, 0.28]; // F1 loudest → down to F3
+// morph position (0..4) → interpolated [F1,F2,F3]
+function vowelFreqsAt(pos) {
+  const p  = Math.max(0, Math.min(4, pos));
+  const i  = Math.min(3, Math.floor(p));
+  const f  = p - i;
+  const a  = VOWEL_FORMANTS[VOWEL_ORDER[i]];
+  const b  = VOWEL_FORMANTS[VOWEL_ORDER[i + 1]];
+  return [0, 1, 2].map(k => a[k] + (b[k] - a[k]) * f);
+}
+
+// ── LFO tempo-sync (Phase 65) ──
+// When a clock is patched into an LFO's SYNC jack, the RATE knob stops setting a
+// free Hz and instead quantizes to one of these musical divisions — `beats` = how
+// many quarter-note beats one full LFO cycle spans (4 beats = 1 bar in 4/4). The
+// synced value is computed deterministically from Transport.seconds in a rAF
+// (Tone.LFO.sync() proved NOT phase-repeatable in v15.1.22 — 0.28 phase error).
+const LFO_SYNC_DIVS = [
+  { id: '4m', label: '4 BAR', beats: 16 },
+  { id: '2m', label: '2 BAR', beats: 8  },
+  { id: '1m', label: '1 BAR', beats: 4  },
+  { id: '2n', label: '1/2',   beats: 2  },
+  { id: '4n', label: '1/4',   beats: 1  },
+  { id: '8n', label: '1/8',   beats: 0.5 },
+];
+// RATE knob 0..1 → division (low = slow/4-bar, high = fast/eighth).
+function lfoDivForRate(rate) {
+  const i = Math.min(LFO_SYNC_DIVS.length - 1, Math.max(0, Math.floor((rate ?? 0.3) * LFO_SYNC_DIVS.length)));
+  return LFO_SYNC_DIVS[i];
+}
+// Unit LFO waveform, phase 0..1 → −1..+1 (matches the four output-jack shapes).
+function lfoWaveValue(type, phase) {
+  switch (type) {
+    case 'square':   return phase < 0.5 ? 1 : -1;
+    case 'sawtooth': return 2 * phase - 1;
+    case 'triangle': return phase < 0.5 ? (4 * phase - 1) : (3 - 4 * phase);
+    default:         return Math.sin(2 * Math.PI * phase); // sine
+  }
+}
 
 // 914 Fixed Filter Bank — 14 bands: LP shelf + 12 bandpass + HP shelf.
 // Frequencies spaced at √2 intervals (2 bands/octave), authentic to the Moog 914.
@@ -276,18 +332,20 @@ function buildJackMap(n) {
     'env3-out':  { type: 'out', node: n.env3 },
     // ── LFO ──
     // lfo-fm → lfo1modGain (Gain): patched CV * MOD DEPTH knob gain → lfo.frequency
-    'lfo-sync':  { type: 'in',  dest: null },
+    // Output jacks route from `${id}Out` (post free/sync crossfade) but still set
+    // the waveform on the oscillator via waveformTarget (Phase 65).
+    'lfo-sync':  { type: 'in',  dest: null, isLfoSync: true, lfoId: 'lfo' },
     'lfo-fm':    { type: 'in',  dest: n.lfo1modGain },
-    'lfo-sin':   { type: 'out', node: n.lfo,  waveform: 'sine'      },
-    'lfo-tri':   { type: 'out', node: n.lfo,  waveform: 'triangle'  },
-    'lfo-sqr':   { type: 'out', node: n.lfo,  waveform: 'square'    },
-    'lfo-saw':   { type: 'out', node: n.lfo,  waveform: 'sawtooth'  },
-    'lfo2-sync': { type: 'in',  dest: null },
+    'lfo-sin':   { type: 'out', node: n.lfoOut,  waveformTarget: n.lfo,  waveform: 'sine'      },
+    'lfo-tri':   { type: 'out', node: n.lfoOut,  waveformTarget: n.lfo,  waveform: 'triangle'  },
+    'lfo-sqr':   { type: 'out', node: n.lfoOut,  waveformTarget: n.lfo,  waveform: 'square'    },
+    'lfo-saw':   { type: 'out', node: n.lfoOut,  waveformTarget: n.lfo,  waveform: 'sawtooth'  },
+    'lfo2-sync': { type: 'in',  dest: null, isLfoSync: true, lfoId: 'lfo2' },
     'lfo2-fm':   { type: 'in',  dest: n.lfo2modGain },
-    'lfo2-sin':  { type: 'out', node: n.lfo2, waveform: 'sine'      },
-    'lfo2-tri':  { type: 'out', node: n.lfo2, waveform: 'triangle'  },
-    'lfo2-sqr':  { type: 'out', node: n.lfo2, waveform: 'square'    },
-    'lfo2-saw':  { type: 'out', node: n.lfo2, waveform: 'sawtooth'  },
+    'lfo2-sin':  { type: 'out', node: n.lfo2Out, waveformTarget: n.lfo2, waveform: 'sine'      },
+    'lfo2-tri':  { type: 'out', node: n.lfo2Out, waveformTarget: n.lfo2, waveform: 'triangle'  },
+    'lfo2-sqr':  { type: 'out', node: n.lfo2Out, waveformTarget: n.lfo2, waveform: 'square'    },
+    'lfo2-saw':  { type: 'out', node: n.lfo2Out, waveformTarget: n.lfo2, waveform: 'sawtooth'  },
     // ── Sequencer 1 ──
     'seq-pitch-out': { type: 'out', node: n.seqPitchOut },
     'seq-gate-out':  { type: 'out', node: null, isGate: true },
@@ -348,6 +406,21 @@ export default function useMoogAudio() {
   const vocShiftLfoRateRefs   = useRef({ voc: 0.7 });  // Hz
   const vocShiftLfoAmpRefs    = useRef({ voc: 0 });    // octaves of swing
   const vocShiftLastRatioRefs = useRef({});            // delta gates — static shift settles to 0 writes
+  // Vowel/formant module state (Phase 64) — id-keyed. vowelIdsRef is the list
+  // the vowelTick rAF (sole writer of the 3 filter frequencies) iterates. The
+  // knob updaters write morph/shape refs ONLY; the rAF combines morph + shape +
+  // the FORMANT-CV input into the final formant frequencies.
+  const vowelIdsRef      = useRef([]);                 // no static instance — dynamic only
+  const vowelMorphRefs   = useRef({});                 // id → morph position 0..4 (A..U)
+  const vowelShapeRefs   = useRef({});                 // id → tract-scale factor
+  const vowelLastFreqRefs = useRef({});                // id → last [F1,F2,F3] (delta gate)
+  // ── LFO tempo-sync (Phase 65) ── all id-keyed; cover static 'lfo'/'lfo2' + dynamics.
+  const lfoSyncActiveRef = useRef({});                 // id → true when a clock is patched to -sync
+  const lfoRateRefs      = useRef({});                 // id → RATE knob 0..1 (drives sync division)
+  const lfoOffsetRefs    = useRef({});                 // id → MOD knob 0..1, reused as sync phase offset
+  const lfoDepthRefs     = useRef({});                 // id → DEPTH knob 0..1 (sync output scale)
+  const lfoWaveRefs      = useRef({});                 // id → active waveform type (for the synced value)
+  const lfoSyncLastRefs  = useRef({});                 // id → last written synced value (delta gate)
   // Glide time in seconds (0 = off). Written by the UI knob, read by the Tone.Loop.
   const kbdGlideRef   = useRef(0);
   const chordSeqGlideRefs = useRef({ chordseq: 0 }); // csId → glide (s) for root/3rd/5th CV outs
@@ -429,7 +502,9 @@ export default function useMoogAudio() {
   const allVcoIdsRef    = useRef([...VCO_IDS]);
   // Monotonic per-type counters — minted eagerly, never reused. Start above the
   // static instances so ids can never collide (vcf1/vcf2 static → dynamic from 3, etc.).
-  const nextInstNumRef  = useRef({ vco: 6, noise: 4, vcf: 3, lfo: 3, vca: 4, env: 4, rev: 3, bbd: 2, kick: 2, ffb: 2, seq: 3, chordseq: 2, voc: 2, qnt: 2 });
+  // vowel starts at 1 — it's the first dynamic-ONLY type (no static instance in
+  // the default rack), unlike the others which start past their statics.
+  const nextInstNumRef  = useRef({ vco: 6, noise: 4, vcf: 3, lfo: 3, vca: 4, env: 4, rev: 3, bbd: 2, kick: 2, ffb: 2, seq: 3, chordseq: 2, voc: 2, qnt: 2, vowel: 1 });
   // Per-instance hard sync (Phase 60d): wireHardSyncRef holds the wire() closure
   // once the worklet module loads (null before load / after unmount) so addModule
   // can mint a worklet for VCOs added later. dynVcoSyncRef tracks each dynamic
@@ -580,7 +655,16 @@ export default function useMoogAudio() {
     }
   }, chordSeqDivisionRefs.current[csId] ?? '1m'), []);
 
-  useEffect(() => {
+  // Node creation runs in a LAYOUT effect (not passive): React fires ALL layout
+  // effects before ANY passive effect, so the nodes exist by the time each
+  // module's passive `onParamUpdate` effect fires on mount. As a plain
+  // useEffect this was a passive PARENT effect, which runs AFTER the child
+  // module passive effects — so a module's mount-time param write hit
+  // `nodesRef.current === null` and no-op'd, leaving the audio at each node's
+  // hardcoded default until the knob was moved. Invisible pre-Phase-63 (knobs
+  // always started at those same defaults); the bug surfaced once saved
+  // settings could differ from the node defaults. (Phase 63b fix.)
+  useLayoutEffect(() => {
     const n = {
       // frequency: 0 — the glideBus Signal (below) is the sole pitch writer.
       // This keeps vco.frequency.value permanently at 0 so glideBus + FM add cleanly.
@@ -637,6 +721,16 @@ export default function useMoogAudio() {
       // 32-sample buffer = 0.73ms at 44100Hz — effectively instantaneous at LFO rates.
       lfoWaveAnalyser:  new Tone.Analyser('waveform', 32),
       lfo2WaveAnalyser: new Tone.Analyser('waveform', 32),
+
+      // LFO tempo-sync output stage (Phase 65). Every output jack taps `${id}Out`.
+      // Free mode: oscillator → oscGain(1) → Out. Sync mode: syncSig (rAF-written)
+      // → syncGain(1) → Out, oscGain crossfaded to 0. The two gains crossfade over
+      // 50 ms so mode flips are click-free (the setArpFx pattern). Meter + wave
+      // analyser tap Out so the LED/display reflect whichever source is live.
+      lfoOut:      new Tone.Gain(1),   lfo2Out:      new Tone.Gain(1),
+      lfoOscGain:  new Tone.Gain(1),   lfo2OscGain:  new Tone.Gain(1),
+      lfoSyncSig:  new Tone.Signal(0), lfo2SyncSig:  new Tone.Signal(0),
+      lfoSyncGain: new Tone.Gain(0),   lfo2SyncGain: new Tone.Gain(0),
       master:      new Tone.Volume(-14),             // no longer goes direct to Destination
       seqMasterGate: new Tone.Gain(1).toDestination(), // sole gateway to speakers — Loop gates here
       analyser:    new Tone.Analyser('waveform', 512),
@@ -1015,9 +1109,16 @@ export default function useMoogAudio() {
     n.reverb.connect(n.reverbAnalyser);
     n.reverb2.connect(n.reverb2Analyser);
 
+    // LFO output stage (Phase 65): osc → oscGain → Out; syncSig → syncGain → Out.
+    // Out is the sole node the output jacks + meter + wave analyser tap.
+    n.lfo.connect(n.lfoOscGain);     n.lfoOscGain.connect(n.lfoOut);
+    n.lfoSyncSig.connect(n.lfoSyncGain); n.lfoSyncGain.connect(n.lfoOut);
+    n.lfo2.connect(n.lfo2OscGain);   n.lfo2OscGain.connect(n.lfo2Out);
+    n.lfo2SyncSig.connect(n.lfo2SyncGain); n.lfo2SyncGain.connect(n.lfo2Out);
+
     // Level meter taps — all dead-end side connections, do not affect audio routing.
-    n.lfo.connect(n.lfoMeter);
-    n.lfo2.connect(n.lfo2Meter);
+    n.lfoOut.connect(n.lfoMeter);
+    n.lfo2Out.connect(n.lfo2Meter);
 
     // Rate-mod Gain nodes feed directly into each LFO's frequency AudioParam.
     // When no cable is patched (gain=0) this adds exactly 0 Hz — fully transparent.
@@ -1025,8 +1126,8 @@ export default function useMoogAudio() {
     n.lfo2modGain.connect(n.lfo2.frequency);
 
     // Waveform analyser taps — dead-end, do not affect audio routing.
-    n.lfo.connect(n.lfoWaveAnalyser);
-    n.lfo2.connect(n.lfo2WaveAnalyser);
+    n.lfoOut.connect(n.lfoWaveAnalyser);
+    n.lfo2Out.connect(n.lfo2WaveAnalyser);
     n.env1.connect(n.env1Meter);
     n.env2.connect(n.env2Meter);
     n.env3.connect(n.env3Meter);
@@ -1211,6 +1312,59 @@ export default function useMoogAudio() {
     };
     vocShiftTick();
 
+    // Vowel/formant rAF (Phase 64) — SOLE writer of every vowel instance's 3
+    // formant filter frequencies. Combines the VOWEL-knob morph ref, the SHAPE
+    // ref, and the sampled FORMANT-CV level; a per-instance delta gate makes an
+    // idle module cost zero AudioParam writes (the vocShiftTick pattern).
+    let vowelRafId;
+    const vowelTick = () => {
+      vowelRafId = requestAnimationFrame(vowelTick);
+      const ids = vowelIdsRef.current;
+      if (ids.length === 0) return;
+      const now = Tone.context.rawContext.currentTime;
+      for (const id of ids) {
+        let cv = 0;
+        const buf = n[`${id}CvAnalyser`]?.getValue();
+        if (buf && buf.length) { let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i]; cv = s / buf.length; }
+        const morph = (vowelMorphRefs.current[id] ?? 2) + cv * 4; // CV ±full A..U sweep
+        const shape = vowelShapeRefs.current[id] ?? 1.0;
+        const scaled = vowelFreqsAt(morph).map(f => Math.max(20, Math.min(18000, f * shape)));
+        const last = vowelLastFreqRefs.current[id];
+        if (last && Math.abs(scaled[0] - last[0]) < 0.5 && Math.abs(scaled[1] - last[1]) < 0.5 && Math.abs(scaled[2] - last[2]) < 0.5) continue;
+        for (let k = 0; k < 3; k++) n[`${id}F${k}`]?.frequency.setValueAtTime(scaled[k], now);
+        vowelLastFreqRefs.current[id] = scaled;
+      }
+    };
+    vowelTick();
+
+    // ── LFO tempo-sync rAF (Phase 65) ── sole writer of each synced LFO's SyncSig.
+    // Value is derived deterministically from Transport.seconds so phase is exact,
+    // repeatable, and lines up with the sequencer grid; the OFFSET knob rotates the
+    // start point. Idle (no synced LFO) costs one `for…in` over an empty object.
+    let lfoSyncRafId;
+    const lfoSyncTick = () => {
+      lfoSyncRafId = requestAnimationFrame(lfoSyncTick);
+      const active = lfoSyncActiveRef.current;
+      const bpm = Tone.Transport.bpm.value;
+      const t   = Tone.Transport.seconds;
+      const now = Tone.context.rawContext.currentTime;
+      for (const id in active) {
+        if (!active[id] || !n[`${id}SyncSig`]) continue;
+        const div       = lfoDivForRate(lfoRateRefs.current[id]);
+        const periodSec = div.beats * (60 / bpm);
+        if (!(periodSec > 0)) continue;
+        const offset = lfoOffsetRefs.current[id] ?? 0;
+        let phase = ((t / periodSec) + offset) % 1;
+        if (phase < 0) phase += 1;
+        const v = lfoWaveValue(lfoWaveRefs.current[id] ?? 'sine', phase) * (lfoDepthRefs.current[id] ?? 0.5);
+        const last = lfoSyncLastRefs.current[id];
+        if (last !== undefined && Math.abs(v - last) < 0.001) continue;
+        n[`${id}SyncSig`].setTargetAtTime(v, now, 0.008); // smooth the 60 Hz steps
+        lfoSyncLastRefs.current[id] = v;
+      }
+    };
+    lfoSyncTick();
+
     nodesRef.current   = n;
     jackMapRef.current = buildJackMap(n);
 
@@ -1345,6 +1499,8 @@ export default function useMoogAudio() {
       cancelAnimationFrame(qntOverrideRafId);
       cancelAnimationFrame(vibratoRafId);
       cancelAnimationFrame(vocShiftRafId);
+      cancelAnimationFrame(vowelRafId);
+      cancelAnimationFrame(lfoSyncRafId);
       // Release the mic device if it was opened, so the OS mic indicator clears on unmount.
       if (extMicRef.current) {
         try { extMicRef.current.close(); } catch (_) {}
@@ -1388,6 +1544,16 @@ export default function useMoogAudio() {
       kickTuneRef.current   = { kick: 55 };
       kickDecayRef.current  = { kick: 0.4 };
       kickTrigCbRef.current = {};
+      vowelIdsRef.current           = [];
+      vowelMorphRefs.current        = {};
+      vowelShapeRefs.current        = {};
+      vowelLastFreqRefs.current     = {};
+      lfoSyncActiveRef.current      = {};
+      lfoRateRefs.current           = {};
+      lfoOffsetRefs.current         = {};
+      lfoDepthRefs.current          = {};
+      lfoWaveRefs.current           = {};
+      lfoSyncLastRefs.current       = {};
       vocIdsRef.current             = ['voc'];
       vocShiftBaseRefs.current      = { voc: 1.0 };
       vocShiftLfoRateRefs.current   = { voc: 0.7 };
@@ -1585,7 +1751,13 @@ export default function useMoogAudio() {
     const n = nodesRef.current;
     if (!n || !nextInstNumRef.current[type]) return null;
     let num;
-    if (Number.isInteger(desiredNum) && desiredNum >= 2 &&
+    // Honor the persisted number (>= 1). It was >= 2 to avoid ever minting a
+    // dynamic instance over a static's num-1, but the rack store only ever holds
+    // real DYNAMIC instances, so num 1 is legit for a dynamic-only type (vowel).
+    // Honoring it is also what keeps a StrictMode remount reusing the same id
+    // instead of drifting (vowel1 → vowel2) — the num-1 case previously fell to
+    // the mint path and double-incremented.
+    if (Number.isInteger(desiredNum) && desiredNum >= 1 &&
         !dynInstancesRef.current.has(`${DYN_ID_PREFIX[type] ?? type}${desiredNum}`)) {
       num = desiredNum;
       nextInstNumRef.current[type] = Math.max(nextInstNumRef.current[type], desiredNum + 1);
@@ -1725,20 +1897,27 @@ export default function useMoogAudio() {
       n[id]                  = new Tone.LFO({ frequency: 0.5, type: 'sine', min: -1, max: 1 });
       n[`${id}modGain`]      = new Tone.Gain(0);
       n[`${id}WaveAnalyser`] = new Tone.Analyser('waveform', 32);
+      // Tempo-sync output stage (Phase 65) — mirrors the static lfo/lfo2 topology.
+      n[`${id}Out`]      = new Tone.Gain(1);
+      n[`${id}OscGain`]  = new Tone.Gain(1);
+      n[`${id}SyncSig`]  = new Tone.Signal(0);
+      n[`${id}SyncGain`] = new Tone.Gain(0);
       n[`${id}modGain`].connect(n[id].frequency);
-      n[id].connect(n[`${id}WaveAnalyser`]);
+      n[id].connect(n[`${id}OscGain`]);      n[`${id}OscGain`].connect(n[`${id}Out`]);
+      n[`${id}SyncSig`].connect(n[`${id}SyncGain`]); n[`${id}SyncGain`].connect(n[`${id}Out`]);
+      n[`${id}Out`].connect(n[`${id}WaveAnalyser`]);
       if (isPoweredRef.current) { try { n[id].start(); } catch (_) {} }
       const jackEntries = {
-        [`${id}-sync`]: { type: 'in',  dest: null },
+        [`${id}-sync`]: { type: 'in',  dest: null, isLfoSync: true, lfoId: id },
         [`${id}-fm`]:   { type: 'in',  dest: n[`${id}modGain`] },
-        [`${id}-sin`]:  { type: 'out', node: n[id], waveform: 'sine'     },
-        [`${id}-tri`]:  { type: 'out', node: n[id], waveform: 'triangle' },
-        [`${id}-sqr`]:  { type: 'out', node: n[id], waveform: 'square'   },
-        [`${id}-saw`]:  { type: 'out', node: n[id], waveform: 'sawtooth' },
+        [`${id}-sin`]:  { type: 'out', node: n[`${id}Out`], waveformTarget: n[id], waveform: 'sine'     },
+        [`${id}-tri`]:  { type: 'out', node: n[`${id}Out`], waveformTarget: n[id], waveform: 'triangle' },
+        [`${id}-sqr`]:  { type: 'out', node: n[`${id}Out`], waveformTarget: n[id], waveform: 'square'   },
+        [`${id}-saw`]:  { type: 'out', node: n[`${id}Out`], waveformTarget: n[id], waveform: 'sawtooth' },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, { type, num,
-        nodeNames: [id, `${id}modGain`, `${id}WaveAnalyser`],
+        nodeNames: [id, `${id}modGain`, `${id}WaveAnalyser`, `${id}Out`, `${id}OscGain`, `${id}SyncSig`, `${id}SyncGain`],
         sourceNames: [id], jackIds: Object.keys(jackEntries) });
       return { id, num };
     }
@@ -1769,6 +1948,53 @@ export default function useMoogAudio() {
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, { type, num,
         nodeNames: [id], sourceNames: [id], jackIds: Object.keys(jackEntries) });
+      return { id, num };
+    }
+
+    if (type === 'vowel') {
+      const id = `vowel${num}`;
+      n[`${id}In`]  = new Tone.Gain(1);
+      // makeup (parallel bandpasses trim ~7× of level) → brick-wall limiter.
+      // The vowels are very unequal in level (open 'A' peaks ~4× the closed
+      // 'I'/'U' because its low F1 sits in a strong region of the source), so a
+      // big fixed makeup alone would clip 'A'. The limiter lets the closed
+      // vowels be loud while catching 'A'/'O' peaks click-free.
+      n[`${id}Mix`] = new Tone.Gain(7);
+      // Hard-knee limiter (Tone.Limiter's default 30 dB soft knee barely
+      // compresses). knee:0 + ratio 20 brick-walls at ~-1 dB so 'A'/'O' don't
+      // clip while the closed vowels stay at full makeup. -out jack + display
+      // tap here.
+      n[`${id}Out`] = new Tone.Compressor({ threshold: -1, ratio: 20, knee: 0, attack: 0.003, release: 0.05 });
+      n[`${id}Mix`].connect(n[`${id}Out`]);
+      n[`${id}CvIn`]       = new Tone.Gain(1);     // FORMANT-CV input buffer
+      n[`${id}CvAnalyser`] = new Tone.Analyser('waveform', 128); // rAF reads the CV level
+      n[`${id}CvIn`].connect(n[`${id}CvAnalyser`]);
+      const nodeNames = [`${id}In`, `${id}Mix`, `${id}Out`, `${id}CvIn`, `${id}CvAnalyser`];
+      // Default morph = 2 ('I'), matching VowelModule's knob default (0.5 → pos 2).
+      const f0 = vowelFreqsAt(2);
+      for (let k = 0; k < 3; k++) {
+        n[`${id}F${k}`] = new Tone.Filter({ type: 'bandpass', frequency: f0[k], Q: VOWEL_Q[k] });
+        n[`${id}G${k}`] = new Tone.Gain(VOWEL_GAIN[k]);
+        n[`${id}In`].connect(n[`${id}F${k}`]);
+        n[`${id}F${k}`].connect(n[`${id}G${k}`]);
+        n[`${id}G${k}`].connect(n[`${id}Mix`]);
+        nodeNames.push(`${id}F${k}`, `${id}G${k}`);
+      }
+      n[`${id}Analyser`] = new Tone.Analyser('fft', 256); // output spectrum → formant display
+      n[`${id}Out`].connect(n[`${id}Analyser`]);
+      nodeNames.push(`${id}Analyser`);
+      // Seed morph/shape refs + register for the rAF (sole filter-freq writer).
+      vowelMorphRefs.current[id]  = 2;
+      vowelShapeRefs.current[id]  = 1.0;
+      vowelLastFreqRefs.current[id] = null;
+      vowelIdsRef.current = [...vowelIdsRef.current, id];
+      const jackEntries = {
+        [`${id}-in`]:    { type: 'in',  dest: n[`${id}In`] },
+        [`${id}-cv-in`]: { type: 'in',  dest: n[`${id}CvIn`] },
+        [`${id}-out`]:   { type: 'out', node: n[`${id}Out`] },
+      };
+      jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
+      dynInstancesRef.current.set(id, { type, num, nodeNames, sourceNames: [], jackIds: Object.keys(jackEntries) });
       return { id, num };
     }
 
@@ -2009,6 +2235,31 @@ export default function useMoogAudio() {
     return null;
   }, [buildSeqLoop, buildChordSeqLoop]);
 
+  // Shared LFO param applier (static + dynamic — Phase 65). Stores every knob
+  // value into the id-keyed refs the sync rAF reads, AND drives the free-running
+  // oscillator's Hz/amplitude/type/mod-gain. In sync mode the oscillator is
+  // crossfaded to silent (applyLfoMode) and the rAF owns the audible signal, so
+  // these writes to the muted oscillator are harmless; RATE/OFFSET/DEPTH/type
+  // still land in the refs and take effect on the synced value immediately.
+  const applyLfoParams = useCallback((id, { rate, depth, type, modDepth } = {}) => {
+    const n = nodesRef.current; if (!n || !n[id]) return;
+    // Legacy quirk: the static LFO's rate-mod gain is `lfo1modGain`, not `lfomodGain`.
+    const modName = id === 'lfo' ? 'lfo1modGain' : `${id}modGain`;
+    if (rate     !== undefined) { lfoRateRefs.current[id]   = rate;  safeRamp(n[id].frequency, 0.1 * Math.pow(300, rate)); }
+    if (depth    !== undefined) { lfoDepthRefs.current[id]  = depth; safeRamp(n[id].amplitude, depth); }
+    if (type     !== undefined) { lfoWaveRefs.current[id]   = type;  n[id].type = type; }
+    // MOD knob doubles as the sync OFFSET (phase) — store it either way.
+    if (modDepth !== undefined) { lfoOffsetRefs.current[id] = modDepth; if (n[modName]) safeRamp(n[modName].gain, modDepth * 10); }
+  }, []);
+
+  // Click-free crossfade between free (oscillator) and sync (rAF signal) output.
+  const applyLfoMode = useCallback((id, synced) => {
+    const n = nodesRef.current; if (!n || !n[`${id}OscGain`]) return;
+    if (synced) { safeRamp(n[`${id}OscGain`].gain, 0); safeRamp(n[`${id}SyncGain`].gain, 1); }
+    else        { safeRamp(n[`${id}OscGain`].gain, 1); safeRamp(n[`${id}SyncGain`].gain, 0);
+                  lfoSyncLastRefs.current[id] = undefined; }
+  }, []);
+
   // Generic param dispatch for dynamic instances (Phase 60c) — mirrors each
   // static updater's mapping exactly. UI passes the same param objects the
   // static modules send; shell binds `(p) => updateDynModuleParams(id, p)`.
@@ -2027,10 +2278,7 @@ export default function useMoogAudio() {
         if (params.gain !== undefined) safeRamp(n[id].gain, params.gain);
         break;
       case 'lfo':
-        if (params.rate     !== undefined) safeRamp(n[id].frequency, 0.1 * Math.pow(300, params.rate));
-        if (params.depth    !== undefined) safeRamp(n[id].amplitude, params.depth);
-        if (params.type     !== undefined) n[id].type = params.type;
-        if (params.modDepth !== undefined) safeRamp(n[`${id}modGain`].gain, params.modDepth * 10);
+        applyLfoParams(id, params);
         break;
       case 'rev':
         if (params.roomSize !== undefined) safeRamp(n[id].roomSize, params.roomSize);
@@ -2040,6 +2288,11 @@ export default function useMoogAudio() {
         if (params.rate  !== undefined) safeRamp(n[id].frequency, 0.1 * Math.pow(50, params.rate));
         if (params.depth !== undefined) n[id].depth = params.depth; // plain setter — not an AudioParam
         if (params.wet   !== undefined) safeRamp(n[id].wet, params.wet);
+        break;
+      case 'vowel':
+        // Write refs ONLY — vowelTick is the sole writer of the filter freqs.
+        if (params.vowel !== undefined) vowelMorphRefs.current[id] = Math.max(0, Math.min(4, params.vowel * 4));
+        if (params.shape !== undefined) vowelShapeRefs.current[id] = 0.7 + params.shape * 0.6; // tract scale 0.7..1.3
         break;
       case 'kick':
         applyKickParams(id, params);
@@ -2061,7 +2314,7 @@ export default function useMoogAudio() {
         break;
       default: break; // vco uses updateVcoParams, env uses updateEnvParams (both id-keyed already)
     }
-  }, [applyKickParams, applyVocoderParams]);
+  }, [applyKickParams, applyVocoderParams, applyLfoParams]);
 
   // Instantaneous LFO phase by instance id — generic name composition covers
   // static ('lfo'/'lfo2') and dynamic ('lfo3'+) analysers alike.
@@ -2141,6 +2394,20 @@ export default function useMoogAudio() {
       delete vocShiftLfoAmpRefs.current[id];
       delete vocShiftLastRatioRefs.current[id];
       vocIdsRef.current = vocIdsRef.current.filter(v => v !== id);
+    }
+    if (inst.type === 'vowel') {
+      vowelIdsRef.current = vowelIdsRef.current.filter(v => v !== id); // stop the rAF iterating it
+      delete vowelMorphRefs.current[id];
+      delete vowelShapeRefs.current[id];
+      delete vowelLastFreqRefs.current[id];
+    }
+    if (inst.type === 'lfo') {
+      delete lfoSyncActiveRef.current[id]; // stop the sync rAF iterating it
+      delete lfoRateRefs.current[id];
+      delete lfoOffsetRefs.current[id];
+      delete lfoDepthRefs.current[id];
+      delete lfoWaveRefs.current[id];
+      delete lfoSyncLastRefs.current[id];
     }
     if (inst.type === 'chordseq') {
       const loop = chordSeqLoopsRef.current[id];
@@ -2261,6 +2528,19 @@ export default function useMoogAudio() {
     }
 
     if (from.type !== 'out' || to.type !== 'in') return;
+
+    // LFO tempo-sync (Phase 65): any clock/CV patched into an LFO's -sync jack
+    // engages sync mode. No audio is routed — the value is computed in lfoSyncTick
+    // from the Transport grid; the cable is purely the mode gesture.
+    if (to.isLfoSync) {
+      const lid = to.lfoId;
+      lfoSyncActiveRef.current[lid] = true;
+      lfoSyncLastRefs.current[lid]  = undefined;
+      applyLfoMode(lid, true);
+      connectionsRef.current.set(key, { isLfoSync: true, lfoId: lid });
+      return;
+    }
+
     if (from.node === null) return; // unimplemented output (e.g. seq-clk-out)
 
     // VCO cv-in — managed by glideBus, never audio-connected directly.
@@ -2323,6 +2603,9 @@ export default function useMoogAudio() {
     // routing node (e.g. n.vco2bus) when they differ.
     const waveformNode = from.waveformTarget ?? from.node;
     if (from.waveform) waveformNode.type = from.waveform;
+    // Keep the synced value's waveform in step with whichever LFO output is patched.
+    const lfoWaveMatch = effFrom.match(/^(lfo\d*)-(sin|tri|sqr|saw)$/);
+    if (lfoWaveMatch) lfoWaveRefs.current[lfoWaveMatch[1]] = from.waveform;
 
     // Chord-seq → quantizer scale override: when any chord seq's cv-out is
     // patched to qnt-transpose-in, THAT instance's loop takes ownership of the
@@ -2354,7 +2637,7 @@ export default function useMoogAudio() {
     // A CV source now feeds a quantizer — its worklet takes over qnt-driven
     // VCO pitch; any knob-stepper glow on that instance's VCOs turns off.
     if (/^qnt\d*-cv-in$/.test(effTo)) notifyKnobQuantize();
-  }, [qntHasCvInput, applyVcoKnobQuantize, notifyKnobQuantize]);
+  }, [qntHasCvInput, applyVcoKnobQuantize, notifyKnobQuantize, applyLfoMode]);
 
   const disconnect = useCallback((fromId, toId) => {
     // Mirror the same direction normalization as connect() so the key matches.
@@ -2370,6 +2653,22 @@ export default function useMoogAudio() {
     const key  = `${effFrom}→${effTo}`;
     const conn = connectionsRef.current.get(key);
     if (!conn) return;
+
+    // LFO tempo-sync cable removed (Phase 65) — revert to free-running unless
+    // another cable still feeds this LFO's -sync jack (multi-patch safety).
+    if (conn.isLfoSync) {
+      const lid = conn.lfoId;
+      connectionsRef.current.delete(key);
+      let stillSynced = false;
+      for (const c of connectionsRef.current.values()) {
+        if (c.isLfoSync && c.lfoId === lid) { stillSynced = true; break; }
+      }
+      if (!stillSynced) {
+        lfoSyncActiveRef.current[lid] = false;
+        applyLfoMode(lid, false);
+      }
+      return;
+    }
 
     if (conn.isGate) {
       gateActionsRef.current.delete(key); // keyed by cable key, not toId
@@ -2423,7 +2722,7 @@ export default function useMoogAudio() {
         if (vcoActiveCvRef.current[id] === cvOutSrc) applyVcoKnobQuantize(id);
       notifyKnobQuantize();
     }
-  }, [applyVcoKnobQuantize, notifyKnobQuantize]);
+  }, [applyVcoKnobQuantize, notifyKnobQuantize, applyLfoMode]);
 
   // Update VCO audio parameters — single writer per node.
   // vcoId: 'vco1' | 'vco2' | 'vco3'
@@ -2547,24 +2846,11 @@ export default function useMoogAudio() {
   // depth (0–1) → lfo.amplitude 0–1 (scales the ±1 output swing)
   // type  (string) → lfo.type; UI-driven default, overridden by whichever waveform jack
   //        is patched (the connect() function also sets lfo.type via from.waveform).
-  const updateLfoParams = useCallback(({ rate, depth, type, modDepth } = {}) => {
-    const n = nodesRef.current;
-    if (!n) return;
-    if (rate     !== undefined) safeRamp(n.lfo.frequency,  0.1 * Math.pow(300, rate));
-    if (depth    !== undefined) safeRamp(n.lfo.amplitude,  depth);
-    if (type     !== undefined) n.lfo.type = type;
-    // modDepth (0–1) → lfo1modGain.gain (0–10 Hz): incoming CV ±1 swings rate by ±10 Hz max.
-    if (modDepth !== undefined) safeRamp(n.lfo1modGain.gain, modDepth * 10);
-  }, []);
-
-  const updateLfo2Params = useCallback(({ rate, depth, type, modDepth } = {}) => {
-    const n = nodesRef.current;
-    if (!n) return;
-    if (rate     !== undefined) safeRamp(n.lfo2.frequency, 0.1 * Math.pow(300, rate));
-    if (depth    !== undefined) safeRamp(n.lfo2.amplitude, depth);
-    if (type     !== undefined) n.lfo2.type = type;
-    if (modDepth !== undefined) safeRamp(n.lfo2modGain.gain, modDepth * 10);
-  }, []);
+  // Both static LFOs route through the shared applier (Phase 65) so the sync refs
+  // stay populated. modDepth (0–1) → lfoNmodGain.gain (0–10 Hz) in free mode; the
+  // same value is reused as the sync OFFSET (phase). See applyLfoParams.
+  const updateLfoParams  = useCallback((p) => applyLfoParams('lfo',  p), [applyLfoParams]);
+  const updateLfo2Params = useCallback((p) => applyLfoParams('lfo2', p), [applyLfoParams]);
 
   // Update reverb parameters — single writer on n.reverb.
   // roomSize (0–1): 0 = small/tight, 1 = large/diffuse.
@@ -2875,6 +3161,12 @@ export default function useMoogAudio() {
     return n?.[`${id}Analyser`]?.getValue() ?? null;
   }, []);
 
+  // Vowel/formant output spectrum (Phase 64) → drives the module's formant display.
+  const getVowelAnalyserData = useCallback((id) => {
+    const n = nodesRef.current;
+    return n?.[`${id}Analyser`]?.getValue() ?? null;
+  }, []);
+
   // Built-in vocoder mic — opens a Tone.UserMedia stream (requires a user gesture for the
   // browser permission prompt) and routes it into extMicGain, which feeds the vocoder
   // modulator (vocModRaw). Returns true on success, false if permission denied / unavailable.
@@ -2913,35 +3205,39 @@ export default function useMoogAudio() {
 
   // Crossfades normalGain ↔ syncOut over 10 ms per VCO.
   // State persisted in ref so powerOff/powerOn can gate and restore it.
+  // syncOut opens only while POWERED: the hard-sync worklet runs continuously
+  // (process() returns true forever), so opening syncOut while unpowered would
+  // leak the free-running slave sawtooth to the I/O even with the synth off.
+  // The ref is always recorded so powerOn restores the correct crossfade.
   const setVco1SyncEnabled = useCallback((enabled) => {
     const n = nodesRef.current; if (!n) return;
     vco1SyncEnabledRef.current = enabled;
     safeRamp(n.vco1normalGain.gain, enabled ? 0 : 1, 0.01);
-    safeRamp(n.vco1syncOut.gain,    enabled ? 1 : 0, 0.01);
+    safeRamp(n.vco1syncOut.gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
   }, []);
   const setVco2SyncEnabled = useCallback((enabled) => {
     const n = nodesRef.current; if (!n) return;
     vco2SyncEnabledRef.current = enabled;
     safeRamp(n.vco2normalGain.gain, enabled ? 0 : 1, 0.01);
-    safeRamp(n.vco2syncOut.gain,    enabled ? 1 : 0, 0.01);
+    safeRamp(n.vco2syncOut.gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
   }, []);
   const setVco3SyncEnabled = useCallback((enabled) => {
     const n = nodesRef.current; if (!n) return;
     vco3SyncEnabledRef.current = enabled;
     safeRamp(n.vco3normalGain.gain, enabled ? 0 : 1, 0.01);
-    safeRamp(n.vco3syncOut.gain,    enabled ? 1 : 0, 0.01);
+    safeRamp(n.vco3syncOut.gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
   }, []);
   const setVco4SyncEnabled = useCallback((enabled) => {
     const n = nodesRef.current; if (!n) return;
     vco4SyncEnabledRef.current = enabled;
     safeRamp(n.vco4normalGain.gain, enabled ? 0 : 1, 0.01);
-    safeRamp(n.vco4syncOut.gain,    enabled ? 1 : 0, 0.01);
+    safeRamp(n.vco4syncOut.gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
   }, []);
   const setVco5SyncEnabled = useCallback((enabled) => {
     const n = nodesRef.current; if (!n) return;
     vco5SyncEnabledRef.current = enabled;
     safeRamp(n.vco5normalGain.gain, enabled ? 0 : 1, 0.01);
-    safeRamp(n.vco5syncOut.gain,    enabled ? 1 : 0, 0.01);
+    safeRamp(n.vco5syncOut.gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
   }, []);
   // Dynamic-instance variant (Phase 60d) — same crossfade, state in dynVcoSyncRef
   // so powerOff/powerOn can gate and restore per instance.
@@ -2950,7 +3246,10 @@ export default function useMoogAudio() {
     if (!n || !n[`${vcoId}syncOut`]) return;
     dynVcoSyncRef.current[vcoId] = enabled;
     safeRamp(n[`${vcoId}normalGain`].gain, enabled ? 0 : 1, 0.01);
-    safeRamp(n[`${vcoId}syncOut`].gain,    enabled ? 1 : 0, 0.01);
+    // syncOut opens only when POWERED — the worklet runs continuously, so opening
+    // it while unpowered leaks the free-running slave to the I/O (bug fix). powerOn
+    // restores it from dynVcoSyncRef.
+    safeRamp(n[`${vcoId}syncOut`].gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
   }, []);
 
   // Keyboard pitch + gate control.
@@ -2972,6 +3271,18 @@ export default function useMoogAudio() {
     }
   }, []);
 
+  // Restart every sequencer (960 + chord) from step 0 — the next Transport tick
+  // lands on the first step. Used by the Workstation's Moog-record count-in so a
+  // take begins at the top of the sequence (Phase 66). Same reset powerOn does.
+  const resetSequencers = useCallback(() => {
+    for (const id of Object.keys(seqLoopsRef.current))      seqCurrentStepRefs.current[id]      = -1;
+    for (const id of Object.keys(chordSeqLoopsRef.current)) chordSeqCurrentStepRefs.current[id] = -1;
+  }, []);
+
+  // Live power state for cross-page callers (the boolean in the return is a
+  // render-time snapshot; this reads the ref that powerOn/powerOff own).
+  const getIsPowered = useCallback(() => isPoweredRef.current, []);
+
   return {
     powerOn, powerOff, connect, disconnect, isPowered,
     updateVcoParams, updateVcfParams, updateVcf2Params, updateEnvParams, triggerGate,
@@ -2990,11 +3301,13 @@ export default function useMoogAudio() {
     setSeqGlide, setSeq2Glide, setKbdGlide, setKbdVibrato, updateNoiseParams,
     updateFFBParams, getFFBAnalyserData,
     updateVocoderParams, getVocAnalyserData,
+    getVowelAnalyserData,
     enableMic, disableMic, updateExtMicParams,
     updateKickParams, triggerKick, triggerKickById, setKickTrigCallbackById,
     setKickTrigCallback: (fn) => { kickTrigCbRef.current.kick = fn; },
     setVcoSyncEnabledById,
     updateQuantizerParams, setQuantizerCallback, setQuantizerCallbackById, setVcoQuantizedCallback,
     addModule, removeModule, updateDynModuleParams, getLfoInstantById,
+    resetSequencers, getIsPowered,
   };
 }

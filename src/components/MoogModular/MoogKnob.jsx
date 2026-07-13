@@ -52,6 +52,12 @@ export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', de
     e.preventDefault();
     const startY     = e.clientY;
     const startValue = valueRef.current;
+    // Phase 61d: knobs no longer carry a permanent `will-change: transform`
+    // (layer promotion lives on `.module` for cheap panning). Promote ONLY the
+    // knob being dragged so its rotation composites on its own layer instead of
+    // re-rastering the whole module every frame; released on mouseup.
+    const knobEl = e.currentTarget;
+    knobEl.style.willChange = 'transform';
 
     const onMove = (ev) => {
       const dy    = startY - ev.clientY; // up = positive
@@ -63,6 +69,7 @@ export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', de
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       document.body.style.cursor = '';
+      knobEl.style.willChange = '';
     };
 
     window.addEventListener('mousemove', onMove);

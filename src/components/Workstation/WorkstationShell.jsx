@@ -170,7 +170,7 @@ const transposeWithRetarget = (prev, hit, semis) => {
   return rt.size ? next.map(n => rt.has(n.id) ? { ...n, glide: rt.get(n.id) } : n) : next;
 };
 
-export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeToggle, getMoogBusNode, pendingProject }) {
+export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeToggle, getMoogBusNode, resetMoogSequencers, isMoogPowered, setMoogRecordingActive, pendingProject }) {
   const [isPlaying,      setIsPlaying]      = useState(false);
   const [tracks,         setTracks]         = useState([]);
   const [regions,        setRegions]        = useState([]);
@@ -240,10 +240,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // ── Moog recording ──────────────────────────────────────────────────────────
   const [moogRecording, setMoogRecording] = useState(false);
   const [moogRecordSec, setMoogRecordSec] = useState(0);
+  const [moogCountingIn, setMoogCountingIn] = useState(false); // 1-bar count-in before record (Phase 66)
   const moogRecorderRef  = useRef(null);  // Tone.Recorder instance while recording
   const moogBusNodeRef   = useRef(null);  // connected bus node (for cleanup)
   const moogTimerRef     = useRef(null);  // setInterval id for elapsed-time display
   const moogRecordingRef = useRef(false); // ref mirror of moogRecording (avoids stale closures)
+  const moogCountingInRef = useRef(false); // ref mirror of moogCountingIn
+  const moogCountInTimerRef = useRef(null); // setTimeout id for count-in → record
+  const moogClickSynthRef = useRef(null);   // Tone.Synth for count-in clicks
+  const moogTargetRegionIdRef = useRef(null); // region captured at record-start (seek + placement)
 
   // Audio region playback — keyed by regionId
   const audioBuffersByRegionId = useRef(new Map()); // regionId → native AudioBuffer
@@ -549,7 +554,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       // Hard right stop through the tempo map (constant-bpm math would mis-cap
       // a project whose tempo lane speeds up or slows down).
       const capSec = buildTempoMap(bpm, tempoPointsOf(globalAutomations)).secondsAtMeasure(totalMeasures);
-      const { buffer, firstOnsetSec } = await bounceProject({ tracks, regions, notes, bpm, globalAutomations, groups, capSec });
+      const { buffer, firstOnsetSec } = await bounceProject({ tracks, regions, notes, bpm, globalAutomations, groups, audioBuffers: audioBuffersByRegionId.current, capSec });
       // Trim leading silence to the first note's onset and trailing silence
       // after the last audible sample; null = nothing audible to export.
       const trimmed = firstOnsetSec == null
@@ -1213,7 +1218,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       const capSec = buildTempoMap(bpm, tempoPointsOf(globalAutos)).secondsAtMeasure(totalMeasuresRef.current);
       const { buffer, firstOnsetSec } = await bounceProject({
         tracks: soloed, regions: regionsRef.current, notes: notesRef.current, bpm,
-        globalAutomations: globalAutos, groups: neutralGroups, capSec,
+        globalAutomations: globalAutos, groups: neutralGroups,
+        audioBuffers: audioBuffersByRegionId.current, capSec,
       });
       const trimmed = firstOnsetSec == null
         ? null
@@ -2505,8 +2511,21 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   // ── Moog recording ────────────────────────────────────────
   // Connects a Tone.Recorder to the Moog's moogBus tap node and captures audio.
-  // Toggle: first click = start recording, second click = stop + download .webm.
+  // Three-state toggle: idle → (count-in) → recording → stop+place.
+  // Count-in (1 bar), auto-seek to the selected bar, restart the Moog sequence,
+  // and play the timeline as backing while capturing the Moog (Phase 66).
   const handleMoogRecord = useCallback(async () => {
+    // ── Cancel during count-in ──
+    if (moogCountingInRef.current) {
+      clearTimeout(moogCountInTimerRef.current);
+      moogCountInTimerRef.current = null;
+      try { moogClickSynthRef.current?.dispose(); } catch (_) {}
+      moogClickSynthRef.current = null;
+      moogCountingInRef.current = false;
+      setMoogCountingIn(false);
+      return;
+    }
+
     if (moogRecordingRef.current) {
       // ── Stop ──
       clearInterval(moogTimerRef.current);
@@ -2518,14 +2537,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       moogRecordingRef.current = false;
       setMoogRecording(false);
       setMoogRecordSec(0);
+      setMoogRecordingActive?.(false); // QWERTY reverts to the hidden-page guard
+      // End the take — stop the shared transport (Moog seq + backing) and playhead.
+      try { Tone.Transport.stop(); } catch (_) {}
+      silenceAll();
+      setIsPlaying(false);
+      updatePlayhead();
       if (blob) {
-        // Require exactly one selected region to attach the recording to.
-        const selIds = selectedRegionIdsRef.current;
-        if (selIds.size !== 1) {
-          setToastMessage('Select exactly one region before recording to place the audio in it.');
-          return;
-        }
-        const regionId = [...selIds][0];
+        // Place into the region captured at record-start (seek + placement agree).
+        const regionId = moogTargetRegionIdRef.current;
         const region   = regionsRef.current.find(r => r.id === regionId);
         if (!region) { setToastMessage('Selected region not found.'); return; }
 
@@ -2582,32 +2602,94 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       return;
     }
 
-    // ── Start ──
+    // ── Start (validate → count-in → record) ──
     const busNode = getMoogBusNode?.();
     if (!busNode) {
       setToastMessage('Open the Moog Modular page first to initialise the audio connection.');
       return;
     }
+    if (isMoogPowered && !isMoogPowered()) {
+      setToastMessage('Power on the Moog Modular first (its POWER switch) so it makes sound.');
+      return;
+    }
+    // The recording is placed in the selected region and playback starts at its bar.
+    const selIds = selectedRegionIdsRef.current;
+    if (selIds.size !== 1) {
+      setToastMessage('Select exactly one region — the recording lands there and playback starts at its bar.');
+      return;
+    }
+    const regionId = [...selIds][0];
+    const region   = regionsRef.current.find(r => r.id === regionId);
+    if (!region) { setToastMessage('Selected region not found.'); return; }
+    moogTargetRegionIdRef.current = regionId;
+
     try {
       await Tone.start();
-      const recorder = new Tone.Recorder();
-      busNode.connect(recorder);
-      recorder.start();
-      moogRecorderRef.current  = recorder;
-      moogBusNodeRef.current   = busNode;
-      moogRecordingRef.current = true;
-      setMoogRecording(true);
-      setMoogRecordSec(0);
-      moogTimerRef.current = setInterval(() => setMoogRecordSec(s => s + 1), 1000);
+      // Park the shared transport at the target bar during the count-in.
+      Tone.Transport.stop();
+      Tone.Transport.position = `${region.startMeasure}m`;
+      updatePlayhead();
+
+      // ── 1-bar count-in: 4 clicks at the project tempo, accented downbeat.
+      // Routed to Destination (NOT moogBus), so the clicks are heard but never
+      // captured by the recorder tapping the Moog bus.
+      const beatSec = 60 / (bpm || 120);
+      const t0 = Tone.now() + 0.12;
+      const click = new Tone.Synth({
+        oscillator: { type: 'square' },
+        envelope: { attack: 0.001, decay: 0.045, sustain: 0, release: 0.02 },
+      }).toDestination();
+      click.volume.value = -9;
+      for (let i = 0; i < 4; i++) click.triggerAttackRelease(i === 0 ? 'C7' : 'G6', 0.05, t0 + i * beatSec);
+      moogClickSynthRef.current = click;
+      moogCountingInRef.current = true;
+      setMoogCountingIn(true);
+
+      const countInMs = ((t0 - Tone.now()) + 4 * beatSec) * 1000;
+      moogCountInTimerRef.current = setTimeout(() => {
+        moogCountInTimerRef.current = null;
+        try { moogClickSynthRef.current?.dispose(); } catch (_) {}
+        moogClickSynthRef.current = null;
+        moogCountingInRef.current = false;
+        setMoogCountingIn(false);
+
+        const bus = getMoogBusNode?.();
+        if (!bus) { setToastMessage('Moog audio not available.'); return; }
+        // Restart the Moog sequence from the top + arm QWERTY into the Moog keyboard.
+        resetMoogSequencers?.();
+        setMoogRecordingActive?.(true);
+
+        const recorder = new Tone.Recorder();
+        bus.connect(recorder);
+        recorder.start();
+        moogRecorderRef.current  = recorder;
+        moogBusNodeRef.current   = bus;
+        moogRecordingRef.current = true;
+        setMoogRecording(true);
+        setMoogRecordSec(0);
+        moogTimerRef.current = setInterval(() => setMoogRecordSec(s => s + 1), 1000);
+
+        // Start the shared transport — backing timeline + Moog sequence play in
+        // sync from the bar; mirrors handlePlayPause's start branch.
+        silenceAll();
+        recomputeFades();
+        Tone.Transport.start();
+        setIsPlaying(true);
+      }, countInMs);
     } catch (err) {
+      moogCountingInRef.current = false;
+      setMoogCountingIn(false);
       setToastMessage(`Moog recording error: ${err.message}`);
     }
-  }, [getMoogBusNode]);
+  }, [getMoogBusNode, isMoogPowered, resetMoogSequencers, setMoogRecordingActive, bpm, silenceAll, recomputeFades, updatePlayhead]);
 
   // Clean up recorder and audio players on unmount.
   useEffect(() => {
     return () => {
       clearInterval(moogTimerRef.current);
+      clearTimeout(moogCountInTimerRef.current);
+      try { moogClickSynthRef.current?.dispose(); } catch (_) {}
+      setMoogRecordingActive?.(false); // never leave the Moog QWERTY armed
       if (moogRecorderRef.current) {
         moogRecorderRef.current.stop().catch(() => {});
         try { moogBusNodeRef.current?.disconnect(moogRecorderRef.current); } catch (_) {}
@@ -4149,12 +4231,16 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           onClick={handlePlayPause} title="Play / Pause (Space)">▶</button>
         <button className={styles.transportBtn} onClick={handleStop} title="Stop">■</button>
         <button
-          className={moogRecording ? styles.transportBtnActive : styles.transportBtn}
+          className={(moogRecording || moogCountingIn) ? styles.transportBtnActive : styles.transportBtn}
           onClick={handleMoogRecord}
-          title={moogRecording ? 'Stop Moog recording and download' : 'Record from Moog Modular'}
-          style={moogRecording ? { color: '#e04848' } : undefined}
+          title={
+            moogCountingIn ? 'Count-in… (click to cancel)'
+            : moogRecording ? 'Stop Moog recording'
+            : 'Record from Moog Modular — 1-bar count-in, then plays from the selected region'
+          }
+          style={(moogRecording || moogCountingIn) ? { color: '#e04848' } : undefined}
         >
-          {moogRecording ? `■ ${moogRecordSec}s` : '● MOOG'}
+          {moogCountingIn ? '● count-in…' : moogRecording ? `■ ${moogRecordSec}s` : '● MOOG'}
         </button>
       </div>
       <ContextMenu menu={contextMenu} onClose={closeContextMenu} onCommand={handleContextCommand} tracks={tracks} />

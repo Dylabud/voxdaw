@@ -11,6 +11,10 @@ const getSvgCoords = (jackId, jackRefs, svgEl) => {
   const jackEl = jackRefs.current.get(jackId);
   if (!jackEl || !svgEl) return null;
   const jr     = jackEl.getBoundingClientRect();
+  // Zero-size = detached or unrendered jack (e.g. mid content-visibility
+  // promotion, Phase 61) — treat as unavailable so the caller's last-good
+  // cache takes over instead of drawing a corner-collapsed cable.
+  if (!jr.width && !jr.height) return null;
   const sr     = svgEl.getBoundingClientRect();
   if (!sr.width || !sr.height) return null;
   const parent = svgEl.parentElement;                 // .cabinet — an HTMLElement
@@ -50,6 +54,7 @@ export default function PatchCableOverlay() {
   const svgRef         = useRef(null);
   const activePathRef  = useRef(null);
   const justEndedRef   = useRef(false); // guard: prevent cable click on drag release
+  const lastCoordsRef  = useRef(new Map()); // cable.id → last good {a, b} endpoints
   const [, forceUpdate] = useReducer(n => n + 1, 0);
 
   // Recompute committed cable paths on resize (layout/scale changes)
@@ -138,9 +143,17 @@ export default function PatchCableOverlay() {
           both ends. Only the base stroke is interactive. */}
       {cables.map(cable => {
         const svgEl = svgRef.current;
-        const a = getSvgCoords(cable.fromJackId, jackRefs, svgEl);
-        const b = getSvgCoords(cable.toJackId,   jackRefs, svgEl);
+        let a = getSvgCoords(cable.fromJackId, jackRefs, svgEl);
+        let b = getSvgCoords(cable.toJackId,   jackRefs, svgEl);
+        // Phase 61 resilience: a redraw can catch a jack while its module's
+        // contents are content-visibility skipped or mid-promotion — reuse
+        // the last good endpoints instead of dropping the cable; the next
+        // healthy redraw refreshes them.
+        const cached = lastCoordsRef.current.get(cable.id);
+        if (!a && cached) a = cached.a;
+        if (!b && cached) b = cached.b;
         if (!a || !b) return null;
+        lastCoordsRef.current.set(cable.id, { a, b });
         const d = cablePath(a.x, a.y, b.x, b.y);
         return (
           <g key={cable.id}>

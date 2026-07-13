@@ -16,6 +16,12 @@ export default function Oscilloscope({ getData }) {
     function draw() {
       rafRef.current = requestAnimationFrame(draw);
 
+      // Root keeps hidden pages mounted display:none — skip all reads/draws.
+      if (canvas.offsetParent === null) return;
+      // Phase 61: also skip while the I/O module's contents are
+      // content-visibility skipped (camera-driven visibility manager).
+      if (canvas.checkVisibility && !canvas.checkVisibility({ contentVisibilityAuto: true })) return;
+
       // Sync buffer width to CSS display width each frame so the waveform always
       // fills the full visualizer regardless of module/cabinet layout changes.
       // canvas.width assignment clears the buffer but we redraw every frame anyway.

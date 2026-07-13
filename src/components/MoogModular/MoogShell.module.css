@@ -65,11 +65,42 @@
   border-color: #c8a86a;
   color: #c8a86a;
 }
-/* ── Module library button — same chrome as home/lights-out buttons ── */
+/* ── Workspace toolbar (Phase 63): reset / save / load, centered top ── */
+.workspaceBar {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  gap: 8px;
+}
+.wsBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid #4a2c10;
+  color: #7a5020;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 5px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.18s, color 0.18s;
+}
+.wsBtn:hover {
+  border-color: #c8a86a;
+  color: #c8a86a;
+}
+
+/* ── Module library button — same chrome as home/lights-out buttons.
+   right:165px clears the lights-out button (which spans right:16px … ~151px
+   in its wider "lights out" state) with a ~14px gap. ── */
 .libraryBtn {
   position: fixed;
   top: 12px;
-  right: 140px;
+  right: 165px;
   z-index: 100;
   appearance: none;
   background: transparent;
@@ -477,6 +508,17 @@
   position: relative;
   display: flex;
   flex-direction: column;
+  /* Phase 61d — scroll performance at Retina density. Promote each MODULE to
+     one GPU compositor layer (was: each knob, ~130 layers). During a camera
+     pan the compositor translates ~30 cached module textures instead of
+     blending 130 full-res knob layers every frame — a real pan drops from
+     ~1000 ms to ~370 ms GPU-thread busy (below even lights-out) with EVERY
+     component visible at full fidelity and still animating. Knobs paint into
+     their module's cached layer (raster-on-pan is bounded to newly-exposed
+     modules, unlike the whole-cabinet catastrophe of no layers at all). The
+     dragged knob is transiently re-promoted in MoogKnob.jsx so rotation stays
+     crisp without re-rastering its whole module each frame. */
+  will-change: transform;
 }
 
 /* ── Faceplate — matte textured black metal, lit from upper-right ──
@@ -780,6 +822,12 @@
   text-transform: uppercase;
 }
 
+/* Active state (Phase 65) — the label the lever points at glows mint. */
+.toggleLabelActive {
+  color: #5DCAA5;
+  text-shadow: 0 0 4px rgba(93, 202, 165, 0.55);
+}
+
 .toggle {
   width: 13px;
   height: 26px;
@@ -797,6 +845,10 @@
   justify-content: center;
   padding: 2px 0;
 }
+
+/* Driven lever position (Phase 65): up → labels[1] (e.g. SYNC), down → labels[0]. */
+.toggle.toggleOn  { align-items: flex-start; }
+.toggle.toggleOff { align-items: flex-end; }
 
 /* Bat-handle lever — chrome capsule with a bright lamp-side tip */
 .toggleLever {
@@ -1687,6 +1739,12 @@
   box-shadow: inset 0 0 14px rgba(0, 0, 0, 0.9);
 }
 .cabinet[data-lights-out="true"] .auraScreen::after { display: none; }
+
+/* NOTE (Phase 61d): smooth Retina scrolling keeps EVERY visual component
+   visible, full-res and animating — nothing is hidden or frozen during a pan.
+   The fix is structural: layer promotion moved from each knob to each `.module`
+   (see the `.module` rule above), so a pan translates ~30 cached module
+   textures instead of blending ~130 knob layers per frame. */
 
 /* Quantizer: hide all text; keep .qntLed, .qntInLed, .qntExtLed */
 .cabinet[data-lights-out="true"] .qntLedLabel,

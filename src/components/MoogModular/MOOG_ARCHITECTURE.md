@@ -68,13 +68,17 @@ All connections carry one of two signal classes. The patch cable simulator must 
 **Ports (5 Total):**
 | Port | Direction | Signal | Description |
 |---|---|---|---|
-| Sync/Reset IN | Input | CV — Trigger | Forces the LFO wave to restart its cycle from 0. Phase-sync for rhythmic modulation. |
+| SYNC IN | Input | Clock | Patch **any** clock/CV here to lock the LFO to the sequencer tempo (Transport). Empty = free-running (Moog Phase 65). |
 | Sine OUT | Output | CV — Continuous | Smooth, gentle sweep. Good for vibrato. |
 | Triangle OUT | Output | CV — Continuous | Symmetric ramp. Subtle tremolo. |
 | Square OUT | Output | CV — Continuous | Hard on/off switching. Tremolo chops or octave-jump effects. |
 | Sawtooth OUT | Output | CV — Continuous | Rising ramp that resets. Rhythmic filter sweeps. |
 
-**Tone.js Node:** `Tone.LFO` (type selectable). `lfo.frequency.rampTo(hz, 0.05)`. Output connects to destination node's AudioParam via `lfo.connect(filter.frequency)`.
+**Tone.js Node:** `Tone.LFO` (type selectable). `lfo.frequency.rampTo(hz, 0.05)` in FREE mode. Output routes through `${id}Out` (a Gain the jacks + meter + wave analyser tap) so the free/sync sources can crossfade behind a stable output node.
+
+**Tempo-sync (Moog Phase 65):** patching a clock into **SYNC** flips the module to a Transport-locked mode. In sync mode the **RATE** knob quantizes to a musical **division** (`LFO_SYNC_DIVS`: 4 BAR / 2 BAR / 1 BAR / 1/2 / 1/4 / 1/8) shown as a SYNC chip, and the **MOD** knob becomes **OFFSET** (start phase — which point of the cycle lands on the downbeat, e.g. which vowel begins the bar). DEPTH is unchanged (output scale / modulation spread).
+- **Why not `Tone.LFO.sync()`:** measured — it does **not** phase-lock repeatably in v15.1.22 (0.28 mean phase error at equal Transport position across runs). Instead the value is computed deterministically from `Transport.seconds` in the **`lfoSyncTick` rAF** (the `vocShiftTick`/`vowelTick` pattern): `phase = frac(t/periodSec + offset)`, `v = lfoWaveValue(type, phase) · depth`, written to a `${id}SyncSig` `Tone.Signal` (delta-gated; sole writer). Measured phase-lock error: **0.001** (LFO) / **~2 Hz** on a driven vowel formant across loops — i.e. the vowels line up with the beat every cycle.
+- **Topology:** `osc → ${id}OscGain → ${id}Out` and `${id}SyncSig → ${id}SyncGain → ${id}Out`. `applyLfoMode(id, synced)` crossfades the two gains (50 ms, click-free) — free mode keeps the smooth audio-rate oscillator (the rAF can't represent fast free rates); sync mode mutes the oscillator and the rAF owns the audible signal (sync divisions are ≤ 1/8, well within rAF fidelity). Engagement is **cable-driven**: `connect()`/`disconnect()` key off the `isLfoSync` jack flag (multi-cable-safe), independent of the knob param path. UI `synced` derives from `useMoogPatch().cables` (matched on `toJackId`/`fromJackId`).
 
 ---
 
@@ -326,6 +330,22 @@ The external-mic input was originally a standalone module (Phase 43) but was **m
 
 ---
 
+### 13. VOWEL — Formant Filter Bank [Implemented: Moog Phase 64]
+
+**Function:** A 3-formant resonant filter bank that sculpts a raw signal (saws ideal) into human vowel sounds. **Dynamic-only** (no static instance) — added from the library.
+
+**Signal:** `${id}In → fan → 3× [bandpass Filter Fk (Q ~11/13/15) → gain Gk (1.0/0.55/0.28)] → ${id}Mix (×7 makeup) → ${id}Out (hard-knee limiter)` (parallel formants summed). `${id}Analyser` (FFT 256) taps Out for the display; `${id}CvIn → ${id}CvAnalyser` reads the FORMANT-CV input.
+
+**Output level (makeup + limiter):** the parallel bandpass bank is intrinsically quiet (~7× down vs. the raw source), so `${id}Mix` applies a ×7 makeup. But the vowels are hugely unequal in level — open **A**/**O** (low F1 in a strong region of the source) peak ~4× the closed **I**/**U** — so a fixed makeup alone clips A. `${id}Out` is therefore a `Tone.Compressor` used as a **hard-knee limiter** (`threshold −1 dB, ratio 20, knee 0`) — *not* `Tone.Limiter` (whose default 30 dB soft knee barely compresses). Net: closed vowels stay at full makeup (RMS ~0.43, matching a raw VCO) while A/O are brick-walled just above unity. The jack `-out` and the FFT display both tap post-limiter `${id}Out`.
+
+**Controls / jacks:** VOWEL knob (morph A→E→I→O→U), SHAPE knob (0.7–1.3 vocal-tract scale on all formants), jacks `-in` / `-cv-in` (FORMANT CV) / `-out`.
+
+**Formant frequencies:** `VOWEL_FORMANTS` (module const in `useMoogAudio.js`) — classic male-voice table; `vowelFreqsAt(pos 0..4)` linearly interpolates adjacent columns. A/E/I/O/U = [730,1090,2440] / [530,1840,2480] / [270,2290,3010] / [570,840,2410] / [300,870,2240] Hz.
+
+**Single-writer rAF (`vowelTick`):** the SOLE writer of the 3 filter frequencies — combines the morph ref (VOWEL knob), shape ref (SHAPE), and the sampled CV level (`cv*4` = full A↔U sweep) into the final formants, with a per-instance delta gate (idle module = 0 writes). `updateDynModuleParams` case `'vowel'` writes the refs only (never the filters), preserving single-writer-per-node. This is why FORMANT CV works at all — a preset morph is a nonlinear map to 3 freqs, not a direct AudioParam connection.
+
+---
+
 ## Default Signal Chain (No Patch Cables)
 
 **True modular routing since Moog Phase 10 — there is NO hardwired audio path.** Powering on starts the sources (VCOs, noise, LFOs, internal carriers) and the sequencer clocks, but no sound reaches the speakers until the user patches a source into the I/O module (`io-in` or a mixer channel `io-in1..4`). The minimal audible patch:
@@ -384,6 +404,7 @@ seq-gate-out → env1-gate,  env1-out → vca-cv          ← gated sequencer ar
 | Moog Phases 55–59 ✅ | Typography pass, Reverb Aura displays, QNT knob-stepper + modulation modes, case system + module library | All |
 | Moog Phase 60 series ✅ | **Dynamic Rack** — see the AS-BUILT section below | All |
 | Moog Phase 12 ✅ | Knob hover tooltips shipped; module bypass rejected as superseded (MIX-at-zero / QNT BYPASS / library removal); mobile fallback deferred (touch camera subproject, desktop-first product) | All |
+| Moog Phase 61 ✅ | Powered-rack frame rate — camera-driven `content-visibility` module culling + LED/meter write dedupe (see §Rendering Performance) | Shell (rendering) |
 
 **Roadmap complete (2026-07-11)** — every phase shipped or resolved with a logged decision (full logs in MOOG_PLAN.md).
 
@@ -405,10 +426,20 @@ seq-gate-out → env1-gate,  env1-out → vca-cv          ← gated sequencer ar
 // Written ONLY from user event handlers / user-driven provider callbacks
 // (the Phase 60c StrictMode wipe lesson); v1 (types only) migrates on read.
 {
-  modules: [ { id: 'vco6', type: 'vco', num: 6 }, … ],   // array order = expansion-row order
-  cables:  [ { from: 'seq-gate-out', to: 'kick2-gate-in', color: '#e84040' }, … ],
+  modules:  [ { id: 'vco6', type: 'vco', num: 6 }, … ],   // array order = expansion-row order
+  cables:   [ { from: 'seq-gate-out', to: 'kick2-gate-in', color: '#e84040' }, … ],
+  settings: { vco1: { freqBase: 0.7, fineTune: 0.5, rangeOctave: 0, syncOn: false },
+              vcf:  { cutoff: 0.4, res: 0.6, … }, seq2: { steps: [...], tempo: 128 }, … },
 }
 ```
+
+### Per-module settings persistence (Phase 63)
+
+`settings` (added Phase 63) captures every module's knob/switch positions, keyed by canonical instance id (the jack prefix — same key space as `modules`/cables). This is what makes a reload / `.moog` load restore the *exact patch*, not just which modules and cables exist (60f). Two hooks in MoogShell.jsx, next to `readRackStore`:
+- **`useSavedSettings(id)`** — lazy `useState(() => readModuleSettings(id))`, read ONCE at mount; each module seeds its `useState` as `saved.field ?? default`. Never-touched module → `{}` → all defaults.
+- **`useModulePersist(id, values)`** — debounced 200 ms (coalesces a knob drag into one write), and writes the module's full snapshot ONLY when it differs from what's stored. That diff-guard is load-bearing: mount-time seeding and StrictMode's double-effect produce no write, honoring the "user events only" rule; and the write is merge-only (`{...settings, [id]: values}`) so it can never wipe `modules`/`cables` (the 60c hazard). The dep is `JSON.stringify(values)` so nested arrays (seq/chord `steps`, FFB `bands`) trigger correctly.
+
+All 15 module types wired uniformly (id computed before `useState`; Vocoder `micStatus` excluded as runtime, not a setting). **SAVE/LOAD/RESET reuse the mount-time restore path**: the store is the whole setup, so SAVE serializes it to a `.moog` download, LOAD writes it + `window.location.reload()`, RESET clears it + reload. A reload lands on Root's home page, so reset/load set a one-shot `sessionStorage['voxdaw-return-page']='moogmodular'` that `Root.js` honors (minimal routing exception). Toolbar `[RESET] [SAVE SETUP] [LOAD SETUP]` in the top bar.
 
 - **Instance id = jack prefix** (`vco6` → jacks `vco6-cv`, `vco6-saw`…). Static ids (`vco1…vco5`, `noise`, `vcf`, `qnt`…) are grandfathered as the default rack; new instances mint `type<n>` from `nextInstNumRef` (monotonic, minted eagerly in handlers). **Restore honors persisted nums** (`addModule(type, desiredNum)`, collision → fall back to minting) so cables stay valid across reloads.
 - **Deviation from the proposal:** no `cases` array — added instances render in a wrapping **expansion row** inside the Voice Case at fixed per-type widths, growing the rack into the 60a floor+scroll. Simpler, and the case picker became unnecessary.
@@ -433,6 +464,7 @@ seq-gate-out → env1-gate,  env1-out → vca-cv          ← gated sequencer ar
 | Vocoder | **16 bands × (BPF+rect+env+VCA) ≈ 70 nodes** + mic singleton (mic stays shared; MIC button on any instance grabs the one `Tone.UserMedia`) | 2 |
 | QNT | own `AudioWorkletNode`; knob-stepper refs (`quantizerParamsRef`, baseHz, callbacks) become per-instance maps keyed by id | 4 |
 | 960 SEQ / CHORD SEQ | own `Tone.Loop`; Transport is shared (tempo knobs all write `Transport.bpm` — last writer wins, as today with 2×960) | 4 |
+| VOWEL (§13) | 3 bandpass+gain pairs + 2 analysers; own entry in `vowelTick` rAF (delta-gated); **dynamic-only → num starts at 1** (Phase 64) | 4 |
 | I/O, 953 Keyboard | **fixed singletons** — not in the bank | 1 |
 
 ### Layout & Camera
@@ -462,3 +494,20 @@ Single Writer per node (per instance now); Zero-Re-render (all per-frame work st
 2. **Worklet-load races** — jack entries whose `dest` is a not-yet-loaded worklet node (existing `qnt-cv-in` null-until-loaded pattern generalizes: factories may return `dest: null` and patch the registry on load).
 3. **GPU budget** — more modules = larger raster area; the transient `will-change` model already handles size, but 60e should re-run the black-flash regression check at 8+ cases.
 4. **Registry/UI drift** — the registry must be the single source for what exists; MoogShell renders purely from state (no hardcoded rows after 60d).
+
+---
+
+## Rendering Performance — Powered-Rack Frame Rate (Phase 61) — AS BUILT
+
+Large custom racks exposed a compositor bottleneck: **every visual invalidation re-runs Blink layerization (`PaintArtifactCompositor::Update`) at a cost proportional to the rack's total paint complexity** (~31 ms/pass at 31 added instances). The per-frame writers (Led opacity, FFB/vocoder segment meters, Aura/scope canvases) each pull that trigger every frame → ~30 fps while powered, even idle. JS is not the cost — the writers are triggers. (Full evidence chain: MOOG_PLAN.md, 2026-07-11/12 entries.)
+
+**Mechanisms (all in `MoogShell.jsx` unless noted):**
+- **Camera-driven module culling:** a visibility-manager effect stamps exact `contain-intrinsic-size` per `.module` (measured layout boxes — skipping can never shift layout, the Phase 55 fit() trap) and toggles `content-visibility` `'visible'`↔`'auto'` from the camera's `apply()` (`cameraViewRef` → `moduleVisRef`). Bands are **activity-adaptive**: 0.5-viewport promote lead / 1.0 demote hysteresis while the camera moves; a deep 0.05-viewport sweep after 1.2 s of stillness (at the fit-width floor one viewport ≈ 1800 layout px — fixed generous margins would exceed the whole rack and skip nothing). Promotions time-sliced ≤2/frame. Far state is always `'auto'`, never `'hidden'` — a banding miss costs perf, not pixels (a skipped module still paints its faceplate).
+- **Power gate:** unpowered racks have no per-frame writers → the manager is dormant and clears its styles; unpowered scroll renders everything (pre-61 behavior).
+- **Write dedupe:** `Led` / FFB / vocoder meter loops quantize opacity to 1/64 and skip identical writes — unchanged style strings never invalidate paint, so silent/steady LEDs stop re-triggering layerization. Aura + Oscilloscope canvas loops skip drawing when `checkVisibility({ contentVisibilityAuto: true })` reports their module skipped. **The QNT TRANSPOSE CV loop stays ungated** (drives the worklet root while hidden).
+- **Cable-overlay resilience (`PatchCableOverlay.jsx`):** zero-size jack rects → null from `getSvgCoords`; a per-cable last-good endpoint cache keeps cables drawn through transient mid-promotion redraws.
+- **Size gate (Phase 61b) — the shipped scroll fix:** toggling `content-visibility` invalidates the layer tree → one `Layerize` per toggle; during a scroll the band moves every frame, so the manager churns and saturates the main thread (which also delays the non-passive wheel handler → choppy scroll). On small/modest racks this is pure cost — they idle fine (~8 ms) without culling and scroll perfectly smooth fully rendered (this is why "lights out is smooth"). So the manager engages **only when `cabinet.offsetHeight > 2500` layout px** (`CULL_MIN_NATH`; between the default rack's 1799 and a large rack's 3415, zoom/viewport-independent). Below it, all `content-visibility` is cleared and the manager stays dormant. Default-rack powered scroll: p95 83 → 9.3 ms. **Rejected alternatives (do not retry):** a gesture writer-pause (LED/meter/canvas skip while the camera moves) — reverted, the writers were never the scroll cost, the toggling was; and removing knob `will-change: transform` — made scroll *worse* (p95 58→117 ms), since it correctly keeps knobs on GPU layers so a pan is a texture move, not a repaint.
+
+- **Module-level layer promotion (Phase 61d) — the Retina SCROLL fix:** the culling above is about idle layerization; a separate cost dominates *scrolling* on a **2× (Retina) display** — the GPU re-composites the whole photoreal rack every frame during a pan, and the dominant term was the **~130 per-knob compositor layers** (each `.knob` had a permanent `will-change: transform`). Fix: promote layers at the **`.module`** level instead — `will-change: transform` on `.module`, removed from `.knob`. A pan then translates ~30 cached module textures (knobs paint into them) rather than blending 130 knob layers, dropping a real pan from ~1000 ms to ~370 ms GPU-thread busy (below lights-out) with **every component visible, full-res and animating — nothing hidden or frozen**. `MoogKnob.jsx` transiently re-promotes only the dragged knob (`will-change` on mousedown → cleared on mouseup) so rotation stays crisp without re-rastering its module. Sweet spot rationale: knob layers = too many composites; no layers = whole-cabinet raster-on-pan (catastrophic, measured 3781 ms); one cabinet layer = over-rasterized; ~30 module layers = few composites + bounded raster-on-pan. **Testing gotcha:** the default rack fits a normal viewport, so wheel hits the zoom path and doesn't pan — measure scrolling with a SHORT viewport (≤ ~650 px) at DPR 2 so it actually overflows/pans. *Rejected en route (do not retry): motion-mode knob-hiding (worked but Dylan rejected the vanishing visuals); an animation-freeze during pan (`viewportActivity.js`, deleted — only ~25 % off a real pan since knob composites, not animation, dominate); removing knob will-change (raster-on-pan, worse).*
+
+**Invariants:** cabinet natural height is byte-identical with the manager on/off (no fit() feedback); jack rects inside skipped modules remain valid (Blink retains last layout — probe-verified); single writer holds (the manager is the only writer of `contentVisibility`/`containIntrinsicSize` on modules); Zero-Re-render holds (closure state + direct style writes only); module `will-change: transform` (61d) is a static CSS property — fewer/bounded layers than the knobs it replaced, so GPU-memory and black-flash risk are not increased. Measured on the 31-instance rack: powered idle ~33–42 ms/frame → ~22–24 ms; wins scale with rack height (test rack was only 1.9 viewports tall — skip ceiling ~50%). Browsers without `content-visibility` degrade gracefully to pre-61 behavior (unknown style values are no-ops).
