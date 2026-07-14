@@ -3,6 +3,7 @@ import HomePage from './components/HomePage/HomePage';
 import App from './App';
 import WorkstationShell from './components/Workstation/WorkstationShell';
 import MoogModular from './components/MoogModular/MoogShell';
+import AIInstrumentGenerator from './components/AIGen/AIInstrumentGenerator';
 
 export default function Root() {
   // A page may request to be re-landed after a full reload (the Moog's
@@ -119,6 +120,17 @@ export default function Root() {
             onNavigateHome={() => navigate('home')}
             onBusReady={(api) => { moogApiRef.current = api; }}
             recordingActiveRef={moogRecordingActiveRef}
+          />
+        </div>
+      )}
+
+      {/* AI Instrument Generator — mounted on first visit, kept alive like the rest */}
+      {visited.has('aigen') && (
+        <div style={hide('aigen')}>
+          <AIInstrumentGenerator
+            onNavigateHome={() => navigate('home')}
+            isDarkMode={isDarkMode}
+            onThemeToggle={onThemeToggle}
           />
         </div>
       )}

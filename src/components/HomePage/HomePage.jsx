@@ -134,6 +134,7 @@ export default function HomePage({ onNavigate, onOpenProject, isDarkMode, onThem
           <button className={styles.primaryBtn} onClick={() => onNavigate('voxtool')}>[ VoxTool ]</button>
           <button className={styles.ghostBtn}   onClick={() => onNavigate('workstation')}>[ Workstation ]</button>
           <button className={styles.moogBtn}    onClick={() => onNavigate('moogmodular')}>[ Moog Modular ]</button>
+          <button className={styles.aiBtn}      onClick={() => onNavigate('aigen')}>[ Instrument Generator ]</button>
           <button
             className={styles.themeBtn}
             onClick={onThemeToggle}

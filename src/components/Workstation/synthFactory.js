@@ -1,6 +1,8 @@
 import * as Tone from 'tone';
 import { SAMPLED_INSTRUMENTS, SAMPLED_INSTRUMENT_NAMES, SAMPLED_MELODIC_NAMES } from './sampleInstruments';
 import { DRUM_KIT_NAMES, isDrumKit, chokeTargetsFor } from './drumKits';
+import { isCustomInstrument, getCustomInstrument } from './customInstruments';
+import { makeCustomInstrumentNode, makeMonoGlideVoice } from './customInstrumentSynth';
 
 // sampleInstruments added Phase 131 — re-exported for RegionEditor / audioBounce consumers
 export const SYNTH_INSTRUMENTS = [
@@ -9,6 +11,7 @@ export const SYNTH_INSTRUMENTS = [
 ];
 
 export { SAMPLED_INSTRUMENT_NAMES, SAMPLED_MELODIC_NAMES, DRUM_KIT_NAMES, isDrumKit, chokeTargetsFor };
+export { isCustomInstrument };
 
 export const INSTRUMENTS = [...SYNTH_INSTRUMENTS, ...SAMPLED_INSTRUMENT_NAMES];
 
@@ -37,6 +40,11 @@ const envFor = (instrument) => ({ ...(SYNTH_ENVELOPES[instrument] ?? DEFAULT_SYN
 // only fields Tone.Sampler exposes); drum kits → null (no ADSR surface).
 export function defaultEnvelopeFor(instrument) {
   if (isDrumKit(instrument)) return null;
+  // Custom instrument: the patch's own ADSR is the default (the delegating
+  // .set on the composite lets the tab knobs + envelope-sync override it).
+  if (isCustomInstrument(instrument)) {
+    return { ...(getCustomInstrument(instrument)?.patch.envelope ?? envFor('analog')) };
+  }
   if (isSampledInstrument(instrument)) {
     const cfg = SAMPLED_INSTRUMENTS[instrument];
     return { attack: 0, release: cfg?.release ?? 1 };
@@ -116,7 +124,18 @@ function voiceSpecFor(instrument) {
 // override on top of the instrument default.
 export function makeSynth(instrument, opts = {}) {
   let synth;
-  if (isSampledInstrument(instrument)) {
+  if (isCustomInstrument(instrument)) {
+    // Baked composite (voice + filter + FX + level). Missing def (imported id
+    // this machine never registered) → graceful default synth, same spirit as
+    // the deserialize instrument fallback.
+    const def = getCustomInstrument(instrument);
+    if (def) {
+      synth = makeCustomInstrumentNode(def.patch);
+    } else {
+      const { Voice, options } = voiceSpecFor('analog');
+      synth = new Tone.PolySynth(Voice, options);
+    }
+  } else if (isSampledInstrument(instrument)) {
     const cfg = SAMPLED_INSTRUMENTS[instrument];
     synth = new Tone.Sampler({
       urls: cfg.urls,
@@ -140,6 +159,12 @@ export function makeSynth(instrument, opts = {}) {
 // schedulable `detune` Signal (cents) that PolySynth can't provide — the glide
 // scheduler owns it exclusively (Single Writer). Caller owns routing/disposal.
 export function makeGlideVoice(instrument, opts = {}) {
+  // Custom instrument: a mono version of its baked composite (voice + filter +
+  // FX) so glides keep the patch's tone. Missing def → bare-voice fallback.
+  if (isCustomInstrument(instrument)) {
+    const def = getCustomInstrument(instrument);
+    if (def) return makeMonoGlideVoice(def.patch, opts);
+  }
   const { Voice, options } = voiceSpecFor(instrument);
   const voice = new Voice(options);
   if (opts.envelope) applyEnvelope(voice, opts.envelope);

@@ -8,6 +8,7 @@ import { firstLoopOffsetMeasures, loopBoundaries } from './loopMath';
 import useWorkstationAudio from '../../hooks/useWorkstationAudio';
 import PanKnob from './PanKnob';
 import { serializeProject, deserializeProject, downloadJSON, readJSONFile } from './projectIO';
+import { registerInstruments, customInstrumentsForIds, isCustomInstrument, isInLibrary, addToLibrary } from './customInstruments';
 import { saveProject as storeSaveProject } from '../../utils/projectStore';
 import { EFFECT_DEFS, defaultParamsFor, automationTargetsFor, labelForTarget, metaForTarget } from './effectDefs';
 import {
@@ -441,6 +442,19 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // running session. Shared by the [ load ] file input and the pending-project
   // effect (open-from-homepage / New Project).
   const applyProjectData = useCallback((data) => {
+    // Register any embedded custom-instrument defs BEFORE state commits so the
+    // audio reconciler's makeSynth resolves their ids (imported projects whose
+    // instruments aren't in this machine's library).
+    registerInstruments(data.customInstruments);
+    // Offer to persist any project instruments not yet in this machine's library
+    // (they play regardless; this makes them permanent + selectable across
+    // projects). Only prompts when there's something new.
+    const newInstrIds = [...new Set((data.tracks ?? []).map(t => t.instrument))]
+      .filter(id => isCustomInstrument(id) && !isInLibrary(id));
+    if (newInstrIds.length &&
+        window.confirm(`This project uses ${newInstrIds.length} custom instrument${newInstrIds.length !== 1 ? 's' : ''} not in your library. Save ${newInstrIds.length !== 1 ? 'them' : 'it'} to your instruments?`)) {
+      newInstrIds.forEach(addToLibrary);
+    }
     Tone.Transport.stop();
     setIsPlaying(false);
     setEditingTrackId(null);
@@ -484,7 +498,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // Projects grid reads from it. Producing a .voxdaw file moved to the export menu.
   const handleSaveProject = useCallback(async () => {
     try {
-      const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups });
+      const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups, customInstruments: customInstrumentsForIds(tracks.map(t => t.instrument)) });
       const id = currentProjectId ?? crypto.randomUUID();
       await storeSaveProject({
         id, name: projectName, bpm, trackCount: tracks.length, data: payload,
@@ -499,7 +513,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   const handleExportProjectFile = useCallback(() => {
     setShowExportMenu(false);
-    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups });
+    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups, customInstruments: customInstrumentsForIds(tracks.map(t => t.instrument)) });
     const filename = `${sanitizeFilename(projectName)}.voxdaw`;
     downloadJSON(payload, filename);
     showToast(`exported ${filename}`);
@@ -1373,6 +1387,12 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       else if (action === 'createGroup')  setGroupModal({ initiatorTrackId: id });
       else if (action === 'ungroupTrack') removeTrackFromGroup(id);
       else if (action === 'pasteEffects') pasteEffectsTo(id, payload);
+      else if (action === 'addInstrument') {
+        // Persist this track's (project-registered) custom instrument into the
+        // permanent library. The dropdown + menu recompute from the registry.
+        const t = tracksRef.current.find(x => x.id === id);
+        if (t && addToLibrary(t.instrument)) showToast('added to your instruments');
+      }
       else if (action === 'export')       exportTrack(id, payload ?? 'wav');
       else if (action === 'delete')       deleteTrack(id);
       return;
@@ -1450,7 +1470,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       else console.log('[context-menu] note', action, ids); // copy / paste (stubs)
     }
   }, [transposeRegions, transposeNotes, handleNotesDelete, splitRegionAtMeasure,
-      duplicateTrack, deleteTrack, pasteEffectsTo, exportTrack,
+      duplicateTrack, deleteTrack, pasteEffectsTo, exportTrack, showToast,
       removeTrackFromGroup, ungroup, deleteGroup, applyGlideCommand,
       handleCommitNoteEdits]);
 

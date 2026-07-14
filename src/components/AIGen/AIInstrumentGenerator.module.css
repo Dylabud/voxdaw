@@ -1,0 +1,428 @@
+/* AI Instrument Generator — page chrome only. The chassis + keybed styling
+   is shared from InstrumentPanel.module.css (ipStyles in the component). */
+
+.page {
+  width: 100vw;
+  height: 100vh;
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* ── Header (HomePage recipe) ── */
+.header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 32px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.headerLeft {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+.wordmark {
+  font-size: 18px;
+  font-weight: 300;
+  letter-spacing: 0.18em;
+  color: var(--accent-color);
+  text-transform: uppercase;
+  line-height: 1;
+}
+.dots {
+  opacity: 0.5;
+  margin-right: 2px;
+}
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.homeBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  padding: 7px 14px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+.homeBtn:hover {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+.iconBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  width: 30px;
+  height: 30px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+.iconBtn:hover {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+/* ── API settings ── */
+.settings {
+  flex: 0 0 auto;
+  padding: 12px 32px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settingsLabel {
+  font-size: 9px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.settingsRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.keyInput {
+  flex: 0 1 420px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-mid);
+  border-radius: 2px;
+  color: var(--form-text, var(--text-primary));
+  font-family: inherit;
+  font-size: 11px;
+  padding: 7px 10px;
+  outline: none;
+}
+.keyInput:focus {
+  border-color: var(--accent-color);
+}
+.settingsBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 7px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+.settingsBtn:hover {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+.settingsNote {
+  margin: 0;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  line-height: 1.7;
+  text-transform: uppercase;
+  color: var(--text-dimmer);
+}
+
+/* ── Prompt bar ── */
+.promptBar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 32px 6px;
+  width: min(1100px, 100%);
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+.promptInput {
+  flex: 1 1 auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  border-radius: 3px;
+  color: var(--form-text, var(--text-primary));
+  font-family: inherit;
+  font-size: 12px;
+  padding: 10px 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.promptInput:focus {
+  border-color: var(--accent-color);
+}
+.promptInput::placeholder {
+  color: var(--text-dimmer);
+}
+.modelSelect {
+  flex: 0 0 auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 9px 8px;
+  cursor: pointer;
+  outline: none;
+}
+.generateBtn {
+  flex: 0 0 auto;
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--accent-color);
+  color: var(--accent-color);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 9px 18px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s, opacity 0.2s;
+  white-space: nowrap;
+}
+.generateBtn:hover:not(:disabled) {
+  background: var(--accent-color);
+  color: var(--bg-base);
+}
+.generateBtn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.errorLine {
+  flex: 0 0 auto;
+  width: min(1100px, 100%);
+  margin: 0 auto;
+  padding: 4px 32px 0;
+  box-sizing: border-box;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--warning-color, #e07a5f);
+}
+
+/* ── Instrument stage ── */
+.stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 16px 16px;
+  overflow: auto;
+}
+.patchRow {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  width: min(1100px, 95%);
+}
+.patchName {
+  font-size: 15px;
+  font-weight: 300;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent-color);
+}
+.patchMeta {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-dimmer);
+}
+
+/* ── Transient save confirmation ── */
+.noticeLine {
+  flex: 0 0 auto;
+  width: min(1100px, 100%);
+  margin: 0 auto;
+  padding: 4px 32px 0;
+  box-sizing: border-box;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent-color);
+}
+
+/* ── Save dropdown ── */
+.saveWrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+.saveBtn {
+  appearance: none;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 9px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.saveBtn:hover:not(:disabled) { border-color: var(--accent-color); color: var(--accent-color); }
+.saveBtn:disabled { opacity: 0.55; cursor: default; }
+.saveMenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 150px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+.saveMenuItem {
+  appearance: none;
+  background: transparent;
+  border: none;
+  text-align: left;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 9px 12px;
+  cursor: pointer;
+}
+.saveMenuItem:hover { background: var(--accent-color); color: var(--bg-base); }
+
+/* ── Editable patch-name box ── */
+.nameBox {
+  position: relative;
+  font-size: 13px;
+  font-weight: 300;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent-color);
+  padding: 4px 12px;
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--bg-elevated, var(--bg-panel)), #fff 5%),
+    var(--bg-panel));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.3);
+  cursor: text;
+  user-select: none;
+}
+.nameInput {
+  font-size: 13px;
+  font-weight: 300;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent-color);
+  background: var(--bg-base);
+  border: 1px solid var(--accent-color);
+  border-radius: 4px;
+  padding: 4px 12px;
+  outline: none;
+  font-family: inherit;
+  min-width: 180px;
+}
+.nameMenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+.nameMenuItem {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 8px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.nameMenuItem:hover { background: var(--accent-color); color: var(--bg-base); }
+
+/* ── FX pill / mini-select (chassis extras) ── */
+.pill {
+  appearance: none;
+  align-self: center;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  color: var(--text-dimmer);
+  font-family: inherit;
+  font-size: 8px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 5px 9px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.pill:hover {
+  border-color: var(--accent-color);
+}
+.pillOn {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 12%, transparent);
+}
+.miniSelectWrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  align-self: center;
+  gap: 4px;
+}
+.miniSelect {
+  background: var(--bg-base);
+  border: 1px solid var(--border-mid);
+  border-radius: 3px;
+  color: var(--form-text, var(--text-primary));
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 4px 5px;
+  cursor: pointer;
+  outline: none;
+}
+.miniSelect:focus {
+  border-color: var(--accent-color);
+}
+.miniSelectLabel {
+  font-size: 8px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dimmer);
+}

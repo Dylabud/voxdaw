@@ -33,9 +33,9 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
-### [2026-07-13] Moog Phase 66 — Cross-page hooks for Workstation Moog-record (pointer; full log in root PLAN.md Phase 152)
+### [2026-07-13] Moog Phase 66 — Cross-page hooks for Workstation Moog-record (pointer; full log in root PLAN.md Phase 155)
 
-Moog-side additions so the Workstation can drive a count-in Moog recording (see root PLAN.md Phase 152 for the full feature):
+Moog-side additions so the Workstation can drive a count-in Moog recording (see root PLAN.md Phase 155 for the full feature):
 - **`useMoogAudio`**: `resetSequencers()` (restart every 960 + chord seq from step 0 — same reset `powerOn` does; used by the Workstation count-in so a take begins at the top) and `getIsPowered()` (live power via `isPoweredRef`, since the `isPowered` boolean in the return is a render snapshot). Both added to the return.
 - **`MoogShell`**: `onBusReady` widened from a bare bus getter to a control surface `{ getBusNode, resetSequencers, isPowered }`; new `recordingActiveRef` prop threaded to `KeyboardModule`.
 - **`KeyboardModule`**: the QWERTY window listener's hidden-page guard (`offsetParent === null`) now also passes when `externalActiveRef.current` is true — so while the Workstation records the Moog, computer keys play it. **MIDI already worked** (its handler never had the guard). Nothing else in the Moog changed.

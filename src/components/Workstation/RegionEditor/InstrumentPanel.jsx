@@ -32,8 +32,8 @@ const MELODIC_KEY_ORDER = ['a', 'w', 's', 'e', 'd', 'f', 't', 'g', 'y', 'h', 'u'
                            'k', 'o', 'l', 'p', ';', "'", ']'];
 const NOTE_SEQ = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
-// Octave stepper bounds (sliding-window keyboard). C1..C9 spanned at the edges.
-const MIN_OCT = 1;
+// Octave stepper bounds (sliding-window keyboard). C-2..C9 spanned at the edges.
+const MIN_OCT = -2;
 const MAX_OCT = 7;
 
 // Chassis knob metadata — 0..1 ↔ real-value mapping (log for time params so the

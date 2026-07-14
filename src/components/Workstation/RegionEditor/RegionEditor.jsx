@@ -5,6 +5,7 @@ import { drawGrid, getSnapIncrement } from '../WorkstationShell';
 import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
 import { firstLoopOffsetMeasures } from '../loopMath';
 import { SYNTH_INSTRUMENTS, SAMPLED_MELODIC_NAMES, DRUM_KIT_NAMES, isDrumKit } from '../synthFactory';
+import { customInstrumentList } from '../customInstruments';
 import {
   normalizeGlide, indexNotesByStartTick, resolveGlideTarget,
   svgPathFor, tensionHandlePoint, keyIndexOf, TENSION_LIMIT,
@@ -278,7 +279,8 @@ export default function RegionEditor({
   }, []);
 
   // Drums are one-shots — glide is meaningless; kick back to the editor if
-  // the instrument flips to a kit while the glide tool is active.
+  // the instrument flips to a kit while the glide tool is active. (Custom
+  // instruments DO support glide — a mono glide composite reproduces their tone.)
   const isDrumTrack = isDrumKit(track?.instrument);
   useEffect(() => {
     if (isDrumTrack && toolMode === 'glide') setToolMode('editor');
@@ -1023,11 +1025,11 @@ export default function RegionEditor({
           <div className={styles.editorTools}>
             <div className={styles.toolToggle}>
               {['editor', 'velocity', 'glide'].map(m => {
-                const drumBlocked = m === 'glide' && isDrumTrack;
+                const glideBlocked = m === 'glide' && isDrumTrack;
                 const titles = {
                   editor:   'Editor — move / resize / draw notes',
                   velocity: 'Velocity tool — drag notes vertically to set velocity (1–120)',
-                  glide:    drumBlocked
+                  glide:    glideBlocked
                     ? 'Drums are one-shots — glide unavailable'
                     : 'Glide — shape per-note pitch glides; drop the right point on the next note to connect (legato)',
                 };
@@ -1036,7 +1038,7 @@ export default function RegionEditor({
                     key={m}
                     className={`${styles.toolBtn}${toolMode === m ? ` ${styles.toolBtnActive}` : ''}`}
                     onClick={() => setToolMode(m)}
-                    disabled={drumBlocked}
+                    disabled={glideBlocked}
                     title={titles[m]}
                   >
                     {m}
@@ -1090,6 +1092,11 @@ export default function RegionEditor({
             <optgroup label="drums">
               {DRUM_KIT_NAMES.map(i => <option key={i} value={i}>{i}</option>)}
             </optgroup>
+            {customInstrumentList().length > 0 && (
+              <optgroup label="custom">
+                {customInstrumentList().map(ci => <option key={ci.id} value={ci.id}>{ci.name}</option>)}
+              </optgroup>
+            )}
           </select>
         </div>
 
