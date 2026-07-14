@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import * as Tone from 'tone';
-import { makeSynth, makeGlideVoice, applyEnvelope, defaultEnvelopeFor, isSampledInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
+import { makeSynth, makeGlideVoice, applyEnvelope, defaultEnvelopeFor, customMaxRelease, isSampledInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
 import { makeFx } from '../components/Workstation/fxChain';
 import { HEAVY_EFFECT_TYPES, EFFECT_DEFS, metaForTarget } from '../components/Workstation/effectDefs';
 import {
@@ -1757,7 +1757,7 @@ function fxTailSec(c) {
 export function estimateTrackTailSec(t) {
   // Synth release rings past the note end (drums: one-shots ignore duration
   // entirely, so a cymbal on the last note needs the 6 s floor).
-  let tail = t.envelope?.release ?? defaultEnvelopeFor(t.instrument)?.release ?? 1;
+  let tail = t.envelope?.release ?? customMaxRelease(t.instrument) ?? defaultEnvelopeFor(t.instrument)?.release ?? 1;
   if (isDrumKit(t.instrument)) tail = Math.max(tail, 6);
   tail = Math.max(tail, fxTailSec(t));
   return Math.min(30, Math.max(2, tail));

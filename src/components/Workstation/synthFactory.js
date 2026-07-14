@@ -40,16 +40,31 @@ const envFor = (instrument) => ({ ...(SYNTH_ENVELOPES[instrument] ?? DEFAULT_SYN
 // only fields Tone.Sampler exposes); drum kits → null (no ADSR surface).
 export function defaultEnvelopeFor(instrument) {
   if (isDrumKit(instrument)) return null;
-  // Custom instrument: the patch's own ADSR is the default (the delegating
-  // .set on the composite lets the tab knobs + envelope-sync override it).
+  // Custom instrument: a patch is a STACK of layers, each with its own envelope
+  // baked in at build. A SINGLE layer → its own ADSR (applying it is a no-op).
+  // MULTIPLE layers → null: there is no single default, and returning one would
+  // make the envelope-sync (effect 3c) clobber every layer with it — the
+  // multi-layer "silent/wrong layer" bug. Null makes applyEnvelope a no-op, so
+  // each layer keeps the envelope makePatchSynth built it with.
   if (isCustomInstrument(instrument)) {
-    return { ...(getCustomInstrument(instrument)?.patch.envelope ?? envFor('analog')) };
+    const layers = getCustomInstrument(instrument)?.patch?.layers;
+    return layers && layers.length === 1 ? { ...layers[0].envelope } : null;
   }
   if (isSampledInstrument(instrument)) {
     const cfg = SAMPLED_INSTRUMENTS[instrument];
     return { attack: 0, release: cfg?.release ?? 1 };
   }
   return envFor(instrument);
+}
+
+// Longest release across a custom instrument's layers (for tail estimation —
+// defaultEnvelopeFor returns null for multi-layer, so activity-pruning/bounce
+// can't read a single release from it). null for non-custom / unknown ids.
+export function customMaxRelease(instrument) {
+  if (!isCustomInstrument(instrument)) return null;
+  const layers = getCustomInstrument(instrument)?.patch?.layers;
+  if (!layers?.length) return null;
+  return layers.reduce((m, l) => Math.max(m, l.envelope?.release ?? 0), 0);
 }
 
 // Apply an ADSR override to a live synth — one path for both node kinds.

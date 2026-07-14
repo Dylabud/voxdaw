@@ -426,3 +426,183 @@
   text-transform: uppercase;
   color: var(--text-dimmer);
 }
+
+/* ── Layer tabs ── */
+.layerTabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: min(1100px, 95%);
+}
+.layerTab {
+  appearance: none;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.layerTab:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong, var(--accent-color));
+}
+.layerTabActive {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+.layerTabRemove {
+  margin-left: 4px;
+  opacity: 0.55;
+  font-size: 11px;
+}
+.layerTabRemove:hover {
+  opacity: 1;
+  color: var(--warning-color, #e07a5f);
+}
+.layerAddBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px dashed var(--border-mid);
+  border-radius: 3px;
+  color: var(--text-dimmer);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.layerAddBtn:hover {
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+}
+.layerHint {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dimmer);
+  margin-left: auto;
+}
+
+/* ── Master mix panel ── */
+.mixPanel {
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+  width: min(1100px, 95%);
+  padding: 10px 14px;
+  box-sizing: border-box;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+}
+.mixMaster {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-right: 14px;
+  border-right: 1px solid var(--border-mid);
+}
+.mixSectionLabel {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent-color);
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+}
+.mixStrips {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+}
+/* Channel strip = the layer selector (click header) + its mix controls. */
+.chStrip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.chStrip:hover { border-color: var(--border-mid); }
+.chStripActive {
+  border-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 8%, transparent);
+}
+.chHead {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.chSelect {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+.chStripActive .chSelect { color: var(--accent-color); }
+.chRemove {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-dimmer);
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.chRemove:hover { color: var(--warning-color, #e07a5f); }
+.muteBtn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  border-radius: 3px;
+  color: var(--text-dimmer);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.muteBtn:hover { color: var(--text-primary); }
+.muteBtnOn {
+  border-color: var(--warning-color, #e07a5f);
+  color: var(--warning-color, #e07a5f);
+  background: color-mix(in srgb, var(--warning-color, #e07a5f) 14%, transparent);
+}
+
+/* ── Undo / redo ── */
+.histBtn {
+  flex: 0 0 auto;
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  border-radius: 2px;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, opacity 0.15s;
+}
+.histBtn:hover:not(:disabled) { color: var(--accent-color); border-color: var(--accent-color); }
+.histBtn:disabled { opacity: 0.35; cursor: default; }
