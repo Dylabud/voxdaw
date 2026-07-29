@@ -51,7 +51,7 @@ All connections carry one of two signal classes. The patch cable simulator must 
 | Sawtooth OUT | Output | AUDIO | Brightest, richest. All harmonics. Classic Moog bass/lead. |
 | Square OUT | Output | AUDIO | Hollow, woody. Odd harmonics only. |
 
-**Tone.js Node:** `Tone.Oscillator` (type: sine / triangle / sawtooth / square). Frequency controlled via `oscillator.frequency.rampTo(hz, 0.02)`. Tune knob: `oscillator.detune.rampTo(cents, 0.02)`.
+**Engine (Moog Phase 68b — worklet CORE):** the VCO is no longer a `Tone.Oscillator`. Its core is the `hard-sync-worklet.js` AudioWorklet: **one phase accumulator emits all four waveforms simultaneously** on a 4-channel output (0=sine 1=triangle 2=sawtooth 3=pulse), so all four output jacks are live at once. Signal path: worklet → `${id}coreGate` (power gate, 0 while unpowered) → `${id}bus` (sequencer per-step gate) → a `ChannelSplitter(4)` → four tap gains (`Sin/Tri/Saw/Pulse`) → the jacks. Per-VCO `Tone.Signal`s sum into the worklet's a-rate params: `GlideBus` + `fm`(×500) → `slaveFreq` (Hz), `DetuneSig` → `slaveDetune` (cents), `WidthSig` + `pw` → `pulseWidth`. **SHAPE** knob phase-warps all four waveforms (pulse duty for the SQR out). **HARD SYNC** = the worklet's `syncEnabled` param: a master patched to SYNC IN resets the shared phase, syncing all four outs; SYNC OUT taps the SAW (sharp reset edge). **Known limitation:** the core is naive (non-band-limited) so high notes alias — PolyBLEP is a logged follow-up (MOOG_PLAN Future Phases).
 
 ---
 
@@ -205,22 +205,24 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 
 ---
 
-### 8. Noise Generator [Implemented: Moog Phase 8b, 2026-07-11]
+### 8. Noise Generator [Implemented: Moog Phase 8b, 2026-07-11 · six colours + scope + LEVEL CV: Phase 69, 2026-07-29]
 
-**Function:** Generates random electrical signals across all frequencies simultaneously. White noise has equal energy per frequency (Hz). Pink noise rolls off at −3 dB/octave, giving equal energy per octave — it sounds perceptually "flatter" and more natural. Used as a sound source (wind, ocean, percussion transients), as a random CV source for organic pitch drift, or as a test signal.
+**Function:** Generates random electrical signals — a sound source (wind, ocean, percussion transients), a random CV source, or a test signal. **Six colours** are available simultaneously, each on its own output jack (spectral tilt in parentheses): WHITE (flat), PINK (−3 dB/oct), RED (−6 dB/oct, deep — aka brown noise), BLUE (+3 dB/oct, bright), VIOLET (+6 dB/oct, brightest/thinnest), GREY (perceptually even). A shared LEVEL knob + a LEVEL-CV jack scale all six.
 
 **Controls:**
 | Knob | Function |
 |---|---|
-| **Level** | Output amplitude of the noise signal before the output jacks. |
+| **Level** | Output amplitude of all six colours before the jacks (knob 0–1 → gain 0–1.43×, unity at 0.7). |
 
-**Ports (2 Total):**
+**Ports (7 Total):**
 | Port | Direction | Signal | Description |
 |---|---|---|---|
-| WHITE OUT | Output | AUDIO / CV | Flat spectrum — full-range randomness. Harsh, bright. |
-| PINK OUT | Output | AUDIO / CV | −3 dB/oct rolloff — perceptually even energy distribution. Warmer. |
+| WHITE / PINK / RED / BLUE / VIOLET / GREY OUT | Output | AUDIO / CV | The six colours, each tapping its own LEVEL gain. |
+| LEVEL CV IN | Input | CV — Continuous | LFO/CV that modulates the LEVEL of all six colours (jack `-lvl-cv`, right of the LEVEL knob). |
 
-**Tone.js Node:** `Tone.Noise` (type: `'white'` or `'pink'`). Two separate noise instances per module, each through a `Tone.Gain` level stage (`${id}WGain`/`${id}PGain`) that the WHT/PNK jacks tap. One LEVEL knob drives both gains via id-keyed `updateNoiseParams(id, { level })` — knob 0–1 → gain 0–1.43× with **unity at the 0.7 default** (pre-8b patches, which had no gain stage, sound identical until the knob moves). Applies to the 3 static modules and every dynamic instance.
+**Tone.js graph (per instance, `buildNoiseColors(n, id)`):** three real sources — `Tone.Noise('white'|'pink'|'brown')`. Each colour has its own `Tone.Gain` LEVEL stage the jack taps. Derived colours filter off the shared sources (fewer running sources): **RED** = brown → gain; **BLUE** = pink → native `IIRFilter([1,-1],[1])` differentiator (−3 + 6 = +3 dB/oct); **VIOLET** = white → same differentiator (+6 dB/oct); **GREY** = white → lowshelf(+) → peaking(−9 @3.5 kHz) → highshelf(+) (inverse equal-loudness). A biquad shelf cannot make a constant broadband slope — hence the IIR differentiators. `updateNoiseParams(id, { level })` is the single writer of all six gains, each scaled by a per-colour makeup (`NOISE_LEVEL_GAINS`) so the colours sit at comparable loudness. **LEVEL CV** fans through per-colour makeup scalers into each gain's AudioParam (knob owns intrinsic value, CV sums — makeup-balanced like the knob). Jack ids: `-wht/-pnk/-brn/-blu/-vio/-gry` + `-lvl-cv` (kept `-brn` internally though the label reads RED). Applies to the 3 static modules and every dynamic instance.
+
+**Visualizer:** a retro CRT scope (`NoiseScope`) draws a procedural noise trace tinted to whichever colour is currently patched (`useMoogPatch().cables`, most-recent wins); trace roughness varies per colour, amplitude tracks LEVEL. Zero-Re-render (canvas-in-rAF, Phase-61 visibility-gated); stays emissive-bright in lights-out with the I/O-oscilloscope bezel treatment.
 
 ---
 
@@ -343,6 +345,30 @@ The external-mic input was originally a standalone module (Phase 43) but was **m
 **Formant frequencies:** `VOWEL_FORMANTS` (module const in `useMoogAudio.js`) — classic male-voice table; `vowelFreqsAt(pos 0..4)` linearly interpolates adjacent columns. A/E/I/O/U = [730,1090,2440] / [530,1840,2480] / [270,2290,3010] / [570,840,2410] / [300,870,2240] Hz.
 
 **Single-writer rAF (`vowelTick`):** the SOLE writer of the 3 filter frequencies — combines the morph ref (VOWEL knob), shape ref (SHAPE), and the sampled CV level (`cv*4` = full A↔U sweep) into the final formants, with a per-instance delta gate (idle module = 0 writes). `updateDynModuleParams` case `'vowel'` writes the refs only (never the filters), preserving single-writer-per-node. This is why FORMANT CV works at all — a preset morph is a nonlinear map to 3 freqs, not a direct AudioParam connection.
+
+---
+
+### 14. PANNER — Voltage-Controlled Stereo Panner [Implemented: Moog Phase 67]
+
+**Function:** Places a (typically mono) source in the stereo field. **Dynamic-only.** `${id}In → Tone.Panner(0) → ${id}Out` — `Tone.Panner` wraps the native `StereoPannerNode`, already **equal-power**, so one node gives the pan law (no dual-VCA matrix). The whole rack downstream of `io-in` is 2-channel, so it pans to both the speakers and the Workstation record tap.
+
+**Controls / jacks:** PAN knob (writes `pan.pan` intrinsic value), CV DEPTH knob (attenuator). Jacks `-in` / `-cv-in` (a CV summed onto `pan.pan` via `${id}CvDepth`, clamped [−1,1]) / `-out`. `getPanMeterData(id)` computes per-channel level (input peak × equal-power gain at the effective pan) for the two L/R meter LEDs.
+
+---
+
+### 15. CHRONOS — Multi-Zone Stereo Delay [Implemented: Moog Phase 68]
+
+**Function:** MONO in → STEREO out. **Dynamic-only.** A **hand-built** stereo feedback loop around two native `Tone.Delay` lines (not a `Tone.FeedbackDelay` black box) so COLOR (loop lowpass), HALO (allpass diffusion + L↔R cross-feedback smear) and a `tanh` soft-clip all live INSIDE the feedback path. Modulating `delayTime` (TIME knob / TIME CV) varispeed-warps pitch with no dropouts (native interpolation) = tape-stop/skid. Stereo width is synthesized (L/R times drift apart + cross-feed); wet L/R hard-pan to their own buses, dry sums to both (centre), all → one stereo OUT jack.
+
+**As built:** per channel `Sum → Delay(maxDelay 4 s) → HP → LP → Ap1 → Ap2 → Wet(→ its OutBus)`, with `Ap2 → Sat(tanh) → Fb(self) + Xfb(cross)` back into the sum. Zones `CHRONOS_RANGES = { micro:[0.003,0.03], mini:[0.03,0.28], macro:[0.28,3.0] }`; TIME is log-mapped within the zone. `updateDynModuleParams` case `'chronos'` takes the full `{zone,time,repeats,halo,color,mix}` and derives all node values (feedback + cross share headroom, `|self|+|cross| ≤ ~0.9`, tanh guards the rest). NB Web Audio clamps any delay inside a feedback cycle to ≥1 render quantum (~2.9 ms), so Micro floors there. Jacks `-in` / `-time-cv` / `-rep-cv` / `-out`; `getChronosDisplay(id)` drives an echo-ring visualizer (energy = post-diffusion peak, ring gap = live delay time).
+
+---
+
+### 16. WAVEFOLDER — West-Coast Sine Folder [Implemented: Moog Phase 68c]
+
+**Function:** Drives a signal into a fixed multi-fold sine transfer curve — more drive = more folds = more added harmonics. **Dynamic-only.** Output-domain waveshaping, so it works on ANY audio in (VCO, chord, external) — which is why it's its own module rather than a VCO knob (the VCO's SHAPE is phase-domain).
+
+**As built:** `In → Drive(FOLD pre-gain 0.2..1.0) → BiasSum → Shaper → Out`, where `Shaper = Tone.WaveShaper(x ⇒ sin(x·π·4))` (4 folds across ±1 at max drive) and `Bias` (a `Tone.Signal`, SYMMETRY −0.5..0.5) adds a DC offset before the fold for asymmetric/even-harmonic folding. FOLD-CV (`${id}FoldCv`) sums onto `Drive.gain`. Jacks `-in` / `-fold-cv` / `-out`; `getFolderScope(id)` draws the folded output waveform.
 
 ---
 

@@ -5,12 +5,12 @@ const TICK_COUNT = 11;
 const MIN_DEG = -135;
 const MAX_DEG =  135;
 
-const BODY_PX = { xl: 64, lg: 50, md: 38, sm: 30, xs: 22 };
-const WRAP_PX = { xl: 104, lg: 86, md: 66, sm: 52, xs: 26 };
+const BODY_PX = { xxl: 80, xl: 64, lg: 50, md: 38, sm: 30, xs: 22 };
+const WRAP_PX = { xxl: 130, xl: 104, lg: 86, md: 66, sm: 52, xs: 26 };
 
 function KnobScale({ size }) {
   if (size === 'xs') return null; // ultra-compact: no tick ring (keeps the wrap tight)
-  const showNums = size === 'xl' || size === 'lg';
+  const showNums = size === 'xxl' || size === 'xl' || size === 'lg';
   return (
     <div className={styles.knobScale}>
       {Array.from({ length: TICK_COUNT }, (_, i) => {

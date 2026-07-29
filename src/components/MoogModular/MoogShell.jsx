@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import styles from './MoogShell.module.css';
 import MoogKnob from './MoogKnob';
 import { MoogPatchProvider, useMoogPatch } from './MoogPatchContext';
@@ -159,7 +159,8 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
   const [fineTune,    setFineTune]    = useState(saved.fineTune    ?? defaultFine);
   const [rangeOctave, setRangeOctave] = useState(saved.rangeOctave ?? 0);
   const [syncOn,      setSyncOn]      = useState(saved.syncOn      ?? false);
-  useModulePersist(vcoId, { freqBase, fineTune, rangeOctave, syncOn });
+  const [pulseWidth,  setPulseWidth]  = useState(saved.pulseWidth  ?? 0.5); // 0.5 = square (SQR out PWM)
+  useModulePersist(vcoId, { freqBase, fineTune, rangeOctave, syncOn, pulseWidth });
 
   // Sync LED getter — ref-backed so the stable useCallback never stale-captures syncOn.
   const syncOnRef = useRef(false);
@@ -171,8 +172,11 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
     const baseHz  = VCO_FREQ_MIN * Math.pow(VCO_FREQ_MAX / VCO_FREQ_MIN, freqBase);
     const finalHz = baseHz * Math.pow(2, rangeOctave);
     const detune  = (fineTune - 0.5) * 200;
-    onParamUpdate(vcoId, { hz: finalHz, detune });
-  }, [freqBase, fineTune, rangeOctave, vcoId, onParamUpdate]);
+    // SHAPE knob 0..1 → phase-warp midpoint 0.05..0.95 (0.5 = no warp). Warps all
+    // four waveforms in the worklet core (pulse duty, tri/saw skew, sine lean).
+    const width   = 0.05 + pulseWidth * 0.9;
+    onParamUpdate(vcoId, { hz: finalHz, detune, width });
+  }, [freqBase, fineTune, rangeOctave, pulseWidth, vcoId, onParamUpdate]);
 
   // Apply the HARD SYNC enable state to the engine on mount AND on change — not
   // just on user toggle. Without the mount application, a `syncOn` restored from
@@ -182,8 +186,28 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
     onSyncChange?.(syncOn);
   }, [syncOn, onSyncChange]);
 
-  const cycleRange = () =>
-    setRangeOctave(prev => RANGE_STEPS[(RANGE_STEPS.indexOf(prev) + 1) % RANGE_STEPS.length]);
+  // RANGE selector — hold and drag the cursor vertically to scrub through the
+  // ranges (up → higher pitch / 2', down → lower / 32') instead of click-cycling,
+  // so either direction is one gesture away. Window listeners bound on mousedown
+  // (the knob drag pattern); stopPropagation keeps the drag off the camera pan.
+  const RANGE_DRAG_PX = 16; // cursor travel per range step
+  const handleRangeDragStart = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startY   = e.clientY;
+    const startIdx = RANGE_STEPS.indexOf(rangeOctave);
+    const onMove = (ev) => {
+      const steps = Math.round((startY - ev.clientY) / RANGE_DRAG_PX); // up = +
+      const idx   = Math.max(0, Math.min(RANGE_STEPS.length - 1, startIdx + steps));
+      setRangeOctave(RANGE_STEPS[idx]); // no-op re-render if unchanged (Object.is)
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   const handleSyncToggle = () => setSyncOn(v => !v);
 
@@ -203,13 +227,19 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
           <div className={styles.knobRow}>
             <MoogKnob label="FREQ" size="xl" value={freqBase} onChange={setFreqBase} defaultValue={0.5} glow={quantized} />
             <MoogKnob label="FINE" size="sm" value={fineTune} onChange={setFineTune} defaultValue={defaultFine} />
+            <MoogKnob label="SHAPE" size="sm" value={pulseWidth} onChange={setPulseWidth} defaultValue={0.5} />
             <Led getValue={getLedValue} color="green" />
           </div>
           <div className={styles.vcoControlRow}>
             <div className={styles.selectorRow}>
-              <div className={styles.selectorGroup} onClick={cycleRange} title="Click to cycle range">
+              <div
+                className={styles.selectorGroup}
+                onMouseDown={handleRangeDragStart}
+                style={{ cursor: 'ns-resize' }}
+                title="Hold and drag up / down to change range"
+              >
                 <span className={styles.selectorLabel}>RANGE</span>
-                <span className={styles.selectorValue}>{RANGE_LABELS[String(rangeOctave)]}</span>
+                <span className={`${styles.selectorValue} ${styles.selectorValueRange}`}>{RANGE_LABELS[String(rangeOctave)]}</span>
               </div>
             </div>
             {onSyncChange && (
@@ -230,6 +260,7 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
           <div className={styles.jackRow}>
             <Jack id={`${p}-cv`}  label="CV" />
             <Jack id={`${p}-fm`}  label="FM" />
+            <Jack id={`${p}-pw`}  label="SH" />
             <Jack id={`${p}-sin`} label={<WaveIcon type="sine" />} />
             <Jack id={`${p}-tri`} label={<WaveIcon type="triangle" />} />
             <Jack id={`${p}-saw`} label={<WaveIcon type="sawtooth" />} />
@@ -241,16 +272,115 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
   );
 }
 
+// Noise-colour jack suffixes + their on-screen tint and trace roughness (Phase 69).
+// 'brn' is brown noise (Tone 'brown', −6 dB/oct) shown as RED (aka red noise).
+// rough: how jagged the scope trace is — red is smooth (low freq), violet spiky.
+const NOISE_KEYS = ['wht', 'pnk', 'brn', 'blu', 'vio', 'gry'];
+const NOISE_VIZ = {
+  wht: { color: '#e9e9e9', rough: 1.00 },
+  pnk: { color: '#ff86b0', rough: 0.60 },
+  brn: { color: '#ff4a35', rough: 0.28 }, // RED
+  blu: { color: '#4aa3ff', rough: 1.35 },
+  vio: { color: '#b26bff', rough: 1.70 },
+  gry: { color: '#9aa0a8', rough: 0.90 },
+};
+const NOISE_SCOPE_W = 176, NOISE_SCOPE_H = 46;
+
+// Retro phosphor oscilloscope for the noise module. Draws a live procedural
+// noise trace (noise IS random, so a real analyser tap adds nothing visually) in
+// the tint of the colour currently patched from this module — so patching RED
+// glows red, VIOLET glows violet, etc. Idle (nothing patched) = a dim grey trace.
+// activeKey = the patched colour suffix (or null); level scales amplitude.
+// Phase-61 visibility gates + persistence trails give the CRT look.
+function NoiseScope({ activeKey, level }) {
+  const canvasRef = useRef(null);
+  const stateRef  = useRef({ activeKey, level });
+  stateRef.current = { activeKey, level };
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = NOISE_SCOPE_W, H = NOISE_SCOPE_H, mid = H / 2;
+    let raf, glow = 0, lp = 0, sweep = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      if (canvas.offsetParent === null) return;                                   // hidden page
+      if (canvas.checkVisibility && !canvas.checkVisibility({ contentVisibilityAuto: true })) return; // culled
+      const { activeKey, level } = stateRef.current;
+      const meta  = NOISE_VIZ[activeKey] || null;
+      const tint  = meta ? meta.color : 'rgba(150,160,175,0.6)';
+      const rough = meta ? meta.rough : 0.9;
+      const amp   = (meta ? 1 : 0.3) * Math.max(0.05, level) * (H * 0.42);
+      glow += ((meta ? 1 : 0.22) - glow) * 0.08;
+
+      // persistence — dark wash each frame leaves a faint phosphor trail
+      ctx.fillStyle = 'rgba(4,7,6,0.34)';
+      ctx.fillRect(0, 0, W, H);
+      // centre baseline
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(W, mid); ctx.stroke();
+
+      // noise trace — per-x random, low-passed by (1-rough) for smoother colours
+      const smooth = Math.min(1, rough * 0.55 + 0.14);
+      ctx.beginPath();
+      for (let x = 0; x <= W; x += 2) {
+        lp += ((Math.random() * 2 - 1) - lp) * smooth;
+        const y = mid - lp * amp;
+        if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = tint;
+      ctx.globalAlpha = 0.32 + glow * 0.58;
+      ctx.lineWidth   = 1.4;
+      ctx.shadowBlur  = 6 * glow;
+      ctx.shadowColor = tint;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
+
+      // a slow scanning dot rides the trace for extra retro motion
+      sweep = (sweep + 1.5) % W;
+      lp += ((Math.random() * 2 - 1) - lp) * smooth;
+      ctx.fillStyle = tint;
+      ctx.globalAlpha = 0.5 + glow * 0.5;
+      ctx.beginPath(); ctx.arc(sweep, mid - lp * amp, 1.3, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    };
+    tick();
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  return (
+    <div className={styles.noiseScope}>
+      <canvas ref={canvasRef} width={NOISE_SCOPE_W} height={NOISE_SCOPE_H} className={styles.noiseScopeCanvas} />
+    </div>
+  );
+}
+
 function NoiseModule({ number = 1, onParamUpdate }) {
   const prefix = number === 1 ? 'noise' : `noise${number}`;
   const saved = useSavedSettings(prefix);
   const [level, setLevel] = useState(saved.level ?? 0.7);
   useModulePersist(prefix, { level });
 
-  // LEVEL → per-instance W/P gain pair (Phase 8b); 0.7 default = unity.
+  // LEVEL → per-instance colour gains (Phase 69); 0.7 default = unity.
   useEffect(() => {
     onParamUpdate?.(prefix, { level });
   }, [level, prefix, onParamUpdate]);
+
+  // Which of this module's colour outputs is patched (most-recent cable wins) —
+  // drives the scope tint. Cables carry fromJackId/toJackId; an output can be the
+  // source (fromJackId) or, if the user dragged into it, the toJackId.
+  const { cables } = useMoogPatch();
+  const activeKey = useMemo(() => {
+    const jackToKey = new Map(NOISE_KEYS.map(k => [`${prefix}-${k}`, k]));
+    let key = null;
+    for (const c of cables) {
+      if (jackToKey.has(c.fromJackId))      key = jackToKey.get(c.fromJackId);
+      else if (jackToKey.has(c.toJackId))   key = jackToKey.get(c.toJackId);
+    }
+    return key;
+  }, [cables, prefix]);
+
   return (
     <div className={styles.module}>
       <Screw pos="screwTL" /><Screw pos="screwTR" />
@@ -265,11 +395,20 @@ function NoiseModule({ number = 1, onParamUpdate }) {
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
             <MoogKnob label="LEVEL" size="md" value={level} onChange={setLevel} defaultValue={0.7} />
+            {/* LEVEL CV in — patch an LFO here to modulate the noise level. */}
+            <Jack id={`${prefix}-lvl-cv`} label="CV" />
           </div>
+          <NoiseScope activeKey={activeKey} level={level} />
           <PlateDivider />
-          <div className={styles.jackRow}>
-            <Jack id={`${prefix}-wht`} label="WHT" />
-            <Jack id={`${prefix}-pnk`} label="PNK" />
+          {/* Six colours (Phase 69): white/pink/red sources + blue/violet/grey
+              voiced off white (RED = brown noise). 3×2 grid, full colour names. */}
+          <div className={styles.noiseJackGrid}>
+            <Jack id={`${prefix}-wht`} label="WHITE" />
+            <Jack id={`${prefix}-pnk`} label="PINK" />
+            <Jack id={`${prefix}-brn`} label="RED" />
+            <Jack id={`${prefix}-blu`} label="BLUE" />
+            <Jack id={`${prefix}-vio`} label="VIOLET" />
+            <Jack id={`${prefix}-gry`} label="GREY" />
           </div>
         </div>
       </div>
@@ -795,6 +934,9 @@ const DYN_TYPES = [
   { type: 'voc',   label: '+ VOCODER', max: 2,  width: 586 },
   { type: 'qnt',   label: '+ QNT',    max: 4,  width: 442 },
   { type: 'vowel', label: '+ VOWEL',  max: 4,  width: 360 },
+  { type: 'panner', label: '+ PAN',   max: 8,  width: 300 },
+  { type: 'chronos', label: '+ DELAY', max: 4, width: 420 },
+  { type: 'folder', label: '+ FOLD',  max: 8, width: 300 },
 ];
 const DYN_WIDTH = Object.fromEntries(DYN_TYPES.map(t => [t.type, t.width]));
 
@@ -1756,6 +1898,255 @@ function VowelModule({ number = 1, onParamUpdate, getAnalyserData }) {
   );
 }
 
+// ──────────── Voltage-Controlled Panner (Phase 67) ────────────
+// onParamUpdate({ pan, depth }) — PAN positions the source -1..+1 (0..1 knob,
+// 0.5 = centre); CV DEPTH scales an external LFO/CV patched to PAN CV. getL/getR
+// feed the two equal-power stereo LEDs. Dynamic-only.
+function PanningModule({ number = 1, onParamUpdate, getL, getR }) {
+  const p = `panner${number}`; // dynamic-only; id = jack prefix
+  const saved = useSavedSettings(p);
+  const [pan, setPan]     = useState(saved.pan ?? 0.5);   // 0.5 → centre
+  const [depth, setDepth] = useState(saved.depth ?? 0.5); // CV attenuator
+  useModulePersist(p, { pan, depth });
+
+  useEffect(() => { onParamUpdate?.({ pan, depth }); }, [pan, depth, onParamUpdate]);
+
+  return (
+    <div className={styles.module}>
+      <Screw pos="screwTL" /><Screw pos="screwTR" />
+      <Screw pos="screwBL" /><Screw pos="screwBR" />
+      <div className={styles.plate}>
+        <div className={styles.plateHeader}>
+          {number > 1 && <span className={styles.plateNum}>{number}</span>}
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>PANNER</span>
+            <span className={styles.plateSub}>VC STEREO PANNER</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          <div className={styles.knobRow}>
+            <MoogKnob label="PAN" size="lg" value={pan} onChange={setPan} defaultValue={0.5} />
+            <MoogKnob label="CV DEPTH" size="md" value={depth} onChange={setDepth} defaultValue={0.5} />
+          </div>
+          <div className={styles.knobRow}>
+            <Led getValue={getL} color="green" label="L" />
+            <Led getValue={getR} color="green" label="R" />
+          </div>
+          <PlateDivider />
+          <div className={styles.jackRow}>
+            <Jack id={`${p}-in`}    label="IN" />
+            <Jack id={`${p}-cv-in`} label="PAN CV" />
+            <Jack id={`${p}-out`}   label="OUT" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────── Chronos Multi-Zone Delay (Phase 68) ────────────
+const CHR_ZONES = ['micro', 'mini', 'macro'];
+const CHR_ZONE_LABELS = { micro: 'MICRO', mini: 'MINI', macro: 'MACRO' };
+const CHR_W = 208, CHR_H = 92; // canvas backing px (matches FormantDisplay)
+
+// Echo-ring visualizer: rings pulse outward, ring gap tracks delay time (log),
+// brightness/line-weight track feedback energy. Same rAF + Phase-61 visibility
+// gates as AuraDisplay. getData() → { energy 0..1, delaySec }.
+function ChronosDisplay({ getData }) {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const cx = CHR_W / 2, cy = CHR_H / 2;
+    let raf, energySm = 0, phase = 0, lastT = performance.now() * 0.001;
+    const L0 = Math.log(0.003), LSPAN = Math.log(3) - Math.log(0.003);
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const t = performance.now() * 0.001;
+      if (canvas.offsetParent === null) { lastT = t; return; }
+      if (canvas.checkVisibility && !canvas.checkVisibility({ contentVisibilityAuto: true })) { lastT = t; return; }
+      const dt = Math.min(0.1, t - lastT); lastT = t;
+      const d = getData?.();
+      const energy = d ? Math.min(1, d.energy) : 0;
+      energySm += (energy - energySm) * 0.2;
+      const delaySec = d ? d.delaySec : 0.2;
+      phase = (phase + dt * (0.3 + energySm * 1.4)) % 1;
+      ctx.clearRect(0, 0, CHR_W, CHR_H);
+      const norm = Math.max(0, Math.min(1, (Math.log(Math.max(0.003, delaySec)) - L0) / LSPAN));
+      const ringGap = 7 + norm * 22;
+      const maxR = CHR_W * 0.52;
+      for (let r = ringGap * phase; r < maxR; r += ringGap) {
+        const a = (1 - r / maxR) * (0.10 + energySm * 0.6);
+        ctx.strokeStyle = `rgba(93,202,165,${a})`;
+        ctx.lineWidth = 1 + energySm * 1.3;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, r, r * 0.6, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.fillStyle = `rgba(120,230,190,${0.35 + energySm * 0.6})`;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 2.4 + energySm * 3.2, 0, Math.PI * 2);
+      ctx.fill();
+    };
+    tick();
+    return () => cancelAnimationFrame(raf);
+  }, [getData]);
+  return (
+    <div className={styles.auraScreen}>
+      <canvas ref={canvasRef} width={CHR_W} height={CHR_H} className={styles.auraCanvas} />
+    </div>
+  );
+}
+
+// onParamUpdate({ zone, time, repeats, halo, color, mix }) — full state every
+// change (the engine derives all node values from the complete set). Dynamic-only.
+function ChronosDelayModule({ number = 1, onParamUpdate, getDisplay }) {
+  const p = `chronos${number}`; // dynamic-only; id = jack prefix
+  const saved = useSavedSettings(p);
+  const [zone, setZone]       = useState(saved.zone ?? 'mini');
+  const [time, setTime]       = useState(saved.time ?? 0.5);
+  const [repeats, setRepeats] = useState(saved.repeats ?? 0.45);
+  const [halo, setHalo]       = useState(saved.halo ?? 0.3);
+  const [color, setColor]     = useState(saved.color ?? 0.6);
+  const [mix, setMix]         = useState(saved.mix ?? 0.5);
+  useModulePersist(p, { zone, time, repeats, halo, color, mix });
+
+  useEffect(() => {
+    onParamUpdate?.({ zone, time, repeats, halo, color, mix });
+  }, [zone, time, repeats, halo, color, mix, onParamUpdate]);
+
+  const cycleZone = () => setZone(z => CHR_ZONES[(CHR_ZONES.indexOf(z) + 1) % CHR_ZONES.length]);
+
+  return (
+    <div className={styles.module}>
+      <Screw pos="screwTL" /><Screw pos="screwTR" />
+      <Screw pos="screwBL" /><Screw pos="screwBR" />
+      <div className={styles.plate}>
+        <div className={styles.plateHeader}>
+          {number > 1 && <span className={styles.plateNum}>{number}</span>}
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>CHRONOS</span>
+            <span className={styles.plateSub}>MULTI-ZONE DELAY</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          <div className={styles.selectorRow}>
+            <div className={styles.selectorGroup} onClick={cycleZone} title="Click to cycle delay zone (Micro comb / Mini / Macro echo)">
+              <span className={styles.selectorLabel}>ZONE</span>
+              <span className={styles.selectorValue}>{CHR_ZONE_LABELS[zone]}</span>
+            </div>
+          </div>
+          <div className={styles.knobRow}>
+            <MoogKnob label="TIME"    size="lg" value={time}    onChange={setTime}    defaultValue={0.5} />
+            <MoogKnob label="REPEATS" size="md" value={repeats} onChange={setRepeats} defaultValue={0.45} />
+            <MoogKnob label="HALO"    size="md" value={halo}    onChange={setHalo}    defaultValue={0.3} />
+          </div>
+          <div className={styles.knobRow}>
+            <MoogKnob label="COLOR" size="md" value={color} onChange={setColor} defaultValue={0.6} />
+            <MoogKnob label="MIX"   size="md" value={mix}   onChange={setMix}   defaultValue={0.5} />
+          </div>
+          <ChronosDisplay getData={getDisplay} />
+          <PlateDivider />
+          <div className={styles.jackRow}>
+            <Jack id={`${p}-in`}      label="IN" />
+            <Jack id={`${p}-time-cv`} label="TIME CV" />
+            <Jack id={`${p}-rep-cv`}  label="REP CV" />
+            <Jack id={`${p}-out`}     label="OUT" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────── Wavefolder (Phase 68c) ────────────
+const FLD_W = 208, FLD_H = 92;
+
+// STILL shape preview — draws one cycle of a reference sine pushed through the
+// EXACT fold math the engine uses (`sin((drive·x + bias)·π·FOLDS)`), computed
+// straight from the FOLD / SYM knobs. No live audio, so nothing scrolls: it just
+// shows the shape the folder is imposing and morphs only when you turn a knob.
+const FLD_FOLDS = 4; // must match the engine's folder factory
+function FolderScope({ fold, symmetry }) {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, FLD_W, FLD_H);
+    const drive = 0.2 + fold * 0.8;   // matches updateDynModuleParams 'folder'
+    const bias  = symmetry - 0.5;
+    // faint zero line for reference
+    ctx.strokeStyle = 'rgba(93,202,165,0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, FLD_H / 2); ctx.lineTo(FLD_W, FLD_H / 2); ctx.stroke();
+    // the folded shape
+    ctx.beginPath();
+    for (let i = 0; i < FLD_W; i++) {
+      const inp    = Math.sin((i / (FLD_W - 1)) * 2 * Math.PI); // one cycle of a sine input
+      const folded = Math.sin((inp * drive + bias) * Math.PI * FLD_FOLDS);
+      const y = FLD_H / 2 - folded * (FLD_H / 2 - 5);
+      if (i === 0) ctx.moveTo(i, y); else ctx.lineTo(i, y);
+    }
+    ctx.strokeStyle = 'rgba(120,230,190,0.95)';
+    ctx.lineWidth = 1.6;
+    ctx.shadowBlur = 5;
+    ctx.shadowColor = 'rgba(93,202,165,0.8)';
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }, [fold, symmetry]);
+  return (
+    <div className={styles.auraScreen}>
+      <canvas ref={canvasRef} width={FLD_W} height={FLD_H} className={styles.auraCanvas} />
+    </div>
+  );
+}
+
+// onParamUpdate({ fold, symmetry, output }) — a sine wavefolder. FOLD drives the
+// signal into the fold curve (more folds = more harmonics); SYM offsets for
+// asymmetric folding; LEVEL is output makeup. Processes ANY audio in. Dynamic-only.
+function WavefolderModule({ number = 1, onParamUpdate }) {
+  const p = `folder${number}`; // dynamic-only; id = jack prefix
+  const saved = useSavedSettings(p);
+  const [fold, setFold]         = useState(saved.fold ?? 0.35);
+  const [symmetry, setSymmetry] = useState(saved.symmetry ?? 0.5);
+  const [output, setOutput]     = useState(saved.output ?? 0.5);
+  useModulePersist(p, { fold, symmetry, output });
+
+  useEffect(() => { onParamUpdate?.({ fold, symmetry, output }); }, [fold, symmetry, output, onParamUpdate]);
+
+  return (
+    <div className={styles.module}>
+      <Screw pos="screwTL" /><Screw pos="screwTR" />
+      <Screw pos="screwBL" /><Screw pos="screwBR" />
+      <div className={styles.plate}>
+        <div className={styles.plateHeader}>
+          {number > 1 && <span className={styles.plateNum}>{number}</span>}
+          <div className={styles.plateTitles}>
+            <span className={styles.plateTitle}>FOLD</span>
+            <span className={styles.plateSub}>WAVEFOLDER</span>
+          </div>
+        </div>
+        <div className={styles.plateBody}>
+          <div className={styles.knobRow}>
+            <MoogKnob label="FOLD"  size="lg" value={fold}     onChange={setFold}     defaultValue={0.35} />
+            <MoogKnob label="SYM"   size="md" value={symmetry} onChange={setSymmetry} defaultValue={0.5} />
+            <MoogKnob label="LEVEL" size="md" value={output}   onChange={setOutput}   defaultValue={0.5} />
+          </div>
+          <FolderScope fold={fold} symmetry={symmetry} />
+          <PlateDivider />
+          <div className={styles.jackRow}>
+            <Jack id={`${p}-in`}      label="IN" />
+            <Jack id={`${p}-fold-cv`} label="FOLD CV" />
+            <Jack id={`${p}-out`}     label="OUT" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ──────────── Kick Drum ────────────
 
 // onParamUpdate({ tune, pitchEnv, decay, click }) — wires knobs to useMoogAudio.
@@ -2276,6 +2667,10 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
     qntCb:        (fn) => audio.setQuantizerCallbackById(id, fn),
     qntTrp:       () => audio.getQntTransposeData(id),
     vowelData:    () => audio.getVowelAnalyserData(id),
+    panL:         () => audio.getPanMeterData(id)?.l ?? 0,
+    panR:         () => audio.getPanMeterData(id)?.r ?? 0,
+    chronosDisp:  () => audio.getChronosDisplay(id),
+    folderScope:  () => audio.getFolderScope(id),
   });
 
   useEffect(() => {
@@ -2721,6 +3116,68 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
     };
   }, [dynModules, hiddenModules, audio.isPowered]);
 
+  // Expansion row (Phase 60b/60c) — dynamic instances added from the library.
+  // Fixed per-type widths + wrap: extra rows grow the rack downward into the
+  // 60a fit-width floor + scroll. Rendered at the BOTTOM of the rack, below
+  // Row 4 (the Sequencer section) as of 2026-07-22.
+  const dynExpansionRow = dynModules.length > 0 && (
+    <div className={styles.tierDyn}>
+      {dynModules.map(m => {
+        const b = bindingsFor(m.id);
+        const inner =
+          m.type === 'vco'   ? <VcoModule number={m.num} onParamUpdate={audio.updateVcoParams} onSyncChange={b.sync} getLedValue={b.meter} quantized={quantizedVcos.includes(m.id)} />
+        : m.type === 'noise' ? <NoiseModule number={m.num} onParamUpdate={audio.updateNoiseParams} />
+        : m.type === 'vcf'   ? <VcfModule number={m.num} onParamUpdate={b.params} />
+        : m.type === 'lfo'   ? <LfoModule number={m.num} onParamUpdate={b.params} getLedValue={b.lfoLed} />
+        : m.type === 'vca'   ? <VcaModule number={m.num} onParamUpdate={b.params} />
+        : m.type === 'env'   ? <EnvelopeModule label={`ENV ${m.num}`} onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={b.meter} />
+        : m.type === 'rev'   ? <ReverbModule number={m.num} onParamUpdate={b.params} getAuraData={b.aura} />
+        : m.type === 'bbd'   ? <ChorusModule number={m.num} onParamUpdate={b.params} />
+        : m.type === 'kick'  ? <KickModule number={m.num} onParamUpdate={b.params} onTrigger={b.kickTrig} onSetTrigCallback={b.kickTrigCb} />
+        : m.type === 'ffb'   ? <FFBModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.ffbData} />
+        : m.type === 'seq'   ? <SequencerModule number={m.num} onStepsChange={b.seqSteps} onTempoChange={audio.setTempo} onSetCallback={b.seqStepCb} onGlideChange={b.seqGlide} />
+        : m.type === 'chordseq' ? <ChordSeqModule number={m.num} onStepsChange={b.chordSteps} onDivisionChange={b.chordDiv} onSetCallback={b.chordStepCb} onRootOctaveChange={b.chordRootOct} onGlideChange={b.chordGlide} />
+        : m.type === 'voc'   ? <VocoderModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vocData} onMicEnable={audio.enableMic} onMicDisable={audio.disableMic} onMicGainChange={audio.updateExtMicParams} getMicLevel={getExtMicLevel} />
+        : m.type === 'qnt'   ? <QuantizerModule number={m.num} onParamUpdate={b.params} onSetCallback={b.qntCb} getTransposeData={b.qntTrp} />
+        : m.type === 'vowel' ? <VowelModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vowelData} />
+        : m.type === 'panner' ? <PanningModule number={m.num} onParamUpdate={b.params} getL={b.panL} getR={b.panR} />
+        : m.type === 'chronos' ? <ChronosDelayModule number={m.num} onParamUpdate={b.params} getDisplay={b.chronosDisp} />
+        : m.type === 'folder' ? <WavefolderModule number={m.num} onParamUpdate={b.params} />
+        : null;
+        return (
+          <div
+            key={m.id}
+            className={styles.dynSlot}
+            style={{ flex: `0 0 ${DYN_WIDTH[m.type]}px` }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.currentTarget.classList.add(styles.dynSlotDropTarget);
+            }}
+            onDragLeave={(e) => e.currentTarget.classList.remove(styles.dynSlotDropTarget)}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.currentTarget.classList.remove(styles.dynSlotDropTarget);
+              handleDynReorder(dragDynIdRef.current, m.id);
+              dragDynIdRef.current = null;
+            }}
+          >
+            <div
+              className={styles.dynGrip}
+              draggable
+              title="Drag to reorder"
+              onDragStart={(e) => {
+                dragDynIdRef.current = m.id;
+                if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+              }}
+              onDragEnd={() => { dragDynIdRef.current = null; }}
+            >⠿</div>
+            {inner}
+          </div>
+        );
+      })}
+    </div>
+  );
+
   return (
     <MoogPatchProvider onCableAdded={audio.connect} onCableRemoved={audio.disconnect} onCablesChanged={handleCablesChanged}>
       <div className={styles.shell}>
@@ -2769,7 +3226,6 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
           <div className={styles.rack}>
             {/* Case 1: oscillators + filters/modulation/fx (rows 1–2) */}
             <section className={styles.case}>
-              <span className={styles.caseLabel}>Voice Case</span>
               <div className={styles.caseInterior}>
                 <div className={`${styles.tier} ${styles.tierRow1}`}>
                   {mod('vco1', <VcoModule key="vco1" number={1} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco1SyncEnabled} getLedValue={getVco1Level} quantized={quantizedVcos.includes('vco1')} />)}
@@ -2791,69 +3247,11 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                   {mod('bbd', <ChorusModule key="bbd" onParamUpdate={audio.updateChorusParams} />)}
                   {mod('ffb', <FFBModule key="ffb" onParamUpdate={audio.updateFFBParams} getAnalyserData={getFFBData} />)}
                 </div>
-                {/* Expansion row (Phase 60b/60c) — dynamic instances added from
-                    the library. Fixed per-type widths + wrap: extra rows grow
-                    the rack downward into the 60a fit-width floor + scroll. */}
-                {dynModules.length > 0 && (
-                  <div className={styles.tierDyn}>
-                    {dynModules.map(m => {
-                      const b = bindingsFor(m.id);
-                      const inner =
-                        m.type === 'vco'   ? <VcoModule number={m.num} onParamUpdate={audio.updateVcoParams} onSyncChange={b.sync} getLedValue={b.meter} quantized={quantizedVcos.includes(m.id)} />
-                      : m.type === 'noise' ? <NoiseModule number={m.num} onParamUpdate={audio.updateNoiseParams} />
-                      : m.type === 'vcf'   ? <VcfModule number={m.num} onParamUpdate={b.params} />
-                      : m.type === 'lfo'   ? <LfoModule number={m.num} onParamUpdate={b.params} getLedValue={b.lfoLed} />
-                      : m.type === 'vca'   ? <VcaModule number={m.num} onParamUpdate={b.params} />
-                      : m.type === 'env'   ? <EnvelopeModule label={`ENV ${m.num}`} onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={b.meter} />
-                      : m.type === 'rev'   ? <ReverbModule number={m.num} onParamUpdate={b.params} getAuraData={b.aura} />
-                      : m.type === 'bbd'   ? <ChorusModule number={m.num} onParamUpdate={b.params} />
-                      : m.type === 'kick'  ? <KickModule number={m.num} onParamUpdate={b.params} onTrigger={b.kickTrig} onSetTrigCallback={b.kickTrigCb} />
-                      : m.type === 'ffb'   ? <FFBModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.ffbData} />
-                      : m.type === 'seq'   ? <SequencerModule number={m.num} onStepsChange={b.seqSteps} onTempoChange={audio.setTempo} onSetCallback={b.seqStepCb} onGlideChange={b.seqGlide} />
-                      : m.type === 'chordseq' ? <ChordSeqModule number={m.num} onStepsChange={b.chordSteps} onDivisionChange={b.chordDiv} onSetCallback={b.chordStepCb} onRootOctaveChange={b.chordRootOct} onGlideChange={b.chordGlide} />
-                      : m.type === 'voc'   ? <VocoderModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vocData} onMicEnable={audio.enableMic} onMicDisable={audio.disableMic} onMicGainChange={audio.updateExtMicParams} getMicLevel={getExtMicLevel} />
-                      : m.type === 'qnt'   ? <QuantizerModule number={m.num} onParamUpdate={b.params} onSetCallback={b.qntCb} getTransposeData={b.qntTrp} />
-                      : m.type === 'vowel' ? <VowelModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vowelData} />
-                      : null;
-                      return (
-                        <div
-                          key={m.id}
-                          className={styles.dynSlot}
-                          style={{ flex: `0 0 ${DYN_WIDTH[m.type]}px` }}
-                          onDragOver={(e) => {
-                            e.preventDefault();
-                            e.currentTarget.classList.add(styles.dynSlotDropTarget);
-                          }}
-                          onDragLeave={(e) => e.currentTarget.classList.remove(styles.dynSlotDropTarget)}
-                          onDrop={(e) => {
-                            e.preventDefault();
-                            e.currentTarget.classList.remove(styles.dynSlotDropTarget);
-                            handleDynReorder(dragDynIdRef.current, m.id);
-                            dragDynIdRef.current = null;
-                          }}
-                        >
-                          <div
-                            className={styles.dynGrip}
-                            draggable
-                            title="Drag to reorder"
-                            onDragStart={(e) => {
-                              dragDynIdRef.current = m.id;
-                              if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-                            }}
-                            onDragEnd={() => { dragDynIdRef.current = null; }}
-                          >⠿</div>
-                          {inner}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
               </div>
             </section>
 
             {/* Case 2: amps, envelopes, drums, vocoder (row 3) */}
             <section className={styles.case}>
-              <span className={styles.caseLabel}>Percussion & FX Case</span>
               <div className={styles.caseInterior}>
                 <div className={`${styles.tier} ${styles.tierRow3}`}>
                   {mod('vca1', <VcaModule key="vca1" number={1} onParamUpdate={audio.updateVcaParams} />)}
@@ -2880,7 +3278,6 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                 Sequencers stay side by side (Phase 54): stacking them made this
                 tier 616px (⅓ of the rack) and halved the global fit() scale. */}
             <section className={styles.case}>
-              <span className={styles.caseLabel}>Sequencer Case</span>
               <div className={styles.caseInterior}>
                 <div className={`${styles.tier} ${styles.tierRow4}`}>
                   {mod('seq1', <SequencerModule
@@ -2924,6 +3321,9 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                     onChannelVolChange={audio.updateIoChannelVol}
                   />
                 </div>
+                {/* Row 5 (2026-07-22): library-added modules land here, below the
+                    sequencers, and wrap/scroll downward as more are added. */}
+                {dynExpansionRow}
               </div>
             </section>
           </div>

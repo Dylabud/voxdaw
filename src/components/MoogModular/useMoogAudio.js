@@ -204,74 +204,152 @@ function safeRamp(param, value, rampTime = 0.05) {
   }
 }
 
+// Noise module colours (Phase 69). Each colour has its own LEVEL-tap gain (the
+// jack taps it) and a per-colour makeup so they sit at comparable loudness at the
+// shared LEVEL default (rising colours are perceptually loud → trimmed).
+// [suffix, makeup]. updateNoiseParams is the single writer of every gain.
+const NOISE_LEVEL_GAINS = [
+  ['WGain',   1.0],  // white  — flat
+  ['PGain',   1.0],  // pink   — −3 dB/oct (native)
+  ['BrnGain', 1.4],  // red    — −6 dB/oct (native 'brown'); deep, perceptually quiet → boost
+  ['BluGain', 0.55], // blue   — +3 dB/oct (pink differentiated); bright → trim
+  ['VioGain', 0.40], // violet — +6 dB/oct (white differentiated); brightest → trim hard
+  ['GryGain', 0.85], // grey   — inverse-loudness voiced
+];
+
+// Builds the red (brown) source, the four new colour gains, and the BLU/VIO/GRY
+// shapers for a noise instance, then wires them. The white (`${id}W`) and pink
+// (`${id}P`) sources must already exist. Shared by the static instances and the
+// addModule factory. Returns the node-name list it created (dynamic dispose sweep).
+//
+// True spectral slopes (not shelf approximations):
+//   violet (+6 dB/oct) = WHITE through a first-difference differentiator y[n]=x[n]−x[n−1]
+//   blue   (+3 dB/oct) = PINK  through the same differentiator (pink −3 + 6 = +3)
+//   grey               = white shaped by an inverse equal-loudness voicing
+// The differentiator is a native IIRFilter — a biquad shelf can't make a constant
+// broadband slope, which is why the earlier shelf versions sounded like white.
+function buildNoiseColors(n, id) {
+  const rawCtx = Tone.context.rawContext;
+  n[`${id}Brn`]     = new Tone.Noise({ type: 'brown' });   // red / brown noise
+  n[`${id}BrnGain`] = new Tone.Gain(1);
+  n[`${id}BluGain`] = new Tone.Gain(1);
+  n[`${id}VioGain`] = new Tone.Gain(1);
+  n[`${id}GryGain`] = new Tone.Gain(1);
+  // Exact rising slopes via first-difference differentiators.
+  n[`${id}VioDiff`] = rawCtx.createIIRFilter([1, -1], [1]); // white → +6 dB/oct
+  n[`${id}BluDiff`] = rawCtx.createIIRFilter([1, -1], [1]); // pink  → +3 dB/oct
+  // Grey — boost lows + air, dip 2–5 kHz (the ear's most sensitive band) so all
+  // octaves sound about equally loud (white sounds bright because the ear isn't flat).
+  n[`${id}GryLo`]  = new Tone.Filter({ type: 'lowshelf',  frequency: 500,  gain: 5 });
+  n[`${id}GryMid`] = new Tone.Filter({ type: 'peaking',   frequency: 3500, Q: 0.8, gain: -9 });
+  n[`${id}GryHi`]  = new Tone.Filter({ type: 'highshelf', frequency: 9000, gain: 7 });
+  // wiring (Tone ↔ native edges use the same .input pattern as the VCO splitter)
+  n[`${id}Brn`].connect(n[`${id}BrnGain`]);
+  n[`${id}W`].connect(n[`${id}VioDiff`]);  n[`${id}VioDiff`].connect(n[`${id}VioGain`].input);
+  n[`${id}P`].connect(n[`${id}BluDiff`]);  n[`${id}BluDiff`].connect(n[`${id}BluGain`].input);
+  n[`${id}W`].connect(n[`${id}GryLo`]);    n[`${id}GryLo`].connect(n[`${id}GryMid`]);
+  n[`${id}GryMid`].connect(n[`${id}GryHi`]); n[`${id}GryHi`].connect(n[`${id}GryGain`]);
+  // LEVEL CV (Phase 69b) — an LFO/CV patched to the LEVEL-CV jack modulates the
+  // level of all six colours. It fans through per-colour makeup scalers into each
+  // colour gain's AudioParam, so the CV scales level exactly like the knob does
+  // (makeup-balanced). The knob still owns each gain's intrinsic .value (single
+  // writer); the CV sums on top — the established Moog knob+CV pattern.
+  n[`${id}LevelCv`] = new Tone.Gain(1);
+  const cvNames = [`${id}LevelCv`];
+  for (const [suf, mk] of NOISE_LEVEL_GAINS) {
+    const sc = new Tone.Gain(mk);
+    n[`${id}${suf}Cv`] = sc;
+    n[`${id}LevelCv`].connect(sc);
+    sc.connect(n[`${id}${suf}`].gain);
+    cvNames.push(`${id}${suf}Cv`);
+  }
+  return [`${id}Brn`, `${id}BrnGain`, `${id}BluGain`, `${id}VioGain`, `${id}GryGain`,
+          `${id}VioDiff`, `${id}BluDiff`, `${id}GryLo`, `${id}GryMid`, `${id}GryHi`,
+          ...cvNames];
+}
+
 // Maps all jack IDs to Tone.js port descriptors.
 // type:'out' → source node (plus optional waveform to set before connecting)
 // type:'in'  → destination: ToneAudioNode (audio input) or AudioParam (CV input)
 // dest:null  → deferred jack (patching does nothing until a later phase wires it)
 function buildJackMap(n) {
   return {
-    // ── VCO 1 ──
-    // cv  → direct to frequency: Hz-range sources (sequencer, keyboard) patch here
-    // fm  → through vco1fm Gain(500): LFO/audio-rate mod — ±1 signal → ±500 Hz
+    // ── VCOs (Phase 68b — worklet core, 4 SIMULTANEOUS waveform outs + PWM) ──
+    // cv  → glideBus (isVcoCv): Hz-range sources (sequencer, keyboard) patch here.
+    // fm  → vcoNfm Gain(500) → worklet slaveFreq: LFO/audio-rate mod, ±1 → ±500 Hz.
+    // pw  → vcoNpw Gain(0.4) → worklet pulseWidth: pulse-width CV for the SQR out.
+    // sin/tri/saw/sqr each tap their own splitter channel (all live at once).
+    // sync-in feeds the worklet master input; sync-out is the SAW tap (sharp edge).
     'vco1-cv':  { type: 'in',  dest: null, isVcoCv: true },
     'vco1-fm':  { type: 'in',  dest: n.vco1fm },
-    'vco1-sin': { type: 'out', node: n.vco1bus, waveform: 'sine',      waveformTarget: n.vco1 },
-    'vco1-tri': { type: 'out', node: n.vco1bus, waveform: 'triangle',  waveformTarget: n.vco1 },
-    'vco1-saw': { type: 'out', node: n.vco1bus, waveform: 'sawtooth',  waveformTarget: n.vco1 },
-    'vco1-sqr': { type: 'out', node: n.vco1bus, waveform: 'square',    waveformTarget: n.vco1 },
-    'vco1-sync-in':  { type: 'in',  dest: n.vco1syncIn  },
-    'vco1-sync-out': { type: 'out', node: n.vco1syncOut },
-    // ── VCO 2 ──
+    'vco1-pw':  { type: 'in',  dest: n.vco1pw },
+    'vco1-sin': { type: 'out', node: n.vco1Sin },
+    'vco1-tri': { type: 'out', node: n.vco1Tri },
+    'vco1-saw': { type: 'out', node: n.vco1Saw },
+    'vco1-sqr': { type: 'out', node: n.vco1Pulse },
+    'vco1-sync-in':  { type: 'in',  dest: n.vco1syncIn },
+    'vco1-sync-out': { type: 'out', node: n.vco1Saw },
     'vco2-cv':  { type: 'in',  dest: null, isVcoCv: true },
     'vco2-fm':  { type: 'in',  dest: n.vco2fm },
-    // Output jacks route through vco2bus so the HARD SYNC crossfade is transparent.
-    // waveformTarget separates waveform-setting (n.vco2) from audio routing (n.vco2bus).
-    'vco2-sin': { type: 'out', node: n.vco2bus, waveform: 'sine',      waveformTarget: n.vco2 },
-    'vco2-tri': { type: 'out', node: n.vco2bus, waveform: 'triangle',  waveformTarget: n.vco2 },
-    'vco2-saw': { type: 'out', node: n.vco2bus, waveform: 'sawtooth',  waveformTarget: n.vco2 },
-    'vco2-sqr': { type: 'out', node: n.vco2bus, waveform: 'square',    waveformTarget: n.vco2 },
-    // Hard sync jacks — both are always live from initial jackMap build.
-    // vco2syncIn (Tone.Gain) receives the master signal via normal Tone connect().
-    // vco2syncOut (Tone.Gain) passes the worklet's slave output downstream.
-    // The SAC-level bridge (vco2syncIn.output → worklet → vco2syncOut.input) is
-    // wired once in the worklet .then() block after the AudioWorkletNode is ready.
-    'vco2-sync-in':  { type: 'in',  dest: n.vco2syncIn  },
-    'vco2-sync-out': { type: 'out', node: n.vco2syncOut },
-    // ── VCO 3 ──
+    'vco2-pw':  { type: 'in',  dest: n.vco2pw },
+    'vco2-sin': { type: 'out', node: n.vco2Sin },
+    'vco2-tri': { type: 'out', node: n.vco2Tri },
+    'vco2-saw': { type: 'out', node: n.vco2Saw },
+    'vco2-sqr': { type: 'out', node: n.vco2Pulse },
+    'vco2-sync-in':  { type: 'in',  dest: n.vco2syncIn },
+    'vco2-sync-out': { type: 'out', node: n.vco2Saw },
     'vco3-cv':  { type: 'in',  dest: null, isVcoCv: true },
     'vco3-fm':  { type: 'in',  dest: n.vco3fm },
-    'vco3-sin': { type: 'out', node: n.vco3bus, waveform: 'sine',      waveformTarget: n.vco3 },
-    'vco3-tri': { type: 'out', node: n.vco3bus, waveform: 'triangle',  waveformTarget: n.vco3 },
-    'vco3-saw': { type: 'out', node: n.vco3bus, waveform: 'sawtooth',  waveformTarget: n.vco3 },
-    'vco3-sqr': { type: 'out', node: n.vco3bus, waveform: 'square',    waveformTarget: n.vco3 },
-    'vco3-sync-in':  { type: 'in',  dest: n.vco3syncIn  },
-    'vco3-sync-out': { type: 'out', node: n.vco3syncOut },
-    // ── VCO 4 ──
+    'vco3-pw':  { type: 'in',  dest: n.vco3pw },
+    'vco3-sin': { type: 'out', node: n.vco3Sin },
+    'vco3-tri': { type: 'out', node: n.vco3Tri },
+    'vco3-saw': { type: 'out', node: n.vco3Saw },
+    'vco3-sqr': { type: 'out', node: n.vco3Pulse },
+    'vco3-sync-in':  { type: 'in',  dest: n.vco3syncIn },
+    'vco3-sync-out': { type: 'out', node: n.vco3Saw },
     'vco4-cv':  { type: 'in',  dest: null, isVcoCv: true },
     'vco4-fm':  { type: 'in',  dest: n.vco4fm },
-    'vco4-sin': { type: 'out', node: n.vco4bus, waveform: 'sine',      waveformTarget: n.vco4 },
-    'vco4-tri': { type: 'out', node: n.vco4bus, waveform: 'triangle',  waveformTarget: n.vco4 },
-    'vco4-saw': { type: 'out', node: n.vco4bus, waveform: 'sawtooth',  waveformTarget: n.vco4 },
-    'vco4-sqr': { type: 'out', node: n.vco4bus, waveform: 'square',    waveformTarget: n.vco4 },
-    'vco4-sync-in':  { type: 'in',  dest: n.vco4syncIn  },
-    'vco4-sync-out': { type: 'out', node: n.vco4syncOut },
-    // ── VCO 5 ──
+    'vco4-pw':  { type: 'in',  dest: n.vco4pw },
+    'vco4-sin': { type: 'out', node: n.vco4Sin },
+    'vco4-tri': { type: 'out', node: n.vco4Tri },
+    'vco4-saw': { type: 'out', node: n.vco4Saw },
+    'vco4-sqr': { type: 'out', node: n.vco4Pulse },
+    'vco4-sync-in':  { type: 'in',  dest: n.vco4syncIn },
+    'vco4-sync-out': { type: 'out', node: n.vco4Saw },
     'vco5-cv':  { type: 'in',  dest: null, isVcoCv: true },
     'vco5-fm':  { type: 'in',  dest: n.vco5fm },
-    'vco5-sin': { type: 'out', node: n.vco5bus, waveform: 'sine',      waveformTarget: n.vco5 },
-    'vco5-tri': { type: 'out', node: n.vco5bus, waveform: 'triangle',  waveformTarget: n.vco5 },
-    'vco5-saw': { type: 'out', node: n.vco5bus, waveform: 'sawtooth',  waveformTarget: n.vco5 },
-    'vco5-sqr': { type: 'out', node: n.vco5bus, waveform: 'square',    waveformTarget: n.vco5 },
-    'vco5-sync-in':  { type: 'in',  dest: n.vco5syncIn  },
-    'vco5-sync-out': { type: 'out', node: n.vco5syncOut },
+    'vco5-pw':  { type: 'in',  dest: n.vco5pw },
+    'vco5-sin': { type: 'out', node: n.vco5Sin },
+    'vco5-tri': { type: 'out', node: n.vco5Tri },
+    'vco5-saw': { type: 'out', node: n.vco5Saw },
+    'vco5-sqr': { type: 'out', node: n.vco5Pulse },
+    'vco5-sync-in':  { type: 'in',  dest: n.vco5syncIn },
+    'vco5-sync-out': { type: 'out', node: n.vco5Saw },
     // ── Noise ──
     // Noise jacks tap the LEVEL gains (Phase 8b), not the raw sources.
+    // Six colours per instance (Phase 69): wht/pnk/brn sources + blu/vio/gry
+    // filtered off white. Each taps its own LEVEL gain.
     'noise-wht':  { type: 'out', node: n.noiseWGain },
     'noise-pnk':  { type: 'out', node: n.noisePGain },
+    'noise-brn':  { type: 'out', node: n.noiseBrnGain },
+    'noise-blu':  { type: 'out', node: n.noiseBluGain },
+    'noise-vio':  { type: 'out', node: n.noiseVioGain },
+    'noise-gry':  { type: 'out', node: n.noiseGryGain },
+    'noise-lvl-cv':  { type: 'in', dest: n.noiseLevelCv },
     'noise2-wht': { type: 'out', node: n.noise2WGain },
     'noise2-pnk': { type: 'out', node: n.noise2PGain },
+    'noise2-brn': { type: 'out', node: n.noise2BrnGain },
+    'noise2-blu': { type: 'out', node: n.noise2BluGain },
+    'noise2-vio': { type: 'out', node: n.noise2VioGain },
+    'noise2-gry': { type: 'out', node: n.noise2GryGain },
+    'noise2-lvl-cv': { type: 'in', dest: n.noise2LevelCv },
     'noise3-wht': { type: 'out', node: n.noise3WGain },
     'noise3-pnk': { type: 'out', node: n.noise3PGain },
+    'noise3-brn': { type: 'out', node: n.noise3BrnGain },
+    'noise3-blu': { type: 'out', node: n.noise3BluGain },
+    'noise3-vio': { type: 'out', node: n.noise3VioGain },
+    'noise3-gry': { type: 'out', node: n.noise3GryGain },
+    'noise3-lvl-cv': { type: 'in', dest: n.noise3LevelCv },
     // ── Kick ──
     'kick-out': { type: 'out', node: n.kickOut },
     // ── 914 FFB ──
@@ -504,7 +582,7 @@ export default function useMoogAudio() {
   // static instances so ids can never collide (vcf1/vcf2 static → dynamic from 3, etc.).
   // vowel starts at 1 — it's the first dynamic-ONLY type (no static instance in
   // the default rack), unlike the others which start past their statics.
-  const nextInstNumRef  = useRef({ vco: 6, noise: 4, vcf: 3, lfo: 3, vca: 4, env: 4, rev: 3, bbd: 2, kick: 2, ffb: 2, seq: 3, chordseq: 2, voc: 2, qnt: 2, vowel: 1 });
+  const nextInstNumRef  = useRef({ vco: 6, noise: 4, vcf: 3, lfo: 3, vca: 4, env: 4, rev: 3, bbd: 2, kick: 2, ffb: 2, seq: 3, chordseq: 2, voc: 2, qnt: 2, vowel: 1, panner: 1, chronos: 1, folder: 1 });
   // Per-instance hard sync (Phase 60d): wireHardSyncRef holds the wire() closure
   // once the worklet module loads (null before load / after unmount) so addModule
   // can mint a worklet for VCOs added later. dynVcoSyncRef tracks each dynamic
@@ -551,8 +629,7 @@ export default function useMoogAudio() {
       const gb = n[`${vcoId}GlideBus`];
       if (glide < 0.001) gb.setValueAtTime(hz, time);
       else               gb.rampTo(hz, glide, time);
-      n.hardSyncNodes?.[vcoId]?.parameters.get('slaveFreq')
-        .setTargetAtTime(hz, time, Math.max(glide / 3, 0.001));
+      // (glideBus is connected to the worklet's slaveFreq — no separate write.)
     }
     const fires = step.gate && Math.random() < step.prob;
     const gateVal = fires ? 1 : 0;
@@ -666,24 +743,28 @@ export default function useMoogAudio() {
   // settings could differ from the node defaults. (Phase 63b fix.)
   useLayoutEffect(() => {
     const n = {
-      // frequency: 0 — the glideBus Signal (below) is the sole pitch writer.
-      // This keeps vco.frequency.value permanently at 0 so glideBus + FM add cleanly.
-      vco1:        new Tone.Oscillator({ type: 'sawtooth', frequency: 0 }),
-      vco2:        new Tone.Oscillator({ type: 'sawtooth', frequency: 0 }),
-      vco3:        new Tone.Oscillator({ type: 'sawtooth', frequency: 0 }),
-      vco4:        new Tone.Oscillator({ type: 'sawtooth', frequency: 0 }),
-      vco5:        new Tone.Oscillator({ type: 'sawtooth', frequency: 0 }),
-      // Per-VCO slew bus — sits between any CV source and vco.frequency.
-      // Sole writer to vco.frequency (FM adds on top via vcoNfm).
-      // setValueAtTime → instant pitch; setTargetAtTime(hz, t, τ) → exponential glide.
-      // Init to ~185 Hz (middle of VCO range, matching freqBase=0.5 in VcoModule).
-      // This ensures the oscillator is audible immediately on power-on even if
-      // updateVcoParams fires before nodesRef.current is set (child effects run first).
+      // VCO core is the hard-sync AudioWorklet (Phase 68b) — one phase accumulator
+      // emitting 4 simultaneous waveforms. These per-VCO Signals are the SOLE
+      // writers of its params (connected in wire()): GlideBus → a-rate slaveFreq
+      // (Hz; FM sums on top), DetuneSig → slaveDetune (cents), WidthSig →
+      // pulseWidth (0..1; PW-CV sums on top). Signals hold their value before the
+      // async worklet loads, so restored knob positions apply the instant it wires.
+      // GlideBus ~185 Hz = freqBase 0.5; DetuneSig 0; WidthSig 0.5 (square).
       vco1GlideBus: new Tone.Signal(185),
       vco2GlideBus: new Tone.Signal(185),
       vco3GlideBus: new Tone.Signal(185),
       vco4GlideBus: new Tone.Signal(185),
       vco5GlideBus: new Tone.Signal(185),
+      vco1DetuneSig: new Tone.Signal(0),
+      vco2DetuneSig: new Tone.Signal(0),
+      vco3DetuneSig: new Tone.Signal(0),
+      vco4DetuneSig: new Tone.Signal(0),
+      vco5DetuneSig: new Tone.Signal(0),
+      vco1WidthSig: new Tone.Signal(0.5),
+      vco2WidthSig: new Tone.Signal(0.5),
+      vco3WidthSig: new Tone.Signal(0.5),
+      vco4WidthSig: new Tone.Signal(0.5),
+      vco5WidthSig: new Tone.Signal(0.5),
       noiseW:      new Tone.Noise({ type: 'white' }),
       noiseP:      new Tone.Noise({ type: 'pink'  }),
       noise2W:     new Tone.Noise({ type: 'white' }),
@@ -786,31 +867,22 @@ export default function useMoogAudio() {
       extMicGain:  new Tone.Gain(1),
       extMicMeter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
 
-      // Hard sync signal path (replicated per VCO).
-      // Each VCO gets an input buffer (syncIn), worklet output buffer (syncOut),
-      // a normal-path gate (normalGain), and a mixing bus (bus). The worklet is
-      // wired syncIn.output → worklet → syncOut.input in the .then() block.
-      // syncOut.gain crossfades 0→1 (normalGain 1→0) when HARD SYNC is enabled.
-      vco1syncIn:     new Tone.Gain(1),
-      vco1syncOut:    new Tone.Gain(0),
-      vco1normalGain: new Tone.Gain(1),
-      vco1bus:        new Tone.Gain(1),
-      vco2syncIn:     new Tone.Gain(1),
-      vco2syncOut:    new Tone.Gain(0),
-      vco2normalGain: new Tone.Gain(1),
-      vco2bus:        new Tone.Gain(1),
-      vco3syncIn:     new Tone.Gain(1),
-      vco3syncOut:    new Tone.Gain(0),
-      vco3normalGain: new Tone.Gain(1),
-      vco3bus:        new Tone.Gain(1),
-      vco4syncIn:     new Tone.Gain(1),
-      vco4syncOut:    new Tone.Gain(0),
-      vco4normalGain: new Tone.Gain(1),
-      vco5syncIn:     new Tone.Gain(1),
-      vco5syncOut:    new Tone.Gain(0),
-      vco5normalGain: new Tone.Gain(1),
-      vco5bus:        new Tone.Gain(1),
-      vco4bus:        new Tone.Gain(1),
+      // VCO core routing (Phase 68b), replicated per VCO. The hard-sync worklet
+      // (created in wire()) emits ONE 4-channel signal → coreGate (power gate) →
+      // bus (sequencer per-step gate) → ChannelSplitter (in wire()) → 4 waveform
+      // tap gains (Sin/Tri/Saw/Pulse) → the output jacks. syncIn buffers the
+      // master patched to SYNC IN into the worklet input; pw scales PW-CV onto
+      // the worklet's pulseWidth param.
+      vco1syncIn: new Tone.Gain(1), vco1coreGate: new Tone.Gain(0), vco1bus: new Tone.Gain(1),
+      vco1Sin: new Tone.Gain(1), vco1Tri: new Tone.Gain(1), vco1Saw: new Tone.Gain(1), vco1Pulse: new Tone.Gain(1), vco1pw: new Tone.Gain(0.4),
+      vco2syncIn: new Tone.Gain(1), vco2coreGate: new Tone.Gain(0), vco2bus: new Tone.Gain(1),
+      vco2Sin: new Tone.Gain(1), vco2Tri: new Tone.Gain(1), vco2Saw: new Tone.Gain(1), vco2Pulse: new Tone.Gain(1), vco2pw: new Tone.Gain(0.4),
+      vco3syncIn: new Tone.Gain(1), vco3coreGate: new Tone.Gain(0), vco3bus: new Tone.Gain(1),
+      vco3Sin: new Tone.Gain(1), vco3Tri: new Tone.Gain(1), vco3Saw: new Tone.Gain(1), vco3Pulse: new Tone.Gain(1), vco3pw: new Tone.Gain(0.4),
+      vco4syncIn: new Tone.Gain(1), vco4coreGate: new Tone.Gain(0), vco4bus: new Tone.Gain(1),
+      vco4Sin: new Tone.Gain(1), vco4Tri: new Tone.Gain(1), vco4Saw: new Tone.Gain(1), vco4Pulse: new Tone.Gain(1), vco4pw: new Tone.Gain(0.4),
+      vco5syncIn: new Tone.Gain(1), vco5coreGate: new Tone.Gain(0), vco5bus: new Tone.Gain(1),
+      vco5Sin: new Tone.Gain(1), vco5Tri: new Tone.Gain(1), vco5Saw: new Tone.Gain(1), vco5Pulse: new Tone.Gain(1), vco5pw: new Tone.Gain(0.4),
 
       // Quantizer output wrapper — gain 1 (always pass-through).
       // AudioWorkletNode (quantizerNode) connects to .input after worklet loads.
@@ -944,45 +1016,15 @@ export default function useMoogAudio() {
       ...Object.fromEntries(VOC_BANDS.map((_, i) => [`vocCarrVCA${i}`, new Tone.Gain(0)])),
     };
 
-    // VCO output buses — each VCO routes through its bus so the HARD SYNC crossfade
-    // is transparent. normalGain (1) and syncOut (0) both feed the bus; setVcoNSyncEnabled
-    // crossfades between them so exactly one carries signal at a time.
-    n.vco1.connect(n.vco1normalGain);
-    n.vco1normalGain.connect(n.vco1bus);
-    n.vco1syncOut.connect(n.vco1bus);
-
-    n.vco2.connect(n.vco2normalGain);
-    n.vco2normalGain.connect(n.vco2bus);
-    n.vco2syncOut.connect(n.vco2bus);
-
-    n.vco3.connect(n.vco3normalGain);
-    n.vco3normalGain.connect(n.vco3bus);
-    n.vco3syncOut.connect(n.vco3bus);
-
-    n.vco4.connect(n.vco4normalGain);
-    n.vco4normalGain.connect(n.vco4bus);
-    n.vco4syncOut.connect(n.vco4bus);
-
-    n.vco5.connect(n.vco5normalGain);
-    n.vco5normalGain.connect(n.vco5bus);
-    n.vco5syncOut.connect(n.vco5bus);
-
-    // GlideBus → vco.frequency: the sole pitch writer per VCO.
-    // vco.frequency.value stays 0; glideBus provides the Hz; FM adds on top.
-    n.vco1GlideBus.connect(n.vco1.frequency);
-    n.vco2GlideBus.connect(n.vco2.frequency);
-    n.vco3GlideBus.connect(n.vco3.frequency);
-    n.vco4GlideBus.connect(n.vco4.frequency);
-    n.vco5GlideBus.connect(n.vco5.frequency);
-
-    // CV scaler hardwires — permanent front-doors for modulation inputs.
-    // Sources patched to the FM / CV1 / CV2 / ENV jacks flow through these gains
-    // before reaching the AudioParam; the scaler itself is never a patch destination.
-    n.vco1fm.connect(n.vco1.frequency);
-    n.vco2fm.connect(n.vco2.frequency);
-    n.vco3fm.connect(n.vco3.frequency);
-    n.vco4fm.connect(n.vco4.frequency);
-    n.vco5fm.connect(n.vco5.frequency);
+    // VCO core routing (Phase 68b). The worklet → coreGate, the ChannelSplitter →
+    // waveform taps, and glideBus/fm/pw → worklet params are all wired in wire()
+    // once the async worklet loads. Here we wire the synchronous Tone edges:
+    // coreGate (power gate) → bus (sequencer per-step gate), and the SAW tap → the
+    // level meter. The four waveform taps route to their jacks directly.
+    for (const v of ['vco1', 'vco2', 'vco3', 'vco4', 'vco5']) {
+      n[`${v}coreGate`].connect(n[`${v}bus`]);
+      n[`${v}Saw`].connect(n[`${v}Meter`]);
+    }
 
     // Keyboard vibrato — additive pitch modulation on all VCOs.
 
@@ -1009,11 +1051,7 @@ export default function useMoogAudio() {
     // as the MOD jack, so enabling the mic + a carrier vocodes instantly (no patching), and
     // an external MOD patch still sums in. extMicGain is silent until the mic is enabled.
     n.extMicGain.connect(n.vocModRaw);
-    n.vco1bus.connect(n.vco1Meter);
-    n.vco2bus.connect(n.vco2Meter);
-    n.vco3bus.connect(n.vco3Meter);
-    n.vco4bus.connect(n.vco4Meter);
-    n.vco5bus.connect(n.vco5Meter);
+    // (VCO level meters are fed from each VCO's SAW tap in the core-routing loop above.)
 
     // master → seqMasterGate → Destination: every patch cable that reaches io-in
     // or any io-inN channel flows through master, then seqMasterGate. The Loop gates
@@ -1039,6 +1077,10 @@ export default function useMoogAudio() {
     n.noise2P.connect(n.noise2PGain);
     n.noise3W.connect(n.noise3WGain);
     n.noise3P.connect(n.noise3PGain);
+    // Brown source + blue/violet/grey colour chains (Phase 69), per static instance.
+    buildNoiseColors(n, 'noise');
+    buildNoiseColors(n, 'noise2');
+    buildNoiseColors(n, 'noise3');
 
     // Kick engine — MembraneSynth and click transient both feed kickOut
     n.kickSynth.connect(n.kickOut);
@@ -1428,8 +1470,7 @@ export default function useMoogAudio() {
               if (!gb) continue;
               if (rawGlide < 0.001) gb.setValueAtTime(hz, Tone.now());
               else                  gb.rampTo(hz, rawGlide, Tone.now());
-              nodesRef.current.hardSyncNodes?.[vcoId]
-                ?.parameters.get('slaveFreq').setTargetAtTime(hz, Tone.now(), Math.max(rawGlide / 3, 0.001));
+              // (glideBus → worklet slaveFreq is connected — no separate write.)
             }
           }
         };
@@ -1464,9 +1505,8 @@ export default function useMoogAudio() {
     // Load the hard sync AudioWorklet asynchronously.
     // One worklet node is created per VCO, keyed by vcoId (Phase 60d — dynamic
     // VCOs mint per-instance worklets too). If the load fails the sync jacks
-    // remain no-ops and everything else works normally.
-    // outputChannelCount:[1] forces mono — Chrome defaults to 2ch, leaving the right
-    // channel permanently silent; mono upmixes correctly downstream.
+    // remain no-ops and the VCOs stay silent (their only sound source is the
+    // worklet core). outputChannelCount:[4] carries the 4 waveforms on one output.
     // The registry object is assigned synchronously so addModule and the loops
     // always share it; keys appear once the worklet module loads.
     const hardSyncNodes = {};
@@ -1474,14 +1514,36 @@ export default function useMoogAudio() {
     rawCtx.audioWorklet.addModule('/hard-sync-worklet.js').then(() => {
       if (nodesRef.current !== n) return;
 
-      // Idempotent per-VCO wiring: syncIn.output → worklet → syncOut.input,
-      // fm scaler dual-feeds the worklet's slaveFreq (FM drives both paths).
+      // Idempotent per-VCO wiring (Phase 68b): the worklet is the VCO CORE. Its
+      // one 4-channel output → coreGate (power) → bus (seq gate) → a splitter →
+      // the four waveform tap gains → jacks. The master patched to SYNC IN feeds
+      // the worklet input; GlideBus/FM → slaveFreq (a-rate), DetuneSig →
+      // slaveDetune, WidthSig/PW-CV → pulseWidth. syncEnabled + coreGate power are
+      // restored from refs since the worklet can load after powerOn / a saved setup.
       const wire = (vcoId) => {
         if (hardSyncNodes[vcoId] || !n[`${vcoId}syncIn`]) return;
-        const node = Tone.context.createAudioWorkletNode('hard-sync-processor', { outputChannelCount: [1] });
-        n[`${vcoId}syncIn`].output.connect(node);
-        node.connect(n[`${vcoId}syncOut`].input);
-        try { n[`${vcoId}fm`].connect(node.parameters.get('slaveFreq')); } catch (_) {}
+        const node = Tone.context.createAudioWorkletNode('hard-sync-processor', {
+          numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [4],
+        });
+        n[`${vcoId}syncIn`].output.connect(node);          // master → worklet input
+        node.connect(n[`${vcoId}coreGate`].input);         // 4ch core → power gate
+        const split = rawCtx.createChannelSplitter(4);
+        n[`${vcoId}bus`].connect(split);                   // seq-gated 4ch → splitter
+        split.connect(n[`${vcoId}Sin`].input,   0);
+        split.connect(n[`${vcoId}Tri`].input,   1);
+        split.connect(n[`${vcoId}Saw`].input,   2);
+        split.connect(n[`${vcoId}Pulse`].input, 3);
+        n[`${vcoId}Split`] = split;
+        try { n[`${vcoId}GlideBus`].connect(node.parameters.get('slaveFreq')); }   catch (_) {}
+        try { n[`${vcoId}fm`].connect(node.parameters.get('slaveFreq')); }         catch (_) {}
+        try { n[`${vcoId}DetuneSig`].connect(node.parameters.get('slaveDetune')); } catch (_) {}
+        try { n[`${vcoId}WidthSig`].connect(node.parameters.get('pulseWidth')); }   catch (_) {}
+        try { n[`${vcoId}pw`].connect(node.parameters.get('pulseWidth')); }         catch (_) {}
+        const seRef = { vco1: vco1SyncEnabledRef, vco2: vco2SyncEnabledRef, vco3: vco3SyncEnabledRef,
+                        vco4: vco4SyncEnabledRef, vco5: vco5SyncEnabledRef }[vcoId];
+        const se = seRef ? seRef.current : !!dynVcoSyncRef.current[vcoId];
+        node.parameters.get('syncEnabled').setValueAtTime(se ? 1 : 0, Tone.now());
+        n[`${vcoId}coreGate`].gain.value = isPoweredRef.current ? 1 : 0;
         hardSyncNodes[vcoId] = node;
       };
 
@@ -1510,7 +1572,7 @@ export default function useMoogAudio() {
       // Null out nodesRef first so any in-flight worklet Promise .then() bails immediately.
       nodesRef.current = null;
       jackMapRef.current = null;
-      [n.vco1, n.vco2, n.vco3, n.vco4, n.vco5, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.vocHissNoise, n.vocBuzzNoise, n.vocCarrOsc, n.lfo, n.lfo2, n.chorus].forEach(node => {
+      [n.noiseW, n.noiseP, n.noiseBrn, n.noise2W, n.noise2P, n.noise2Brn, n.noise3W, n.noise3P, n.noise3Brn, n.vocHissNoise, n.vocBuzzNoise, n.vocCarrOsc, n.lfo, n.lfo2, n.chorus].forEach(node => {
         try { node.stop(); } catch (_) {}
       });
       Object.values(seqLoopsRef.current).forEach(loop => {
@@ -1575,31 +1637,20 @@ export default function useMoogAudio() {
 
     const n = nodesRef.current;
     if (!n) return;
-    [n.vco1, n.vco2, n.vco3, n.vco4, n.vco5, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.vocHissNoise, n.vocBuzzNoise, n.vocCarrOsc, n.lfo, n.lfo2, n.chorus].forEach(node => {
+    [n.noiseW, n.noiseP, n.noiseBrn, n.noise2W, n.noise2P, n.noise2Brn, n.noise3W, n.noise3P, n.noise3Brn, n.vocHissNoise, n.vocBuzzNoise, n.vocCarrOsc, n.lfo, n.lfo2, n.chorus].forEach(node => {
       try { node.start(); } catch (_) {}
     });
     // Dynamic instances' sound sources (Phase 60b)
     dynInstancesRef.current.forEach(inst =>
       inst.sourceNames.forEach(sn => { try { n[sn]?.start(); } catch (_) {} }));
 
-    // Restore hard sync crossfade for all VCOs. syncOut was forced to 0 on powerOff
-    // to prevent always-running worklets from producing audio while the synth is off.
-    [[n.vco1normalGain, n.vco1syncOut, vco1SyncEnabledRef],
-     [n.vco2normalGain, n.vco2syncOut, vco2SyncEnabledRef],
-     [n.vco3normalGain, n.vco3syncOut, vco3SyncEnabledRef],
-     [n.vco4normalGain, n.vco4syncOut, vco4SyncEnabledRef],
-     [n.vco5normalGain, n.vco5syncOut, vco5SyncEnabledRef],
-    ].forEach(([normalGain, syncOut, ref]) => {
-      const se = ref.current;
-      normalGain.gain.value = se ? 0 : 1;
-      syncOut.gain.value    = se ? 1 : 0;
-    });
-    // Dynamic VCOs — same restore, toggle state lives in dynVcoSyncRef (Phase 60d).
+    // Open every VCO's power gate (coreGate) — the worklet core runs continuously
+    // and is silenced while unpowered by coreGate=0 (Phase 68b). HARD SYNC state
+    // lives on the worklet's syncEnabled param (set by the sync setters / wire()),
+    // so it is untouched here. Static + dynamic VCOs alike.
+    ['vco1', 'vco2', 'vco3', 'vco4', 'vco5'].forEach(v => { if (n[`${v}coreGate`]) n[`${v}coreGate`].gain.value = 1; });
     dynInstancesRef.current.forEach((inst, id) => {
-      if (inst.type !== 'vco' || !n[`${id}syncOut`]) return;
-      const se = !!dynVcoSyncRef.current[id];
-      n[`${id}normalGain`].gain.value = se ? 0 : 1;
-      n[`${id}syncOut`].gain.value    = se ? 1 : 0;
+      if (inst.type === 'vco' && n[`${id}coreGate`]) n[`${id}coreGate`].gain.value = 1;
     });
 
     // Start sequencer clocks — reset steps so first tick lands on step 0
@@ -1618,7 +1669,7 @@ export default function useMoogAudio() {
 
     const n = nodesRef.current;
     if (!n) return;
-    [n.vco1, n.vco2, n.vco3, n.vco4, n.vco5, n.noiseW, n.noiseP, n.noise2W, n.noise2P, n.noise3W, n.noise3P, n.vocHissNoise, n.vocBuzzNoise, n.vocCarrOsc, n.lfo, n.lfo2, n.chorus].forEach(node => {
+    [n.noiseW, n.noiseP, n.noiseBrn, n.noise2W, n.noise2P, n.noise2Brn, n.noise3W, n.noise3P, n.noise3Brn, n.vocHissNoise, n.vocBuzzNoise, n.vocCarrOsc, n.lfo, n.lfo2, n.chorus].forEach(node => {
       try { node.stop(); } catch (_) {}
     });
     // Dynamic instances' sound sources (Phase 60b)
@@ -1638,17 +1689,12 @@ export default function useMoogAudio() {
     }
     Tone.Transport.stop();
 
-    // Gate the hard sync slave to silence. The AudioWorkletProcessor returns true so
-    // it keeps running indefinitely — stopping oscillators is not enough. Without this,
-    // vco2syncOut (gain=1 when HARD SYNC is ON) lets the worklet sawtooth flow through
-    // vco2bus → master → seqMasterGate (which is re-opened below) → speakers.
-    [n.vco1syncOut, n.vco2syncOut, n.vco3syncOut, n.vco4syncOut, n.vco5syncOut].forEach(g => { g.gain.value = 0; });
-    [n.vco1normalGain, n.vco2normalGain, n.vco3normalGain, n.vco4normalGain, n.vco5normalGain].forEach(g => { g.gain.value = 1; });
-    // Dynamic VCOs — their always-running worklets must be gated too (Phase 60d).
+    // Gate every VCO core to silence (Phase 68b). The worklet core returns true so
+    // it runs indefinitely — coreGate=0 is the only thing stopping its 4 waveforms
+    // from flowing (when patched) through bus → master → seqMasterGate → speakers.
+    ['vco1', 'vco2', 'vco3', 'vco4', 'vco5'].forEach(v => { if (n[`${v}coreGate`]) n[`${v}coreGate`].gain.value = 0; });
     dynInstancesRef.current.forEach((inst, id) => {
-      if (inst.type !== 'vco' || !n[`${id}syncOut`]) return;
-      n[`${id}syncOut`].gain.value    = 0;
-      n[`${id}normalGain`].gain.value = 1;
+      if (inst.type === 'vco' && n[`${id}coreGate`]) n[`${id}coreGate`].gain.value = 0;
     });
 
     // Re-open both gates so keyboard / manual playing is audible after sequencer stops.
@@ -1766,25 +1812,25 @@ export default function useMoogAudio() {
     }
 
     if (type === 'vco') {
+      // Worklet-core VCO (Phase 68b) — same topology as the statics. The worklet,
+      // splitter, waveform taps and param connections are all built by wire()
+      // (below / the load sweep); here we create the Tone nodes it wires into.
       const id = `vco${num}`;
-      n[id]                = new Tone.Oscillator({ type: 'sawtooth', frequency: 0 });
-      n[`${id}GlideBus`]   = new Tone.Signal(185);
-      n[`${id}normalGain`] = new Tone.Gain(1);
-      n[`${id}bus`]        = new Tone.Gain(1);
-      n[`${id}Meter`]      = new Tone.Meter({ normalRange: true, smoothing: 0.15 });
-      n[`${id}fm`]         = new Tone.Gain(500);
-      // Hard sync buffers (Phase 60d) — same crossfade topology as the statics:
-      // normalGain(1) and syncOut(0) both feed the bus; setVcoSyncEnabledById
-      // crossfades. The worklet bridges syncIn → syncOut once wired (below).
-      n[`${id}syncIn`]     = new Tone.Gain(1);
-      n[`${id}syncOut`]    = new Tone.Gain(0);
-      n[id].connect(n[`${id}normalGain`]);
-      n[`${id}normalGain`].connect(n[`${id}bus`]);
-      n[`${id}syncOut`].connect(n[`${id}bus`]);
-      n[`${id}GlideBus`].connect(n[id].frequency);
-      n[`${id}fm`].connect(n[id].frequency);
-      n[`${id}bus`].connect(n[`${id}Meter`]);
-      if (isPoweredRef.current) { try { n[id].start(); } catch (_) {} }
+      n[`${id}GlideBus`]  = new Tone.Signal(185);
+      n[`${id}DetuneSig`] = new Tone.Signal(0);
+      n[`${id}WidthSig`]  = new Tone.Signal(0.5);
+      n[`${id}coreGate`]  = new Tone.Gain(0);   // power gate
+      n[`${id}bus`]       = new Tone.Gain(1);    // sequencer per-step gate
+      n[`${id}Sin`]       = new Tone.Gain(1);
+      n[`${id}Tri`]       = new Tone.Gain(1);
+      n[`${id}Saw`]       = new Tone.Gain(1);
+      n[`${id}Pulse`]     = new Tone.Gain(1);
+      n[`${id}fm`]        = new Tone.Gain(500);
+      n[`${id}pw`]        = new Tone.Gain(0.4);
+      n[`${id}Meter`]     = new Tone.Meter({ normalRange: true, smoothing: 0.15 });
+      n[`${id}syncIn`]    = new Tone.Gain(1);
+      n[`${id}coreGate`].connect(n[`${id}bus`]);
+      n[`${id}Saw`].connect(n[`${id}Meter`]);
       vcoKnobHzRef.current[id]   = null;
       vcoActiveCvRef.current[id] = null;
       dynVcoSyncRef.current[id]  = false;
@@ -1792,23 +1838,27 @@ export default function useMoogAudio() {
       const jackEntries = {
         [`${id}-cv`]:  { type: 'in',  dest: null, isVcoCv: true },
         [`${id}-fm`]:  { type: 'in',  dest: n[`${id}fm`] },
-        [`${id}-sync-in`]:  { type: 'in',  dest: n[`${id}syncIn`]  },
-        [`${id}-sync-out`]: { type: 'out', node: n[`${id}syncOut`] },
-        [`${id}-sin`]: { type: 'out', node: n[`${id}bus`], waveform: 'sine',     waveformTarget: n[id] },
-        [`${id}-tri`]: { type: 'out', node: n[`${id}bus`], waveform: 'triangle', waveformTarget: n[id] },
-        [`${id}-saw`]: { type: 'out', node: n[`${id}bus`], waveform: 'sawtooth', waveformTarget: n[id] },
-        [`${id}-sqr`]: { type: 'out', node: n[`${id}bus`], waveform: 'square',   waveformTarget: n[id] },
+        [`${id}-pw`]:  { type: 'in',  dest: n[`${id}pw`] },
+        [`${id}-sync-in`]:  { type: 'in',  dest: n[`${id}syncIn`] },
+        [`${id}-sync-out`]: { type: 'out', node: n[`${id}Saw`] },
+        [`${id}-sin`]: { type: 'out', node: n[`${id}Sin`] },
+        [`${id}-tri`]: { type: 'out', node: n[`${id}Tri`] },
+        [`${id}-saw`]: { type: 'out', node: n[`${id}Saw`] },
+        [`${id}-sqr`]: { type: 'out', node: n[`${id}Pulse`] },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, {
         type, num,
-        nodeNames:   [id, `${id}GlideBus`, `${id}normalGain`, `${id}bus`, `${id}Meter`, `${id}fm`,
-                      `${id}syncIn`, `${id}syncOut`],
-        sourceNames: [id],
+        // Split is created + registered in wire(); include it so removeModule
+        // disconnects it. sourceNames is empty — the worklet has no start/stop.
+        nodeNames:   [`${id}GlideBus`, `${id}DetuneSig`, `${id}WidthSig`, `${id}coreGate`,
+                      `${id}bus`, `${id}Sin`, `${id}Tri`, `${id}Saw`, `${id}Pulse`,
+                      `${id}fm`, `${id}pw`, `${id}Meter`, `${id}syncIn`, `${id}Split`],
+        sourceNames: [],
         jackIds:     Object.keys(jackEntries),
       });
-      // Worklet module already loaded → mint this instance's sync worklet now;
-      // otherwise the load .then() sweeps allVcoIdsRef and picks it up.
+      // Worklet module already loaded → mint this instance's core now; otherwise
+      // the load .then() sweeps allVcoIdsRef and wires it (setting coreGate power).
       wireHardSyncRef.current?.(id);
       return { id, num };
     }
@@ -1821,19 +1871,27 @@ export default function useMoogAudio() {
       n[`${id}PGain`] = new Tone.Gain(1);
       n[`${id}W`].connect(n[`${id}WGain`]);
       n[`${id}P`].connect(n[`${id}PGain`]);
+      // Brown source + blue/violet/grey colour chains (Phase 69).
+      const colorNames = buildNoiseColors(n, id);
       if (isPoweredRef.current) {
-        try { n[`${id}W`].start(); } catch (_) {}
-        try { n[`${id}P`].start(); } catch (_) {}
+        try { n[`${id}W`].start();   } catch (_) {}
+        try { n[`${id}P`].start();   } catch (_) {}
+        try { n[`${id}Brn`].start(); } catch (_) {}
       }
       const jackEntries = {
         [`${id}-wht`]: { type: 'out', node: n[`${id}WGain`] },
         [`${id}-pnk`]: { type: 'out', node: n[`${id}PGain`] },
+        [`${id}-brn`]: { type: 'out', node: n[`${id}BrnGain`] },
+        [`${id}-blu`]: { type: 'out', node: n[`${id}BluGain`] },
+        [`${id}-vio`]: { type: 'out', node: n[`${id}VioGain`] },
+        [`${id}-gry`]: { type: 'out', node: n[`${id}GryGain`] },
+        [`${id}-lvl-cv`]: { type: 'in', dest: n[`${id}LevelCv`] },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, {
         type, num,
-        nodeNames:   [`${id}W`, `${id}P`, `${id}WGain`, `${id}PGain`],
-        sourceNames: [`${id}W`, `${id}P`],
+        nodeNames:   [`${id}W`, `${id}P`, `${id}WGain`, `${id}PGain`, ...colorNames],
+        sourceNames: [`${id}W`, `${id}P`, `${id}Brn`],
         jackIds:     Object.keys(jackEntries),
       });
       return { id, num };
@@ -1992,6 +2050,169 @@ export default function useMoogAudio() {
         [`${id}-in`]:    { type: 'in',  dest: n[`${id}In`] },
         [`${id}-cv-in`]: { type: 'in',  dest: n[`${id}CvIn`] },
         [`${id}-out`]:   { type: 'out', node: n[`${id}Out`] },
+      };
+      jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
+      dynInstancesRef.current.set(id, { type, num, nodeNames, sourceNames: [], jackIds: Object.keys(jackEntries) });
+      return { id, num };
+    }
+
+    if (type === 'panner') {
+      // Voltage-Controlled Panner (Phase 67) — places a (typically mono) source
+      // in the stereo field. Tone.Panner wraps the native StereoPannerNode, which
+      // is already an EQUAL-POWER panner, so one node gives Gemini's requested law
+      // (no dual-VCA matrix). The whole rack downstream of io-in is 2-channel
+      // (master Volume → seqMasterGate → Destination + moogBus tap), so this pans
+      // to both the speakers and the Workstation recording tap.
+      const id = `panner${num}`;
+      n[`${id}In`]  = new Tone.Gain(1);
+      n[`${id}Pan`] = new Tone.Panner(0);   // -1 L … +1 R; 0 = centre (equal-power)
+      n[`${id}Out`] = new Tone.Gain(1);
+      n[`${id}In`].connect(n[`${id}Pan`]);
+      n[`${id}Pan`].connect(n[`${id}Out`]);
+      // CV: cv-in → DEPTH attenuator → pan param. The PAN knob writes pan's
+      // INTRINSIC value (updateDynModuleParams); this connected CV SUMS at the
+      // AudioParam (Web Audio semantics) and clamps to [-1,1] — the established
+      // Moog knob+CV pattern (single writer per node holds: knob owns .value,
+      // the cable owns the connected input).
+      n[`${id}CvIn`]    = new Tone.Gain(1);
+      n[`${id}CvDepth`] = new Tone.Gain(0.5); // CV DEPTH / attenuator, knob 0..1
+      n[`${id}CvIn`].connect(n[`${id}CvDepth`]);
+      n[`${id}CvDepth`].connect(n[`${id}Pan`].pan);
+      // Meters — input level + CV level, read by getPanMeterData for the L/R LEDs.
+      n[`${id}InAnalyser`] = new Tone.Analyser('waveform', 128);
+      n[`${id}CvAnalyser`] = new Tone.Analyser('waveform', 128);
+      n[`${id}In`].connect(n[`${id}InAnalyser`]);
+      n[`${id}CvIn`].connect(n[`${id}CvAnalyser`]);
+      const nodeNames = [`${id}In`, `${id}Pan`, `${id}Out`, `${id}CvIn`, `${id}CvDepth`, `${id}InAnalyser`, `${id}CvAnalyser`];
+      const jackEntries = {
+        [`${id}-in`]:    { type: 'in',  dest: n[`${id}In`] },
+        [`${id}-cv-in`]: { type: 'in',  dest: n[`${id}CvIn`] },
+        [`${id}-out`]:   { type: 'out', node: n[`${id}Out`] },
+      };
+      jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
+      dynInstancesRef.current.set(id, { type, num, nodeNames, sourceNames: [], jackIds: Object.keys(jackEntries) });
+      return { id, num };
+    }
+
+    if (type === 'chronos') {
+      // Chronos Multi-Zone Delay (Phase 68) — MONO in → STEREO out. A HAND-BUILT
+      // stereo feedback loop around two native Tone.Delay lines, so COLOR (loop
+      // lowpass), HALO (allpass diffusion + L↔R cross-feedback smear) and a tanh
+      // soft-clip all live INSIDE the feedback path (a Tone.FeedbackDelay black
+      // box can't host them). Modulating delayTime (TIME knob / TIME CV) varispeed-
+      // warps pitch with NO dropouts (native DelayNode interpolation) = tape-stop /
+      // skid. Stereo width is synthesized: the L/R delay times drift apart (HALO)
+      // and cross-feed, so WetL→OutBusL / WetR→OutBusR stay decorrelated; the dry
+      // path sums equally to both buses (centre). NB Web Audio clamps any delay in
+      // a feedback cycle to ≥1 render quantum (~2.9 ms), so Micro floors ~3 ms.
+      const id = `chronos${num}`;
+      const MAXD = 4; // seconds — sized once; ZONE/TIME/CV always stay within it
+      n[`${id}In`]      = new Tone.Gain(1);
+      n[`${id}HpPre`]   = new Tone.Filter({ type: 'highpass', frequency: 90, Q: 0.5 });
+      n[`${id}Dry`]     = new Tone.Gain(0.707);  // dry leg (MIX, equal-power)
+      // Internal hard-pan legs place wet-L on the left channel and wet-R on the
+      // right (dry fans to both → centred), then BOTH sum into a single stereo
+      // Out Gain feeding ONE central OUT jack — the whole stereo image travels
+      // down one cable (same convention as the Panner module). Plain Gains here
+      // would be mono and collapse the width.
+      n[`${id}OutBusL`] = new Tone.Panner(-1);
+      n[`${id}OutBusR`] = new Tone.Panner(1);
+      n[`${id}Out`]     = new Tone.Gain(1); // stereo sum → single OUT jack
+      n[`${id}OutBusL`].connect(n[`${id}Out`]);
+      n[`${id}OutBusR`].connect(n[`${id}Out`]);
+      n[`${id}In`].connect(n[`${id}HpPre`]);
+      n[`${id}In`].connect(n[`${id}Dry`]);
+      n[`${id}Dry`].connect(n[`${id}OutBusL`]);
+      n[`${id}Dry`].connect(n[`${id}OutBusR`]); // dry fans to both legs → centred
+      const nodeNames = [`${id}In`, `${id}HpPre`, `${id}Dry`, `${id}OutBusL`, `${id}OutBusR`, `${id}Out`];
+
+      for (const S of ['L', 'R']) {
+        n[`${id}Sum${S}`]   = new Tone.Gain(1);
+        n[`${id}Delay${S}`] = new Tone.Delay({ delayTime: 0.18, maxDelay: MAXD });
+        n[`${id}Hp${S}`]    = new Tone.Filter({ type: 'highpass', frequency: 90,   Q: 0.5 });
+        n[`${id}Lp${S}`]    = new Tone.Filter({ type: 'lowpass',  frequency: 8000, Q: 0.4 });
+        n[`${id}Ap1${S}`]   = new Tone.Filter({ type: 'allpass',  frequency: 600,  Q: 1.2 });
+        n[`${id}Ap2${S}`]   = new Tone.Filter({ type: 'allpass',  frequency: 1900, Q: 1.2 });
+        n[`${id}Sat${S}`]   = new Tone.WaveShaper((x) => Math.tanh(1.2 * x), 2048); // loop soft-clip
+        n[`${id}Fb${S}`]    = new Tone.Gain(0.4);  // self feedback (REPEATS)
+        n[`${id}Xfb${S}`]   = new Tone.Gain(0);    // cross feedback (HALO smear)
+        n[`${id}Wet${S}`]   = new Tone.Gain(0.707); // wet leg level (MIX)
+        // forward chain (the Delay in this cycle satisfies the ≥1-quantum rule)
+        n[`${id}HpPre`].connect(n[`${id}Sum${S}`]);
+        n[`${id}Sum${S}`].connect(n[`${id}Delay${S}`]);
+        n[`${id}Delay${S}`].connect(n[`${id}Hp${S}`]);
+        n[`${id}Hp${S}`].connect(n[`${id}Lp${S}`]);
+        n[`${id}Lp${S}`].connect(n[`${id}Ap1${S}`]);
+        n[`${id}Ap1${S}`].connect(n[`${id}Ap2${S}`]);
+        n[`${id}Ap2${S}`].connect(n[`${id}Wet${S}`]);
+        n[`${id}Wet${S}`].connect(n[`${id}OutBus${S}`]);       // wet → its own bus (stereo)
+        n[`${id}Ap2${S}`].connect(n[`${id}Sat${S}`]);          // post-diffusion → feedback
+        n[`${id}Sat${S}`].connect(n[`${id}Fb${S}`]);
+        n[`${id}Sat${S}`].connect(n[`${id}Xfb${S}`]);
+        n[`${id}Fb${S}`].connect(n[`${id}Sum${S}`]);           // self loop
+        nodeNames.push(`${id}Sum${S}`, `${id}Delay${S}`, `${id}Hp${S}`, `${id}Lp${S}`, `${id}Ap1${S}`, `${id}Ap2${S}`, `${id}Sat${S}`, `${id}Fb${S}`, `${id}Xfb${S}`, `${id}Wet${S}`);
+      }
+      n[`${id}XfbL`].connect(n[`${id}SumR`]); // L diffusion → R loop (stereo smear)
+      n[`${id}XfbR`].connect(n[`${id}SumL`]); // R diffusion → L loop
+
+      // CV: TIME CV varispeed-warps both delay lines; REPEAT CV pushes feedback
+      // (the tanh soft-clip bounds self-oscillation rather than letting it blow up).
+      n[`${id}TimeCvIn`]    = new Tone.Gain(1);
+      n[`${id}TimeCvDepth`] = new Tone.Gain(0.15); // ±1 CV → ±0.15 s
+      n[`${id}TimeCvIn`].connect(n[`${id}TimeCvDepth`]);
+      n[`${id}TimeCvDepth`].connect(n[`${id}DelayL`].delayTime);
+      n[`${id}TimeCvDepth`].connect(n[`${id}DelayR`].delayTime);
+      n[`${id}RepCvIn`]    = new Tone.Gain(1);
+      n[`${id}RepCvDepth`] = new Tone.Gain(0.25);
+      n[`${id}RepCvIn`].connect(n[`${id}RepCvDepth`]);
+      n[`${id}RepCvDepth`].connect(n[`${id}FbL`].gain);
+      n[`${id}RepCvDepth`].connect(n[`${id}FbR`].gain);
+
+      n[`${id}Analyser`] = new Tone.Analyser('waveform', 128); // display energy tap
+      n[`${id}Ap2L`].connect(n[`${id}Analyser`]);
+      n[`${id}Ap2R`].connect(n[`${id}Analyser`]);
+      nodeNames.push(`${id}TimeCvIn`, `${id}TimeCvDepth`, `${id}RepCvIn`, `${id}RepCvDepth`, `${id}Analyser`);
+
+      const jackEntries = {
+        [`${id}-in`]:      { type: 'in',  dest: n[`${id}In`] },
+        [`${id}-time-cv`]: { type: 'in',  dest: n[`${id}TimeCvIn`] },
+        [`${id}-rep-cv`]:  { type: 'in',  dest: n[`${id}RepCvIn`] },
+        [`${id}-out`]:     { type: 'out', node: n[`${id}Out`] },
+      };
+      jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
+      dynInstancesRef.current.set(id, { type, num, nodeNames, sourceNames: [], jackIds: Object.keys(jackEntries) });
+      return { id, num };
+    }
+
+    if (type === 'folder') {
+      // Wavefolder (Phase 68c) — a West-Coast sine wavefolder. FOLD pre-gain drives
+      // the signal into a fixed multi-fold sine transfer curve (Tone.WaveShaper), so
+      // more drive = more folds = more added harmonics. SYMMETRY adds a DC offset
+      // before the fold for asymmetric (even-harmonic) folding. Output-domain
+      // waveshaping — works on ANY audio in (VCO, chord, external), which is exactly
+      // why it is its OWN module rather than a VCO knob (VCO SHAPE is phase-domain).
+      const id = `folder${num}`;
+      const FOLDS = 4; // fold count across the full ±1 curve at max drive
+      n[`${id}In`]      = new Tone.Gain(1);
+      n[`${id}Drive`]   = new Tone.Gain(0.4);  // FOLD amount (pre-shaper gain 0.2..1.0)
+      n[`${id}FoldCv`]  = new Tone.Gain(0.5);  // FOLD-CV → Drive.gain (sums onto knob)
+      n[`${id}Bias`]    = new Tone.Signal(0);  // SYMMETRY — DC offset before the fold
+      n[`${id}BiasSum`] = new Tone.Gain(1);
+      n[`${id}Shaper`]  = new Tone.WaveShaper((x) => Math.sin(x * Math.PI * FOLDS), 4096);
+      n[`${id}Out`]     = new Tone.Gain(1);    // OUTPUT level
+      n[`${id}Analyser`] = new Tone.Analyser('waveform', 256); // → folded-wave scope
+      n[`${id}In`].connect(n[`${id}Drive`]);
+      n[`${id}Drive`].connect(n[`${id}BiasSum`]);
+      n[`${id}Bias`].connect(n[`${id}BiasSum`]);   // DC offset sums with the driven signal
+      n[`${id}BiasSum`].connect(n[`${id}Shaper`]);
+      n[`${id}Shaper`].connect(n[`${id}Out`]);
+      n[`${id}Shaper`].connect(n[`${id}Analyser`]);
+      n[`${id}FoldCv`].connect(n[`${id}Drive`].gain); // CV sums onto the FOLD knob
+      const nodeNames = [`${id}In`, `${id}Drive`, `${id}FoldCv`, `${id}Bias`, `${id}BiasSum`, `${id}Shaper`, `${id}Out`, `${id}Analyser`];
+      const jackEntries = {
+        [`${id}-in`]:      { type: 'in',  dest: n[`${id}In`] },
+        [`${id}-fold-cv`]: { type: 'in',  dest: n[`${id}FoldCv`] },
+        [`${id}-out`]:     { type: 'out', node: n[`${id}Out`] },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, { type, num, nodeNames, sourceNames: [], jackIds: Object.keys(jackEntries) });
@@ -2294,6 +2515,50 @@ export default function useMoogAudio() {
         if (params.vowel !== undefined) vowelMorphRefs.current[id] = Math.max(0, Math.min(4, params.vowel * 4));
         if (params.shape !== undefined) vowelShapeRefs.current[id] = 0.7 + params.shape * 0.6; // tract scale 0.7..1.3
         break;
+      case 'panner':
+        // PAN knob 0..1 → pan -1..1 (intrinsic value; CV sums on top of it).
+        if (params.pan   !== undefined) safeRamp(n[`${id}Pan`].pan, params.pan * 2 - 1, 0.02);
+        if (params.depth !== undefined) safeRamp(n[`${id}CvDepth`].gain, Math.max(0, params.depth), 0.02);
+        break;
+      case 'chronos': {
+        // Module sends the full {zone,time,repeats,halo,color,mix} each change.
+        const CHRONOS_RANGES = { micro: [0.003, 0.03], mini: [0.03, 0.28], macro: [0.28, 3.0] };
+        const zone = params.zone ?? 'mini';
+        const [minT, maxT] = CHRONOS_RANGES[zone] || CHRONOS_RANGES.mini;
+        const time    = Math.max(0, Math.min(1, params.time    ?? 0.5));
+        const halo    = Math.max(0, Math.min(1, params.halo    ?? 0.3));
+        const repeats = Math.max(0, Math.min(1, params.repeats ?? 0.45));
+        const color   = Math.max(0, Math.min(1, params.color   ?? 0.6));
+        const mix     = Math.max(0, Math.min(1, params.mix     ?? 0.5));
+        const now  = Tone.now();
+        const base = minT * Math.pow(maxT / minT, time); // log-mapped delay time
+        n[`${id}DelayL`].delayTime.setTargetAtTime(base, now, 0.05);
+        n[`${id}DelayR`].delayTime.setTargetAtTime(base * (1 + 0.035 * halo), now, 0.05); // R drifts → width
+        const cut = 400 * Math.pow(50, color); // 400 Hz (dark) … 20 kHz (bright)
+        n[`${id}LpL`].frequency.setTargetAtTime(cut, now, 0.05);
+        n[`${id}LpR`].frequency.setTargetAtTime(cut, now, 0.05);
+        // Feedback + cross share headroom so the coupled loop stays stable
+        // (|self| + |cross| ≤ ~0.9; the tanh soft-clip guards the rest).
+        const cross = halo * 0.4;
+        const fb    = repeats * (0.9 - 0.4 * halo);
+        safeRamp(n[`${id}FbL`].gain,  fb);    safeRamp(n[`${id}FbR`].gain,  fb);
+        safeRamp(n[`${id}XfbL`].gain, cross); safeRamp(n[`${id}XfbR`].gain, cross);
+        // HALO also widens the allpass diffusion spread
+        n[`${id}Ap1L`].frequency.setTargetAtTime(300 + halo * 700, now, 0.05);
+        n[`${id}Ap1R`].frequency.setTargetAtTime(360 + halo * 700, now, 0.05);
+        n[`${id}Ap2L`].frequency.setTargetAtTime(1500 + halo * 1500, now, 0.05);
+        n[`${id}Ap2R`].frequency.setTargetAtTime(1700 + halo * 1500, now, 0.05);
+        // MIX — equal-power dry/wet crossfade
+        const wetG = Math.sin(mix * Math.PI / 2), dryG = Math.cos(mix * Math.PI / 2);
+        safeRamp(n[`${id}WetL`].gain, wetG); safeRamp(n[`${id}WetR`].gain, wetG);
+        safeRamp(n[`${id}Dry`].gain,  dryG);
+        break;
+      }
+      case 'folder':
+        if (params.fold     !== undefined) safeRamp(n[`${id}Drive`].gain, 0.2 + params.fold * 0.8); // 0.2..1.0
+        if (params.symmetry !== undefined) safeRamp(n[`${id}Bias`], (params.symmetry - 0.5));       // -0.5..0.5 DC
+        if (params.output   !== undefined) safeRamp(n[`${id}Out`].gain, params.output * 2);          // 0..2×
+        break;
       case 'kick':
         applyKickParams(id, params);
         break;
@@ -2335,8 +2600,8 @@ export default function useMoogAudio() {
     const jm = { ...jackMapRef.current };
     inst.jackIds.forEach(j => delete jm[j]);
     jackMapRef.current = jm;
-    // Per-instance hard sync worklet (Phase 60d): a native AudioWorkletNode —
-    // disconnect only (no dispose), and BEFORE its syncIn/syncOut neighbors go.
+    // Per-instance VCO core worklet (Phase 60d/68b): a native AudioWorkletNode —
+    // disconnect only (no dispose), and BEFORE its syncIn/coreGate neighbors go.
     const hs = n.hardSyncNodes?.[id];
     if (hs) {
       try { hs.disconnect(); } catch (_) {}
@@ -2479,7 +2744,7 @@ export default function useMoogAudio() {
     if (!gb) return;
     if (Tone.context.state === 'running') gb.rampTo(hz, 0.02);
     else                                  gb.value = hz;
-    n.hardSyncNodes?.[vcoId]?.parameters.get('slaveFreq').setTargetAtTime(hz, Tone.now(), 0.02);
+    // (glideBus → worklet slaveFreq is connected — no separate write.)
     if (!q.bypass && quantizerStepCbRefs.current[qid]) {
       const midi = Math.round(69 + 12 * Math.log2(hz / 440));
       lastQuantizedMidiRefs.current[qid] = midi;
@@ -2691,7 +2956,7 @@ export default function useMoogAudio() {
       const kHz = vcoKnobHzRef.current[vcoId];
       if (kHz != null) {
         n[`${vcoId}GlideBus`].setValueAtTime(kHz, Tone.now());
-        n.hardSyncNodes?.[vcoId]?.parameters.get('slaveFreq').setValueAtTime(kHz, Tone.now());
+        // (glideBus → worklet slaveFreq is connected — no separate write.)
       }
       if (/^qnt\d*-cv-out$/.test(conn.sourceId)) notifyKnobQuantize(); // glow off for this VCO
       return;
@@ -2734,12 +2999,12 @@ export default function useMoogAudio() {
   // subsequent exponential ramp crashes: "Value must be within [0, 0]".
   // setTargetAtTime bypasses Tone.js assertRange, accepts any value, and approaches the
   // target asymptotically (never actually reaches 0), so it is safe in all cases.
-  const updateVcoParams = useCallback((vcoId, { hz, detune, type } = {}) => {
+  // Phase 68b: the VCO core is the worklet; pitch/detune/width are written to
+  // per-VCO Signals (GlideBus/DetuneSig/WidthSig) which are connected to the
+  // worklet params in wire(). No direct oscillator node any more (`width` 0..1).
+  const updateVcoParams = useCallback((vcoId, { hz, detune, width } = {}) => {
     const n = nodesRef.current;
-    if (!n) return;
-    const vco = n[vcoId];
-    if (!vco) return;
-    const syncNode = n.hardSyncNodes?.[vcoId];
+    if (!n || !n[`${vcoId}GlideBus`]) return;
     if (hz !== undefined) {
       const safeHz = Math.max(0.1, hz);
       vcoKnobHzRef.current[vcoId] = safeHz;
@@ -2749,7 +3014,6 @@ export default function useMoogAudio() {
         const gb = n[`${vcoId}GlideBus`];
         if (Tone.context.state === 'running') gb.rampTo(safeHz, 0.02);
         else                                  gb.value = safeHz;
-        syncNode?.parameters.get('slaveFreq').setTargetAtTime(safeHz, Tone.now(), 0.02);
       } else {
         const qid = qntIdForVco(vcoId);
         if (qid && quantizerParamsRefs.current[qid]) {
@@ -2764,10 +3028,13 @@ export default function useMoogAudio() {
       }
     }
     if (detune !== undefined) {
-      vco.detune.setTargetAtTime(detune, Tone.now(), 0.02);
-      syncNode?.parameters.get('slaveDetune').setTargetAtTime(detune, Tone.now(), 0.02);
+      const d = n[`${vcoId}DetuneSig`];
+      if (d) { if (Tone.context.state === 'running') d.rampTo(detune, 0.02); else d.value = detune; }
     }
-    if (type !== undefined) vco.type = type;
+    if (width !== undefined) {
+      const w = n[`${vcoId}WidthSig`];
+      if (w) { if (Tone.context.state === 'running') w.rampTo(width, 0.02); else w.value = width; }
+    }
   }, [qntHasCvInput, applyVcoKnobQuantize, qntIdForVco]);
 
   // Update VCF audio parameters — single writer per node.
@@ -3122,8 +3389,12 @@ export default function useMoogAudio() {
     const n = nodesRef.current;
     if (!n || !n[`${id}WGain`] || level === undefined) return;
     const g = Math.max(0, level) / 0.7;
-    safeRamp(n[`${id}WGain`].gain, g, 0.02);
-    safeRamp(n[`${id}PGain`].gain, g, 0.02);
+    // Single writer of all six colour gains — each scaled by its makeup so the
+    // colours sit at comparable loudness at the shared LEVEL (Phase 69).
+    for (const [suf, mk] of NOISE_LEVEL_GAINS) {
+      const node = n[`${id}${suf}`];
+      if (node) safeRamp(node.gain, g * mk, 0.02);
+    }
   }, []);
 
   const setSeqGlide  = useCallback((v) => setSeqGlideById('seq', v),  [setSeqGlideById]);
@@ -3167,6 +3438,44 @@ export default function useMoogAudio() {
     return n?.[`${id}Analyser`]?.getValue() ?? null;
   }, []);
 
+  // Panner L/R distribution (Phase 67) → drives the module's two stereo LEDs.
+  // Per-channel level = input peak × equal-power gain at the EFFECTIVE pan
+  // (knob base + sampled CV × depth), so the LEDs track both signal and motion.
+  const getPanMeterData = useCallback((id) => {
+    const n = nodesRef.current;
+    if (!n || !n[`${id}InAnalyser`]) return null;
+    const inWave = n[`${id}InAnalyser`].getValue();
+    let peak = 0;
+    for (let i = 0; i < inWave.length; i++) { const a = Math.abs(inWave[i]); if (a > peak) peak = a; }
+    const level = Math.min(1, peak);
+    const cvWave = n[`${id}CvAnalyser`].getValue();
+    let sum = 0;
+    for (let i = 0; i < cvWave.length; i++) sum += cvWave[i];
+    const cv = sum / cvWave.length; // DC/mean of the CV input (bipolar)
+    const base  = n[`${id}Pan`].pan.value;      // knob intrinsic value
+    const depth = n[`${id}CvDepth`].gain.value; // CV attenuator
+    const eff = Math.max(-1, Math.min(1, base + cv * depth));
+    const angle = (eff + 1) * 0.25 * Math.PI;   // (eff+1)/2 · π/2 → equal-power
+    return { l: level * Math.cos(angle), r: level * Math.sin(angle) };
+  }, []);
+
+  // Chronos delay display (Phase 68) → echo-ring visualizer. energy = post-
+  // diffusion peak (feedback activity); delaySec = live L delay time (ring gap).
+  const getChronosDisplay = useCallback((id) => {
+    const n = nodesRef.current;
+    if (!n || !n[`${id}Analyser`]) return null;
+    const w = n[`${id}Analyser`].getValue();
+    let peak = 0;
+    for (let i = 0; i < w.length; i++) { const a = Math.abs(w[i]); if (a > peak) peak = a; }
+    return { energy: Math.min(1, peak), delaySec: n[`${id}DelayL`].delayTime.value };
+  }, []);
+
+  // Wavefolder output waveform (Phase 68c) → drives the folded-wave scope.
+  const getFolderScope = useCallback((id) => {
+    const n = nodesRef.current;
+    return n?.[`${id}Analyser`]?.getValue() ?? null;
+  }, []);
+
   // Built-in vocoder mic — opens a Tone.UserMedia stream (requires a user gesture for the
   // browser permission prompt) and routes it into extMicGain, which feeds the vocoder
   // modulator (vocModRaw). Returns true on success, false if permission denied / unavailable.
@@ -3203,53 +3512,43 @@ export default function useMoogAudio() {
     if (gain !== undefined) safeRamp(n.extMicGain.gain, Math.max(0, gain), 0.05);
   }, []);
 
-  // Crossfades normalGain ↔ syncOut over 10 ms per VCO.
-  // State persisted in ref so powerOff/powerOn can gate and restore it.
-  // syncOut opens only while POWERED: the hard-sync worklet runs continuously
-  // (process() returns true forever), so opening syncOut while unpowered would
-  // leak the free-running slave sawtooth to the I/O even with the synth off.
+  // HARD SYNC enable — see the worklet-core note on the setters below.
   // The ref is always recorded so powerOn restores the correct crossfade.
+  // Phase 68b: HARD SYNC is now the worklet core's syncEnabled param (0/1) — when
+  // off the core free-runs (a normal 4-waveform VCO); when on it phase-resets to a
+  // master patched into SYNC IN, syncing ALL FOUR outputs. No power-gating here —
+  // coreGate silences the core while unpowered. The ref is recorded so wire()
+  // restores syncEnabled after an async worklet load / saved setup.
   const setVco1SyncEnabled = useCallback((enabled) => {
     const n = nodesRef.current; if (!n) return;
     vco1SyncEnabledRef.current = enabled;
-    safeRamp(n.vco1normalGain.gain, enabled ? 0 : 1, 0.01);
-    safeRamp(n.vco1syncOut.gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
+    n.hardSyncNodes?.vco1?.parameters.get('syncEnabled').setValueAtTime(enabled ? 1 : 0, Tone.now());
   }, []);
   const setVco2SyncEnabled = useCallback((enabled) => {
     const n = nodesRef.current; if (!n) return;
     vco2SyncEnabledRef.current = enabled;
-    safeRamp(n.vco2normalGain.gain, enabled ? 0 : 1, 0.01);
-    safeRamp(n.vco2syncOut.gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
+    n.hardSyncNodes?.vco2?.parameters.get('syncEnabled').setValueAtTime(enabled ? 1 : 0, Tone.now());
   }, []);
   const setVco3SyncEnabled = useCallback((enabled) => {
     const n = nodesRef.current; if (!n) return;
     vco3SyncEnabledRef.current = enabled;
-    safeRamp(n.vco3normalGain.gain, enabled ? 0 : 1, 0.01);
-    safeRamp(n.vco3syncOut.gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
+    n.hardSyncNodes?.vco3?.parameters.get('syncEnabled').setValueAtTime(enabled ? 1 : 0, Tone.now());
   }, []);
   const setVco4SyncEnabled = useCallback((enabled) => {
     const n = nodesRef.current; if (!n) return;
     vco4SyncEnabledRef.current = enabled;
-    safeRamp(n.vco4normalGain.gain, enabled ? 0 : 1, 0.01);
-    safeRamp(n.vco4syncOut.gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
+    n.hardSyncNodes?.vco4?.parameters.get('syncEnabled').setValueAtTime(enabled ? 1 : 0, Tone.now());
   }, []);
   const setVco5SyncEnabled = useCallback((enabled) => {
     const n = nodesRef.current; if (!n) return;
     vco5SyncEnabledRef.current = enabled;
-    safeRamp(n.vco5normalGain.gain, enabled ? 0 : 1, 0.01);
-    safeRamp(n.vco5syncOut.gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
+    n.hardSyncNodes?.vco5?.parameters.get('syncEnabled').setValueAtTime(enabled ? 1 : 0, Tone.now());
   }, []);
-  // Dynamic-instance variant (Phase 60d) — same crossfade, state in dynVcoSyncRef
-  // so powerOff/powerOn can gate and restore per instance.
+  // Dynamic-instance variant (Phase 60d) — state in dynVcoSyncRef so wire() restores it.
   const setVcoSyncEnabledById = useCallback((vcoId, enabled) => {
-    const n = nodesRef.current;
-    if (!n || !n[`${vcoId}syncOut`]) return;
+    const n = nodesRef.current; if (!n) return;
     dynVcoSyncRef.current[vcoId] = enabled;
-    safeRamp(n[`${vcoId}normalGain`].gain, enabled ? 0 : 1, 0.01);
-    // syncOut opens only when POWERED — the worklet runs continuously, so opening
-    // it while unpowered leaks the free-running slave to the I/O (bug fix). powerOn
-    // restores it from dynVcoSyncRef.
-    safeRamp(n[`${vcoId}syncOut`].gain,    (enabled && isPoweredRef.current) ? 1 : 0, 0.01);
+    n.hardSyncNodes?.[vcoId]?.parameters.get('syncEnabled').setValueAtTime(enabled ? 1 : 0, Tone.now());
   }, []);
 
   // Keyboard pitch + gate control.
@@ -3302,6 +3601,9 @@ export default function useMoogAudio() {
     updateFFBParams, getFFBAnalyserData,
     updateVocoderParams, getVocAnalyserData,
     getVowelAnalyserData,
+    getPanMeterData,
+    getChronosDisplay,
+    getFolderScope,
     enableMic, disableMic, updateExtMicParams,
     updateKickParams, triggerKick, triggerKickById, setKickTrigCallbackById,
     setKickTrigCallback: (fn) => { kickTrigCbRef.current.kick = fn; },

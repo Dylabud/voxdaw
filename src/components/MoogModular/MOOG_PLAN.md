@@ -29,9 +29,34 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 - **Phase 62 candidate (hardening, small):** monotonic-clamp kick trigger times (`Math.max(time, lastKickTime + ε)` at the `triggerKickById` sites). A load-induced Tone race ("Start time must be strictly greater than previous start time", `MembraneSynth ← seq Loop.callback`) surfaced once in ~18 heavy-rack stress runs — reachable whenever the main thread stalls past the Transport lookAhead. The class predates Phase 61 (pre-61 heavy racks stalled constantly at 30–40 ms/frame) and did not reproduce in 3 further 40 s stress runs on either code version.
 
+- **Phase 68b follow-up (VCO anti-aliasing):** the worklet VCO core (Phase 68b) generates naive, non-band-limited saw/pulse/phase-warped waveforms, so notes high in the range alias audibly — a regression vs the native `OscillatorNode` it replaced (which was band-limited). Add **PolyBLEP** at the saw/pulse discontinuities (+ polyBLAMP on the triangle corners) inside `hard-sync-worklet.js` to restore band-limiting while keeping the single-phase, 4-simultaneous-waveform core. Sine stays pure; the SHAPE phase-warp complicates but doesn't block a basic BLEP at the main reset edge.
+
 ---
 
 ## Completed Phases Log
+
+### [2026-07-29] Moog Phase 69 — Noise module: six colours, retro scope, LEVEL CV
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+
+Expanded the Noise module from white/pink to **six colours per instance**, each with its own output jack (3×2 grid, full-word labels WHITE / PINK / RED / BLUE / VIOLET / GREY):
+- **RED** = native `Tone.Noise('brown')` (−6 dB/oct); **BLUE** (+3 dB/oct) = the PINK source through a first-difference IIR differentiator (`createIIRFilter([1,-1],[1])`); **VIOLET** (+6 dB/oct) = the WHITE source through the same differentiator; **GREY** = white through an inverse-equal-loudness voicing (+lowshelf 500 Hz, −9 dB peaking @3.5 kHz, +highshelf 9 kHz). A biquad shelf can't make a constant broadband slope — the first shelf attempt sounded like white, which is why the differentiators were needed (Dylan feedback: "actually produce that type of noise").
+- Shared `buildNoiseColors(n, id)` builds/wires all colours for the 3 statics **and** the `addModule` factory; blue derives from pink, violet/grey from white, so only ONE extra running source (brown) is added. Per-colour makeup (`NOISE_LEVEL_GAINS`, `[suffix, makeup]`) balances loudness at the shared LEVEL; `updateNoiseParams` iterates it and stays the single writer of all six gains. Jack ids `-wht/-pnk/-brn/-blu/-vio/-gry` (kept `-brn` internally though the label reads RED). Backward compatible — `-wht/-pnk` ids unchanged; only `level` persists.
+- **Retro CRT scope** (`NoiseScope`) — a procedural noise trace (noise is random, so no analyser tap is needed) tinted to whichever colour is patched (reads `useMoogPatch().cables`, most-recently-patched wins); trace character varies per colour (RED smooth → VIOLET spiky), amplitude tracks LEVEL. Own `.noiseScope` CRT bezel + scanlines + phosphor persistence; Phase-61 visibility gates (offsetParent / checkVisibility). Lights-out keeps it emissive-bright with an I/O-oscilloscope-style dark ring + green glow — the **same lights-out treatment was extended to `.auraScreen`** (reverb / vowel / chronos / fold displays).
+- **LEVEL CV jack** (69b, to the right of the LEVEL knob): an LFO/CV fans through per-colour makeup scalers into each colour gain's AudioParam, so it scales level makeup-balanced exactly like the knob (knob owns intrinsic `.value`, CV sums — the Moog knob+CV pattern).
+
+### [2026-07-22] Moog Phase 67 / 68 — VCO worklet core + new FX/util modules; VCO UI polish; layout de-wooding
+
+**Files modified:** `public/hard-sync-worklet.js`, `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.jsx`, `MoogKnob.module.css`
+
+- **VCO worklet CORE (Phase 68b):** rewrote `hard-sync-worklet.js` from a sync-only slave into the full oscillator core — one phase accumulator → **4 simultaneous waveforms** (sine/tri/saw/pulse) on a 4-channel output → `coreGate` (power) → `bus` (seq gate) → `ChannelSplitter` → four tap gains → the sin/tri/saw/sqr jacks (all live at once, like a real 921/901 core). Replaced `Tone.Oscillator` for every VCO; per-VCO `GlideBus`/`DetuneSig`/`WidthSig` Signals sum into a-rate worklet params (`slaveFreq`/`slaveDetune`/`pulseWidth`), FM + PW-CV sum on top. HARD SYNC is now the worklet's `syncEnabled` param (resets the shared phase → all 4 outs sync together); `coreGate` silences the ever-running worklet while unpowered. New **SHAPE** knob + **SH/PW** jack phase-warp all four waveforms (pulse duty). **Known limitation → see Future Phases:** the core is naive (non-band-limited) → aliasing on high notes, a regression vs the native `OscillatorNode` it replaced; PolyBLEP is the fix.
+- **VCO UI polish:** RANGE selector changed from click-cycle to **hold-and-drag vertical scrub** (up = higher range); RANGE value box fixed-width (`selectorValueRange`, em-based) so single/double-digit ranges never reflow neighbours; jack-row alignment fix (`.jackLabel` = fixed-height centred box so text labels line up with the wave-icon labels). A `.vcoBig` ~1.25× enlargement was added then **reverted** to the original size on request (SHAPE knob + RANGE changes kept; `sm` SHAPE knob).
+- **New dynamic, library-addable modules:**
+  - **PANNER (Phase 67)** — VC stereo panner: `Tone.Panner` (equal-power) + CV depth attenuator summing onto `pan.pan`; L/R meter LEDs (`getPanMeterData`). Jacks in / cv-in / out.
+  - **CHRONOS (Phase 68)** — mono→stereo multi-zone delay: hand-built stereo feedback loop (native `Tone.Delay` L/R + in-loop highpass/lowpass + two allpass diffusers + tanh soft-clip; self + cross feedback for width), **MICRO/MINI/MACRO** zones (`CHRONOS_RANGES`, log-mapped TIME), TIME/REP CV, echo-ring display (`getChronosDisplay`). Jacks in / time-cv / rep-cv / out.
+  - **WAVEFOLDER (Phase 68c)** — West-Coast sine folder: FOLD drive into a fixed multi-fold `Tone.WaveShaper` (`sin(x·π·4)`), SYMMETRY DC bias for even harmonics, FOLD-CV, folded-wave scope (`getFolderScope`). Output-domain (works on any audio in), unlike the VCO's phase-domain SHAPE. Jacks in / fold-cv / out.
+  - Registered in `DYN_TYPES` (PAN / DELAY / FOLD) + `nextInstNumRef` + `bindingsFor` + expansion-row render; all dynamic-only (num starts at 1).
+- **Layout (2026-07-22):** cases de-wooded/flattened to one continuous dark field (labels removed, `gap: 0`); the dynamic expansion row relocated from Case 1 to the bottom of Case 3. `MoogKnob` gained an `xxl` size tier (added for the VCO enlargement; now unused after the revert).
 
 ### [2026-07-13] Moog Phase 66 — Cross-page hooks for Workstation Moog-record (pointer; full log in root PLAN.md Phase 155)
 

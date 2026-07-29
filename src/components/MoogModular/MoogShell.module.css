@@ -362,50 +362,32 @@
 
 /* ══════════════════════════════════════════════════════
    RACK — dark metal chassis; walnut only at cabinet edges.
-   The 2px gap between tiers shows as a thin dark rail line.
+   The three case sections butt flush (gap 0) so the whole
+   interior reads as one continuous dark field (2026-07-22).
    ══════════════════════════════════════════════════════ */
 .rack {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 0;
   background: #0a0908;
 }
 
 /* ══════════════════════════════════════════════════════
-   CASES (Phase 59) — each tier group sits in its own
-   walnut road-case with a stamped label strip. The dark
-   .rack background shows through the 12px gaps as the
-   shadow line between stacked cases.
+   CASES (Phase 59, de-wooded + flattened 2026-07-22) —
+   each tier group is now a bare dark-metal section, not a
+   walnut road-case, and its stamped label is gone. Wood
+   lives ONLY on the outer .cabinet frame; the three cases
+   carry no padding / radius / bevel, so they melt into one
+   continuous dark field with zero seam between them.
    ══════════════════════════════════════════════════════ */
 .case {
-  position: relative; /* anchor for the .caseLabel strip */
-  background:
-    repeating-linear-gradient(
-      90deg,
-      transparent 0px, transparent 42px,
-      rgba(0, 0, 0, 0.06) 42px, rgba(0, 0, 0, 0.06) 43px
-    ),
-    linear-gradient(to bottom, #8a4620 0%, #7c3e1c 30%, #6a3216 60%, #542610 100%);
-  border-radius: 6px;
-  padding: 25px 7px 7px;
-  box-shadow:
-    0 0 0 1px #2e1206,
-    0 6px 16px rgba(0, 0, 0, 0.55),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    inset 0 -2px 0 rgba(0, 0, 0, 0.4);
+  position: relative;
+  background: #0a0908; /* dark metal — matches .rack / .caseInterior */
+  padding: 0;
 }
 
-.caseLabel {
-  position: absolute;
-  top: 5px;
-  left: 14px;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.34em;
-  text-transform: uppercase;
-  color: rgba(240, 232, 216, 0.85);
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
-}
+/* .caseLabel removed 2026-07-22 — the "Voice / Percussion & FX /
+   Sequencer Case" strips were deleted from the JSX. */
 
 /* Expansion row (Phase 60b) — dynamic instances at fixed per-type widths.
    Widths match the static tier-1 column sizes at the FLOOR_LAYOUT_W layout
@@ -487,6 +469,7 @@
 .tierRow2 { grid-template-columns: 1.25fr 1.25fr 1fr 1fr 0.7fr 0.7fr 0.75fr 1.45fr; }
 .tierRow3 { grid-template-columns: 0.85fr 0.85fr 0.85fr 1fr 1fr 1fr 1fr max-content; }
 .tierRow4 { grid-template-columns: 1.5fr 1.5fr 1fr 0.9fr 1.1fr; }
+
 /* Stacks two sequencer modules vertically inside a single grid cell */
 .seqStack {
   display: flex;
@@ -909,6 +892,16 @@
   transition: color 0.1s, border-color 0.1s;
 }
 
+/* RANGE value only — fixed width so single- ("8'") and double-digit ("32'")
+   labels share one box and never reflow the components beside them. em-based
+   so it tracks the .vcoBig 26px size; border-box so padding stays inside the
+   fixed width. Sized to fit the widest range label with margin. */
+.selectorValueRange {
+  box-sizing: border-box;
+  width: 3em;
+  min-width: 0; /* override the base 28px floor — width is authoritative here */
+}
+
 .selectorGroup:hover .selectorValue {
   color: rgba(255, 255, 255, 0.90);
   border-color: #58503c;
@@ -991,6 +984,21 @@
   grid-template-columns: repeat(4, 1fr);
   gap: 7px;
   margin-top: 8px;
+}
+
+/* Noise module (Phase 69): six colour jacks as a fixed 3×2 grid with the full
+   colour names. Smaller label font + tighter letter-spacing so "VIOLET" fits the
+   narrow plate. */
+.noiseJackGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 7px 3px;
+  padding: 0 2px;
+  justify-items: center;
+}
+.noiseJackGrid .jackLabel {
+  font-size: 11px;
+  letter-spacing: 0.03em;
 }
 
 .jackGroup {
@@ -1104,6 +1112,15 @@
   text-transform: uppercase;
   text-align: center;
   white-space: nowrap;
+  /* Fixed-height, centered label box so text labels (CV/FM/SH) and WaveIcon
+     SVG labels (sin/tri/saw/sqr) occupy identical vertical space — otherwise
+     the taller text pushes its jack circle up and the row loses horizontal
+     symmetry. em-based so it scales with the normal / .vcoBig font sizes. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  min-height: 1.35em;
 }
 
 .jackLabelEmpty {
@@ -1733,10 +1750,16 @@
 .cabinet[data-lights-out="true"] .hardSyncSwitch { opacity: 0; }
 .cabinet[data-lights-out="true"] .vcoSyncLed .toggleLabel { opacity: 0; }
 
-/* Aura display: kill the chrome bezel + lamp sheen (nothing to reflect in the
-   dark); the canvas halo itself stays lit — it's emissive, like the scope. */
+/* Aura display (reverb / vowel / chronos / fold): kill the lamp sheen (nothing to
+   reflect in the dark); the canvas halo stays lit — emissive, like the scope — and
+   the surrounding line matches the I/O oscilloscope: a dark ring with a soft
+   phosphor glow instead of the lit chrome bezel. */
 .cabinet[data-lights-out="true"] .auraScreen {
-  box-shadow: inset 0 0 14px rgba(0, 0, 0, 0.9);
+  box-shadow:
+    inset 0 0 14px rgba(0, 0, 0, 0.9),
+    0 0 0 1px #0c1a0e,
+    0 0 0 2px #1c1a18,
+    0 0 14px rgba(80, 180, 120, 0.30);
 }
 .cabinet[data-lights-out="true"] .auraScreen::after { display: none; }
 
@@ -1812,6 +1835,58 @@
   display: block;
   width: 100%;
   height: 100%;
+}
+
+/* ══════════════════════════════════════════════════════
+   NOISE SCOPE (Phase 69) — retro CRT strip on the noise
+   module. Neutral near-black glass so any colour tint reads,
+   chrome bezel to match the jewel-lamp/aura housings, plus
+   scanline overlay for the phosphor-tube look.
+   ══════════════════════════════════════════════════════ */
+.noiseScope {
+  width: 100%;
+  height: 44px;
+  margin: 3px 0 4px;
+  border-radius: 4px;
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: radial-gradient(ellipse at 50% 40%, #0b0f0c 0%, #070a08 55%, #030504 100%);
+  box-shadow:
+    inset 0 0 12px rgba(0, 0, 0, 0.9),
+    inset 0 0 3px rgba(120, 255, 170, 0.08),
+    0 0 0 2px #767066,
+    0 0 0 3px #100e0c,
+    -2px 3px 7px rgba(0, 0, 0, 0.8);
+}
+/* scanlines + upper-right glass sheen */
+.noiseScope::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at 68% 20%, rgba(255, 255, 255, 0.08) 0%, transparent 44%),
+    repeating-linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.035) 0px, rgba(255, 255, 255, 0.035) 1px,
+      transparent 1px, transparent 3px
+    );
+}
+.noiseScopeCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* Lights-out: the noise scope's emissive trace stays at full brightness, and its
+   surrounding line matches the I/O oscilloscope — a dark ring with a soft phosphor
+   glow instead of the lit chrome bezel. */
+.cabinet[data-lights-out="true"] .noiseScope {
+  box-shadow:
+    inset 0 0 12px rgba(0, 0, 0, 0.95),
+    0 0 0 1px #0c1a0e,
+    0 0 0 2px #1c1a18,
+    0 0 14px rgba(80, 180, 120, 0.30);
 }
 
 /* ══════════════════════════════════════════════════════
