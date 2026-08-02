@@ -36,6 +36,107 @@ function vowelFreqsAt(pos) {
   return [0, 1, 2].map(k => a[k] + (b[k] - a[k]) * f);
 }
 
+// ── LFO free-run rate range (Phase 70) ──
+// RATE knob 0..1 → Hz, exponentially. Widened from the original 0.1–30 Hz (×300):
+// the low end now reaches genuinely slow evolving sweeps (0.01 Hz = a 100-second
+// cycle, matching MOOG_ARCHITECTURE §2's spec) and the top crosses into audio rate
+// for FM/growl territory. The ×10000 span lands on a decade per quarter-turn
+// (0.01 / 0.1 / 1 / 10 / 100 Hz), which keeps a knob this wide readable.
+// SYNC mode is unaffected — it stores the raw 0..1 knob in lfoRateRefs and maps it
+// to LFO_SYNC_DIVS, never to Hz.
+// ── 914 FFB sweep (Phase 70) ──
+// SWEEP CV moves a resonant gain hump across the 14 bands: a filter-bank formant
+// sweep. FLOOR is how far the off-centre bands duck (0 would mute everything but the
+// hump); SIGMA is the hump width in band indices.
+const FFB_SWEEP_FLOOR = 0.10;
+const FFB_SWEEP_SIGMA = 2.2;
+
+// ── Reverb (Phase 70) ──
+// ROOM is CLAMPED: Tone.Freeverb wires roomSize straight to the feedback gain of its
+// eight parallel comb filters (`roomSize.connect(lowpassCombFilter.resonance)`), so at
+// 1.0 the feedback hits unity — the tail never decays and the combs sum into a runaway
+// build-up. 0.95 is the same cap the Workstation's effectDefs uses and the value
+// CLAUDE.md lists as load-bearing. Unclamped ROOM was a real bug, not a hypothetical.
+const REV_MAX_ROOM = 0.95;
+// DAMP → Freeverb `dampening`: the lowpass inside each comb, i.e. how fast the tail
+// loses its highs. Dark/distant hall → bright/splashy plate.
+//
+// TWO HAZARDS, both learned the hard way — do not "simplify" this:
+//
+// 1. STABILITY CEILING. `dampening` reaches OnePoleFilter, whose lowpass coefficients
+//    are a0 = 2π·f/sr and b1 = a0 − 1, fed to createIIRFilter([a0,0],[1,b1]). A one-pole
+//    IIR is stable only while |b1| < 1, i.e. **f < sr/π** (≈14 kHz at 44.1 kHz). Above
+//    that the filter diverges, NaN floods the comb FEEDBACK loop, and the whole
+//    AudioContext dies — audio stops rack-wide and only a page reload recovers it.
+//    An 18 kHz ceiling shipped briefly and did exactly that. Cap at 70% of the limit.
+// 2. EVERY WRITE REBUILDS NODES. OnePoleFilter.frequency's setter calls _createFilter(),
+//    which disposes and re-creates its IIRFilter and re-wires the graph — ×8 comb
+//    filters per write. Writing it per knob-frame is a continuous teardown/rebuild
+//    storm that sounds like loud scratching. Hence the debounce in scheduleRevDamp:
+//    a continuous drag must produce ZERO writes until the knob settles.
+const REV_DAMP_MID_HZ    = 3000;  // Freeverb's original fixed value — pinned to knob centre
+const REV_DAMP_DEBOUNCE_MS = 120;
+// Range adapts to the device sample rate; the midpoint stays exactly 3000 Hz by
+// construction, so a centred DAMP knob is byte-identical to the pre-knob behaviour.
+function revDampRange() {
+  const sr  = Tone.context?.sampleRate || 44100;
+  const max = Math.min(12000, (sr / Math.PI) * 0.7);
+  return { min: (REV_DAMP_MID_HZ * REV_DAMP_MID_HZ) / max, max };
+}
+function revDampHz(d) {
+  const { min, max } = revDampRange();
+  return min * Math.pow(max / min, Math.max(0, Math.min(1, d)));
+}
+
+// ── BBD chorus (Phase 70) ──
+// The module is now a COMPOSITE, not a bare Tone.Chorus:
+//   ${id}In ─┬─────────────────────────► ${id}Dry ──┐
+//            └─► ${id} (Chorus, wet 1) ─► ${id}Tone ─► ${id}Wet ─┴─► ${id}Out
+// Reason: the BBD colour filter must sit on the WET path only. Tone.Chorus's own
+// dry/wet is internal, so a filter after it would darken the dry signal too. The
+// Chorus therefore runs 100% wet and MIX crossfades the two external gains — the
+// same composite shape the Workstation's delay uses for its dry-through.
+// FEEDBACK is HAND-BUILT, not Tone.Chorus's internal `feedback` (which is left at 0).
+// Tone's loop is a bare gain: nothing damps the resonance as it recirculates and nothing
+// stops low frequencies accumulating, so at high settings the comb peak — which tracks
+// delayTime, ≈190–560 Hz at DELAY 3.5 ms / DEPTH 0.5 — sings as a low bee-like hum, one
+// per channel offset by the 180° stereo spread. Real BBDs band-limit INSIDE the loop.
+// So the return path is Tone(lowpass) → FbHp(highpass) → Sat(tanh) → Fb(gain) → chorus
+// input: the TONE filter is now in-loop, a highpass kills the mud buildup, and the tanh
+// bounds any runaway. Same reasoning as CHRONOS's hand-built loop (MOOG_ARCHITECTURE §15).
+const BBD_MAX_FEEDBACK = 0.9;   // feedback loop — same runaway class as reverb roomSize
+const BBD_FB_HP_HZ     = 120;   // trims sub-bass from the recirculating signal only
+// LOAD-BEARING: an explicit Delay must sit in the return path. Web Audio MUTES any
+// cycle that contains no DelayNode, and Tone.Chorus has an internal DRY branch
+// (input → CrossFade → output) with no delay in it — so routing feedback into the
+// chorus input creates a delay-free cycle and Chrome silences the entire loop. The
+// wet path goes dead: MIX just fades the dry away and every wet-side knob does
+// nothing. Cycle detection is topological, so wet:1 muting that branch does NOT
+// help. 5 ms clears one render quantum (2.9 ms @44.1k) at every sample rate.
+const BBD_FB_DELAY_S   = 0.005;
+// DELAY: knob 0..1 → 2–20 ms (Tone's documented nominal range). Default knob 0.25
+// ≈ 3.56 ms, matching the 3.5 ms the module was fixed at before the knob existed.
+const bbdDelayMs = (d) => 2 * Math.pow(10, Math.max(0, Math.min(1, d)));
+// TONE: the bucket-brigade voice — real BBD chips lose their top end badly, and that
+// dark blur is the whole character. knob 0..1 → 700 Hz … 14 kHz.
+const bbdToneHz  = (t) => 700 * Math.pow(20, Math.max(0, Math.min(1, t)));
+
+// ── Quantized FM (Phase 70) ──
+// When a quantizer drives a VCO's CV and an LFO is patched to that VCO's FM jack,
+// the modulation is snapped to the quantizer's scale instead of sliding through it
+// (see qntFmTick). Full modulator swing (±1) = ±QNT_FM_SEMITONES around the FREQ
+// knob — one octave each way, matching the quantizer worklet's own modulation mode.
+const QNT_FM_SEMITONES = 12;
+// Above this the 60 Hz rAF can't resolve the modulator's shape, so quantized FM
+// disengages and the direct audio-rate FM path takes back over — the fast end of the
+// RATE knob keeps its smooth FM growl rather than degrading into aliased stepping.
+const QNT_FM_MAX_HZ = 10;
+
+const LFO_RATE_MIN_HZ = 0.01;
+const LFO_RATE_SPAN   = 10000;   // × from min → 100 Hz at the top of the knob
+const lfoRateHz = (rate) =>
+  LFO_RATE_MIN_HZ * Math.pow(LFO_RATE_SPAN, Math.max(0, Math.min(1, rate)));
+
 // ── LFO tempo-sync (Phase 65) ──
 // When a clock is patched into an LFO's SYNC jack, the RATE knob stops setting a
 // free Hz and instead quantizes to one of these musical divisions — `beats` = how
@@ -68,6 +169,14 @@ function lfoWaveValue(type, phase) {
 // 914 Fixed Filter Bank — 14 bands: LP shelf + 12 bandpass + HP shelf.
 // Frequencies spaced at √2 intervals (2 bands/octave), authentic to the Moog 914.
 // LP/HP use shelf filters; bandpass uses BiquadFilter(bandpass) → Gain (parallel sum).
+// Live sample rate for UI analyser bin math. Hardcoding 44100 mis-maps every bin on a
+// 48 kHz device (the common default on modern Macs), so meters light the wrong bands.
+export const moogSampleRate = () => Tone.context?.sampleRate || 44100;
+// Tone.Analyser('fft', N) sets the underlying analyser's fftSize to N*2 and returns N
+// bins, so a bin spans sampleRate / (N*2) Hz — NOT sampleRate / N. Getting this wrong
+// puts every reading a full octave off. Both LED meters derive their bin width here.
+export const fftBinHz = (bins) => moogSampleRate() / (bins * 2);
+
 export const FFB_BANDS = [
   { freq: 100,  type: 'lowpass',  Q: 0.7, label: 'LP'   },
   { freq: 125,  type: 'bandpass', Q: 2.8, label: '125'  },
@@ -204,6 +313,31 @@ function safeRamp(param, value, rampTime = 0.05) {
   }
 }
 
+// ── VCF cutoff modulation (Phase 70) ──
+// All three VCF CV inputs (ENV, CV 1, CV 2) sum onto the filter's DETUNE param
+// (cents), NOT frequency (Hz). Native BiquadFilterNode computes the working
+// cutoff as `frequency · 2^(detune/1200)`, so modulation becomes EXPONENTIAL:
+// a given depth moves the cutoff by the same musical interval wherever the CUTOFF
+// knob sits. The old linear-Hz summing made one envelope a 3.5-octave slam at a
+// low cutoff and an inaudible nudge at a high one. Exponential also means the
+// three inputs sum in cents (= multiply in Hz), which is how real 1V/oct
+// modular CV behaves. Single writer holds: the CUTOFF knob owns
+// `frequency.value`, the patch cables own the connected `detune` input.
+// The CUTOFF knob sweeps VCF_CUTOFF_MIN_HZ … ×VCF_CUTOFF_RATIO (the `20 * 1000^cutoff`
+// mapping in updateVcfParams) — keep these in step with that expression.
+const VCF_CUTOFF_MIN_HZ = 20;
+const VCF_CUTOFF_RATIO  = 1000;                 // 20 Hz → 20 kHz
+// FULL-RANGE envelope depth: at ENV AMT = 1 a peaking envelope (Tone.Envelope tops
+// out at exactly 1.0) must lift a fully-CLOSED cutoff to the very top of the knob's
+// range — i.e. the whole 20 Hz → 20 kHz span, ~9.97 octaves. Anything less and the
+// knob at max still feels weak, which is what a 6000-cent (5-octave) cap did.
+const VCF_ENV_CENTS = Math.round(1200 * Math.log2(VCF_CUTOFF_RATIO));  // ≈ 11959
+// CV 1 / CV 2 are BIPOLAR (an LFO swings ±1), so half the span each way already
+// covers the full range end-to-end — deliberately not the same number as ENV.
+const VCF_CV_CENTS  = Math.round(VCF_ENV_CENTS / 2);                   // ≈ 5980, ±~5 oct
+// ENV AMT knob (0–1) → the ENV-jack scaler's gain, in cents.
+const vcfEnvAmtCents = (amt) => Math.max(0, Math.min(1, amt)) * VCF_ENV_CENTS;
+
 // Noise module colours (Phase 69). Each colour has its own LEVEL-tap gain (the
 // jack taps it) and a per-colour makeup so they sit at comparable loudness at the
 // shared LEVEL default (rising colours are perceptually loud → trimmed).
@@ -276,12 +410,14 @@ function buildJackMap(n) {
   return {
     // ── VCOs (Phase 68b — worklet core, 4 SIMULTANEOUS waveform outs + PWM) ──
     // cv  → glideBus (isVcoCv): Hz-range sources (sequencer, keyboard) patch here.
-    // fm  → vcoNfm Gain(500) → worklet slaveFreq: LFO/audio-rate mod, ±1 → ±500 Hz.
+    // fm  → vcoNfmIn (unity) → vcoNfm Gain(500) → worklet slaveFreq: LFO/audio-rate
+    //      mod, ±1 → ±500 Hz. fmIn also feeds vcoNfmAnalyser so qntFmTick can read
+    //      the RAW modulator while the ×500 path is muted for quantized FM (Phase 70).
     // pw  → vcoNpw Gain(0.4) → worklet pulseWidth: pulse-width CV for the SQR out.
     // sin/tri/saw/sqr each tap their own splitter channel (all live at once).
     // sync-in feeds the worklet master input; sync-out is the SAW tap (sharp edge).
     'vco1-cv':  { type: 'in',  dest: null, isVcoCv: true },
-    'vco1-fm':  { type: 'in',  dest: n.vco1fm },
+    'vco1-fm':  { type: 'in',  dest: n.vco1fmIn },
     'vco1-pw':  { type: 'in',  dest: n.vco1pw },
     'vco1-sin': { type: 'out', node: n.vco1Sin },
     'vco1-tri': { type: 'out', node: n.vco1Tri },
@@ -290,7 +426,7 @@ function buildJackMap(n) {
     'vco1-sync-in':  { type: 'in',  dest: n.vco1syncIn },
     'vco1-sync-out': { type: 'out', node: n.vco1Saw },
     'vco2-cv':  { type: 'in',  dest: null, isVcoCv: true },
-    'vco2-fm':  { type: 'in',  dest: n.vco2fm },
+    'vco2-fm':  { type: 'in',  dest: n.vco2fmIn },
     'vco2-pw':  { type: 'in',  dest: n.vco2pw },
     'vco2-sin': { type: 'out', node: n.vco2Sin },
     'vco2-tri': { type: 'out', node: n.vco2Tri },
@@ -299,7 +435,7 @@ function buildJackMap(n) {
     'vco2-sync-in':  { type: 'in',  dest: n.vco2syncIn },
     'vco2-sync-out': { type: 'out', node: n.vco2Saw },
     'vco3-cv':  { type: 'in',  dest: null, isVcoCv: true },
-    'vco3-fm':  { type: 'in',  dest: n.vco3fm },
+    'vco3-fm':  { type: 'in',  dest: n.vco3fmIn },
     'vco3-pw':  { type: 'in',  dest: n.vco3pw },
     'vco3-sin': { type: 'out', node: n.vco3Sin },
     'vco3-tri': { type: 'out', node: n.vco3Tri },
@@ -308,7 +444,7 @@ function buildJackMap(n) {
     'vco3-sync-in':  { type: 'in',  dest: n.vco3syncIn },
     'vco3-sync-out': { type: 'out', node: n.vco3Saw },
     'vco4-cv':  { type: 'in',  dest: null, isVcoCv: true },
-    'vco4-fm':  { type: 'in',  dest: n.vco4fm },
+    'vco4-fm':  { type: 'in',  dest: n.vco4fmIn },
     'vco4-pw':  { type: 'in',  dest: n.vco4pw },
     'vco4-sin': { type: 'out', node: n.vco4Sin },
     'vco4-tri': { type: 'out', node: n.vco4Tri },
@@ -317,7 +453,7 @@ function buildJackMap(n) {
     'vco4-sync-in':  { type: 'in',  dest: n.vco4syncIn },
     'vco4-sync-out': { type: 'out', node: n.vco4Saw },
     'vco5-cv':  { type: 'in',  dest: null, isVcoCv: true },
-    'vco5-fm':  { type: 'in',  dest: n.vco5fm },
+    'vco5-fm':  { type: 'in',  dest: n.vco5fmIn },
     'vco5-pw':  { type: 'in',  dest: n.vco5pw },
     'vco5-sin': { type: 'out', node: n.vco5Sin },
     'vco5-tri': { type: 'out', node: n.vco5Tri },
@@ -353,15 +489,18 @@ function buildJackMap(n) {
     // ── Kick ──
     'kick-out': { type: 'out', node: n.kickOut },
     // ── 914 FFB ──
-    'ffb-in':  { type: 'in',  dest: n.ffbIn    },
-    'ffb-out': { type: 'out', node: n.ffbMaster },
+    'ffb-in':        { type: 'in',  dest: n.ffbIn },
+    'ffb-master-cv': { type: 'in',  dest: n.ffbMasterCv },
+    'ffb-sweep-cv':  { type: 'in',  dest: n.ffbSweepCv },
+    'ffb-out':       { type: 'out', node: n.ffbMaster },
     // ── 16-band Vocoder ── modulator + carrier audio inputs, vocoded output.
     'voc-mod-in':  { type: 'in',  dest: n.vocModRaw },
     'voc-carr-in': { type: 'in',  dest: n.vocCarrIn },
     'voc-out':     { type: 'out', node: n.vocVolume },
-    // ── VCF ──
-    // cv1/cv2 → vcfcv1/vcfcv2 Gain(5000): LFO ±1 → ±5000 Hz — sweeps full audible spectrum
-    // env     → vcfenv Gain(1000):         env  0→1 →  0→1000 Hz lift above base cutoff
+    // ── VCF ──  (Phase 70: all three CV inputs are CENTS scalers → filter.detune)
+    // cv1/cv2 → vcfcv1/vcfcv2 Gain(VCF_CV_CENTS): CV ±1 → ±~5 octaves of cutoff
+    // env     → vcfenv, gain owned by the ENV AMT knob: at max, env 0→1 sweeps the
+    //           cutoff across its ENTIRE 20 Hz–20 kHz range (VCF_ENV_CENTS)
     'vcf-in':  { type: 'in',  dest: n.vcf },
     'vcf-cv1': { type: 'in',  dest: n.vcfcv1 },
     'vcf-cv2': { type: 'in',  dest: n.vcfcv2 },
@@ -385,13 +524,17 @@ function buildJackMap(n) {
     'vca3-cv':  { type: 'in',  dest: n.vca3.gain },
     'vca3-out': { type: 'out', node: n.vca3 },
     // ── Reverb ──
-    'reverb-in':   { type: 'in',  dest: n.reverb  },
-    'reverb-out':  { type: 'out', node: n.reverb  },
-    'reverb2-in':  { type: 'in',  dest: n.reverb2 },
-    'reverb2-out': { type: 'out', node: n.reverb2 },
+    'reverb-in':      { type: 'in',  dest: n.reverb  },
+    'reverb-mix-cv':  { type: 'in',  dest: n.reverbMixCv },
+    'reverb-out':     { type: 'out', node: n.reverb  },
+    'reverb2-in':     { type: 'in',  dest: n.reverb2 },
+    'reverb2-mix-cv': { type: 'in',  dest: n.reverb2MixCv },
+    'reverb2-out':    { type: 'out', node: n.reverb2 },
     // ── Chorus ──
-    'chorus-in':  { type: 'in',  dest: n.chorus },
-    'chorus-out': { type: 'out', node: n.chorus },
+    // BBD is a composite (Phase 70): jacks land on the wrapper In/Out, not the Chorus.
+    'chorus-in':      { type: 'in',  dest: n.chorusIn },
+    'chorus-rate-cv': { type: 'in',  dest: n.chorusRateCv },
+    'chorus-out':     { type: 'out', node: n.chorusOut },
     // ── Kick gate ── fires kickSynth.triggerAttackRelease on each gate-on event.
     // isKick:true distinguishes it from ENV gates in the loop and connect() handler.
     'kick-gate-in':  { type: 'in', dest: null, isGate: true, isKick: true },
@@ -489,6 +632,11 @@ export default function useMoogAudio() {
   // knob updaters write morph/shape refs ONLY; the rAF combines morph + shape +
   // the FORMANT-CV input into the final formant frequencies.
   const vowelIdsRef      = useRef([]);                 // no static instance — dynamic only
+  // 914 FFB instances (Phase 70) — 'ffb' is the static one; the sweep rAF iterates this.
+  const ffbIdsRef        = useRef(['ffb']);
+  const ffbSweepActiveRef = useRef({});   // id → true while a cable feeds its SWEEP CV
+  const ffbSweepLastRef   = useRef({});   // id → last written weights (delta gate)
+  const recomputeFfbSweepRef = useRef(null);
   const vowelMorphRefs   = useRef({});                 // id → morph position 0..4 (A..U)
   const vowelShapeRefs   = useRef({});                 // id → tract-scale factor
   const vowelLastFreqRefs = useRef({});                // id → last [F1,F2,F3] (delta gate)
@@ -568,6 +716,13 @@ export default function useMoogAudio() {
   // dynamic 'qnt' params without a TDZ-breaking dependency.
   const applyQuantizerParamsRef = useRef(null);
   const vcoQuantizedCbRef     = useRef(null);   // UI callback: (vcoIds[]) in knob-stepper mode
+  // Quantized FM (Phase 70) — vcoId → owning qid while engaged, else null/undefined.
+  // qntFmTick is the sole writer of those VCOs' GlideBus; muted/lastHz are its own
+  // bookkeeping (mute transition edge + delta gate).
+  const qntFmEngagedRef = useRef({});
+  const qntFmMutedRef   = useRef({});
+  const qntFmLastHzRef  = useRef({});
+  const recomputeQntFmRef = useRef(null);   // inline-synced below recomputeQntFm's definition
 
   // ── Dynamic module instances (Phase 60b) ──
   // Pilot types: 'vco' | 'noise'. Instance nodes live in nodesRef.current under
@@ -834,10 +989,30 @@ export default function useMoogAudio() {
       // tail after the source stops — that's what reads as "reverb" on screen.
       reverbAnalyser:  new Tone.Analyser('fft', 256),
       reverb2Analyser: new Tone.Analyser('fft', 256),
+      // MIX CV (Phase 70) — sums onto Freeverb's `wet` (a CrossFade fade Signal, so it
+      // is connectable and self-clamps to 0..1). The MIX knob owns the intrinsic value,
+      // the cable owns the connected input: the standard Moog knob+CV split. Unity gain
+      // — depth is set at the source (an LFO's DEPTH knob), matching the decision not to
+      // put attenuators on the VCF's CV inputs.
+      reverbMixCv:  new Tone.Gain(1),
+      reverb2MixCv: new Tone.Gain(1),
 
       // Bucket Brigade Chorus — internal LFOs require explicit start()/stop() in powerOn/powerOff.
-      // wet:0 on init so patching is transparent until MIX is raised (unity gain at Mix=0).
-      chorus: new Tone.Chorus({ frequency: 1.5, delayTime: 3.5, depth: 0.7, wet: 0.0 }),
+      // wet:1 — the Chorus runs fully wet and the EXTERNAL Dry/Wet gains do the mix, so
+      // the BBD tone filter can sit on the wet path alone (see the BBD notes above).
+      // Dry starts at 1 / Wet at 0, so patching is transparent until MIX is raised.
+      chorus:     new Tone.Chorus({ frequency: 1.5, delayTime: 3.5, depth: 0.7, wet: 1.0 }),
+      chorusIn:   new Tone.Gain(1),
+      chorusDry:  new Tone.Gain(1),
+      chorusWet:  new Tone.Gain(0),
+      chorusTone: new Tone.Filter({ frequency: bbdToneHz(0.75), type: 'lowpass', rolloff: -12 }),
+      chorusOut:  new Tone.Gain(1),
+      chorusRateCv: new Tone.Gain(3),   // CV ±1 → ±3 Hz on the chorus LFO
+      // Hand-built feedback return — see the BBD notes.
+      chorusFbHp: new Tone.Filter({ frequency: BBD_FB_HP_HZ, type: 'highpass', rolloff: -12 }),
+      chorusSat:  new Tone.WaveShaper((x) => Math.tanh(x * 1.2), 1024),
+      chorusFb:   new Tone.Gain(0),
+      chorusFbDly: new Tone.Delay(BBD_FB_DELAY_S),   // breaks the delay-free cycle — see BBD_FB_DELAY_S
 
       // Per-sequencer gate nodes — sit between n.vca and the seq?-vca-out jacks.
       // Sole writers are the seq1/seq2 Tone.Loop callbacks. Gate-off silences only
@@ -922,22 +1097,39 @@ export default function useMoogAudio() {
       // (32–1046 Hz) and patches here; multiplying by 500 would wreck it.
       // vco?-fm (FM / LFO mod) goes through a ×500 scaler: LFO at depth=1 → ±500 Hz.
       //
-      // VCF cv1/cv2 (LFO sweep) ×5000: sweeps most of the 20 Hz–20 kHz range at depth=1.
-      // VCF env (envelope track) ×1000: envelope 0→1 lifts cutoff by 0–1000 Hz above base.
+      // VCF cv1/cv2/env are CENTS scalers feeding filter.detune (Phase 70) — see
+      // VCF_CV_CENTS. The env scaler's gain is owned by the ENV AMT knob and is
+      // initialised at the knob's default (0.5) so the mount-time param write is a no-op.
+      // FM chain per VCO (Phase 70): the JACK now lands on `${id}fmIn` (unity), which
+      // fans to `${id}fm` (×500 → slaveFreq, the direct audio-rate path) and to
+      // `${id}fmAnalyser`. Quantized FM mutes `${id}fm` while still reading the raw
+      // ±1 modulator off the analyser — which is why the tap has to sit BEFORE the
+      // ×500 stage rather than after it.
+      vco1fmIn: new Tone.Gain(1),
+      vco2fmIn: new Tone.Gain(1),
+      vco3fmIn: new Tone.Gain(1),
+      vco4fmIn: new Tone.Gain(1),
+      vco5fmIn: new Tone.Gain(1),
+      vco1fmAnalyser: new Tone.Analyser('waveform', 32),
+      vco2fmAnalyser: new Tone.Analyser('waveform', 32),
+      vco3fmAnalyser: new Tone.Analyser('waveform', 32),
+      vco4fmAnalyser: new Tone.Analyser('waveform', 32),
+      vco5fmAnalyser: new Tone.Analyser('waveform', 32),
       vco1fm: new Tone.Gain(500),
       vco2fm: new Tone.Gain(500),
       vco3fm: new Tone.Gain(500),
       vco4fm: new Tone.Gain(500),
       vco5fm: new Tone.Gain(500),
-      vcfcv1: new Tone.Gain(5000),
-      vcfcv2: new Tone.Gain(5000),
-      vcfenv: new Tone.Gain(1000),
-      vcf2cv1: new Tone.Gain(5000),
-      vcf2cv2: new Tone.Gain(5000),
-      vcf2env: new Tone.Gain(1000),
+      vcfcv1: new Tone.Gain(VCF_CV_CENTS),
+      vcfcv2: new Tone.Gain(VCF_CV_CENTS),
+      vcfenv: new Tone.Gain(vcfEnvAmtCents(0.5)),
+      vcf2cv1: new Tone.Gain(VCF_CV_CENTS),
+      vcf2cv2: new Tone.Gain(VCF_CV_CENTS),
+      vcf2env: new Tone.Gain(vcfEnvAmtCents(0.5)),
 
       // 914 Fixed Filter Bank — parallel bandpass architecture.
       // ffbIn fans out to 14 filters; each filter → Gain (slider-controlled); all Gains → ffbSum → ffbMaster.
+      // The analyser taps ffbMaster (post-bank), so the per-band LEDs show FILTERED output.
       // LP/HP use shelf filters; bandpass use Tone.Filter(bandpass). The Gain nodes (not filter.gain)
       // control amplitude — BiquadFilter bandpass type has no gain parameter.
       // Kick drum engine — MembraneSynth (pitch-drop oscillator + envelope) in parallel
@@ -958,6 +1150,13 @@ export default function useMoogAudio() {
       ffbAnalyser: new Tone.Analyser('fft', 512),
       ...Object.fromEntries(FFB_BANDS.map((b, i) => [`ffbFilter${i}`, new Tone.Filter({ type: b.type, frequency: b.freq, Q: b.Q, rolloff: -12 })])),
       ...Object.fromEntries(FFB_BANDS.map((_, i) => [`ffbGain${i}`,   new Tone.Gain(0.75)])),
+      // SWEEP stage (Phase 70): filter → Sweep(rAF-owned) → Gain(knob-owned) → sum.
+      // Two separate stages so single-writer holds — the sweep rAF and the band knobs
+      // would otherwise both write the same gain node.
+      ...Object.fromEntries(FFB_BANDS.map((_, i) => [`ffbSweep${i}`,  new Tone.Gain(1)])),
+      ffbMasterCv: new Tone.Gain(1),                      // CV sums onto ffbMaster.gain
+      ffbSweepCv:  new Tone.Gain(1),
+      ffbSweepAnalyser: new Tone.Analyser('waveform', 32), // rAF samples the sweep CV here
 
       // 16-band Vocoder — modulator analysis bank gates a carrier synthesis bank.
       // vocModIn fans to 16 modulator bands: BPF → full-wave rectifier (WaveShaper, drive
@@ -1028,12 +1227,21 @@ export default function useMoogAudio() {
 
     // Keyboard vibrato — additive pitch modulation on all VCOs.
 
-    n.vcfcv1.connect(n.vcf.frequency);
-    n.vcfcv2.connect(n.vcf.frequency);
-    n.vcfenv.connect(n.vcf.frequency);
-    n.vcf2cv1.connect(n.vcf2.frequency);
-    n.vcf2cv2.connect(n.vcf2.frequency);
-    n.vcf2env.connect(n.vcf2.frequency);
+    // → detune (cents), not frequency (Hz): exponential cutoff modulation. Phase 70.
+    // FM tap chain (Phase 70) — fmIn → fm (×500 → slaveFreq, wired in the worklet
+    // wire()) and fmIn → analyser (raw ±1, read by qntFmTick).
+    for (const v of VCO_IDS) {
+      n[`${v}fmIn`].connect(n[`${v}fm`]);
+      n[`${v}fmIn`].connect(n[`${v}fmAnalyser`]);
+    }
+
+    // → detune (cents), not frequency (Hz): exponential cutoff modulation. Phase 70.
+    n.vcfcv1.connect(n.vcf.detune);
+    n.vcfcv2.connect(n.vcf.detune);
+    n.vcfenv.connect(n.vcf.detune);
+    n.vcf2cv1.connect(n.vcf2.detune);
+    n.vcf2cv2.connect(n.vcf2.detune);
+    n.vcf2env.connect(n.vcf2.detune);
 
     // I/O channel gains → master: each channel has its own Gain node so the
     // 4-channel mixer faders are independent. Meters tap from the channel output
@@ -1091,11 +1299,14 @@ export default function useMoogAudio() {
     // 914 FFB — parallel bandpass sum
     FFB_BANDS.forEach((_, i) => {
       n.ffbIn.connect(n[`ffbFilter${i}`]);
-      n[`ffbFilter${i}`].connect(n[`ffbGain${i}`]);
+      n[`ffbFilter${i}`].connect(n[`ffbSweep${i}`]);
+      n[`ffbSweep${i}`].connect(n[`ffbGain${i}`]);
       n[`ffbGain${i}`].connect(n.ffbSum);
     });
     n.ffbSum.connect(n.ffbMaster);
-    n.ffbIn.connect(n.ffbAnalyser);
+    n.ffbMaster.connect(n.ffbAnalyser);   // POST-bank: LEDs must follow the sliders (Phase 56 rule)
+    n.ffbMasterCv.connect(n.ffbMaster.gain);
+    n.ffbSweepCv.connect(n.ffbSweepAnalyser);
 
     // 16-band Vocoder — modulator envelope followers gate carrier band VCAs.
     // Single writer per node: each vocCarrVCA.gain is driven only by its env follower
@@ -1150,6 +1361,23 @@ export default function useMoogAudio() {
     // Aura display taps — dead-end, post-reverb (see node creation note).
     n.reverb.connect(n.reverbAnalyser);
     n.reverb2.connect(n.reverb2Analyser);
+    n.reverbMixCv.connect(n.reverb.wet);
+    n.reverb2MixCv.connect(n.reverb2.wet);
+
+    // BBD composite (Phase 70) — see the BBD notes for why the tone filter is wet-only.
+    n.chorusIn.connect(n.chorusDry);
+    n.chorusIn.connect(n.chorus);
+    n.chorus.connect(n.chorusTone);
+    n.chorusTone.connect(n.chorusWet);
+    n.chorusDry.connect(n.chorusOut);
+    n.chorusWet.connect(n.chorusOut);
+    n.chorusRateCv.connect(n.chorus.frequency);
+    // Feedback return: tapped POST-tone so the lowpass is inside the loop.
+    n.chorusTone.connect(n.chorusFbHp);
+    n.chorusFbHp.connect(n.chorusSat);
+    n.chorusSat.connect(n.chorusFb);
+    n.chorusFb.connect(n.chorusFbDly);
+    n.chorusFbDly.connect(n.chorus);
 
     // LFO output stage (Phase 65): osc → oscGain → Out; syncSig → syncGain → Out.
     // Out is the sole node the output jacks + meter + wave analyser tap.
@@ -1379,6 +1607,113 @@ export default function useMoogAudio() {
     };
     vowelTick();
 
+    // ── Quantized FM rAF (Phase 70) ── SOLE writer of the GlideBus for any VCO whose
+    // CV is driven by a quantizer AND whose FM jack is patched.
+    //
+    // Why a rAF and not an audio connection: quantizing is a nearest-note LOOKUP, not
+    // a sum, so it cannot be expressed as a connection into an AudioParam. The FM jack
+    // sums into the worklet's slaveFreq at audio rate — i.e. AFTER quantization — which
+    // is why a patched LFO used to slide the pitch straight through the scale. Same
+    // reasoning (and same shape) as vowelTick: a nonlinear map has to be computed.
+    //
+    // While engaged, `${id}fm` is muted to 0 so the direct ×500 path cannot ALSO move
+    // the pitch — otherwise the smooth slide plays underneath the stepped one.
+    //
+    // Single-writer holds against the keyboard: vcoActiveCvRef holds exactly ONE CV
+    // source per VCO, so a VCO driven by a quantizer is by construction not driven by
+    // kbd-pitch-out, and vibratoTick skips it. The two rAFs can never both own a bus.
+    let qntFmRafId;
+    const qntFmTick = () => {
+      qntFmRafId = requestAnimationFrame(qntFmTick);
+      const ids = allVcoIdsRef.current;
+      const now = Tone.context.rawContext.currentTime;
+      for (const vcoId of ids) {
+        const engaged = qntFmEngagedRef.current[vcoId];
+        const gain = n[`${vcoId}fm`];
+        if (!engaged) {
+          // Restore the direct FM path once (ramped — a hard jump would click).
+          if (qntFmMutedRef.current[vcoId]) {
+            qntFmMutedRef.current[vcoId] = false;
+            qntFmLastHzRef.current[vcoId] = undefined;
+            if (gain) safeRamp(gain.gain, 500, 0.03);
+          }
+          continue;
+        }
+        if (!qntFmMutedRef.current[vcoId]) {
+          qntFmMutedRef.current[vcoId] = true;
+          if (gain) safeRamp(gain.gain, 0, 0.03);
+        }
+        const kHz = vcoKnobHzRef.current[vcoId];
+        const q   = quantizerParamsRefs.current[engaged];
+        const gb  = n[`${vcoId}GlideBus`];
+        if (kHz == null || !q || !gb) continue;
+        // Sample the RAW modulator (pre-×500). Last sample, not an average: an average
+        // over a 32-frame window flattens a fast LFO toward its DC mean.
+        const buf = n[`${vcoId}fmAnalyser`]?.getValue();
+        if (!buf || !buf.length) continue;
+        const level = Math.max(-1, Math.min(1, buf[buf.length - 1]));
+        // ±1 → ±QNT_FM_SEMITONES around the FREQ knob, exponential (equal intervals),
+        // matching the quantizer worklet's own modulation mode.
+        const target = kHz * Math.pow(2, level * (QNT_FM_SEMITONES / 12));
+        const hz = q.bypass ? target : quantizeHzJs(target, q);
+        const last = qntFmLastHzRef.current[vcoId];
+        if (last !== undefined && Math.abs(hz - last) < 0.01) continue;
+        qntFmLastHzRef.current[vcoId] = hz;
+        gb.setTargetAtTime(hz, now, 0.005);   // tiny smoothing kills the step edge click
+        // Mirror the stepped note onto the owning QNT's display + LEDs.
+        if (!q.bypass && quantizerStepCbRefs.current[engaged]) {
+          const midi = Math.round(69 + 12 * Math.log2(hz / 440));
+          if (midi !== lastQuantizedMidiRefs.current[engaged]) {
+            lastQuantizedMidiRefs.current[engaged] = midi;
+            quantizerStepCbRefs.current[engaged](((midi % 12) + 12) % 12, midi, undefined);
+          }
+        }
+      }
+    };
+    qntFmTick();
+
+    // ── 914 SWEEP rAF (Phase 70) ── SOLE writer of every ffbSweep{i} gain.
+    // A CV can't drive this through an AudioParam: "sweep" is a nonlinear map from one
+    // voltage to 14 correlated gains (a resonant hump travelling across the bank), the
+    // same reason vowelTick exists for the formant morph. The band KNOBS keep their own
+    // gain stage, so the two writers never touch the same node.
+    // Idle cost: instances with nothing patched write their weights back to 1 once and
+    // are then skipped entirely by the delta gate.
+    let ffbSweepRafId;
+    const ffbSweepTick = () => {
+      ffbSweepRafId = requestAnimationFrame(ffbSweepTick);
+      const ids = ffbIdsRef.current;
+      if (!ids.length) return;
+      const now = Tone.context.rawContext.currentTime;
+      const N = FFB_BANDS.length;
+      for (const id of ids) {
+        const active = ffbSweepActiveRef.current[id];
+        let cv = 0;
+        if (active) {
+          const buf = n[`${id}SweepAnalyser`]?.getValue();
+          if (buf && buf.length) cv = Math.max(-1, Math.min(1, buf[buf.length - 1]));
+        }
+        // CV −1..+1 → hump centre travelling across band 0..N−1. Unpatched (or centred)
+        // still means "no colouring" only when inactive — hence the explicit flag.
+        const centre = ((cv + 1) / 2) * (N - 1);
+        const last = ffbSweepLastRef.current[id];
+        let changed = !last;
+        const weights = new Array(N);
+        for (let i = 0; i < N; i++) {
+          const w = active
+            ? FFB_SWEEP_FLOOR + (1 - FFB_SWEEP_FLOOR) *
+              Math.exp(-((i - centre) * (i - centre)) / (2 * FFB_SWEEP_SIGMA * FFB_SWEEP_SIGMA))
+            : 1;
+          weights[i] = w;
+          if (last && Math.abs(w - last[i]) > 0.004) changed = true;
+        }
+        if (!changed) continue;
+        for (let i = 0; i < N; i++) n[`${id}Sweep${i}`]?.gain.setTargetAtTime(weights[i], now, 0.01);
+        ffbSweepLastRef.current[id] = weights;
+      }
+    };
+    ffbSweepTick();
+
     // ── LFO tempo-sync rAF (Phase 65) ── sole writer of each synced LFO's SyncSig.
     // Value is derived deterministically from Transport.seconds so phase is exact,
     // repeatable, and lines up with the sequencer grid; the OFFSET knob rotates the
@@ -1563,6 +1898,12 @@ export default function useMoogAudio() {
       cancelAnimationFrame(vocShiftRafId);
       cancelAnimationFrame(vowelRafId);
       cancelAnimationFrame(lfoSyncRafId);
+      cancelAnimationFrame(qntFmRafId);
+      cancelAnimationFrame(ffbSweepRafId);
+      // Pending DAMP writes must not land on disposed Freeverbs (Phase 70).
+      Object.values(revDampTimerRef.current).forEach(clearTimeout);
+      revDampTimerRef.current  = {};
+      revDampTargetRef.current = {};
       // Release the mic device if it was opened, so the OS mic indicator clears on unmount.
       if (extMicRef.current) {
         try { extMicRef.current.close(); } catch (_) {}
@@ -1612,6 +1953,12 @@ export default function useMoogAudio() {
       vowelLastFreqRefs.current     = {};
       lfoSyncActiveRef.current      = {};
       lfoRateRefs.current           = {};
+      ffbIdsRef.current             = ['ffb'];
+      ffbSweepActiveRef.current     = {};
+      ffbSweepLastRef.current        = {};
+      qntFmEngagedRef.current       = {};
+      qntFmMutedRef.current         = {};
+      qntFmLastHzRef.current        = {};
       lfoOffsetRefs.current         = {};
       lfoDepthRefs.current          = {};
       lfoWaveRefs.current           = {};
@@ -1826,9 +2173,13 @@ export default function useMoogAudio() {
       n[`${id}Saw`]       = new Tone.Gain(1);
       n[`${id}Pulse`]     = new Tone.Gain(1);
       n[`${id}fm`]        = new Tone.Gain(500);
+      n[`${id}fmIn`]      = new Tone.Gain(1);    // jack lands here — see the static FM chain note
+      n[`${id}fmAnalyser`] = new Tone.Analyser('waveform', 32);
       n[`${id}pw`]        = new Tone.Gain(0.4);
       n[`${id}Meter`]     = new Tone.Meter({ normalRange: true, smoothing: 0.15 });
       n[`${id}syncIn`]    = new Tone.Gain(1);
+      n[`${id}fmIn`].connect(n[`${id}fm`]);
+      n[`${id}fmIn`].connect(n[`${id}fmAnalyser`]);
       n[`${id}coreGate`].connect(n[`${id}bus`]);
       n[`${id}Saw`].connect(n[`${id}Meter`]);
       vcoKnobHzRef.current[id]   = null;
@@ -1837,7 +2188,7 @@ export default function useMoogAudio() {
       allVcoIdsRef.current = [...allVcoIdsRef.current, id];
       const jackEntries = {
         [`${id}-cv`]:  { type: 'in',  dest: null, isVcoCv: true },
-        [`${id}-fm`]:  { type: 'in',  dest: n[`${id}fm`] },
+        [`${id}-fm`]:  { type: 'in',  dest: n[`${id}fmIn`] },
         [`${id}-pw`]:  { type: 'in',  dest: n[`${id}pw`] },
         [`${id}-sync-in`]:  { type: 'in',  dest: n[`${id}syncIn`] },
         [`${id}-sync-out`]: { type: 'out', node: n[`${id}Saw`] },
@@ -1853,7 +2204,8 @@ export default function useMoogAudio() {
         // disconnects it. sourceNames is empty — the worklet has no start/stop.
         nodeNames:   [`${id}GlideBus`, `${id}DetuneSig`, `${id}WidthSig`, `${id}coreGate`,
                       `${id}bus`, `${id}Sin`, `${id}Tri`, `${id}Saw`, `${id}Pulse`,
-                      `${id}fm`, `${id}pw`, `${id}Meter`, `${id}syncIn`, `${id}Split`],
+                      `${id}fm`, `${id}fmIn`, `${id}fmAnalyser`, `${id}pw`,
+                      `${id}Meter`, `${id}syncIn`, `${id}Split`],
         sourceNames: [],
         jackIds:     Object.keys(jackEntries),
       });
@@ -1900,12 +2252,13 @@ export default function useMoogAudio() {
     if (type === 'vcf') {
       const id = `vcf${num}`;
       n[id]          = new Tone.Filter({ frequency: 20000, type: 'lowpass', rolloff: -24 });
-      n[`${id}cv1`]  = new Tone.Gain(5000);
-      n[`${id}cv2`]  = new Tone.Gain(5000);
-      n[`${id}env`]  = new Tone.Gain(1000);
-      n[`${id}cv1`].connect(n[id].frequency);
-      n[`${id}cv2`].connect(n[id].frequency);
-      n[`${id}env`].connect(n[id].frequency);
+      // Cents scalers → detune (exponential cutoff modulation) — mirrors the statics. Phase 70.
+      n[`${id}cv1`]  = new Tone.Gain(VCF_CV_CENTS);
+      n[`${id}cv2`]  = new Tone.Gain(VCF_CV_CENTS);
+      n[`${id}env`]  = new Tone.Gain(vcfEnvAmtCents(0.5));
+      n[`${id}cv1`].connect(n[id].detune);
+      n[`${id}cv2`].connect(n[id].detune);
+      n[`${id}env`].connect(n[id].detune);
       const jackEntries = {
         [`${id}-in`]:  { type: 'in',  dest: n[id] },
         [`${id}-cv1`]: { type: 'in',  dest: n[`${id}cv1`] },
@@ -1984,28 +2337,57 @@ export default function useMoogAudio() {
       const id = `reverb${num}`; // id doubles as jack prefix — matches ReverbModule's naming
       n[id]              = new Tone.Freeverb({ roomSize: 0.7, dampening: 3000, wet: 0.0 });
       n[`${id}Analyser`] = new Tone.Analyser('fft', 256); // Aura tap — post-reverb (Phase 56 rule)
+      n[`${id}MixCv`]    = new Tone.Gain(1);              // MIX CV → wet (Phase 70)
       n[id].connect(n[`${id}Analyser`]);
+      n[`${id}MixCv`].connect(n[id].wet);
       const jackEntries = {
-        [`${id}-in`]:  { type: 'in',  dest: n[id] },
-        [`${id}-out`]: { type: 'out', node: n[id] },
+        [`${id}-in`]:     { type: 'in',  dest: n[id] },
+        [`${id}-mix-cv`]: { type: 'in',  dest: n[`${id}MixCv`] },
+        [`${id}-out`]:    { type: 'out', node: n[id] },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, { type, num,
-        nodeNames: [id, `${id}Analyser`], sourceNames: [], jackIds: Object.keys(jackEntries) });
+        nodeNames: [id, `${id}Analyser`, `${id}MixCv`], sourceNames: [], jackIds: Object.keys(jackEntries) });
       return { id, num };
     }
 
     if (type === 'bbd') {
       const id = `chorus${num}`;
-      n[id] = new Tone.Chorus({ frequency: 1.5, delayTime: 3.5, depth: 0.7, wet: 0.0 });
+      // Mirrors the static BBD composite exactly — see the BBD notes.
+      n[id]             = new Tone.Chorus({ frequency: 1.5, delayTime: 3.5, depth: 0.7, wet: 1.0 });
+      n[`${id}In`]      = new Tone.Gain(1);
+      n[`${id}Dry`]     = new Tone.Gain(1);
+      n[`${id}Wet`]     = new Tone.Gain(0);
+      n[`${id}Tone`]    = new Tone.Filter({ frequency: bbdToneHz(0.75), type: 'lowpass', rolloff: -12 });
+      n[`${id}Out`]     = new Tone.Gain(1);
+      n[`${id}RateCv`]  = new Tone.Gain(3);
+      n[`${id}FbHp`]    = new Tone.Filter({ frequency: BBD_FB_HP_HZ, type: 'highpass', rolloff: -12 });
+      n[`${id}Sat`]     = new Tone.WaveShaper((x) => Math.tanh(x * 1.2), 1024);
+      n[`${id}Fb`]      = new Tone.Gain(0);
+      n[`${id}FbDly`]   = new Tone.Delay(BBD_FB_DELAY_S);
+      n[`${id}In`].connect(n[`${id}Dry`]);
+      n[`${id}In`].connect(n[id]);
+      n[id].connect(n[`${id}Tone`]);
+      n[`${id}Tone`].connect(n[`${id}Wet`]);
+      n[`${id}Dry`].connect(n[`${id}Out`]);
+      n[`${id}Wet`].connect(n[`${id}Out`]);
+      n[`${id}RateCv`].connect(n[id].frequency);
+      n[`${id}Tone`].connect(n[`${id}FbHp`]);
+      n[`${id}FbHp`].connect(n[`${id}Sat`]);
+      n[`${id}Sat`].connect(n[`${id}Fb`]);
+      n[`${id}Fb`].connect(n[`${id}FbDly`]);
+      n[`${id}FbDly`].connect(n[id]);
       if (isPoweredRef.current) { try { n[id].start(); } catch (_) {} }
       const jackEntries = {
-        [`${id}-in`]:  { type: 'in',  dest: n[id] },
-        [`${id}-out`]: { type: 'out', node: n[id] },
+        [`${id}-in`]:      { type: 'in',  dest: n[`${id}In`] },
+        [`${id}-rate-cv`]: { type: 'in',  dest: n[`${id}RateCv`] },
+        [`${id}-out`]:     { type: 'out', node: n[`${id}Out`] },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, { type, num,
-        nodeNames: [id], sourceNames: [id], jackIds: Object.keys(jackEntries) });
+        nodeNames: [id, `${id}In`, `${id}Dry`, `${id}Wet`, `${id}Tone`, `${id}Out`,
+                    `${id}RateCv`, `${id}FbHp`, `${id}Sat`, `${id}Fb`, `${id}FbDly`],
+        sourceNames: [id], jackIds: Object.keys(jackEntries) });
       return { id, num };
     }
 
@@ -2254,23 +2636,34 @@ export default function useMoogAudio() {
       n[`${id}Sum`]      = new Tone.Gain(1);
       n[`${id}Master`]   = new Tone.Gain(1);
       n[`${id}Analyser`] = new Tone.Analyser('fft', 512);
+      n[`${id}MasterCv`]      = new Tone.Gain(1);
+      n[`${id}SweepCv`]       = new Tone.Gain(1);
+      n[`${id}SweepAnalyser`] = new Tone.Analyser('waveform', 32);
       FFB_BANDS.forEach((b, i) => {
         n[`${id}Filter${i}`] = new Tone.Filter({ type: b.type, frequency: b.freq, Q: b.Q, rolloff: -12 });
+        n[`${id}Sweep${i}`]  = new Tone.Gain(1);   // rAF-owned — see the static note
         n[`${id}Gain${i}`]   = new Tone.Gain(0.75);
         n[`${id}In`].connect(n[`${id}Filter${i}`]);
-        n[`${id}Filter${i}`].connect(n[`${id}Gain${i}`]);
+        n[`${id}Filter${i}`].connect(n[`${id}Sweep${i}`]);
+        n[`${id}Sweep${i}`].connect(n[`${id}Gain${i}`]);
         n[`${id}Gain${i}`].connect(n[`${id}Sum`]);
       });
       n[`${id}Sum`].connect(n[`${id}Master`]);
-      n[`${id}In`].connect(n[`${id}Analyser`]);
+      n[`${id}Master`].connect(n[`${id}Analyser`]);   // POST-bank — see the static note
+      n[`${id}MasterCv`].connect(n[`${id}Master`].gain);
+      n[`${id}SweepCv`].connect(n[`${id}SweepAnalyser`]);
+      ffbIdsRef.current = [...ffbIdsRef.current, id];
       const jackEntries = {
-        [`${id}-in`]:  { type: 'in',  dest: n[`${id}In`] },
-        [`${id}-out`]: { type: 'out', node: n[`${id}Master`] },
+        [`${id}-in`]:        { type: 'in',  dest: n[`${id}In`] },
+        [`${id}-master-cv`]: { type: 'in',  dest: n[`${id}MasterCv`] },
+        [`${id}-sweep-cv`]:  { type: 'in',  dest: n[`${id}SweepCv`] },
+        [`${id}-out`]:       { type: 'out', node: n[`${id}Master`] },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, { type, num,
         nodeNames: [`${id}In`, `${id}Sum`, `${id}Master`, `${id}Analyser`,
-                    ...FFB_BANDS.flatMap((_, i) => [`${id}Filter${i}`, `${id}Gain${i}`])],
+                    `${id}MasterCv`, `${id}SweepCv`, `${id}SweepAnalyser`,
+                    ...FFB_BANDS.flatMap((_, i) => [`${id}Filter${i}`, `${id}Sweep${i}`, `${id}Gain${i}`])],
         sourceNames: [], jackIds: Object.keys(jackEntries) });
       return { id, num };
     }
@@ -2462,11 +2855,78 @@ export default function useMoogAudio() {
   // crossfaded to silent (applyLfoMode) and the rAF owns the audible signal, so
   // these writes to the muted oscillator are harmless; RATE/OFFSET/DEPTH/type
   // still land in the refs and take effect on the synced value immediately.
+  // Debounced, delta-checked dampening writer — the ONLY path that may assign
+  // `dampening` (see the REV_DAMP notes: each write rebuilds 8 IIRFilter nodes).
+  // The delta check is what stops ROOM/MIX moves from touching it at all: the param
+  // effect re-sends `damp` unchanged on every render, and an identical target is a
+  // no-op here. The debounce collapses a DAMP drag into one write when it settles.
+  const revDampTargetRef = useRef({});   // nodeName → last REQUESTED Hz
+  const revDampTimerRef  = useRef({});   // nodeName → pending timeout
+  // Chorus DEPTH is a plain setter (recomputes both LFOs' min/max), so like the
+  // reverb's DAMP it gets re-sent unchanged every time RATE or MIX moves — the param
+  // effect always sends the whole object. Far cheaper than DAMP (no node rebuild, so
+  // no scratching), but it still writes LFO scaling for no reason. Delta-check it.
+  const chorusDepthRef = useRef({});
+  const applyChorusDepth = useCallback((nodeName, depth) => {
+    if (chorusDepthRef.current[nodeName] === depth) return;
+    chorusDepthRef.current[nodeName] = depth;
+    const n = nodesRef.current;
+    if (n && n[nodeName]) n[nodeName].depth = depth;
+  }, []);
+
+  // delayTime is likewise a plain setter (it re-applies depth to both LFOs), so it gets
+  // the same delta guard rather than being rewritten on every RATE/MIX move.
+  const chorusDelayRef = useRef({});
+  const applyChorusDelay = useCallback((nodeName, delay) => {
+    const ms = bbdDelayMs(delay);
+    if (chorusDelayRef.current[nodeName] === ms) return;
+    chorusDelayRef.current[nodeName] = ms;
+    const n = nodesRef.current;
+    if (n && n[nodeName]) n[nodeName].delayTime = ms;
+  }, []);
+
+  // Shared by the static + dynamic BBD paths so the two can never drift.
+  const applyChorusParams = useCallback((id, { rate, depth, wet, feedback, delay, tone } = {}) => {
+    const n = nodesRef.current;
+    if (!n || !n[id]) return;
+    if (rate  !== undefined) safeRamp(n[id].frequency, 0.1 * Math.pow(50, rate));
+    if (depth !== undefined) applyChorusDepth(id, depth);
+    if (delay !== undefined) applyChorusDelay(id, delay);
+    // MIX is now an external equal-gain crossfade (the Chorus itself stays 100% wet).
+    if (wet   !== undefined) {
+      safeRamp(n[`${id}Dry`].gain, 1 - wet);
+      safeRamp(n[`${id}Wet`].gain, wet);
+    }
+    // Drives the HAND-BUILT return gain, not Tone's internal `feedback` (kept at 0 —
+    // its loop has no in-line filtering). Clamped: >0.9 runs away, the roomSize lesson.
+    if (feedback !== undefined) safeRamp(n[`${id}Fb`].gain, Math.min(BBD_MAX_FEEDBACK, feedback));
+    // Filter frequency IS an AudioParam, so TONE is smooth — unlike the reverb's DAMP.
+    if (tone  !== undefined) n[`${id}Tone`].frequency.setTargetAtTime(bbdToneHz(tone), Tone.now(), 0.02);
+  }, [applyChorusDepth, applyChorusDelay]);
+
+  const scheduleRevDamp = useCallback((nodeName, damp) => {
+    const hz = revDampHz(damp);
+    if (revDampTargetRef.current[nodeName] === hz) return;   // nothing new asked for
+    // First request at exactly the centre value: the node was CONSTRUCTED there, so
+    // record it and skip the pointless mount-time rebuild.
+    if (revDampTargetRef.current[nodeName] === undefined && hz === REV_DAMP_MID_HZ) {
+      revDampTargetRef.current[nodeName] = hz;
+      return;
+    }
+    revDampTargetRef.current[nodeName] = hz;
+    clearTimeout(revDampTimerRef.current[nodeName]);
+    revDampTimerRef.current[nodeName] = setTimeout(() => {
+      const n = nodesRef.current;
+      if (n && n[nodeName]) n[nodeName].dampening = hz;
+    }, REV_DAMP_DEBOUNCE_MS);
+  }, []);
+
   const applyLfoParams = useCallback((id, { rate, depth, type, modDepth } = {}) => {
     const n = nodesRef.current; if (!n || !n[id]) return;
     // Legacy quirk: the static LFO's rate-mod gain is `lfo1modGain`, not `lfomodGain`.
     const modName = id === 'lfo' ? 'lfo1modGain' : `${id}modGain`;
-    if (rate     !== undefined) { lfoRateRefs.current[id]   = rate;  safeRamp(n[id].frequency, 0.1 * Math.pow(300, rate)); }
+    if (rate     !== undefined) { lfoRateRefs.current[id]   = rate;  safeRamp(n[id].frequency, lfoRateHz(rate));
+                                  recomputeQntFmRef.current?.(); }  // rate may cross QNT_FM_MAX_HZ
     if (depth    !== undefined) { lfoDepthRefs.current[id]  = depth; safeRamp(n[id].amplitude, depth); }
     if (type     !== undefined) { lfoWaveRefs.current[id]   = type;  n[id].type = type; }
     // MOD knob doubles as the sync OFFSET (phase) — store it either way.
@@ -2494,6 +2954,7 @@ export default function useMoogAudio() {
       case 'vcf':
         if (params.cutoff    !== undefined) n[id].frequency.setTargetAtTime(20 * Math.pow(1000, params.cutoff), Tone.now(), 0.02);
         if (params.resonance !== undefined) safeRamp(n[id].Q, Math.max(0.001, params.resonance * 20));
+        if (params.envAmt    !== undefined) safeRamp(n[`${id}env`].gain, vcfEnvAmtCents(params.envAmt));
         break;
       case 'vca':
         if (params.gain !== undefined) safeRamp(n[id].gain, params.gain);
@@ -2501,14 +2962,13 @@ export default function useMoogAudio() {
       case 'lfo':
         applyLfoParams(id, params);
         break;
-      case 'rev':
-        if (params.roomSize !== undefined) safeRamp(n[id].roomSize, params.roomSize);
+      case 'rev':  // mirrors updateReverbParams exactly — see its notes on the clamp/setter
+        if (params.roomSize !== undefined) safeRamp(n[id].roomSize, Math.min(REV_MAX_ROOM, params.roomSize));
         if (params.wet      !== undefined) safeRamp(n[id].wet,      params.wet);
+        if (params.damp     !== undefined) scheduleRevDamp(id, params.damp);
         break;
       case 'bbd':
-        if (params.rate  !== undefined) safeRamp(n[id].frequency, 0.1 * Math.pow(50, params.rate));
-        if (params.depth !== undefined) n[id].depth = params.depth; // plain setter — not an AudioParam
-        if (params.wet   !== undefined) safeRamp(n[id].wet, params.wet);
+        applyChorusParams(id, params);
         break;
       case 'vowel':
         // Write refs ONLY — vowelTick is the sole writer of the filter freqs.
@@ -2579,7 +3039,7 @@ export default function useMoogAudio() {
         break;
       default: break; // vco uses updateVcoParams, env uses updateEnvParams (both id-keyed already)
     }
-  }, [applyKickParams, applyVocoderParams, applyLfoParams]);
+  }, [applyKickParams, applyVocoderParams, applyLfoParams, scheduleRevDamp, applyChorusParams]);
 
   // Instantaneous LFO phase by instance id — generic name composition covers
   // static ('lfo'/'lfo2') and dynamic ('lfo3'+) analysers alike.
@@ -2630,10 +3090,25 @@ export default function useMoogAudio() {
       try { node.dispose(); }      catch (_) {}
       delete n[name];
     });
+    if (inst.type === 'bbd') { delete chorusDepthRef.current[id]; delete chorusDelayRef.current[id]; }
+    if (inst.type === 'ffb') {
+      ffbIdsRef.current = ffbIdsRef.current.filter(v => v !== id);   // stop the sweep rAF iterating it
+      delete ffbSweepActiveRef.current[id];
+      delete ffbSweepLastRef.current[id];
+    }
+    if (inst.type === 'rev') {
+      // Kill any debounced DAMP write before the Freeverb is gone (Phase 70).
+      clearTimeout(revDampTimerRef.current[id]);
+      delete revDampTimerRef.current[id];
+      delete revDampTargetRef.current[id];
+    }
     if (inst.type === 'vco') {
       allVcoIdsRef.current = allVcoIdsRef.current.filter(v => v !== id);
       delete vcoKnobHzRef.current[id];
       delete vcoActiveCvRef.current[id];
+      delete qntFmEngagedRef.current[id];   // Phase 70 — quantized-FM bookkeeping
+      delete qntFmMutedRef.current[id];
+      delete qntFmLastHzRef.current[id];
       delete dynVcoSyncRef.current[id];
     }
     if (inst.type === 'kick') {
@@ -2729,11 +3204,56 @@ export default function useMoogAudio() {
     vcoQuantizedCbRef.current?.(knobQuantizedVcoIds());
   }, [knobQuantizedVcoIds]);
 
+  // Quantized FM engagement (Phase 70) — recomputed on cable changes and on LFO RATE
+  // moves (the rate can cross QNT_FM_MAX_HZ). Sets qntFmEngagedRef[vcoId] = owning qid
+  // or null; qntFmTick reads it every frame and handles the mute/restore transitions.
+  const recomputeQntFm = useCallback(() => {
+    const keys = [...connectionsRef.current.keys()];
+    for (const vcoId of allVcoIdsRef.current) {
+      const qid = qntIdForVco(vcoId);
+      // Only in knob-stepper mode: if the QNT has its own CV input, its worklet already
+      // owns the pitch and the GlideBus is not ours to write.
+      if (!qid || qntHasCvInput(qid) || !quantizerParamsRefs.current[qid]) {
+        qntFmEngagedRef.current[vcoId] = null;
+        continue;
+      }
+      const fmKey = keys.find(k => k.endsWith(`→${vcoId}-fm`));
+      if (!fmKey) { qntFmEngagedRef.current[vcoId] = null; continue; }
+      // Rate gate — only meaningful when the source is an LFO we can measure. A synced
+      // LFO is always slow (divisions are ≤ 1/8), so it always qualifies.
+      const src = fmKey.split('→')[0];
+      const lfoMatch = src.match(/^(lfo\d*)-(sin|tri|sqr|saw)$/);
+      let rateOk = true;
+      if (lfoMatch && !lfoSyncActiveRef.current[lfoMatch[1]]) {
+        rateOk = lfoRateHz(lfoRateRefs.current[lfoMatch[1]] ?? 0.3) <= QNT_FM_MAX_HZ;
+      }
+      qntFmEngagedRef.current[vcoId] = rateOk ? qid : null;
+    }
+  }, [qntIdForVco, qntHasCvInput]);
+  // Inline-synced mirror — applyLfoParams and connect()/disconnect() are all defined
+  // above this point, so they reach it through the ref (the applyQuantizerParams pattern).
+  recomputeQntFmRef.current = recomputeQntFm;
+
+  // SWEEP engagement is cable-driven (the isLfoSync pattern): a patched-but-silent CV
+  // reads 0 V, which is indistinguishable from no cable, so the flag — not the level —
+  // decides whether the hump applies. Without it an unpatched bank would sit permanently
+  // humped at its centre band.
+  const recomputeFfbSweep = useCallback(() => {
+    const keys = [...connectionsRef.current.keys()];
+    for (const id of ffbIdsRef.current) {
+      ffbSweepActiveRef.current[id] = keys.some(k => k.endsWith(`→${id}-sweep-cv`));
+    }
+  }, []);
+  recomputeFfbSweepRef.current = recomputeFfbSweep;
+
   // Write the FREQ knob's Hz — snapped, or raw when bypassed — to a qnt-patched
   // VCO's glideBus, and mirror the snapped note onto that QNT's display/LEDs.
   const applyVcoKnobQuantize = useCallback((vcoId) => {
     const n = nodesRef.current;
     if (!n) return;
+    // Quantized FM owns this VCO's GlideBus while engaged (single writer) — it reads
+    // vcoKnobHzRef itself, so a knob turn still lands on the very next frame.
+    if (qntFmEngagedRef.current[vcoId]) return;
     const kHz = vcoKnobHzRef.current[vcoId];
     if (kHz == null) return;
     const qid = qntIdForVco(vcoId);
@@ -2856,7 +3376,7 @@ export default function useMoogAudio() {
           n.qntNodes?.[qid]?.port.postMessage({ baseHz: kHz });
         }
         if (!qntHasCvInput(qid)) applyVcoKnobQuantize(vcoId);
-        notifyKnobQuantize();
+        notifyKnobQuantize(); recomputeQntFmRef.current?.();
       }
       return;
     }
@@ -2902,6 +3422,10 @@ export default function useMoogAudio() {
     // A CV source now feeds a quantizer — its worklet takes over qnt-driven
     // VCO pitch; any knob-stepper glow on that instance's VCOs turns off.
     if (/^qnt\d*-cv-in$/.test(effTo)) notifyKnobQuantize();
+    // Any cable can change quantized-FM engagement (an FM patch, a qnt→cv patch, or a
+    // qnt-cv-in patch handing pitch to the worklet), so recompute unconditionally.
+    recomputeQntFmRef.current?.();
+    recomputeFfbSweepRef.current?.();
   }, [qntHasCvInput, applyVcoKnobQuantize, notifyKnobQuantize, applyLfoMode]);
 
   const disconnect = useCallback((fromId, toId) => {
@@ -2958,7 +3482,7 @@ export default function useMoogAudio() {
         n[`${vcoId}GlideBus`].setValueAtTime(kHz, Tone.now());
         // (glideBus → worklet slaveFreq is connected — no separate write.)
       }
-      if (/^qnt\d*-cv-out$/.test(conn.sourceId)) notifyKnobQuantize(); // glow off for this VCO
+      if (/^qnt\d*-cv-out$/.test(conn.sourceId)) notifyKnobQuantize(); recomputeQntFmRef.current?.(); // glow off for this VCO
       return;
     }
 
@@ -2987,6 +3511,10 @@ export default function useMoogAudio() {
         if (vcoActiveCvRef.current[id] === cvOutSrc) applyVcoKnobQuantize(id);
       notifyKnobQuantize();
     }
+    // Unconditional, for the same reason as in connect() — pulling the FM cable must
+    // disengage and hand the direct ×500 path back.
+    recomputeQntFmRef.current?.();
+    recomputeFfbSweepRef.current?.();
   }, [applyVcoKnobQuantize, notifyKnobQuantize, applyLfoMode]);
 
   // Update VCO audio parameters — single writer per node.
@@ -3044,27 +3572,10 @@ export default function useMoogAudio() {
   // cutoff uses setTargetAtTime for the same reason as VCO frequency — it is a
   // frequency-type AudioParam where rampTo → exponentialRampTo, unsafe near 0.
   // resonance uses safeRamp (linear path, floor already applied, no crash risk).
-  const updateVcfParams = useCallback(({ cutoff, resonance } = {}) => {
-    const n = nodesRef.current;
-    if (!n) return;
-    if (cutoff    !== undefined) n.vcf.frequency.setTargetAtTime(
-      20 * Math.pow(1000, cutoff), Tone.now(), 0.02
-    );
-    if (resonance !== undefined) safeRamp(n.vcf.Q, Math.max(0.001, resonance * 20));
-  }, []);
-
-  const updateVcf2Params = useCallback(({ cutoff, resonance } = {}) => {
-    const n = nodesRef.current;
-    if (!n) return;
-    if (cutoff    !== undefined) n.vcf2.frequency.setTargetAtTime(
-      20 * Math.pow(1000, cutoff), Tone.now(), 0.02
-    );
-    if (resonance !== undefined) safeRamp(n.vcf2.Q, Math.max(0.001, resonance * 20));
-  }, []);
-
-  // Update Envelope ADSR params.  envId: 'env1' | 'env2'.
-  // All time values use exponential mapping so short/long times feel equally reachable.
-  // attack/decay/release: 0–1 → 0.01s–10s   sustain: 0–1 → 0.0–1.0 (linear)
+  //
+  // envAmt (0–1) → the ENV-jack cents scaler (Phase 70). This knob is the SOLE
+  // writer of `vcfenv.gain`; the cable patched into the ENV jack owns the signal
+  // flowing through it. A plain linear ramp is safe (Gain, floor 0).
   const updateEnvParams = useCallback((envId, { attack, decay, sustain, release } = {}) => {
     const n = nodesRef.current;
     if (!n) return;
@@ -3120,33 +3631,51 @@ export default function useMoogAudio() {
   const updateLfo2Params = useCallback((p) => applyLfoParams('lfo2', p), [applyLfoParams]);
 
   // Update reverb parameters — single writer on n.reverb.
-  // roomSize (0–1): 0 = small/tight, 1 = large/diffuse.
-  // wet      (0–1): dry/wet mix crossfade.
-  const updateReverbParams = useCallback(({ roomSize, wet } = {}) => {
+  // roomSize (0–1): 0 = small/tight, capped at REV_MAX_ROOM (see the const — 1.0 is a
+  //                 unity-feedback runaway, not a "bigger room").
+  // wet      (0–1): dry/wet mix crossfade. The MIX-CV cable sums on top of this value.
+  // damp     (0–1): tail brightness → Freeverb `dampening`, via the debounced scheduler
+  //                 (every write rebuilds 8 IIRFilter nodes — see the REV_DAMP notes).
+  const updateReverbParams = useCallback(({ roomSize, wet, damp } = {}) => {
     const n = nodesRef.current;
     if (!n) return;
-    if (roomSize !== undefined) safeRamp(n.reverb.roomSize, roomSize);
+    if (roomSize !== undefined) safeRamp(n.reverb.roomSize, Math.min(REV_MAX_ROOM, roomSize));
     if (wet      !== undefined) safeRamp(n.reverb.wet,      wet);
-  }, []);
+    if (damp     !== undefined) scheduleRevDamp('reverb', damp);
+  }, [scheduleRevDamp]);
 
-  const updateReverb2Params = useCallback(({ roomSize, wet } = {}) => {
+  const updateReverb2Params = useCallback(({ roomSize, wet, damp } = {}) => {
     const n = nodesRef.current;
     if (!n) return;
-    if (roomSize !== undefined) safeRamp(n.reverb2.roomSize, roomSize);
+    if (roomSize !== undefined) safeRamp(n.reverb2.roomSize, Math.min(REV_MAX_ROOM, roomSize));
     if (wet      !== undefined) safeRamp(n.reverb2.wet,      wet);
-  }, []);
+    if (damp     !== undefined) scheduleRevDamp('reverb2', damp);
+  }, [scheduleRevDamp]);
 
-  // Update BBD Chorus parameters.
-  // rate  (0–1) → exponential 0.1–5 Hz  (0.1 * 50^rate) — classic chorus sweep range.
-  // depth (0–1) → Tone.Chorus.depth plain property (JS setter, not AudioParam — no ramp).
-  // wet   (0–1) → dry/wet mix; 0 = unity gain (dry only), transparent when unpatched.
-  const updateChorusParams = useCallback(({ rate, depth, wet } = {}) => {
+  // BBD chorus — delegates to the shared applier so static and dynamic never drift.
+  const updateChorusParams = useCallback((p) => applyChorusParams('chorus', p), [applyChorusParams]);
+
+  // Update VCF audio parameters — single writer per node.
+  // cutoff    (0–1) → exponential 20 Hz–20 kHz  (20 * 1000^cutoff)
+  // resonance (0–1) → Q 0–20; floored at 0.001 — Q=0 fails exponential ramp.
+  // cutoff uses setTargetAtTime (frequency params dispatch rampTo → exponential, unsafe near 0).
+  // envAmt    (0–1) → the ENV-jack cents scaler (Phase 70); this knob is its SOLE writer.
+  const updateVcfParams = useCallback(({ cutoff, resonance, envAmt } = {}) => {
     const n = nodesRef.current;
     if (!n) return;
-    if (rate  !== undefined) safeRamp(n.chorus.frequency, 0.1 * Math.pow(50, rate));
-    if (depth !== undefined) n.chorus.depth = depth; // plain setter — not an AudioParam
-    if (wet   !== undefined) safeRamp(n.chorus.wet, wet);
+    if (cutoff    !== undefined) n.vcf.frequency.setTargetAtTime(20 * Math.pow(1000, cutoff), Tone.now(), 0.02);
+    if (resonance !== undefined) safeRamp(n.vcf.Q, Math.max(0.001, resonance * 20));
+    if (envAmt    !== undefined) safeRamp(n.vcfenv.gain, vcfEnvAmtCents(envAmt));
   }, []);
+
+  const updateVcf2Params = useCallback(({ cutoff, resonance, envAmt } = {}) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    if (cutoff    !== undefined) n.vcf2.frequency.setTargetAtTime(20 * Math.pow(1000, cutoff), Tone.now(), 0.02);
+    if (resonance !== undefined) safeRamp(n.vcf2.Q, Math.max(0.001, resonance * 20));
+    if (envAmt    !== undefined) safeRamp(n.vcf2env.gain, vcfEnvAmtCents(envAmt));
+  }, []);
+
 
   // Update per-channel mixer volume for the 4-channel I/O input stage.
   // channelIndex: 1–4  value: 0–1 linear gain (0 = muted, 1 = unity gain).
@@ -3285,7 +3814,7 @@ export default function useMoogAudio() {
       for (const id of allVcoIdsRef.current)
         if (vcoActiveCvRef.current[id] === cvOutSrc) applyVcoKnobQuantize(id);
     }
-    if (bypass !== undefined) notifyKnobQuantize(); // glow follows bypass state
+    if (bypass !== undefined) notifyKnobQuantize(); recomputeQntFmRef.current?.(); // glow follows bypass state
     nodesRef.current?.qntNodes?.[qid]?.port.postMessage(qp);
   }, [qntHasCvInput, applyVcoKnobQuantize, notifyKnobQuantize]);
   // Inline ref sync (the App.js mappingsRef pattern): updateDynModuleParams is

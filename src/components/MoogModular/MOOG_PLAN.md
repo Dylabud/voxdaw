@@ -35,6 +35,66 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-08-01] Moog Phase 70 — Module-perfection pass: VCF · LFO · Reverb · BBD · 914
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+
+A module-by-module "perfect them" session (VCO + Noise were done in 68/69), Dylan driving the calls. Two themes ran through it: **removing dead affordances** (controls that looked interactive but weren't) and **fixing meters/params that were quietly wrong**.
+
+#### VCF
+- **KBD knob REMOVED** (knob + state + persistence). Never wired to anything — no node, no jack, no engine path — and it is a **Minimoog** feature, not a 904A one. Stale `kbd` values in saved racks are inert and drop on the next VCF knob write.
+- **ENV AMT wired** — visual-only since Phase 2. The ENV jack worked but at a hardcoded `Gain(1000)`, which the knob now owns (sole writer of `vcfenv.gain`).
+- **CV summing moved from `frequency` (Hz) to `detune` (cents)** for ALL THREE inputs (ENV, CV 1, CV 2). Native BiquadFilter computes `frequency · 2^(detune/1200)`, so modulation is **exponential**: equal depth = equal musical interval at any cutoff. Linear-Hz summing made one envelope a 3.5-octave slam at a low cutoff and inaudible at a high one. Cents also sum correctly across the three inputs (= multiply in Hz), matching 1V/oct. `Tone.Filter` fans `detune` to both cascaded biquads (verified `node_modules/tone/.../Filter.js:117`).
+- **Depth is FULL-RANGE**: `VCF_ENV_CENTS = round(1200·log2(1000))` ≈ **11959**, derived from the CUTOFF knob's own 20 Hz→20 kHz span, so ENV AMT at max lifts a fully-closed cutoff to the top of the dial (verified 20 Hz → 20001 Hz). The first pass shipped 6000 (5 oct) — half the dial, which is what Dylan reported as a weak spike. `VCF_CV_CENTS = ENV/2` deliberately: CV is **bipolar**, so half the span each way already covers the range.
+- **CV 1 / CV 2 attenuators: declined** (Dylan) — an LFO has its own DEPTH knob. Correct for one-source-one-destination; noted as genuinely missing for **fan-out** (one LFO to several destinations shares one DEPTH) and for **sources with no level knob** (ENV, seq pitch out, kbd pitch out, VCO outs).
+
+#### LFO
+- **Knob labels FIXED at RATE / DEPTH / MOD** — they used to swap to DIV/OFFSET while synced; a silkscreened faceplate never relabels itself.
+- **FREE/SYNC `ToggleSwitch` → read-only `ModeIndicator`.** The old one drew a full bat-handle lever with **no click handler** — mode is cable-driven, so it was a dead affordance. Now two fixed words, the live one burning **red** (`.modeWordOn`, the POWER jewel-lamp language rather than the app's mint), the other near-black like an unpowered segment.
+- **Division chip → permanent `.lfoDivScreen`** — was a `.selectorValue` box that looked pressable. Now always-mounted hardware (auraScreen glass + chrome bezel), **dark until a clock is patched**, then lit with green phosphor.
+- **WAVE selector REMOVED** — waveform is chosen by **which output jack you patch**, like the real module. Safe because `connect()` sets the oscillator type *and* keeps `lfoWaveRefs` in step (`useMoogAudio.js:2903`), so free AND sync follow the cable; cable restore re-fires `connect()` so shape survives reload. Removed a second writer of the same state. `waveType` no longer persists; an LFO with no output cable sits at its constructor default (sine).
+- **Lights-out**: sync screen + lit mode word stay visible. The exemption **must** live on the row (`.selectorRowEmissive`) — `opacity` on a parent creates a stacking context a child can never opt out of, so `opacity: 1` on the screen is a no-op under `.selectorRow { opacity: 0 }`. Equal specificity → must also sit AFTER that rule.
+- **RATE range widened** to **0.01 Hz – 100 Hz** (was 0.1–30). `LFO_RATE_MIN_HZ` × `LFO_RATE_SPAN` (10000) lands on a **decade per quarter-turn** (0.01/0.1/1/10/100), which keeps a knob this wide readable. The low end finally meets MOOG_ARCHITECTURE §2's stated 0.01 Hz floor; the top crosses into audio-rate FM. SYNC is unaffected (it stores the raw 0..1 knob in `lfoRateRefs`, never Hz). **Saved racks shift**: rate persists as knob position, so an LFO parked at 1.7 Hz now runs at 1 Hz.
+
+#### Quantized FM (VCO ← LFO through the quantizer)
+Dylan: an LFO into VCO **FM** slid pitch straight through the scale, ignoring a quantizer on the VCO's CV. First report of this class was a patching fix (LFO → `qnt-cv-in` uses the worklet's Phase-58 modulation mode); he then asked for the **FM jack itself** to respect the quantizer.
+- **`qntFmTick` rAF** — SOLE writer of the GlideBus for any VCO whose CV is quantizer-driven AND whose FM jack is patched. Quantizing is a nearest-note LOOKUP, not a sum, so it cannot be an audio connection; FM sums into `slaveFreq` *after* quantization. Same reasoning/shape as `vowelTick`. Reads the raw modulator, maps ±1 → ±`QNT_FM_SEMITONES` (12) around the FREQ knob, snaps via `quantizeHzJs`, writes GlideBus. QNT BYPASS passes the exponential sweep unquantized.
+- **New FM tap chain**: the jack now lands on `${id}fmIn` (unity) → `${id}fm` (×500 → slaveFreq) + `${id}fmAnalyser`. The analyser must sit BEFORE the ×500 stage because quantized FM mutes `${id}fm` to stop the smooth slide playing under the stepped one.
+- **Rate gate** `QNT_FM_MAX_HZ` (10): above it, quantized FM disengages and the direct audio-rate path takes back over — 60 Hz sampling cannot resolve a faster modulator, and the widened RATE knob's fast half stays useful for FM growl.
+- **No keyboard-vs-quantizer conflict exists** (I had proposed a precedence rule): `vcoActiveCvRef` holds exactly ONE CV source per VCO, so a quantizer-driven VCO is by construction not kbd-driven and `vibratoTick` skips it.
+
+#### Reverb
+- **ROOM CLAMPED to `REV_MAX_ROOM` (0.95)** — a real bug. Freeverb wires `roomSize` straight to the feedback gain of 8 comb filters (`roomSize.connect(lowpassCombFilter.resonance)`); at 1.0 feedback hits unity, the tail never decays and the combs sum into a runaway. Workstation `effectDefs` already capped this and CLAUDE.md lists it as load-bearing; the Moog reverb never got it.
+- **DAMP knob added** — exposes Freeverb `dampening`. Range is **sample-rate-derived**, midpoint pinned to exactly 3000 Hz (the old hardcoded value), so a centred knob is byte-identical to pre-knob behaviour. ≈916 Hz–9.8 kHz at 44.1 kHz.
+  - **STABILITY CEILING (crash, Dylan-reported):** `dampening` reaches `OnePoleFilter`, coefficients `a0 = 2π·f/sr`, `b1 = a0 − 1`, fed to `createIIRFilter([a0,0],[1,b1])`. A one-pole IIR is stable only while `|b1| < 1`, i.e. **f < sr/π** (≈14 kHz @44.1k). An 18 kHz ceiling shipped briefly: the filter diverged, NaN flooded the comb FEEDBACK loop and the **whole AudioContext died** (rack-wide silence, reload required). Now capped at 70% of the limit — verified `|b1| ≤ 0.951` worst case across 44.1/48/96 kHz.
+  - **EVERY WRITE REBUILDS NODES (scratching, Dylan-reported):** `OnePoleFilter.frequency`'s setter calls `_createFilter()`, disposing and re-creating its IIRFilter and re-wiring — ×8 combs per write. The param effect re-sends `damp` unchanged on every ROOM/MIX move, so any knob caused a rebuild storm that sounded like loud scratching. Fixed by `scheduleRevDamp`: delta-check (identical target = no-op, which is what stops ROOM/MIX touching it) + **120 ms debounce** (a continuous DAMP drag produces ZERO writes, one lands when it settles). Timers cleared on instance removal and unmount.
+- **MIX CV jack** — sums onto Freeverb's `wet` (a CrossFade fade Signal, connectable, self-clamping 0..1). Unity gain; depth belongs to the source, matching the VCF attenuator decision.
+- **Layout**: IN/OUT paired with MIX CV centred beneath (centred per-row, not a grid — "MIX CV" is a wider label than either above it), Aura screen to their right and **top-aligned** against the knob/jack divider (`-4px` to pull through `.plateBody`'s 5px gap).
+
+#### BBD
+- **Now a COMPOSITE**, not a bare `Tone.Chorus`: `In ─┬─► Dry ─┐ / └─► Chorus(wet 1) ─► Tone ─► Wet ─┴─► Out`. The BBD colour filter must be on the WET path only; Tone's own dry/wet is internal, so a filter after it would darken the dry too. Same shape as the Workstation delay's dry-through.
+- **FEEDBACK (FBK)** — Tone's internal `feedback` is left at 0 and the loop is **hand-built**: `Tone → FbHp(120 Hz) → Sat(tanh) → Fb(gain) → FbDly → chorus input`. Tone's own loop is a bare gain: nothing damps the resonance and nothing stops LF accumulating, so at high settings the comb peak (≈190–560 Hz at DELAY 3.5 ms / DEPTH 0.5) sang as a **low bee-like hum, one per channel offset by the 180° spread** — Dylan-reported. In-loop TONE + highpass + tanh fix it. Clamped to `BBD_MAX_FEEDBACK` (0.9), the roomSize lesson.
+  - **`BBD_FB_DELAY_S` (5 ms) is LOAD-BEARING.** Web Audio MUTES any cycle containing no DelayNode, and Tone.Chorus has an internal DRY branch (input → CrossFade → output) with no delay in it — so feeding back into the chorus input made a delay-free cycle and Chrome **silenced the whole loop**. Symptom (Dylan-reported): wet path dead, MIX only made things quieter, every wet-side knob did nothing. Cycle detection is **topological**, so `wet: 1` muting that branch does NOT help. 5 ms clears one render quantum at every sample rate.
+- **DELAY knob** (2–20 ms, default ≈3.56 ms = the old fixed 3.5) and **TONE knob** (700 Hz–14 kHz lowpass, default 0.75 ≈ 6.6 kHz — mild analog roll-off, so saved racks are slightly darker than before; max = fully clean). TONE doubles as the in-loop resonance tamer.
+- **RATE CV jack** → `Gain(3)` → `chorus.frequency` (CV ±1 → ±3 Hz).
+- **DEPTH + DELAY delta-checked** — both are plain setters re-sent on every unrelated knob move (the reverb DAMP class, far cheaper here: no node rebuild).
+- **Rate LED bugs**: seeded from a hardcoded 0.3 instead of the restored rate; and being **synthetic** (`Date.now()`-driven, not meter-fed) it never went dark on an unpowered rack, unlike every other LED. Now seeded from `saved.rate` and gated on `isPowered`.
+
+#### 914 Fixed Filter Bank
+- **Analyser tapped the INPUT, not the output** — so the per-band LEDs showed the raw incoming signal and were blind to the band knobs and master entirely. Retapped to `ffbMaster` (the Phase 56 post-effect rule the reverb already followed).
+- **Bin math was wrong twice.** `Tone.Analyser('fft', N)` sets `fftSize = N*2` and returns N bins, so a bin spans `sampleRate/(N*2)` — the code used `44100/512`, i.e. **double the true width AND a hardcoded rate**. Every band LED read roughly **an octave low** (the "1k" LED metered 345–732 Hz; 375–797 Hz at 48 kHz). Now `fftBinHz(512)` from the shared `moogSampleRate()`. **The identical bug was in the vocoder's 16-LED meter** and is fixed by the same helper.
+- **FLAT button** — 14 knobs is a lot to reset by hand; returns every band to unity.
+- **MSTR CV jack** → sums onto `ffbMaster.gain`.
+- **SWEEP CV jack** — moves a resonant gain hump across the 14 bands (filter-bank formant sweep). Needed **its own gain stage per band** (`filter → Sweep → Gain → sum`) so single-writer holds: the `ffbSweepTick` rAF owns Sweep, the knobs own Gain. Engagement is **cable-driven** (`recomputeFfbSweep`, the `isLfoSync` pattern) — a patched-but-silent CV reads 0 V, indistinguishable from no cable, so without the flag an unpatched bank would sit permanently humped at its centre band. `FFB_SWEEP_FLOOR` 0.10 / `FFB_SWEEP_SIGMA` 2.2.
+
+#### Built and REVERTED — Moog ladder VCF (do not silently re-attempt)
+A real 4-pole Huovilainen nonlinear ladder worklet (`public/moog-ladder-worklet.js`, 2× oversampled, tanh per stage, cutoff+detune params so the Phase-70 CV architecture carried over unchanged, plus a DRIVE knob) was built to replace the cascaded-biquad `Tone.Filter` — motivated by a Moog System 55 demo video where the filter sounded unreachable with the current core. **Dylan listened and preferred the existing biquad**, so the whole thing was reverted (worklet file deleted, In/Out wrappers, loader, deferred wiring, DRIVE knob and bookkeeping all removed; `Tone.Filter` restored). Verified post-revert that every `useCallback` definition and every returned hook key still matched git HEAD.
+
+**Keep for reference:** the biquad's shortcomings are real and unchanged — Q fans into BOTH cascaded biquads (resonance effectively squared → spiky rather than throaty), no self-oscillation, no passband thinning, no drive. Dylan prefers that character. If the ladder is ever wanted again, ship it as a **separate library module** so this VCF is left alone, not as a core swap.
+
+#### Known dead control, NOT addressed
+`VcaModule`'s `<ToggleSwitch labels={['LOG','LIN']} />` (`MoogShell.jsx`) has no click handler **and** no `active` prop, so the lever sits between positions and neither word lights — worse than the LFO switch, which at least reported real state. LOG vs LIN is a real feature (ear-matched vs mathematically linear VCA response). Wire or strip during the VCA pass.
+
 ### [2026-07-29] Moog Phase 69 — Noise module: six colours, retro scope, LEVEL CV
 
 **Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`

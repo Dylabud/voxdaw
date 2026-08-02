@@ -59,11 +59,15 @@ All connections carry one of two signal classes. The patch cable simulator must 
 
 **Function:** Mechanically identical to the VCO but tuned to sub-audio rates (0.01 Hz – ~20 Hz). It is **never heard directly** — its output is always CV, used to automatically modulate other modules (vibrato, filter wobble, tremolo, etc.).
 
-**Controls:**
+**Controls (as built — Moog Phase 70):**
 | Knob | Function |
 |---|---|
-| **Speed** | Oscillation rate (very slow → ~20 Hz). |
-| **Output Level** | Amplitude of the outgoing CV voltage (depth of the modulation effect). |
+| **RATE** | Free-run rate, exponential **0.01 Hz – 100 Hz** (`LFO_RATE_MIN_HZ · LFO_RATE_SPAN^knob`, span 10000 = a **decade per quarter-turn**: 0.01/0.1/1/10/100). The low end is a 100-second sweep; the top crosses into audio rate for FM. In SYNC mode this same knob selects a musical division instead (`LFO_SYNC_DIVS`) — it stores the raw 0..1 in `lfoRateRefs` and never touches Hz. |
+| **DEPTH** | Amplitude of the outgoing CV (modulation depth). |
+| **MOD** | Rate-modulation depth in free mode; doubles as the sync **OFFSET** (start phase). |
+| ~~WAVE selector~~ | **Removed** Phase 70 — waveform is chosen by **which output jack you patch** (the real module has four simultaneous shape outs and no shape switch). `connect()` sets the oscillator type AND keeps `lfoWaveRefs` in step, so free and sync both follow the cable; cable restore re-fires `connect()`, so shape survives a reload without being persisted. An LFO with no output cable sits at its constructor default (sine). |
+
+**Panel readouts are READ-ONLY (Phase 70).** Knob labels are fixed silkscreen — they no longer relabel themselves to DIV/OFFSET when synced. The old FREE/SYNC `ToggleSwitch` drew a full lever with **no click handler** (mode is cable-driven), so it is now a `ModeIndicator`: two printed words, the live one burning red, the other dark. The division is a permanent `.lfoDivScreen` — dead glass until a clock is patched, then lit. Both are exempt from the lights-out fade via `.selectorRowEmissive` **on the row**, because `opacity` on a parent creates a stacking context a child cannot opt out of.
 
 **Ports (5 Total):**
 | Port | Direction | Signal | Description |
@@ -162,21 +166,28 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 
 **Filter Type:** **24 dB/octave Moog Ladder Filter** — a 4-pole lowpass design with distinctive resonance character. **[Note: Tone.js's built-in `Tone.Filter` uses a `BiquadFilterNode` which maxes at 12 dB/oct. For true Moog ladder sound, consider `Tone.Filter` at 24 dB or a custom `MoogLadderFilter` using cascaded biquads. Flag for Phase 3.]**
 
-**Controls:**
+**Controls (as built — Moog Phase 70):**
 | Knob | Function |
 |---|---|
-| **Cutoff Frequency** | The frequency point below which audio passes, above which is cut. Low = muffled; High = full brightness. |
-| **Resonance** | Boosts the band around the Cutoff. Low = gentle shaping; above ~0.7 = self-oscillation (the filter generates its own pitch). |
-| **CV Attenuator** | Scales how much the incoming CV moves the Cutoff. |
+| **Cutoff Frequency** | Exponential 20 Hz–20 kHz (`20 · 1000^knob`). Writes `filter.frequency` — the knob is its sole writer. |
+| **Resonance** | `Q = knob · 20` (floored 0.001 — Q=0 breaks the exponential ramp). |
+| **ENV AMT** | Attenuator on the ENV jack's cutoff depth. Sole writer of `vcfenv.gain`. At max, a peaking envelope lifts a fully-closed cutoff across the WHOLE knob range (`VCF_ENV_CENTS` ≈ 11959 cents ≈ 9.97 oct, derived from the cutoff span itself). |
+| ~~CV Attenuator~~ | **Not built** — declined Phase 70. CV 1/CV 2 carry a fixed `VCF_CV_CENTS` (≈5980, i.e. ±5 oct, half of ENV because CV is bipolar); depth belongs to the source's own level knob. Genuinely missing for fan-out and for level-less sources (ENV, seq/kbd pitch out, VCO outs) — revisit if those bite. |
+| ~~KBD tracking~~ | **Removed** Phase 70 — it was never wired, and keyboard tracking is a *Minimoog* feature, not a 904A one. |
 
-**Ports (3 Total):**
+**Ports (5 Total, as built):**
 | Port | Direction | Signal | Description |
 |---|---|---|---|
-| Audio IN | Input | AUDIO | Receives the audio signal from VCO or VCF chain. |
-| Audio OUT | Output | AUDIO | Filtered audio out. Patch to VCA IN or I/O. |
-| Cutoff CV IN | Input | CV — Continuous | Moves the Cutoff Frequency dynamically. Source: Envelope, LFO, or Sequencer. |
+| Audio IN (`-in`) | Input | AUDIO | From VCO, mixer, or another filter. |
+| CV 1 / CV 2 (`-cv1`/`-cv2`) | Input | CV — Continuous | Cutoff modulation, fixed depth. |
+| ENV (`-env`) | Input | CV — Continuous | Cutoff modulation, depth set by ENV AMT. |
+| Audio OUT (`-out`) | Output | AUDIO | Filtered audio. |
 
-**Tone.js Node:** `Tone.Filter` (type: 'lowpass', rolloff: -24). `filter.frequency.rampTo(hz, 0.02)`. `filter.Q.rampTo(q, 0.02)`. CV input: connect envelope/LFO signal to `filter.frequency` AudioParam.
+**Tone.js Node:** `Tone.Filter` (type `lowpass`, rolloff −24 = **two cascaded biquads**). Cutoff uses `setTargetAtTime` — frequency-type params dispatch `rampTo` → exponential, which is unsafe near 0.
+
+**CV summing is EXPONENTIAL, on `detune` (Moog Phase 70).** All three CV inputs are **cents scalers** feeding `filter.detune`, never `frequency`. Native BiquadFilter computes `frequency · 2^(detune/1200)`, so a given depth moves the cutoff by the same musical interval wherever the CUTOFF knob sits; linear-Hz summing made one envelope a 3.5-octave slam at a low cutoff and an inaudible nudge at a high one. Cents also sum correctly across the three inputs (= multiply in Hz), which is how 1V/oct CV behaves. `Tone.Filter` fans its `detune` Signal to both cascaded biquads. Single-writer holds: the knob owns `frequency.value`, the cables own the connected `detune` input.
+
+**Not a true ladder — deliberate.** The faceplate says "24 dB/OCT LADDER" but the core is cascaded biquads, which cannot self-oscillate, do not thin the passband as resonance rises, have no drive, and (because Tone fans `Q` into *both* biquads) produce an effectively squared, spiky resonance. A real Huovilainen ladder worklet was built in Phase 70 and **reverted — Dylan preferred the biquad's smoother character.** If it is ever revisited, ship it as a separate library module rather than swapping this core (see MOOG_PLAN Phase 70).
 
 ---
 
@@ -369,6 +380,59 @@ The external-mic input was originally a standalone module (Phase 43) but was **m
 **Function:** Drives a signal into a fixed multi-fold sine transfer curve — more drive = more folds = more added harmonics. **Dynamic-only.** Output-domain waveshaping, so it works on ANY audio in (VCO, chord, external) — which is why it's its own module rather than a VCO knob (the VCO's SHAPE is phase-domain).
 
 **As built:** `In → Drive(FOLD pre-gain 0.2..1.0) → BiasSum → Shaper → Out`, where `Shaper = Tone.WaveShaper(x ⇒ sin(x·π·4))` (4 folds across ±1 at max drive) and `Bias` (a `Tone.Signal`, SYMMETRY −0.5..0.5) adds a DC offset before the fold for asymmetric/even-harmonic folding. FOLD-CV (`${id}FoldCv`) sums onto `Drive.gain`. Jacks `-in` / `-fold-cv` / `-out`; `getFolderScope(id)` draws the folded output waveform.
+
+---
+
+### 17. REV — Studio Reverb [Implemented: Moog Phase 3 · DAMP + MIX CV + ROOM clamp: Phase 70]
+
+**Function:** Freeverb-based room/hall reverb. Static ×2 (`reverb`, `reverb2`) plus library instances (`reverb3`+).
+
+**Controls / jacks:** **ROOM** (size), **DAMP** (tail brightness), **MIX** (dry/wet). Jacks `-in` / `-mix-cv` / `-out`.
+
+**ROOM is CLAMPED to `REV_MAX_ROOM` (0.95) — load-bearing.** `Tone.Freeverb` wires `roomSize` straight to the feedback gain of its eight comb filters (`roomSize.connect(lowpassCombFilter.resonance)`); at 1.0 the feedback reaches unity, the tail never decays, and the combs sum into a runaway build-up. Same value the Workstation's `effectDefs` uses.
+
+**DAMP → Freeverb `dampening`, with two hazards (both hit in Phase 70):**
+1. **Stability ceiling.** It reaches `OnePoleFilter`, whose lowpass coefficients are `a0 = 2π·f/sr`, `b1 = a0 − 1`, fed to `createIIRFilter([a0,0],[1,b1])`. A one-pole IIR is stable only while `|b1| < 1`, i.e. **f < sr/π** (≈14 kHz @44.1 kHz). Beyond it the filter diverges, NaN floods the comb feedback loop, and the **whole AudioContext dies** (rack-wide silence, reload required). The range is therefore derived from the live sample rate and capped at 70% of that limit, with the midpoint pinned to exactly 3000 Hz (the value dampening was hardcoded to before the knob existed).
+2. **Every write rebuilds nodes.** `OnePoleFilter.frequency`'s setter calls `_createFilter()`, disposing and re-creating its IIRFilter and re-wiring the graph — ×8 combs per write. Writing per knob-frame is a teardown storm that sounds like loud scratching. All writes therefore go through **`scheduleRevDamp`**: delta-checked (an identical target is a no-op — this is what stops ROOM/MIX moves touching it, since the param effect re-sends the whole object) and **debounced 120 ms**, so a continuous drag produces zero writes and one lands when the knob settles. Timers are cleared on instance removal and unmount.
+
+**MIX CV** sums onto Freeverb's `wet` (a CrossFade fade Signal — connectable, self-clamping 0..1). Unity gain; depth belongs to the source. **Display:** the Aura sphere taps the reverb's OUTPUT (Phase 56 rule) so it keeps moving through the tail.
+
+---
+
+### 18. BBD — Bucket Brigade Chorus / Flanger [Implemented: Moog Phase 3 · composite + FBK/DELAY/TONE + RATE CV: Phase 70]
+
+**Function:** Chorus through flanger. Static `chorus` plus library instances (`chorus2`+).
+
+**As built — a COMPOSITE, not a bare `Tone.Chorus`:**
+```
+${id}In ─┬──────────────────────────────► ${id}Dry ──┐
+         └─► ${id} (Chorus, wet 1) ─► ${id}Tone ─► ${id}Wet ─┴─► ${id}Out
+                    ▲                        │
+                    └─ ${id}FbDly ◄─ ${id}Fb ◄─ ${id}Sat(tanh) ◄─ ${id}FbHp(120 Hz) ◄┘
+```
+The Chorus runs 100% wet and MIX crossfades the two external gains, because the **BBD colour filter must sit on the WET path only** — Tone's own dry/wet is internal, so a filter after it would darken the dry signal too. Same shape as the Workstation delay's dry-through.
+
+**Controls / jacks:** RATE (0.1–5 Hz), DEPTH, MIX, **FBK**, **DELAY** (2–20 ms), **TONE** (700 Hz–14 kHz lowpass). Jacks `-in` / `-rate-cv` / `-out`.
+
+**FEEDBACK is hand-built; Tone's internal `feedback` stays 0.** Tone's loop is a bare gain — nothing damps the resonance as it recirculates and nothing stops low frequencies accumulating, so at high settings the comb peak (which tracks `delayTime`, ≈190–560 Hz at DELAY 3.5 ms / DEPTH 0.5) sings as a low bee-like hum, one per channel offset by the 180° stereo spread. The return path puts **TONE inside the loop**, adds a 120 Hz highpass to kill the mud, and a `tanh` to bound runaway. Clamped to `BBD_MAX_FEEDBACK` (0.9). Same reasoning as CHRONOS's hand-built loop (§15).
+
+**`BBD_FB_DELAY_S` (5 ms) in the return path is LOAD-BEARING.** Web Audio **mutes any cycle that contains no DelayNode**, and `Tone.Chorus` has an internal DRY branch (input → CrossFade → output) with no delay in it — so feeding back into the chorus input creates a delay-free cycle and Chrome silences the entire loop. Symptom: the wet path goes dead, MIX only makes things quieter, and every wet-side knob does nothing. **Cycle detection is topological**, so running the chorus at `wet: 1` does NOT help. 5 ms clears one render quantum at every sample rate.
+
+**DEPTH and DELAY are plain setters** (both recompute the two LFOs' min/max), re-sent on every unrelated knob move, so both are delta-checked. The **rate LED is synthetic** (`Date.now()`-driven, not meter-fed), so unlike every other LED on the rack it must be **explicitly gated on power** or it keeps pulsing on a dead rack.
+
+---
+
+### 19. 914 — Fixed Filter Bank [Implemented: Moog Phase 60d · meter fixes + FLAT/MSTR CV/SWEEP CV: Phase 70]
+
+**Function:** 14 parallel fixed-frequency bands (`FFB_BANDS`: lowpass 100 Hz, twelve bandpasses 125 Hz–5.6 kHz at Q 2.8, highpass 8 kHz), each with its own level knob. Frequencies and Q are **fixed** — that is what "fixed filter bank" means; do not add tuning controls.
+
+**Signal:** `${id}In` → fan to 14 × [`Filter` → **`Sweep`** → `Gain`] → `${id}Sum` → `${id}Master` → out. **The Sweep stage exists so single-writer holds**: the `ffbSweepTick` rAF owns `Sweep`, the band knobs own `Gain`; without the split both would write the same node.
+
+**Controls / jacks:** 14 band knobs, **MSTR**, **FLAT** (resets all bands to unity). Jacks `-in` / `-master-cv` / `-sweep-cv` / `-out`.
+
+**SWEEP CV** moves a resonant gain hump across the bank (a filter-bank formant sweep) — a nonlinear map from one voltage to 14 correlated gains, which is why it is an rAF and not an AudioParam connection (the `vowelTick` reason). Engagement is **cable-driven** (`recomputeFfbSweep`, the `isLfoSync` pattern): a patched-but-silent CV reads 0 V, indistinguishable from no cable, so without the flag an unpatched bank would sit permanently humped at its centre band. `FFB_SWEEP_FLOOR` 0.10, `FFB_SWEEP_SIGMA` 2.2 bands.
+
+**Meter (fixed Phase 70 — it had never been correct):** the analyser taps **`${id}Master`, post-bank** (the Phase 56 rule), so pulling a band knob down visibly darkens its LED; it previously tapped the INPUT and was blind to both the band knobs and the master. Bin width comes from **`fftBinHz(bins)`** — `Tone.Analyser('fft', N)` sets `fftSize = N*2` and returns N bins, so a bin spans `sampleRate/(N*2)`, **not** `sampleRate/N`. The old `44100 / 512` was double the true width *and* ignored the device rate, putting every band roughly an octave low. The vocoder's 16-LED meter shared the identical bug and the same helper now backs both.
 
 ---
 

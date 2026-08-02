@@ -811,6 +811,101 @@
   text-shadow: 0 0 4px rgba(93, 202, 165, 0.55);
 }
 
+/* ── LFO mode indicator (Phase 70) ──
+   Two fixed silkscreen words, the live one lit mint (.toggleLabelActive). This
+   replaced a ToggleSwitch that rendered a real-looking lever with no click
+   handler; a flat pair of words reads as a readout, not a control, so it no
+   longer invites a click. Lives inside .selectorRow, so the existing lights-out
+   rule already fades it with the rest of the printed panel text. */
+.modeIndicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  user-select: none;
+}
+
+/* Words are LAMPS, not silkscreen: the live mode burns red, the other sits dark
+   like an unpowered segment. Red matches the POWER jewel lamp already on the rack
+   rather than the app's mint accent — this is panel hardware, not app chrome. */
+.modeWord {
+  font-size: 14px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  /* unlit segment — barely above the faceplate, readable only as a dead label */
+  color: #2a2521;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.035);
+  transition: color 0.12s, text-shadow 0.12s;
+}
+
+.modeWordOn {
+  color: #ff5a44;
+  text-shadow:
+    0 0 4px  rgba(226, 42, 26, 0.90),
+    0 0 10px rgba(210, 30, 16, 0.55),
+    0 0 20px rgba(190, 20, 10, 0.28);
+}
+
+/* Sync division SCREEN — permanent hardware, dark until a clock is patched.
+   Same near-black glass + chrome bezel language as .auraScreen, shrunk to a
+   single line of text. Read-only; the RATE knob picks the division. */
+.lfoDivScreen {
+  min-width: 62px;
+  height: 26px;
+  border-radius: 4px;
+  position: relative;
+  flex-shrink: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 7px;
+  user-select: none;
+  /* dead glass — no emission while free-running */
+  background: radial-gradient(ellipse at 50% 40%, #0a0f14 0%, #06080c 60%, #030406 100%);
+  box-shadow:
+    inset 0 0 10px rgba(0, 0, 0, 0.9),
+    0 0 0 2px #767066,
+    0 0 0 3px #100e0c,
+    -2px 3px 6px rgba(0, 0, 0, 0.8);
+  transition: box-shadow 0.15s, background 0.15s;
+}
+
+/* Powered: faint phosphor bloom inside the glass + ambient bleed onto the plate */
+.lfoDivScreenOn {
+  background: radial-gradient(ellipse at 50% 40%, #06180f 0%, #04100a 60%, #020805 100%);
+  box-shadow:
+    inset 0 0 10px rgba(0, 0, 0, 0.85),
+    inset 0 0 4px rgba(93, 202, 165, 0.18),
+    0 0 0 2px #767066,
+    0 0 0 3px #100e0c,
+    -2px 3px 6px rgba(0, 0, 0, 0.8),
+    0 0 10px rgba(60, 200, 150, 0.16);
+}
+
+/* Glass sheen — catches the studio lamp upper-right like every other display */
+.lfoDivScreen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 4px;
+  background: radial-gradient(
+    ellipse at 68% 20%,
+    rgba(255, 255, 255, 0.09) 0%,
+    rgba(255, 255, 255, 0.025) 28%,
+    transparent 48%
+  );
+  pointer-events: none;
+}
+
+.lfoDivScreenText {
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  color: #5DCAA5;
+  text-shadow: 0 0 6px rgba(93, 202, 165, 0.65);
+}
+
 .toggle {
   width: 13px;
   height: 26px;
@@ -1721,6 +1816,42 @@
 /* Selector rows (WAVE, RANGE, SCALE, ROOT, etc.): off */
 .cabinet[data-lights-out="true"] .selectorRow { opacity: 0; }
 
+/* …EXCEPT rows holding only emissive hardware (the LFO's sync screen + mode
+   lamps), which stay lit in the dark like every other display and LED on the
+   rack. This exemption MUST live on the row: opacity on a parent creates a
+   stacking context that a child can never opt out of, so `opacity: 1` on the
+   screen itself would do nothing while the row sits at 0. Equal specificity to
+   the rule above, so it also has to stay AFTER it — last one wins. */
+.cabinet[data-lights-out="true"] .selectorRowEmissive { opacity: 1; }
+
+/* Dead glass in the dark: no chrome bezel to catch a lamp that's off, and no
+   glass sheen. The screen reappears as hardware only once it's powered. */
+.cabinet[data-lights-out="true"] .lfoDivScreen {
+  box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.9);
+  background: #010101;
+}
+.cabinet[data-lights-out="true"] .lfoDivScreen::after { display: none; }
+
+/* Powered screen: keep the phosphor bloom, drop the chrome ring so it reads as
+   a floating lit panel rather than a bezel picking up nonexistent room light. */
+.cabinet[data-lights-out="true"] .lfoDivScreenOn {
+  background: radial-gradient(ellipse at 50% 40%, #06180f 0%, #04100a 60%, #010402 100%);
+  box-shadow:
+    inset 0 0 10px rgba(0, 0, 0, 0.85),
+    inset 0 0 4px rgba(93, 202, 165, 0.22),
+    0 0 14px rgba(60, 200, 150, 0.28);
+}
+
+/* Unlit mode word: fully dark — an unpowered segment shows nothing in the dark. */
+.cabinet[data-lights-out="true"] .modeWord { color: #0a0908; text-shadow: none; }
+.cabinet[data-lights-out="true"] .modeWordOn {
+  color: #ff5a44;
+  text-shadow:
+    0 0 5px  rgba(226, 42, 26, 0.95),
+    0 0 12px rgba(210, 30, 16, 0.65),
+    0 0 24px rgba(190, 20, 10, 0.35);
+}
+
 /* Toggle switches (LOG/LIN, FREE/SYNC): off.
    PowerSwitch uses the same .toggleGroup class — hiding it here
    leaves the sibling .powerLamp/.powerLampOn fully visible. */
@@ -1788,12 +1919,39 @@
 
 /* Jacks left, screen right — screen bottom-aligns with the jack sockets
    (jackRow uses align-items:flex-end for the same baseline). */
+/* Reverb bottom row (Phase 70): jack cluster left, Aura screen right.
+   Top-aligned so the screen rides up against the knob/jack divider rather than
+   floating level with the jacks. */
 .revBottomRow {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
   padding: 0 2px;
+}
+
+/* Pull the screen up through .plateBody's 5px row gap so its top edge sits just
+   under the divider line. Scoped to the reverb row — .auraScreen is shared with
+   the vowel / chronos / folder displays, which must keep their own spacing. */
+.revBottomRow .auraScreen {
+  margin-top: -4px;
+}
+
+/* IN / OUT paired, MIX CV centred beneath them. Centring is per-row (not a grid)
+   so the CV jack lands midway between the pair regardless of label widths —
+   "MIX CV" is wider than either label above it. */
+.revJackBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px;
+}
+
+.revJackPair {
+  display: flex;
+  gap: 10px;          /* matches .jackRow so jack spacing reads consistent */
+  align-items: flex-end;
 }
 
 .auraScreen {
@@ -1937,8 +2095,40 @@
   grid-column: 9;
   grid-row: 1 / span 2;
   display: flex;
+  flex-direction: column;   /* MSTR knob above the FLAT button (Phase 70) */
   align-items: center;
   justify-content: center;
+  gap: 6px;
+}
+
+/* FLAT — small engraved panel button under MSTR. Styled as a real switch cap rather
+   than a web button so it reads as hardware. */
+.ffbFlatBtn {
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: rgba(234, 229, 217, 0.72);
+  background: linear-gradient(to bottom, #232120, #141212);
+  border: 1px solid #3a3630;
+  border-radius: 3px;
+  padding: 3px 7px;
+  cursor: pointer;
+  user-select: none;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 1px 2px rgba(0, 0, 0, 0.7);
+  transition: color 0.1s, border-color 0.1s, transform 0.05s;
+}
+
+.ffbFlatBtn:hover {
+  color: #eae5d9;
+  border-color: #58503c;
+}
+
+/* Depress on press — matches the tactile language of the rack's other controls. */
+.ffbFlatBtn:active {
+  transform: translateY(1px);
+  background: linear-gradient(to bottom, #141212, #1c1a18);
 }
 
 /* ── External mic enable button ── */

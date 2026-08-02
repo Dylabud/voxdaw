@@ -3,7 +3,7 @@ import styles from './MoogShell.module.css';
 import MoogKnob from './MoogKnob';
 import { MoogPatchProvider, useMoogPatch } from './MoogPatchContext';
 import PatchCableOverlay from './PatchCableOverlay';
-import useMoogAudio, { FFB_BANDS, VOC_BANDS } from './useMoogAudio';
+import useMoogAudio, { FFB_BANDS, VOC_BANDS, fftBinHz } from './useMoogAudio';
 import Oscilloscope from './Oscilloscope';
 import KeyboardModule from './KeyboardModule';
 import Led from './Led';
@@ -42,6 +42,21 @@ function Jack({ id, label }) {
 
 // `active` reflects a real on/off state (true → lever up toward labels[1]; false →
 // down toward labels[0]); omit it for a purely decorative switch (Phase 65).
+// Read-only MODE INDICATOR (Phase 70) — deliberately NOT a switch.
+// It replaced a ToggleSwitch on the LFO that looked fully interactive but had no
+// click handler: the free/sync mode is driven by whether a cable is patched into
+// the SYNC jack, so the lever was a dead affordance that invited pointless clicks.
+// Both words stay printed at all times (silkscreen doesn't move); the active one
+// lights mint via .toggleLabelActive, shared with the genuine switches.
+function ModeIndicator({ labels, active, title }) {
+  return (
+    <div className={styles.modeIndicator} title={title}>
+      <span className={`${styles.modeWord} ${active === false ? styles.modeWordOn : ''}`}>{labels[0]}</span>
+      <span className={`${styles.modeWord} ${active === true  ? styles.modeWordOn : ''}`}>{labels[1]}</span>
+    </div>
+  );
+}
+
 function ToggleSwitch({ labels = ['OFF', 'ON'], active, title }) {
   const on = active === true, off = active === false;
   return (
@@ -416,21 +431,24 @@ function NoiseModule({ number = 1, onParamUpdate }) {
   );
 }
 
-// onParamUpdate({ cutoff, resonance }) is the audio update callback from useMoogAudio.
-// envAmt and kbdTracking are visual-only in this phase (Phase 6 will wire them).
+// onParamUpdate({ cutoff, resonance, envAmt }) is the audio update callback from
+// useMoogAudio. ENV AMT attenuates the ENV jack's cutoff-modulation depth (Phase 70):
+// knob 0 = the patched envelope moves nothing, knob 1 = it lifts the cutoff 5 octaves.
+// There is deliberately NO keyboard-tracking knob: the real Moog 904A has only a
+// fixed-control-voltage (cutoff) knob, regeneration (resonance) and attenuated CV
+// inputs. KBD tracking is a Minimoog feature and was removed as inauthentic.
 function VcfModule({ onParamUpdate, number = 1 }) {
   const p = number === 1 ? 'vcf' : `vcf${number}`;
   const saved = useSavedSettings(p);
   const [cutoff, setCutoff] = useState(saved.cutoff ?? 1.0);   // fully open — matches vcf init at 20kHz
   const [res, setRes]       = useState(saved.res    ?? 0.0);
-  const [envAmt, setEnvAmt] = useState(saved.envAmt ?? 0.5);   // visual only
-  const [kbd, setKbd]       = useState(saved.kbd    ?? 0.0);   // visual only
-  useModulePersist(p, { cutoff, res, envAmt, kbd });
+  const [envAmt, setEnvAmt] = useState(saved.envAmt ?? 0.5);
+  useModulePersist(p, { cutoff, res, envAmt });
 
   useEffect(() => {
     if (!onParamUpdate) return;
-    onParamUpdate({ cutoff, resonance: res });
-  }, [cutoff, res, onParamUpdate]);
+    onParamUpdate({ cutoff, resonance: res, envAmt });
+  }, [cutoff, res, envAmt, onParamUpdate]);
 
   return (
     <div className={styles.module}>
@@ -450,8 +468,7 @@ function VcfModule({ onParamUpdate, number = 1 }) {
                 row when fit()'s width compensation narrows, oscillating the layout */}
             <MoogKnob label="CUTOFF" size="xl" value={cutoff} onChange={setCutoff} defaultValue={1.0} />
             <MoogKnob label="RES"    size="lg" value={res}    onChange={setRes}    defaultValue={0.0} />
-            <MoogKnob label="ENV AMT"   size="md" value={envAmt} onChange={setEnvAmt} defaultValue={0.5} />
-            <MoogKnob label="KBD"       size="sm" value={kbd}    onChange={setKbd}    defaultValue={0.0} />
+            <MoogKnob label="ENV AMT" size="md" value={envAmt} onChange={setEnvAmt} defaultValue={0.5} />
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
@@ -467,19 +484,22 @@ function VcfModule({ onParamUpdate, number = 1 }) {
   );
 }
 
-// LFO waveform options — same cycling pattern as VcoModule (Phase 4).
-// Patching a specific output jack (lfo-sin, lfo-tri, etc.) overrides the type
-// at cable-connect time via the jackMap waveform field. The UI selector sets
-// the default type for the currently-running LFO signal.
-const LFO_WAVE_TYPES  = ['sine', 'triangle', 'square', 'sawtooth'];
-const LFO_WAVE_LABELS = { sine: 'SIN', triangle: 'TRI', square: 'SQR', sawtooth: 'SAW' };
+// LFO waveform is chosen by WHICH OUTPUT JACK you patch (Phase 70) — the click-to-
+// cycle WAVE selector was removed. `connect()` sets the oscillator type from the
+// jack's `waveform` field AND keeps `lfoWaveRefs` in step, so both free and sync
+// modes follow the cable. This is how the real module works (four simultaneous
+// shape outputs, no shape switch), and it removes a UI writer of the same state,
+// so the cable is now the single source of truth for shape. Cable restore re-fires
+// connect() on load, so the shape survives a reload without being persisted.
+//
 // Mirror of useMoogAudio's LFO_SYNC_DIVS labels — RATE knob (0..1) → division shown
 // when a clock is patched into SYNC (Phase 65). Keep in step with lfoDivForRate.
 const LFO_SYNC_LABELS = ['4 BAR', '2 BAR', '1 BAR', '1/2', '1/4', '1/8'];
 const lfoSyncLabelForRate = (rate) =>
   LFO_SYNC_LABELS[Math.min(LFO_SYNC_LABELS.length - 1, Math.max(0, Math.floor((rate ?? 0.3) * LFO_SYNC_LABELS.length)))];
 
-// onParamUpdate({ rate, depth, type }) wires knobs and wave selector to useMoogAudio.
+// onParamUpdate({ rate, depth, modDepth }) wires the knobs to useMoogAudio. Waveform
+// is deliberately NOT passed — the patched output jack owns it (see above).
 // getLedValue() — stable getter (pre-bound in MoogShell) for the LFO level meter.
 function LfoModule({ onParamUpdate, getLedValue, number = 1 }) {
   const p = number === 1 ? 'lfo' : `lfo${number}`;
@@ -487,8 +507,7 @@ function LfoModule({ onParamUpdate, getLedValue, number = 1 }) {
   const [rate,     setRate]     = useState(saved.rate     ?? 0.3);
   const [depth,    setDepth]    = useState(saved.depth    ?? 0.5);
   const [modDepth, setModDepth] = useState(saved.modDepth ?? 0.0);
-  const [waveType, setWaveType] = useState(saved.waveType ?? 'sine');
-  useModulePersist(p, { rate, depth, modDepth, waveType });
+  useModulePersist(p, { rate, depth, modDepth });
 
   // Tempo-sync engages when a clock is patched into this LFO's SYNC jack (Phase
   // 65). In sync mode RATE selects a musical division and MOD becomes the OFFSET
@@ -499,11 +518,8 @@ function LfoModule({ onParamUpdate, getLedValue, number = 1 }) {
 
   useEffect(() => {
     if (!onParamUpdate) return;
-    onParamUpdate({ rate, depth, modDepth, type: waveType });
-  }, [rate, depth, modDepth, waveType, onParamUpdate]);
-
-  const cycleWave = () =>
-    setWaveType(prev => LFO_WAVE_TYPES[(LFO_WAVE_TYPES.indexOf(prev) + 1) % LFO_WAVE_TYPES.length]);
+    onParamUpdate({ rate, depth, modDepth });
+  }, [rate, depth, modDepth, onParamUpdate]);
 
   return (
     <div className={styles.module}>
@@ -519,22 +535,27 @@ function LfoModule({ onParamUpdate, getLedValue, number = 1 }) {
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
             <Led getValue={getLedValue} color="yellow" />
-            <MoogKnob label={synced ? 'DIV' : 'RATE'} size="lg" value={rate}     onChange={setRate}     defaultValue={0.3} />
-            <MoogKnob label="DEPTH"                    size="md" value={depth}    onChange={setDepth}    defaultValue={0.5} />
-            <MoogKnob label={synced ? 'OFFSET' : 'MOD'} size="sm" value={modDepth} onChange={setModDepth} defaultValue={0.0} />
+            {/* Labels are FIXED (Phase 70). They used to swap to DIV/OFFSET while
+                synced, but a real faceplate is silkscreened — it never relabels
+                itself. The knobs keep their jobs; sync only changes what RATE's
+                position means, which the engraved readout below reports. */}
+            <MoogKnob label="RATE"  size="lg" value={rate}     onChange={setRate}     defaultValue={0.3} />
+            <MoogKnob label="DEPTH" size="md" value={depth}    onChange={setDepth}    defaultValue={0.5} />
+            <MoogKnob label="MOD"   size="sm" value={modDepth} onChange={setModDepth} defaultValue={0.0} />
           </div>
-          <div className={styles.selectorRow}>
-            <div className={styles.selectorGroup} onClick={cycleWave} title="Click to cycle waveform">
-              <span className={styles.selectorLabel}>WAVE</span>
-              <span className={styles.selectorValue}>{LFO_WAVE_LABELS[waveType]}</span>
+          {/* selectorRowEmissive: this row holds only lit hardware, so it is exempt
+              from the lights-out fade that silences the printed selector rows. */}
+          <div className={`${styles.selectorRow} ${styles.selectorRowEmissive}`}>
+            {/* Division screen — a permanent piece of hardware (the panel never gains
+                or loses parts), DARK while free-running and lit only once a clock is
+                patched into SYNC. Read-only: the RATE knob picks the division. */}
+            <div className={`${styles.lfoDivScreen} ${synced ? styles.lfoDivScreenOn : ''}`}
+              title={synced
+                ? 'LFO cycle length — the RATE knob selects it while synced'
+                : 'Patch a clock into SYNC to lock the LFO to tempo'}>
+              <span className={styles.lfoDivScreenText}>{synced ? lfoSyncLabelForRate(rate) : ''}</span>
             </div>
-            {synced && (
-              <div className={styles.selectorGroup} title="LFO cycle length — the RATE knob selects it while synced">
-                <span className={styles.selectorLabel}>SYNC</span>
-                <span className={styles.selectorValue}>{lfoSyncLabelForRate(rate)}</span>
-              </div>
-            )}
-            <ToggleSwitch labels={['FREE', 'SYNC']} active={synced}
+            <ModeIndicator labels={['FREE', 'SYNC']} active={synced}
               title={synced
                 ? 'Locked to Transport tempo — unpatch SYNC to free-run'
                 : 'Patch a clock (e.g. SEQ) into SYNC to lock the LFO to tempo'} />
@@ -706,7 +727,10 @@ function ReverbModule({ onParamUpdate, getAuraData, number = 1 }) {
   const saved = useSavedSettings(p);
   const [roomSize, setRoomSize] = useState(saved.roomSize ?? 0.7);
   const [wet,      setWet]      = useState(saved.wet      ?? 0.0);
-  useModulePersist(p, { roomSize, wet });
+  // DAMP default 0.5 maps to exactly 3000 Hz — the value dampening was hardcoded to
+  // before this knob existed, so an untouched reverb is unchanged. (Phase 70)
+  const [damp,     setDamp]     = useState(saved.damp     ?? 0.5);
+  useModulePersist(p, { roomSize, wet, damp });
 
   // Ref mirrors for the Aura rAF loop — the loop reads these each frame so it
   // never stale-captures knob state and never restarts on knob changes.
@@ -716,8 +740,8 @@ function ReverbModule({ onParamUpdate, getAuraData, number = 1 }) {
 
   useEffect(() => {
     if (!onParamUpdate) return;
-    onParamUpdate({ roomSize, wet });
-  }, [roomSize, wet, onParamUpdate]);
+    onParamUpdate({ roomSize, wet, damp });
+  }, [roomSize, wet, damp, onParamUpdate]);
 
   return (
     <div className={styles.module}>
@@ -733,15 +757,19 @@ function ReverbModule({ onParamUpdate, getAuraData, number = 1 }) {
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
             <MoogKnob label="ROOM" size="md" value={roomSize} onChange={setRoomSize} defaultValue={0.7} />
+            <MoogKnob label="DAMP" size="md" value={damp}     onChange={setDamp}     defaultValue={0.5} />
             <MoogKnob label="MIX"  size="md" value={wet}      onChange={setWet}      defaultValue={0.0} />
           </div>
           <PlateDivider />
-          {/* Bottom row: jacks left, Aura screen filling the empty space to their
-              right — screen bottom-aligns with the jack sockets */}
+          {/* Jack cluster left, Aura screen to its right (Phase 70 layout):
+              IN / OUT paired on top, MIX CV centred beneath them. */}
           <div className={styles.revBottomRow}>
-            <div className={styles.jackRow}>
-              <Jack id={`${p}-in`}  label="IN" />
-              <Jack id={`${p}-out`} label="OUT" />
+            <div className={styles.revJackBlock}>
+              <div className={styles.revJackPair}>
+                <Jack id={`${p}-in`}  label="IN" />
+                <Jack id={`${p}-out`} label="OUT" />
+              </div>
+              <Jack id={`${p}-mix-cv`} label="MIX CV" />
             </div>
             <AuraDisplay getData={getAuraData} wetRef={wetRef} roomRef={roomRef} />
           </div>
@@ -1741,24 +1769,40 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, onGlideC
 
 // Rate LED pulses at the same frequency as the chorus LFO by reading rateHzRef
 // in a stable getter closure — no React state writes in the rAF loop.
-function ChorusModule({ onParamUpdate, number = 1 }) {
+function ChorusModule({ onParamUpdate, isPowered = false, number = 1 }) {
   const p = number === 1 ? 'chorus' : `chorus${number}`;
   const saved = useSavedSettings(p);
   const [rate,  setRate]  = useState(saved.rate  ?? 0.3);
   const [depth, setDepth] = useState(saved.depth ?? 0.5);
   const [wet,   setWet]   = useState(saved.wet   ?? 0.0);
-  useModulePersist(p, { rate, depth, wet });
+  // Phase 70. FBK default 0 = no feedback, so the module still starts as a plain
+  // chorus; DELAY default 0.25 ≈ 3.56 ms, matching the value it was fixed at.
+  const [feedback, setFeedback] = useState(saved.feedback ?? 0.0);
+  const [delay,    setDelay]    = useState(saved.delay    ?? 0.25);
+  const [tone,     setTone]     = useState(saved.tone     ?? 0.75);
+  useModulePersist(p, { rate, depth, wet, feedback, delay, tone });
 
-  const rateHzRef = useRef(0.1 * Math.pow(50, 0.3));
+  // Seed from the RESTORED rate, not a hardcoded 0.3 — a saved rack whose BBD was
+  // parked at a different rate flashed its LED at the wrong speed until the first
+  // param effect ran.
+  const rateHzRef = useRef(0.1 * Math.pow(50, saved.rate ?? 0.3));
 
   useEffect(() => {
     rateHzRef.current = 0.1 * Math.pow(50, rate);
-    onParamUpdate?.({ rate, depth, wet });
-  }, [rate, depth, wet, onParamUpdate]);
+    onParamUpdate?.({ rate, depth, wet, feedback, delay, tone });
+  }, [rate, depth, wet, feedback, delay, tone, onParamUpdate]);
 
-  // Stable getter — reads ref each frame, never changes reference so Led's rAF never restarts.
+  // This LED is SYNTHETIC (driven by Date.now(), not by signal), so unlike every
+  // meter-fed LED on the rack it does not go dark by itself when the power is off —
+  // it has to be gated explicitly, or it keeps pulsing on a dead rack.
+  const poweredRef = useRef(isPowered);
+  useEffect(() => { poweredRef.current = isPowered; }, [isPowered]);
+
+  // Stable getter — reads refs each frame, never changes reference so Led's rAF never restarts.
   const getRateFlash = useCallback(() =>
-    (Math.sin(Date.now() * 0.001 * rateHzRef.current * Math.PI * 2) + 1) / 2
+    poweredRef.current
+      ? (Math.sin(Date.now() * 0.001 * rateHzRef.current * Math.PI * 2) + 1) / 2
+      : 0
   , []);
 
   return (
@@ -1779,10 +1823,18 @@ function ChorusModule({ onParamUpdate, number = 1 }) {
             <MoogKnob label="DEPTH" size="md" value={depth} onChange={setDepth} defaultValue={0.5} />
             <MoogKnob label="MIX"   size="md" value={wet}   onChange={setWet}   defaultValue={0.0} />
           </div>
+          {/* Second row (Phase 70) — sm knobs so six controls still fit the BBD's
+              280px slot without the row wrapping. */}
+          <div className={styles.knobRow}>
+            <MoogKnob label="FBK"   size="sm" value={feedback} onChange={setFeedback} defaultValue={0.0} />
+            <MoogKnob label="DELAY" size="sm" value={delay}    onChange={setDelay}    defaultValue={0.25} />
+            <MoogKnob label="TONE"  size="sm" value={tone}     onChange={setTone}     defaultValue={0.75} />
+          </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id={`${p}-in`}  label="IN" />
-            <Jack id={`${p}-out`} label="OUT" />
+            <Jack id={`${p}-in`}      label="IN" />
+            <Jack id={`${p}-rate-cv`} label="RATE CV" />
+            <Jack id={`${p}-out`}     label="OUT" />
           </div>
         </div>
       </div>
@@ -2252,13 +2304,14 @@ function FFBModule({ number = 1, onParamUpdate, getAnalyserData }) {
     onParamUpdate?.({ bands, master });
   }, [bands, master, onParamUpdate]);
 
-  // rAF loop: reads FFT from input analyser, computes per-band peak, writes LED opacity.
-  // FFT buffer is 512 → 256 bins, sampleRate/512 ≈ 86 Hz/bin. Maps dB (−∞ to 0) → 0–1.
+  // rAF loop: reads FFT from the POST-BANK analyser, computes per-band peak, writes
+  // LED opacity — so pulling a band's knob down visibly darkens its LED.
   useEffect(() => {
     if (!getAnalyserData) return;
-    const SAMPLE_RATE = 44100;
-    const FFT_SIZE    = 512;
-    const BIN_HZ      = SAMPLE_RATE / FFT_SIZE;
+    // Tone.Analyser('fft', 512) → 512 bins over fftSize 1024, so a bin is
+    // sampleRate/1024 wide. The old `44100 / 512` was double that AND ignored the
+    // device rate, so every band LED read roughly an octave low.
+    const BIN_HZ = fftBinHz(512);
     const lastVals    = new Array(FFB_BANDS.length).fill(-1); // Phase 61 dedupe
 
     const tick = () => {
@@ -2319,12 +2372,21 @@ function FFBModule({ number = 1, onParamUpdate, getAnalyserData }) {
             <div className={styles.ffbMasterDivider} />
             <div className={styles.ffbMasterCol}>
               <MoogKnob label="MSTR" size="sm" value={master / 1.5} onChange={v => setMaster(v * 1.5)} defaultValue={1 / 1.5} />
+              {/* FLAT — 14 knobs is a lot to reset by hand; returns every band to unity. */}
+              <button
+                type="button"
+                className={styles.ffbFlatBtn}
+                onClick={() => setBands(Array(FFB_BANDS.length).fill(0.75))}
+                title="Reset all bands to flat (unity)"
+              >FLAT</button>
             </div>
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id={`${p}-in`}  label="IN" />
-            <Jack id={`${p}-out`} label="OUT" />
+            <Jack id={`${p}-in`}        label="IN" />
+            <Jack id={`${p}-master-cv`} label="MSTR CV" />
+            <Jack id={`${p}-sweep-cv`}  label="SWEEP CV" />
+            <Jack id={`${p}-out`}       label="OUT" />
           </div>
         </div>
       </div>
@@ -2388,7 +2450,7 @@ function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable
   // (FFT 512 → 256 bins, ~86 Hz/bin, dB → 0–1 over a half-octave window per band center).
   useEffect(() => {
     if (!getAnalyserData) return;
-    const BIN_HZ   = 44100 / 512;
+    const BIN_HZ   = fftBinHz(512);   // same fix as the FFB meter — see its note
     const lastVals = new Array(VOC_BANDS.length).fill(-1); // Phase 61 dedupe
 
     const tick = () => {
@@ -3132,7 +3194,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
         : m.type === 'vca'   ? <VcaModule number={m.num} onParamUpdate={b.params} />
         : m.type === 'env'   ? <EnvelopeModule label={`ENV ${m.num}`} onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={b.meter} />
         : m.type === 'rev'   ? <ReverbModule number={m.num} onParamUpdate={b.params} getAuraData={b.aura} />
-        : m.type === 'bbd'   ? <ChorusModule number={m.num} onParamUpdate={b.params} />
+        : m.type === 'bbd'   ? <ChorusModule number={m.num} onParamUpdate={b.params} isPowered={audio.isPowered} />
         : m.type === 'kick'  ? <KickModule number={m.num} onParamUpdate={b.params} onTrigger={b.kickTrig} onSetTrigCallback={b.kickTrigCb} />
         : m.type === 'ffb'   ? <FFBModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.ffbData} />
         : m.type === 'seq'   ? <SequencerModule number={m.num} onStepsChange={b.seqSteps} onTempoChange={audio.setTempo} onSetCallback={b.seqStepCb} onGlideChange={b.seqGlide} />
@@ -3244,7 +3306,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                   {mod('lfo2', <LfoModule key="lfo2" number={2} onParamUpdate={audio.updateLfo2Params} getLedValue={getLfo2Instant} />)}
                   {mod('rev1', <ReverbModule key="rev1" number={1} onParamUpdate={audio.updateReverbParams}  getAuraData={getRev1Aura} />)}
                   {mod('rev2', <ReverbModule key="rev2" number={2} onParamUpdate={audio.updateReverb2Params} getAuraData={getRev2Aura} />)}
-                  {mod('bbd', <ChorusModule key="bbd" onParamUpdate={audio.updateChorusParams} />)}
+                  {mod('bbd', <ChorusModule key="bbd" onParamUpdate={audio.updateChorusParams} isPowered={audio.isPowered} />)}
                   {mod('ffb', <FFBModule key="ffb" onParamUpdate={audio.updateFFBParams} getAnalyserData={getFFBData} />)}
                 </div>
               </div>
