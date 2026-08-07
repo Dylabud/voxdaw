@@ -797,6 +797,20 @@
   gap: 2px;
 }
 
+/* Only switches that were handed an onToggle read as clickable (Phase 71). */
+.toggleGroupLive {
+  cursor: pointer;
+  user-select: none;
+}
+
+/* VCA output lamp — .jackRow is align-items: flex-end (so jack captions line up),
+   which would drop a captionless lamp to the baseline. Centre it on the jack
+   circles instead. Phase 71. */
+.vcaOutLed {
+  align-self: center;
+  margin-left: 2px;
+}
+
 .toggleLabel {
   font-size: 14px;
   letter-spacing: 0.16em;
@@ -995,6 +1009,21 @@
   box-sizing: border-box;
   width: 3em;
   min-width: 0; /* override the base 28px floor — width is authoritative here */
+}
+
+/* A selector that exists but isn't in circuit yet (VOWEL's FROM/TO outside DIRECT
+   mode, Phase 75). Dimmed and non-interactive rather than hidden — hiding it would
+   change the module's height between modes, and the LFO division screen already
+   establishes "real hardware, currently dark" as the language for this. */
+.selectorGroupIdle {
+  cursor: default;
+  opacity: 0.32;
+}
+.selectorGroupIdle:hover .selectorValue,
+.selectorGroupIdle:active .selectorValue {
+  color: #ffffff;
+  border-color: #38342c;
+  background: linear-gradient(to bottom, #1e1c18, #161412);
 }
 
 .selectorGroup:hover .selectorValue {
@@ -2174,6 +2203,23 @@
   justify-content: center;
   padding: 2px;
 }
+/* ── Vocoder header controls (Phase 72) — PROGRAM + GATE ──
+   Parked in the header's dead space beside the title because the vocoder is tier
+   row 3's max-content column (its width sets the rack floor) and Phase 49 already
+   fought its height down. margin-left:auto pushes them to the right edge; the
+   compact type keeps the pair SHORTER than the two-line title block, so the header
+   box is still sized by the title and neither axis grows. */
+.vocHeadCtrls {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-left: auto;
+  padding-right: 2px;
+}
+.vocHeadSel .selectorLabel { font-size: 10px; letter-spacing: 0.14em; }
+.vocHeadSel .selectorValue { font-size: 14px; letter-spacing: 0.1em; padding: 1px 5px; min-width: 52px; }
+.vocHeadSel { gap: 2px; }
+
 /* Left column: MIC knob (with SIG + button to its right), then jacks beneath */
 .vocLeft {
   display: flex;
@@ -2224,7 +2270,10 @@
 /* ── 16-Band Vocoder control grid — 4×3 sm-knob block (12 knobs under MIX), spread out ── */
 .vocKnobGrid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  /* 7 columns since Phase 82 (13 knobs = 7 + 6). Widening the grid rather than adding a
+     third row: this module is tier row 3's max-content column so both axes cost, but
+     Phase 49 spent real effort trading its HEIGHT down and a third row would undo that. */
+  grid-template-columns: repeat(7, 1fr);
   gap: 8px 6px;
   justify-items: center;
   align-items: start;

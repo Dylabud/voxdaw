@@ -36,6 +36,134 @@ function vowelFreqsAt(pos) {
   return [0, 1, 2].map(k => a[k] + (b[k] - a[k]) * f);
 }
 
+// DIRECT morph (Phase 75) — interpolate straight between TWO chosen vowels instead of
+// walking the A→E→I→O→U chain. This is the whole point of the mode: vowelFreqsAt treats
+// the five vowels as an ordered ROAD, so travelling U→A necessarily drives back through
+// O, I and E — halfway through it is literally sounding the vowel I. Blending the two
+// endpoints' formant triples directly means the sweep only ever contains shades of the
+// two vowels you picked (U→A at 50% = 515/980/2340, which is between them and is not
+// any other vowel). `from`/`to` are indices into VOWEL_ORDER; t is 0..1.
+function vowelFreqsBetween(from, to, t) {
+  const a = VOWEL_FORMANTS[VOWEL_ORDER[Math.max(0, Math.min(4, from))]];
+  const b = VOWEL_FORMANTS[VOWEL_ORDER[Math.max(0, Math.min(4, to))]];
+  const u = Math.max(0, Math.min(1, t));
+  return [0, 1, 2].map(k => a[k] + (b[k] - a[k]) * u);
+}
+
+// ── Kick CLICK TONE (Phase 80) ──
+// The click transient's highpass was hardcoded at 2 kHz. Exposing it costs no new nodes
+// and spans soft mallet thud → sharp beater snap. The range is built around the old
+// value so knob CENTRE is exactly 2000 Hz and saved racks are unchanged: ratio 36 gives
+// √36 = 6, so min = 2000/6 and max = 2000×6.
+const KICK_CLICK_MID_HZ = 2000;
+const KICK_CLICK_RATIO  = 36;                                   // 333 Hz … 12 kHz
+const KICK_CLICK_MIN_HZ = KICK_CLICK_MID_HZ / Math.sqrt(KICK_CLICK_RATIO);
+const kickClickToneHz = (k) =>
+  KICK_CLICK_MIN_HZ * Math.pow(KICK_CLICK_RATIO, Math.max(0, Math.min(1, k)));
+
+// ── Kick TUNE CV (Phase 80) ──
+// This rack's pitch CVs are Hz-domain, not volts — every pitch out (960, quantizer,
+// chord seq, keyboard) emits the frequency itself, which is what the VCOs' glideBus
+// consumes. So the kick's TUNE CV is Hz-domain too: the patched signal's VALUE becomes
+// the drum's fundamental, which is what makes sequenced tom fills and melodic drums
+// work. With a cable present the TUNE knob stops being an absolute pitch and becomes a
+// TRANSPOSE around it, exactly as a VCO's FREQ knob does against its CV — so neither
+// control goes dead. Centre of the TUNE knob (40·√5) is unity transpose.
+const KICK_TUNE_CENTER_HZ = 40 * Math.sqrt(5);   // ≈ 89.4 Hz, the TUNE knob's midpoint
+const KICK_TUNE_MIN_HZ = 20;                     // clamp: a sub-20 Hz "kick" is just a thud
+const KICK_TUNE_MAX_HZ = 2000;
+
+// Engagement is CABLE-driven, not level-driven: a patched-but-idle pitch source reads
+// 0, which is indistinguishable from no cable (the isLfoSync / FFB-sweep reasoning).
+// Resolved at trigger time rather than cached — a kick fires a few times a second, so
+// the scan is free next to a connect/disconnect invalidation surface.
+function kickTuneHz(n, kid, connections, knobHz) {
+  let patched = false;
+  const suffix = `\u2192${kid}-tune-cv`;
+  for (const k of connections.keys()) { if (k.endsWith(suffix)) { patched = true; break; } }
+  if (!patched) return knobHz;
+  const buf = n[`${kid}TuneCvAnalyser`]?.getValue();
+  if (!buf || !buf.length) return knobHz;
+  const cvHz = buf[buf.length - 1];
+  if (!(cvHz > 0)) return knobHz;                       // source silent this instant
+  const hz = cvHz * (knobHz / KICK_TUNE_CENTER_HZ);     // knob becomes transpose
+  return Math.max(KICK_TUNE_MIN_HZ, Math.min(KICK_TUNE_MAX_HZ, hz));
+}
+
+// ── Percussion trigger hygiene (Phase 79) ──
+// Tone's monophonic voices are Sources, and `Source.start()` asserts
+// "Start time must be strictly greater than previous start time" — so two triggers
+// landing on one kick instance at a non-increasing time throw and kill the step loop.
+// Two ways that happens here, one of them trivially reachable:
+//   1. The manual TRIG button fires at `Tone.now()`, while the sequencer schedules
+//      lookAhead (~0.1 s) INTO THE FUTURE. Clicking TRIG while a step is already
+//      pending is therefore in the PAST relative to it — a guaranteed throw, not a
+//      rare race. (MOOG_PLAN logged this class as a heavy-load-only race; it isn't.)
+//   2. Under a main-thread stall the step loop itself can fall behind its own last
+//      scheduled time.
+// Clamping strictly forward makes both harmless: a hit that would land in the past is
+// nudged 1 ms past the previous one, which is far below audibility on a drum.
+const KICK_MIN_GAP_S = 0.001;
+function nextKickTime(lastMap, kid, time) {
+  const t = Math.max(time, (lastMap[kid] ?? 0) + KICK_MIN_GAP_S);
+  lastMap[kid] = t;
+  return t;
+}
+
+// Run a visual callback AT an audio time rather than when it was scheduled. Tone's own
+// docs on Draw: Transport callbacks "always happen _before_ the scheduled time and are
+// not synchronized to the animation frame so they are not good for triggering tightly
+// synchronized visuals and sound". Step loops fire lookAhead ahead of the audible
+// moment, so LEDs driven straight from them lead the sound by ~100 ms — 40% of an
+// eighth note at 120 BPM, plainly visible. Falls back to calling immediately if the
+// context has no Draw, so the worst case is today's behaviour rather than a throw.
+function drawAt(time, fn) {
+  try {
+    const d = Tone.getDraw?.();
+    if (d?.schedule) { d.schedule(fn, time); return; }
+  } catch (_) { /* fall through */ }
+  fn();
+}
+
+// ── Pitch-CV origin resolution (Phase 76) ──
+// A 960's rest steps mute the VCOs it drives, and that mute keys on JACK IDENTITY:
+// `vcoActiveCvRef[vcoId] === 'seq-pitch-out'`. Patch the 960 straight into a VCO and
+// that matches. Route it through a quantizer or chord sequencer first and the VCO's
+// active CV becomes `qnt-cv-out` / `chordseq-cv-out`, which never matches — so off-steps
+// silently stopped muting and the note droned through every rest (Dylan-reported).
+//
+// These two module types PASS a pitch CV through, so their output can be walked back to
+// whatever feeds their input. Anything else terminates the walk. Keep this list to real
+// pitch-CV processors: it decides what counts as "the same note travelling onward".
+function cvPassthroughInput(jackId) {
+  const q = jackId.match(/^(qnt\d*)-cv-out$/);
+  if (q) return `${q[1]}-cv-in`;
+  const c = jackId.match(/^(chordseq\d*)-(cv|root|3rd|5th)-out$/);
+  if (c) return `${c[1]}-cv-in`;
+  return null;
+}
+
+// Walk a VCO's immediate CV source back to the jack that originated it.
+// `connections` is the live connectionsRef map (keys are `from→to`).
+// Terminates at a non-pass-through jack, at an unpatched pass-through input (that
+// module is then the origin — e.g. a chord seq running its own program), or at the
+// hop guard, which also makes a cable cycle harmless.
+function resolveCvOrigin(jackId, connections) {
+  let cur = jackId;
+  for (let hop = 0; hop < 4; hop++) {
+    const inJack = cvPassthroughInput(cur);
+    if (!inJack) return cur;
+    let feeder = null;
+    for (const key of connections.keys()) {
+      const i = key.indexOf('\u2192');
+      if (i !== -1 && key.slice(i + 1) === inJack) { feeder = key.slice(0, i); break; }
+    }
+    if (!feeder) return cur;
+    cur = feeder;
+  }
+  return cur;
+}
+
 // ── LFO free-run rate range (Phase 70) ──
 // RATE knob 0..1 → Hz, exponentially. Widened from the original 0.1–30 Hz (×300):
 // the low end now reaches genuinely slow evolving sweeps (0.01 Hz = a 100-second
@@ -216,9 +344,204 @@ export const VOC_BANDS = [
   { freq: 8000, Q: 4, label: '8k'   },
 ];
 
-// Rectifier drive — scales the full-wave-rectified band signal so the envelope follower
-// drives the carrier VCA gain into a useful range. Tuned by ear; raise for hotter vocoding.
+// Rectifier drive — scales each band before rectification so the envelope follower drives
+// the carrier VCA gain into a useful range. Lives in a per-band Gain (`${id}ModDrive${i}`)
+// rather than inside the WaveShaper curve — see VOC_RECT_POINTS for why that matters.
+//
+// **This is the single most consequential number in the vocoder, and it was a constant
+// from Phase 42 until Phase 82.** It decides how hard the voice gates the carrier:
+//   too HIGH — every band's detector pins against the rectifier ceiling, so the band VCAs
+//              sit near max whatever you say. Sixteen bandpasses of a saw, all open, sum
+//              back to roughly the saw: you hear the SYNTH with vague vocal colour rather
+//              than a voice. Dylan's "loose synth sound".
+//   too LOW  — bands barely crack, output is thin and quiet.
+// Measured at the shipped value of 8: the 8 kHz band pins at any band level above 0.031,
+// and a 4× change in voice level moves it only 0.638 → 0.853. Phase 73's pre-emphasis
+// tilt made that worse up top by multiplying the drive by up to 4×.
+// The knob is exponential with its CENTRE on the historical 8, so saved racks are
+// unchanged and the range reaches well below it (2) as well as above (32).
 const VOC_ENV_DRIVE = 8;
+// RES range + output makeup (Phase 83). VOC_RES_MAX_Q reaches past VOWEL's 11/13/15 so the
+// carrier bank can actually cut formant-shaped peaks; VOC_OUT_MAKEUP is the historical ×3,
+// now the value at the BASE Q rather than a constant.
+// Asymmetric envelope following (Phase 84, env-follower-worklet.js). ATTACK is pinned
+// fast — the useful range is tiny and 1 vs 3 ms is not worth a panel control — while the
+// DECAY knob maps to RELEASE. VOC_ENV_POST_HZ is what the legacy ModEnv lowpass is parked
+// at once the worklet owns the smoothing: high enough to be a pass-through for envelope
+// content, low enough to take off any residual stair-stepping.
+const VOC_ENV_ATK_S     = 0.0015;
+const VOC_ENV_REL_MIN_S = 0.006;   // DECAY 0 — snappy
+const VOC_ENV_REL_RATIO = 20;      // DECAY 1 → 120 ms; centre ≈ 27 ms
+// De-ripple filter after the follower, PER BAND (Phase 86). The follower's 1.5 ms attack
+// is fast enough to track individual GLOTTAL PULSES, so it re-imposes the speaker's PITCH
+// on the carrier as amplitude modulation — measured at 18.9% ripple with this parked at a
+// flat 300 Hz, which is heard as buzzy static on every voiced sound. (The pre-Phase-84
+// symmetric follower was worse still at 28.7%, so 84 helped and simply did not go far
+// enough; that is why DECAY "didn't make much difference" — release was never the culprit.)
+//
+// A FLAT cutoff can't win: pitch ripple (~120 Hz) and consonant onsets (~30 Hz bandwidth)
+// are barely a decade apart, so 60 Hz flat still leaves 7.4% ripple AND slows consonants
+// to 15 ms. Scaling with band frequency breaks the trade, because the two problems live in
+// different bands: pitch ripple is a VOICED phenomenon concentrated low and mid, while
+// consonants are high and mostly unvoiced noise with no pitch ripple to reject at all.
+// 20 Hz at the 100 Hz band rising to 121 Hz at 8 kHz gives 6.0% ripple AND a 12.5 ms
+// consonant rise — better than any single flat value on both counts.
+const VOC_ENV_POST_BASE_HZ = 20;     // at VOC_BANDS[0]
+const VOC_ENV_POST_EXP     = 0.41;   // → ~121 Hz at the 8 kHz band
+const vocEnvPostHzFor = (hz) =>
+  VOC_ENV_POST_BASE_HZ * Math.pow(hz / VOC_BANDS[0].freq, VOC_ENV_POST_EXP);
+const vocEnvReleaseFor = (d) =>
+  VOC_ENV_REL_MIN_S * Math.pow(VOC_ENV_REL_RATIO, Math.max(0, Math.min(1, d)));
+
+const VOC_RES_MAX_Q = 20;
+// ANALYSIS bank Q (Phase 85). Phase 83 sharpened only the CARRIER bank, which was half
+// the job: the modulator bank stayed at VOC_BANDS' Q of 4, and at that width a single
+// vocal formant at 730 Hz opens FIVE analysis bands (430/580/770/1035/1385 at
+// 22/47/92/33/18%). So every formant was reproduced as a smeared cloud of five carrier
+// peaks — sharp peaks after 83, but still five of them. VOWEL renders the same formant as
+// exactly ONE peak, which is the difference Dylan keeps hearing.
+// At Q≈12 the leakage collapses to a single band. Tied to RES at 0.8× so one knob
+// sharpens analysis and synthesis together, floored at the original 4 (so RES at or below
+// centre is byte-identical to before) and ceilinged at 14.
+// Trade-off, accepted: a constant-Q bank rings for ~Q/(pi*f), so narrow LOW bands ring
+// longest (~38 ms at 100 Hz, Q 12). It matters least exactly there — the 150 Hz highpass
+// and the pre-emphasis tilt (-8.4 dB at 100 Hz) already suppress that region — and the
+// Phase 84 fast attack tracks an onset before the ring settles.
+const VOC_ANALYSIS_Q_RATIO = 0.8;
+const VOC_ANALYSIS_Q_MIN   = 4;    // the historical VOC_BANDS Q
+const VOC_ANALYSIS_Q_MAX   = 14;
+const vocAnalysisQFor = (carrierQ) =>
+  Math.max(VOC_ANALYSIS_Q_MIN, Math.min(VOC_ANALYSIS_Q_MAX, carrierQ * VOC_ANALYSIS_Q_RATIO));
+const VOC_BASE_Q    = 4;     // VOC_BANDS' Q — the reference point for the makeup
+const VOC_OUT_MAKEUP = 3;
+const VOC_DRIVE_RATIO = 16;                               // knob 0 → /4, knob 1 → ×4
+const vocDriveFor = (k) =>
+  VOC_ENV_DRIVE * Math.pow(VOC_DRIVE_RATIO, Math.max(0, Math.min(1, k)) - 0.5);
+
+// ── Modulator analysis rectifier (Phase 73) ───────────────────────────────────
+// Each modulator band is rectified and smoothed into an envelope that opens the matching
+// carrier band. Two things about this stage were wrong and both were audible.
+//
+// 1. THE CURVE MUST HAVE AN ODD POINT COUNT. `Tone.WaveShaper.setMap` samples the mapping
+//    at `x = (i/(len-1))*2 - 1`; with the default even length of 1024, x = 0 falls between
+//    samples 511 and 512, and since the mapping is |x|·8 BOTH neighbours are 0.0078. Web
+//    Audio interpolates, so the curve returned 0.0078 for a SILENT input — a permanent
+//    0.0078 gain on all 16 carrier VCAs. Through the ×3 output makeup that is raw carrier
+//    at about −8.5 dB, always, whether or not anyone is talking, and loudest wherever the
+//    carrier has the most energy: the saw's fundamental. That was the constant low buzz.
+//    An odd count puts x = 0 exactly on a sample, so silence maps to exactly 0.
+//    (Third time this class has bitten: the VCA LOG/LIN curve and the mic gate both had to
+//    be built to pass through the origin for the same reason.)
+// 2. THE CEILING WAS A HARD CLIP. `Math.min(1, …)` meant every band at or above 1/8 scale
+//    pinned to exactly 1.0, so the loudest bands became indistinguishable from each other.
+//    Vowel identity IS the relative height of the formant peaks, so flattening the tops
+//    smears one vowel into another — the "vocals aren't clear" complaint. Now linear up to
+//    VOC_RECT_KNEE (contrast preserved exactly where it matters) and asymptotic to 1 above
+//    it, so nothing pins and nothing exceeds unity.
+//
+// Keeping the drive OUT of the curve is what makes the resolution honest: the shaper now
+// sees an already-amplified signal that spans the full [-1, 1] domain, so every band gets
+// the curve's full resolution. With the drive inside the curve, a band driven ×32 would
+// have used ~1/32 of the table and quantised its envelope into a few dozen steps.
+const VOC_RECT_POINTS = 2049;   // ODD — see (1)
+const VOC_RECT_KNEE   = 0.6;    // linear below this, soft-limited above
+const vocRectShape = (x) => {
+  const a = Math.abs(x);
+  if (a <= VOC_RECT_KNEE) return a;
+  return 1 - (1 - VOC_RECT_KNEE) * Math.exp(-(a - VOC_RECT_KNEE) / (1 - VOC_RECT_KNEE));
+};
+
+// ── Analysis pre-emphasis (Phase 73) ──────────────────────────────────────────
+// Speech energy falls roughly 6–9 dB per octave above ~500 Hz, so with a flat analysis
+// bank the low bands sit wide open on the voice fundamental while the consonant bands
+// (2–8 kHz) barely crack — a muffled robot with a droning bottom end. Every real vocoder
+// pre-emphasises the analysis path to compensate; this is the per-band form of it, applied
+// in each band's drive gain, so it costs no extra nodes and nothing downstream changes.
+//
+// Deliberately applied BEFORE the rectifier, not after the envelope: tilting the DETECTOR
+// makes low bands less sensitive and high bands more sensitive while every carrier VCA
+// stays bounded at unity. Tilting after the envelope would instead push the high carrier
+// bands past unity and make the output level depend on the tilt.
+//
+// (f/500)^0.6 ≈ 3.6 dB/octave — a partial correction, not a full one. Full compensation
+// measures "more correct" and sounds hissy; this leaves the voice sounding like a voice.
+const VOC_TILT_PIVOT_HZ = 500;
+const VOC_TILT_EXP      = 0.6;
+const VOC_TILT_MIN      = 0.35;  // ≈ −9 dB floor, so the 100 Hz band can't dominate
+const VOC_TILT_MAX      = 4.0;   // ≈ +12 dB ceiling, so the top bands can't hiss
+const vocBandTilt = (hz) => Math.max(VOC_TILT_MIN,
+  Math.min(VOC_TILT_MAX, Math.pow(hz / VOC_TILT_PIVOT_HZ, VOC_TILT_EXP)));
+
+// ── Modulator noise gate (Phase 72) ───────────────────────────────────────────
+// The mod pre-chain is HP(150) → Compressor(−28 dB, 4:1). That compressor is what
+// makes vocoding consistent, but at a −28 dB threshold it also pulls ROOM NOISE up
+// between words — the vocoder hisses at you whenever you stop talking. A gate in
+// front of it is the fix. Order matters: gate BEFORE the compressor, so the gate
+// sees the mic's natural dynamics; after it, the compressor has already flattened
+// the difference between speech and noise and no threshold works.
+//
+//   ${id}ModHP ─┬──────────────────────────► ${id}GateGain ─► ${id}ModComp
+//               └─► GateFollow ─► GateScale ─► GateCurve ──┘ (drives .gain)
+//                   (envelope)    (1/thresh)   (soft knee)
+//
+// NOT `Tone.Gate`, though it exists and looks like an exact fit. Tone.Gate is
+// Follower → GreaterThan → gain, and GreaterThan emits a hard 0/1 step: the gain
+// snaps open the instant the threshold is crossed, which clicks on every word and
+// chatters on breaths. Its `smoothing` only smooths DETECTION, not the gain. So the
+// comparator is replaced by a soft-knee WaveShaper — same three-stage shape, but the
+// gain eases open across the 6 dB below the threshold instead of switching.
+//
+// The threshold is applied by SCALING the follower into a FIXED curve rather than by
+// rebuilding the curve: x = followerAmp / thresholdAmp, so the knob writes one plain
+// gain param (rampable, single-writer) and the curve table is never rewritten (the
+// reverb-DAMP rebuild-storm lesson). WaveShaper clamps its input to [-1, 1], which is
+// exactly the behaviour wanted at the top: any level at or above the threshold gives
+// x ≥ 1 → fully open. curve(0) = 0 keeps the gate shut on true silence (and a
+// WaveShaper fed silence still emits curve(0), so this must be exact — the VCA
+// LOG/LIN lesson from Phase 71).
+const VOC_GATE_MIN_DB   = -80;   // knob 0 — below any real signal, i.e. effectively OFF
+const VOC_GATE_MAX_DB   = -30;   // knob 1 — aggressive, for a noisy room
+const VOC_GATE_SMOOTH   = 0.04;  // follower time constant. FIXED at construction and never
+                                 // written: Follower wraps a OnePoleFilter, whose frequency
+                                 // setter disposes and rebuilds its IIRFilter (Phase 70).
+const VOC_GATE_KNEE     = 0.5;   // curve is 0 below half the threshold (−6 dB), 1 at it
+const VOC_GATE_POINTS   = 513;   // odd, so x = 0 lands exactly on a sample
+
+// knob 0–1 → the scaler that maps "amplitude equal to the threshold" onto x = 1.
+const vocGateScaleFor = (g) =>
+  1 / Math.pow(10, (VOC_GATE_MIN_DB + Math.max(0, Math.min(1, g)) * (VOC_GATE_MAX_DB - VOC_GATE_MIN_DB)) / 20);
+
+const VOC_GATE_CURVE = (() => {
+  const c = new Float32Array(VOC_GATE_POINTS);
+  for (let i = 0; i < VOC_GATE_POINTS; i++) {
+    const x = (i / (VOC_GATE_POINTS - 1)) * 2 - 1;   // WaveShaper maps the curve over [-1, 1]
+    if (x <= VOC_GATE_KNEE) { c[i] = 0; continue; }  // covers x ≤ 0 too (Follower is non-negative anyway)
+    const t = (x - VOC_GATE_KNEE) / (1 - VOC_GATE_KNEE);
+    c[i] = t * t * (3 - 2 * t);                      // smoothstep — no corner at either end
+  }
+  return c;
+})();
+
+// Builds + splices one vocoder instance's modulator noise gate. `${id}ModHP` and
+// `${id}ModComp` must already exist and must NOT already be connected to each other.
+// Shared by the static instance (id 'voc' — its node names are `vocModHP` etc., so the
+// composed names match exactly) and the addModule factory. Returns the created node
+// names for the dynamic dispose sweep.
+function buildVocGate(n, id) {
+  n[`${id}GateFollow`] = new Tone.Follower({ smoothing: VOC_GATE_SMOOTH });
+  n[`${id}GateScale`]  = new Tone.Gain(vocGateScaleFor(0));   // default OFF — saved racks unchanged
+  n[`${id}GateCurve`]  = new Tone.WaveShaper(VOC_GATE_CURVE);
+  n[`${id}GateGain`]   = new Tone.Gain(0);                    // intrinsic 0: the curve is the only driver
+  // Audio path.
+  n[`${id}ModHP`].connect(n[`${id}GateGain`]);
+  n[`${id}GateGain`].connect(n[`${id}ModComp`]);
+  // Side-chain detector — taps BEFORE the gate, so a closed gate can still reopen.
+  n[`${id}ModHP`].connect(n[`${id}GateFollow`]);
+  n[`${id}GateFollow`].connect(n[`${id}GateScale`]);
+  n[`${id}GateScale`].connect(n[`${id}GateCurve`]);
+  n[`${id}GateCurve`].connect(n[`${id}GateGain`].gain);
+  return [`${id}GateFollow`, `${id}GateScale`, `${id}GateCurve`, `${id}GateGain`];
+}
 
 // Quantizer scale definitions (semitone offsets from root).
 // Sent to the quantizer AudioWorklet via port.postMessage.
@@ -337,6 +660,79 @@ const VCF_ENV_CENTS = Math.round(1200 * Math.log2(VCF_CUTOFF_RATIO));  // ≈ 11
 const VCF_CV_CENTS  = Math.round(VCF_ENV_CENTS / 2);                   // ≈ 5980, ±~5 oct
 // ENV AMT knob (0–1) → the ENV-jack scaler's gain, in cents.
 const vcfEnvAmtCents = (amt) => Math.max(0, Math.min(1, amt)) * VCF_ENV_CENTS;
+
+// ── VCA CV chain (Phase 71 · CV 2 added Phase 77) ─────────────────────────────
+// The -cv jack used to land straight on the Tone.Gain's `gain` param, which left
+// the faceplate's attenuator knob wired to nothing and the LOG/LIN lever wired to
+// nothing. There are now TWO attenuated control inputs feeding one response curve:
+//
+//   -cv  jack → ${id}Cv  (CV 1 attenuator) ─┐
+//                                            ├→ ${id}CvShape (LOG/LIN) → ${id}.gain
+//   -cv2 jack → ${id}Cv2 (CV 2 attenuator) ─┘
+//
+// **The two CVs sum BEFORE the response curve, not after.** That is how a real VCA
+// behaves — several control voltages meet at one control port and the amplifier's
+// linear or exponential response acts on their SUM — and it is why there is one
+// shaper rather than two. Shaping each input separately and adding the results
+// would make two half-open CVs read as two small gains instead of one large one,
+// which is both wrong and, in LOG, drastically quieter. Web Audio sums multiple
+// connections into a node's input, so no summing node is needed.
+//
+// The attenuators matter far more here than they did on the VCF, where they were
+// declined in Phase 70 on the grounds that "an LFO has its own DEPTH knob": the
+// VCA's usual CV source is an ENVELOPE, which has no level knob at all, so
+// without this there was no way to set modulation depth. (MOOG_PLAN Phase 70
+// already flagged level-less sources as the gap in that decision.)
+//
+// LOG/LIN is that CV's response curve — the 902's LIN/EXP switch:
+//   LIN  gain follows the voltage 1:1. A linear envelope ramp stays loud and
+//        then drops away sharply at the very end.
+//   LOG  gain follows the voltage in dB across VCA_LOG_RANGE_DB. Because hearing
+//        is logarithmic, a linear envelope ramp fades perfectly evenly — the
+//        "natural instrument" decay.
+// Both curves are normalised so f(0) = 0 and f(1) = 1: switching never changes
+// the fully-open or fully-closed level, and — load-bearing — an UNPATCHED CV
+// input adds exactly 0. A WaveShaper fed silence still emits curve(0), so a
+// curve that didn't pass through the origin would park a permanent DC offset on
+// every VCA's gain. VCA_CURVE_POINTS is ODD so x = 0 lands exactly on a sample.
+// Negative CV clamps to 0 in LOG (there is no negative dB-domain gain); LIN
+// passes it through, so a bipolar LFO can still subtract from the GAIN bias
+// exactly as it did before this chain existed.
+const VCA_LOG_RANGE_DB = 60;
+const VCA_CURVE_POINTS = 1025;
+
+function makeVcaCurve(log) {
+  const c = new Float32Array(VCA_CURVE_POINTS);
+  const floor = Math.pow(10, -VCA_LOG_RANGE_DB / 20);   // 0.001 at 60 dB
+  for (let i = 0; i < VCA_CURVE_POINTS; i++) {
+    const x = (i / (VCA_CURVE_POINTS - 1)) * 2 - 1;     // WaveShaper maps the curve over [-1, 1]
+    if (!log)   { c[i] = x; continue; }
+    if (x <= 0) { c[i] = 0; continue; }
+    c[i] = (Math.pow(10, ((x - 1) * VCA_LOG_RANGE_DB) / 20) - floor) / (1 - floor);
+  }
+  return c;
+}
+const VCA_CURVE_LIN = makeVcaCurve(false);
+const VCA_CURVE_LOG = makeVcaCurve(true);
+
+// Builds + wires one VCA instance's CV chain and its output meter. `n[id]` (the
+// Tone.Gain) must already exist. Shared by the three statics and the addModule
+// factory; returns the node names it created for the dynamic dispose sweep.
+// The meter is a dead-end tap on the OUTPUT (the Phase 56 post-effect rule), so
+// the panel LED shows the envelope actually opening — the VCA is the one module
+// where "is anything getting through?" is the whole question, and it was the
+// only signal-path module on the rack with no indicator at all.
+function buildVcaCv(n, id) {
+  n[`${id}Cv`]      = new Tone.Gain(1);                    // CV 1 attenuator
+  n[`${id}Cv2`]     = new Tone.Gain(1);                    // CV 2 attenuator
+  n[`${id}CvShape`] = new Tone.WaveShaper(VCA_CURVE_LIN);   // LOG/LIN response, shared
+  n[`${id}Meter`]   = new Tone.Meter({ normalRange: true, smoothing: 0.2 });
+  n[`${id}Cv`].connect(n[`${id}CvShape`]);                  // both attenuators sum at the
+  n[`${id}Cv2`].connect(n[`${id}CvShape`]);                 // shaper's input — see above
+  n[`${id}CvShape`].connect(n[id].gain);
+  n[id].connect(n[`${id}Meter`]);
+  return [`${id}Cv`, `${id}Cv2`, `${id}CvShape`, `${id}Meter`];
+}
 
 // Noise module colours (Phase 69). Each colour has its own LEVEL-tap gain (the
 // jack taps it) and a per-colour makeup so they sit at comparable loudness at the
@@ -513,15 +909,24 @@ function buildJackMap(n) {
     'vcf2-env': { type: 'in',  dest: n.vcf2env },
     'vcf2-out': { type: 'out', node: n.vcf2 },
     // ── VCA ──
+    // -cv lands on the ENV AMT attenuator, never on `gain` directly (see buildVcaCv).
+    // -out taps the VCA itself on every instance. It used to tap seqGateNode for
+    // vca1 (plus an unreachable `vca-out2` on seq2GateNode), which silently chopped
+    // VCA 1's output to sequencer 1's rhythm with no cable patched — a hardwired
+    // audio path, which MOOG_ARCHITECTURE forbids since Phase 10.
+    // `-cv` keeps its original id (it is `vca-cv`, not `vca-cv1`) so cables saved
+    // before CV 2 existed still resolve; only its panel LABEL became "CV 1".
     'vca-in':  { type: 'in',  dest: n.vca },
-    'vca-cv':  { type: 'in',  dest: n.vca.gain },
-    'vca-out':  { type: 'out', node: n.seqGateNode  }, // seq1-gated VCA tap
-    'vca-out2': { type: 'out', node: n.seq2GateNode }, // seq2-gated VCA tap
+    'vca-cv':  { type: 'in',  dest: n.vcaCv },
+    'vca-cv2': { type: 'in',  dest: n.vcaCv2 },
+    'vca-out':  { type: 'out', node: n.vca },
     'vca2-in':  { type: 'in',  dest: n.vca2 },
-    'vca2-cv':  { type: 'in',  dest: n.vca2.gain },
+    'vca2-cv':  { type: 'in',  dest: n.vca2Cv },
+    'vca2-cv2': { type: 'in',  dest: n.vca2Cv2 },
     'vca2-out': { type: 'out', node: n.vca2 },
     'vca3-in':  { type: 'in',  dest: n.vca3 },
-    'vca3-cv':  { type: 'in',  dest: n.vca3.gain },
+    'vca3-cv':  { type: 'in',  dest: n.vca3Cv },
+    'vca3-cv2': { type: 'in',  dest: n.vca3Cv2 },
     'vca3-out': { type: 'out', node: n.vca3 },
     // ── Reverb ──
     'reverb-in':      { type: 'in',  dest: n.reverb  },
@@ -540,16 +945,18 @@ function buildJackMap(n) {
     'kick-gate-in':  { type: 'in', dest: null, isGate: true, isKick: true },
     // ── Kick click CV ── audio-rate CV into kickClickGain.gain for accent modulation.
     'kick-click-in': { type: 'in', dest: n.kickClickGain.gain },
-    // ── ENV 1 ── gate jack wired to gateActionsRef by connect(); trig deferred
+    // Hz-domain: patch a pitch out here and its value becomes the drum's fundamental.
+    'kick-tune-cv':  { type: 'in', dest: n.kickTuneCv },
+    // ── ENV 1 ── gate + trig jacks both wired to gateActionsRef by connect()
     'env1-gate': { type: 'in', dest: null, isGate: true, envId: 'env1' },
-    'env1-trig': { type: 'in', dest: null },
+    'env1-trig': { type: 'in', dest: null, isGate: true, envId: 'env1', isTrig: true },
     'env1-out':  { type: 'out', node: n.env1 },
     // ── ENV 2 ──
     'env2-gate': { type: 'in', dest: null, isGate: true, envId: 'env2' },
-    'env2-trig': { type: 'in', dest: null },
+    'env2-trig': { type: 'in', dest: null, isGate: true, envId: 'env2', isTrig: true },
     'env2-out':  { type: 'out', node: n.env2 },
     'env3-gate': { type: 'in', dest: null, isGate: true, envId: 'env3' },
-    'env3-trig': { type: 'in', dest: null },
+    'env3-trig': { type: 'in', dest: null, isGate: true, envId: 'env3', isTrig: true },
     'env3-out':  { type: 'out', node: n.env3 },
     // ── LFO ──
     // lfo-fm → lfo1modGain (Gain): patched CV * MOD DEPTH knob gain → lfo.frequency
@@ -626,6 +1033,7 @@ export default function useMoogAudio() {
   const vocShiftBaseRefs      = useRef({ voc: 1.0 });  // base ratio (1 = no shift)
   const vocShiftLfoRateRefs   = useRef({ voc: 0.7 });  // Hz
   const vocShiftLfoAmpRefs    = useRef({ voc: 0 });    // octaves of swing
+  const vocDecayRefs          = useRef({});            // id → DECAY knob, replayed when the worklet wires late
   const vocShiftLastRatioRefs = useRef({});            // delta gates — static shift settles to 0 writes
   // Vowel/formant module state (Phase 64) — id-keyed. vowelIdsRef is the list
   // the vowelTick rAF (sole writer of the 3 filter frequencies) iterates. The
@@ -640,6 +1048,11 @@ export default function useMoogAudio() {
   const vowelMorphRefs   = useRef({});                 // id → morph position 0..4 (A..U)
   const vowelShapeRefs   = useRef({});                 // id → tract-scale factor
   const vowelLastFreqRefs = useRef({});                // id → last [F1,F2,F3] (delta gate)
+  // DIRECT mode (Phase 75) — id-keyed. Empty/false = CHAIN, i.e. the pre-Phase-75
+  // behaviour, so a saved rack that never touched MODE is bit-identical.
+  const vowelDirectRefs  = useRef({});                 // id → true while MODE is DIRECT
+  const vowelFromRefs    = useRef({});                 // id → FROM vowel index 0..4
+  const vowelToRefs      = useRef({});                 // id → TO vowel index 0..4
   // ── LFO tempo-sync (Phase 65) ── all id-keyed; cover static 'lfo'/'lfo2' + dynamics.
   const lfoSyncActiveRef = useRef({});                 // id → true when a clock is patched to -sync
   const lfoRateRefs      = useRef({});                 // id → RATE knob 0..1 (drives sync division)
@@ -672,7 +1085,22 @@ export default function useMoogAudio() {
   const seqCurrentStepRefs = useRef({ seq: -1, seq2: -1 });
   const seqStepCbRefs      = useRef({});                       // seqId → UI LED callback
   const seqGlideRefs       = useRef({ seq: 0, seq2: 0 });      // seconds (0 = off)
-  const gateActionsRef      = useRef(new Map()); // toJackId → Tone.Envelope
+  const gateActionsRef      = useRef(new Map()); // cable key → { env, fromId, isTrig } | kick action
+
+// TRIG vs GATE. A GATE holds the envelope at SUSTAIN for as long as it stays high, so the
+// note's length is the incoming gate's length. A TRIG is a momentary spike: it fires
+// attack → decay → release as a ONE-SHOT whose length comes from the envelope's own A+D
+// knobs, so a clock pulse or a one-step sequencer gate plays a percussive hit regardless
+// of how long the source is held. That distinction is the whole reason MOOG_ARCHITECTURE
+// §5 lists the two as separate ports on the 911.
+const triggerEnvOneShot = (env, time) => {
+  // A+D reaches the sustain point and releases from there, so the knobs still shape it.
+  // Floored so an all-zero envelope still produces an audible click rather than nothing.
+  const dur = Math.max(0.002, env.toSeconds(env.attack) + env.toSeconds(env.decay));
+  if (time === undefined) env.triggerAttackRelease(dur);
+  else                    env.triggerAttackRelease(dur, time);
+};
+
 
   // Chord sequencer — separate slower-clocked 8-step pitch CV source.
   // Each step stores { rootClass: 0-11, chordType: keyof SCALE_DEFS }.
@@ -743,6 +1171,7 @@ export default function useMoogAudio() {
   // can mint a worklet for VCOs added later. dynVcoSyncRef tracks each dynamic
   // VCO's HARD SYNC toggle across power cycles (the static VCOs use 5 dedicated refs).
   const wireHardSyncRef = useRef(null);
+  const wireEnvFollowRef = useRef(null);   // Phase 84 — wires a vocoder added after the worklet loaded
   const dynVcoSyncRef   = useRef({});
   // Persists each quantizer's latest config (keyed by qid) so it can be flushed
   // when its worklet node is created. baseHz — modulation-mode center for the
@@ -788,12 +1217,24 @@ export default function useMoogAudio() {
     }
     const fires = step.gate && Math.random() < step.prob;
     const gateVal = fires ? 1 : 0;
-    // Static seqs gate a VCA tap (vca-out/vca-out2 jacks); dynamic seqs have no
-    // tap — the optional chain makes the write a no-op for them.
+    // Legacy per-seq VCA tap. No instance has a GateNode any more (Phase 71
+    // removed the two statics'; dynamics never had one), so this is a no-op —
+    // kept only so a future per-seq output gate can drop straight back in.
     // Native AudioParam directly: Tone.Param's event queue conflicts with rampTo.
     n[`${seqId}GateNode`]?.gain._param.setValueAtTime(gateVal, time);
+    // Rest-step mute. Unlike the glide write above — which must stay on the IMMEDIATE
+    // source, because whoever sits directly upstream owns the pitch — this resolves the
+    // source TRANSITIVELY, so a rest still mutes through a quantizer or chord sequencer.
+    // The `=== pitchSrc` short-circuit means a direct patch never pays for the walk, and
+    // the walk itself only runs for a VCO whose CV really is a pass-through output.
+    // Resolved per step rather than cached: the origin depends on cables that never touch
+    // the VCO (patching seq→qnt-cv-in changes it for a VCO already fed by qnt-cv-out), so
+    // a cache would need invalidating from every connect/disconnect site — more failure
+    // surface than the few microseconds it saves at four steps a second.
     for (const vcoId of allVcoIdsRef.current) {
-      if (vcoActiveCvRef.current[vcoId] === pitchSrc)
+      const src = vcoActiveCvRef.current[vcoId];
+      if (!src) continue;
+      if (src === pitchSrc || resolveCvOrigin(src, connectionsRef.current) === pitchSrc)
         n[`${vcoId}bus`].gain._param.setValueAtTime(gateVal, time);
     }
     if (gateActionsRef.current.size > 0) {
@@ -804,10 +1245,16 @@ export default function useMoogAudio() {
         if (action.isKick) {
           const kid = action.kickId ?? 'kick';
           if (fires && n[`${kid}Synth`]) {
-            n[`${kid}Synth`].triggerAttackRelease(kickTuneRef.current[kid] ?? 55, kickDecayRef.current[kid] ?? 0.4, time);
-            n[`${kid}ClickSynth`]?.triggerAttackRelease((kickDecayRef.current[kid] ?? 0.4) * 0.1, time);
-            kickTrigCbRef.current[kid]?.();
+            const kt = nextKickTime(kickLastTimeRef.current, kid, time);
+            const kd = kickDecayRef.current[kid] ?? 0.4;
+            const khz = kickTuneHz(n, kid, connectionsRef.current, kickTuneRef.current[kid] ?? 55);
+            n[`${kid}Synth`].triggerAttackRelease(khz, kd, kt);
+            n[`${kid}ClickSynth`]?.triggerAttackRelease(kd * 0.1, kt);
+            drawAt(kt, () => kickTrigCbRef.current[kid]?.());
           }
+        } else if (action.isTrig) {
+          // One-shot: a trigger has no "off", so a rest step simply doesn't fire.
+          if (fires) triggerEnvOneShot(action.env, time);
         } else {
           if (fires) {
             action.env.triggerAttack(time);
@@ -818,8 +1265,9 @@ export default function useMoogAudio() {
         }
       }
     }
-    // Notify UI for LED animation (Tone callbacks execute on main thread)
-    seqStepCbRefs.current[seqId]?.(idx);
+    // Notify UI for LED animation, scheduled AT the step's audio time — firing it
+    // straight from this callback lit the LED ~lookAhead early (see drawAt).
+    drawAt(time, () => seqStepCbRefs.current[seqId]?.(idx));
   }, '8n'), []);
 
   // One chord-seq loop body for every instance (Phase 60e part 2) — the chord
@@ -1014,11 +1462,10 @@ export default function useMoogAudio() {
       chorusFb:   new Tone.Gain(0),
       chorusFbDly: new Tone.Delay(BBD_FB_DELAY_S),   // breaks the delay-free cycle — see BBD_FB_DELAY_S
 
-      // Per-sequencer gate nodes — sit between n.vca and the seq?-vca-out jacks.
-      // Sole writers are the seq1/seq2 Tone.Loop callbacks. Gate-off silences only
-      // signals explicitly routed through seq-vca-out / seq2-vca-out, not global audio.
-      seqGateNode:  new Tone.Gain(1),
-      seq2GateNode: new Tone.Gain(1),
+      // (Phase 71: seqGateNode / seq2GateNode removed — they sat between n.vca and
+      // the vca-out jacks and chopped VCA 1's output to sequencer 1's rhythm with no
+      // cable patched. buildSeqLoop's write is optional-chained, so the statics now
+      // behave exactly like the dynamic sequencers, which never had a VCA tap.)
 
       // Recording tap — side connection from seqMasterGate so the Workstation's
       // Tone.Recorder can capture Moog audio without touching the speaker path.
@@ -1040,6 +1487,13 @@ export default function useMoogAudio() {
       // → vocModRaw (the vocoder modulator pre-chain). extMicMeter taps post-gain for the
       // SIG LED (getMeterValue('extMic')).
       extMicGain:  new Tone.Gain(1),
+      // Per-vocoder mic level. The Tone.UserMedia and extMicGain are a SINGLETON shared
+      // by every vocoder instance, but the MIC knob is per-instance — so before Phase 81
+      // both instances' knobs wrote the one extMicGain and fought over it (turning voc2's
+      // MIC silently moved voc1's, and the two knob positions disagreed with reality).
+      // One gain per instance restores single-writer; extMicGain now stays at unity and
+      // is purely the shared tap point for the mic + its SIG meter.
+      vocMicGain:  new Tone.Gain(1),
       extMicMeter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
 
       // VCO core routing (Phase 68b), replicated per VCO. The hard-sync worklet
@@ -1141,6 +1595,8 @@ export default function useMoogAudio() {
                           envelope: { attack: 0.001, decay: 0.04, sustain: 0, release: 0.01 } }),
       kickClickFilter: new Tone.Filter({ frequency: 2000, type: 'highpass', rolloff: -12 }),
       kickClickGain:   new Tone.Gain(0.25),
+      kickTuneCv:         new Tone.Gain(1),                        // TUNE CV jack buffer
+      kickTuneCvAnalyser: new Tone.Analyser('waveform', 128),      // sampled at trigger time
       kickOut:         new Tone.Gain(1),
 
       // 914 Fixed Filter Bank — parallel bandpass architecture.
@@ -1208,8 +1664,17 @@ export default function useMoogAudio() {
       // PRESENCE — peaking EQ (~2.7 kHz) on the vocoded output so the robot voice cuts
       // through. Gain (dB) owned by updateVocoderParams; sits vocOut → vocPresence → vocVolume.
       vocPresence: new Tone.Filter({ type: 'peaking', frequency: 2700, Q: 1, gain: 0 }),
+      // Hard-knee brick wall, copied from the VOWEL module's output stage — NOT Tone.Limiter,
+      // whose 30 dB soft knee barely compresses (the Phase 64a finding). It catches the peaks
+      // the Q-tracking makeup lets through and is a large part of why VOWEL reads as "clean".
+      // Sits before VOLUME so the user's level control isn't fighting it, and CLARITY still
+      // sums after it — the real voice bypasses the bank's limiter exactly as in VOWEL.
+      vocLimit: new Tone.Compressor({ threshold: -1, ratio: 20, knee: 0, attack: 0.003, release: 0.05 }),
       ...Object.fromEntries(VOC_BANDS.map((b, i) => [`vocModBPF${i}`,  new Tone.Filter({ type: 'bandpass', frequency: b.freq, Q: b.Q, rolloff: -12 })])),
-      ...Object.fromEntries(VOC_BANDS.map((_, i) => [`vocModRect${i}`, new Tone.WaveShaper((x) => Math.min(1, Math.abs(x) * VOC_ENV_DRIVE))])),
+      // Per-band drive = VOC_ENV_DRIVE × the pre-emphasis tilt. Set once at construction;
+      // nothing writes these afterwards, so the env follower stays the VCA gain's one driver.
+      ...Object.fromEntries(VOC_BANDS.map((b, i) => [`vocModDrive${i}`, new Tone.Gain(VOC_ENV_DRIVE * vocBandTilt(b.freq))])),
+      ...Object.fromEntries(VOC_BANDS.map((_, i) => [`vocModRect${i}`, new Tone.WaveShaper(vocRectShape, VOC_RECT_POINTS)])),
       ...Object.fromEntries(VOC_BANDS.map((_, i) => [`vocModEnv${i}`,  new Tone.Filter({ type: 'lowpass', frequency: 20, Q: 0.5, rolloff: -12 })])),
       ...Object.fromEntries(VOC_BANDS.map((b, i) => [`vocCarrBPF${i}`, new Tone.Filter({ type: 'bandpass', frequency: b.freq, Q: b.Q, rolloff: -12 })])),
       ...Object.fromEntries(VOC_BANDS.map((_, i) => [`vocCarrVCA${i}`, new Tone.Gain(0)])),
@@ -1258,20 +1723,22 @@ export default function useMoogAudio() {
     // Built-in mic → vocoder modulator. The mic feeds the same pre-chain front (vocModRaw)
     // as the MOD jack, so enabling the mic + a carrier vocodes instantly (no patching), and
     // an external MOD patch still sums in. extMicGain is silent until the mic is enabled.
-    n.extMicGain.connect(n.vocModRaw);
+    n.extMicGain.connect(n.vocMicGain);
+    n.vocMicGain.connect(n.vocModRaw);
     // (VCO level meters are fed from each VCO's SAW tap in the core-routing loop above.)
 
     // master → seqMasterGate → Destination: every patch cable that reaches io-in
-    // or any io-inN channel flows through master, then seqMasterGate. The Loop gates
-    // seqMasterGate per step — silences ALL audio on gate-off steps regardless of routing.
+    // or any io-inN channel flows through master, then seqMasterGate. No step loop
+    // writes seqMasterGate (that would silence the other sequencers) — powerOff is
+    // its only writer, so it is a unity pass-through in practice.
     n.master.connect(n.seqMasterGate);
 
     // moogBus: side tap after the master gate, feeds the Workstation's Tone.Recorder.
     // Does not connect to Destination — purely a recording tap.
     n.seqMasterGate.connect(n.moogBus);
 
-    // Oscilloscope and masterMeter tap from master (pre-gate so the scope still shows
-    // waveform shape even on muted steps — useful for debugging patches).
+    // Oscilloscope taps master (pre-gate, so the scope still shows waveform shape
+    // even on muted steps — useful for debugging patches).
     n.master.connect(n.analyser);
     // Quantizer keepalive: gain(0) ensures qntOut stays connected to the
     // audio graph so Chrome never stops calling the worklet's process() callback.
@@ -1295,6 +1762,7 @@ export default function useMoogAudio() {
     n.kickClickSynth.connect(n.kickClickFilter);
     n.kickClickFilter.connect(n.kickClickGain);
     n.kickClickGain.connect(n.kickOut);
+    n.kickTuneCv.connect(n.kickTuneCvAnalyser);
 
     // 914 FFB — parallel bandpass sum
     FFB_BANDS.forEach((_, i) => {
@@ -1313,7 +1781,8 @@ export default function useMoogAudio() {
     // (audio connection into the AudioParam); vocWet/vocDry.gain owned by updateVocoderParams.
     VOC_BANDS.forEach((_, i) => {
       n.vocModIn.connect(n[`vocModBPF${i}`]);
-      n[`vocModBPF${i}`].connect(n[`vocModRect${i}`]);
+      n[`vocModBPF${i}`].connect(n[`vocModDrive${i}`]);   // drive + pre-emphasis tilt
+      n[`vocModDrive${i}`].connect(n[`vocModRect${i}`]);
       n[`vocModRect${i}`].connect(n[`vocModEnv${i}`]);
       n[`vocModEnv${i}`].connect(n[`vocCarrVCA${i}`].gain); // audio-rate env → VCA gain
       n.vocCarrBank.connect(n[`vocCarrBPF${i}`]);
@@ -1336,10 +1805,10 @@ export default function useMoogAudio() {
     n.vocBuzzNoise.connect(n.vocBuzzLP);
     n.vocBuzzLP.connect(n.vocBuzzGain);
     n.vocBuzzGain.connect(n.vocCarrBank);
-    // Modulator pre-processing — jack lands on vocModRaw; HP + compressor condition the
-    // voice before it fans out (vocModIn keeps all its existing downstream connections).
+    // Modulator pre-processing — jack lands on vocModRaw; HP + noise gate + compressor
+    // condition the voice before it fans out (vocModIn keeps all its downstream edges).
     n.vocModRaw.connect(n.vocModHP);
-    n.vocModHP.connect(n.vocModComp);
+    buildVocGate(n, 'voc');          // splices vocModHP → gate → vocModComp
     n.vocModComp.connect(n.vocModIn);
     // Output stage: vocoded (wet) + carrier (dry) → vocOut (OUT makeup) → vocPresence (EQ).
     n.vocSum.connect(n.vocWet);
@@ -1351,12 +1820,15 @@ export default function useMoogAudio() {
     n.vocClarityHP.connect(n.vocClarityGain);
     n.vocClarityGain.connect(n.vocVolume);
     // Final master volume (VOL) → voc-out jack.
-    n.vocPresence.connect(n.vocVolume);
+    n.vocPresence.connect(n.vocLimit);
+    n.vocLimit.connect(n.vocVolume);
     n.vocModIn.connect(n.vocAnalyser); // FFT tap for the 16-segment meter
 
-    // seqGateNode sits between VCA and the vca-out jack — secondary gate for vca-out path.
-    n.vca.connect(n.seqGateNode);
-    n.vca.connect(n.seq2GateNode);
+    // VCA CV chains (Phase 71) — ENV AMT attenuator + LOG/LIN response curve
+    // between each -cv jack and the Gain's gain param. See buildVcaCv.
+    buildVcaCv(n, 'vca');
+    buildVcaCv(n, 'vca2');
+    buildVcaCv(n, 'vca3');
 
     // Aura display taps — dead-end, post-reverb (see node creation note).
     n.reverb.connect(n.reverbAnalyser);
@@ -1401,7 +1873,11 @@ export default function useMoogAudio() {
     n.env1.connect(n.env1Meter);
     n.env2.connect(n.env2Meter);
     n.env3.connect(n.env3Meter);
-    n.seqGateNode.connect(n.masterMeter);
+    // I/O PEAK lamp. Taps n.master — i.e. the actual signal leaving the rack,
+    // post-MASTER-knob, which is what a peak indicator on an output stage should
+    // read. It previously tapped seqGateNode (VCA 1's seq-gated output), so it was
+    // blind to the MASTER knob and to every patch that didn't run through VCA 1.
+    n.master.connect(n.masterMeter);
 
     // 960 sequencer loops — 8th-note clocks driven by Tone.Transport. Both
     // statics share the generic buildSeqLoop body (Phase 60e); dynamic
@@ -1596,9 +2072,18 @@ export default function useMoogAudio() {
         let cv = 0;
         const buf = n[`${id}CvAnalyser`]?.getValue();
         if (buf && buf.length) { let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i]; cv = s / buf.length; }
-        const morph = (vowelMorphRefs.current[id] ?? 2) + cv * 4; // CV ±full A..U sweep
         const shape = vowelShapeRefs.current[id] ?? 1.0;
-        const scaled = vowelFreqsAt(morph).map(f => Math.max(20, Math.min(18000, f * shape)));
+        // CHAIN walks the A→E→I→O→U road; DIRECT flies straight between FROM and TO.
+        // Both read the SAME morph knob + FORMANT-CV sum, so an envelope patched into
+        // FORM CV drives either mode identically — only the path through vowel space
+        // differs. In DIRECT the knob is the manual position along that line, and the
+        // CV rides on top of it, so a full-scale envelope with the knob at 0 travels
+        // exactly FROM → TO.
+        const base = vowelMorphRefs.current[id] ?? 2;
+        const freqs = vowelDirectRefs.current[id]
+          ? vowelFreqsBetween(vowelFromRefs.current[id] ?? 4, vowelToRefs.current[id] ?? 0, base / 4 + cv)
+          : vowelFreqsAt(base + cv * 4);
+        const scaled = freqs.map(f => Math.max(20, Math.min(18000, f * shape)));
         const last = vowelLastFreqRefs.current[id];
         if (last && Math.abs(scaled[0] - last[0]) < 0.5 && Math.abs(scaled[1] - last[1]) < 0.5 && Math.abs(scaled[2] - last[2]) < 0.5) continue;
         for (let k = 0; k < 3; k++) n[`${id}F${k}`]?.frequency.setValueAtTime(scaled[k], now);
@@ -1846,6 +2331,55 @@ export default function useMoogAudio() {
     // always share it; keys appear once the worklet module loads.
     const hardSyncNodes = {};
     n.hardSyncNodes = hardSyncNodes;
+    // ── Asymmetric envelope followers (Phase 84) ──
+    // Splices ONE 16-channel worklet into each vocoder's modulator bank, replacing the
+    // symmetric ModEnv lowpasses as the smoothing stage. Load-failure safety is the whole
+    // shape of this block: the existing `ModRect → ModEnv → CarrVCA.gain` path is left
+    // wired at construction and only unhooked HERE, once the worklet actually exists — so
+    // if the file 404s or the browser refuses it, the vocoder keeps working exactly as it
+    // did before, just symmetrically.
+    const envFollowNodes = {};
+    n.envFollowNodes = envFollowNodes;
+    rawCtx.audioWorklet.addModule('/env-follower-worklet.js').then(() => {
+      if (nodesRef.current !== n) return;
+      const wireEnv = (vid) => {
+        if (envFollowNodes[vid] || !n[`${vid}ModRect0`]) return;
+        // Tone.context.createAudioWorkletNode (not `new AudioWorkletNode`) — see the
+        // quantizer block: SAC refuses connections to nodes outside its own registry.
+        const node = Tone.context.createAudioWorkletNode('env-follower-processor', {
+          numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [VOC_BANDS.length],
+          channelCount: VOC_BANDS.length, channelCountMode: 'explicit',
+          channelInterpretation: 'discrete',   // 16 independent bands, never up/down-mixed
+        });
+        const merger = rawCtx.createChannelMerger(VOC_BANDS.length);
+        const split  = rawCtx.createChannelSplitter(VOC_BANDS.length);
+        for (let i = 0; i < VOC_BANDS.length; i++) {
+          // Rectifier now feeds the worklet instead of the lowpass...
+          try { n[`${vid}ModRect${i}`].disconnect(n[`${vid}ModEnv${i}`]); } catch (_) {}
+          n[`${vid}ModRect${i}`].connect(merger, 0, i);
+          // ...and the worklet's output re-enters through ModEnv, which keeps its existing
+          // ModEnv → CarrVCA.gain edge. Reusing it as the landing point avoids 16 adapter
+          // nodes AND avoids connecting a raw splitter straight to a Tone param.
+          split.connect(n[`${vid}ModEnv${i}`].input, i);
+          // The worklet owns the envelope SHAPE; this filter's job is now to strip the
+          // pitch-rate ripple the fast attack lets through — see vocEnvPostHzFor.
+          // setTargetAtTime, not safeRamp: rampTo on a frequency param goes exponential.
+          n[`${vid}ModEnv${i}`].frequency.setTargetAtTime(
+            vocEnvPostHzFor(VOC_BANDS[i].freq), Tone.now(), 0.02);
+        }
+        merger.connect(node);
+        node.connect(split);
+        try { node.parameters.get('attack').setValueAtTime(VOC_ENV_ATK_S, Tone.now()); } catch (_) {}
+        try { node.parameters.get('release').setValueAtTime(
+                vocEnvReleaseFor(vocDecayRefs.current[vid] ?? 0.5), Tone.now()); } catch (_) {}
+        envFollowNodes[vid] = { node, merger, split };
+      };
+      vocIdsRef.current.forEach(wireEnv);   // instances that already exist
+      wireEnvFollowRef.current = wireEnv;   // and any added later
+    }).catch(err => {
+      console.warn('[MoogAudio] Envelope-follower worklet unavailable, using symmetric filters:', err);
+    });
+
     rawCtx.audioWorklet.addModule('/hard-sync-worklet.js').then(() => {
       if (nodesRef.current !== n) return;
 
@@ -1904,6 +2438,9 @@ export default function useMoogAudio() {
       Object.values(revDampTimerRef.current).forEach(clearTimeout);
       revDampTimerRef.current  = {};
       revDampTargetRef.current = {};
+      // A remount rebuilds every WaveShaper at the LIN curve — the delta cache
+      // must forget this mount's state or a saved LOG rack never re-applies it.
+      vcaLinRefs.current = {};
       // Release the mic device if it was opened, so the OS mic indicator clears on unmount.
       if (extMicRef.current) {
         try { extMicRef.current.close(); } catch (_) {}
@@ -1929,6 +2466,12 @@ export default function useMoogAudio() {
       chordSeqIdsRef.current = ['chordseq'];
       try { Tone.Transport.stop(); } catch (_) {}
       // Disconnect AudioWorkletNodes (not Tone.js nodes — no .dispose()).
+      wireEnvFollowRef.current = null;
+      Object.values(envFollowNodes).forEach(({ node, merger, split }) => {
+        try { node.disconnect(); } catch (_) {}
+        try { merger.disconnect(); } catch (_) {}
+        try { split.disconnect(); } catch (_) {}
+      });
       wireHardSyncRef.current = null; // a remount must never wire against this mount's disposed nodes
       Object.values(hardSyncNodes).forEach(node => { try { node.disconnect(); } catch (_) {} });
       wireQntRef.current = null; // a remount must never wire against this mount's disposed nodes
@@ -1947,7 +2490,11 @@ export default function useMoogAudio() {
       kickTuneRef.current   = { kick: 55 };
       kickDecayRef.current  = { kick: 0.4 };
       kickTrigCbRef.current = {};
+      kickLastTimeRef.current = {};
       vowelIdsRef.current           = [];
+      vowelDirectRefs.current       = {};
+      vowelFromRefs.current         = {};
+      vowelToRefs.current           = {};
       vowelMorphRefs.current        = {};
       vowelShapeRefs.current        = {};
       vowelLastFreqRefs.current     = {};
@@ -2044,8 +2591,27 @@ export default function useMoogAudio() {
       if (inst.type === 'vco' && n[`${id}coreGate`]) n[`${id}coreGate`].gain.value = 0;
     });
 
-    // Re-open both gates so keyboard / manual playing is audible after sequencer stops.
-    // Last gate-off step may have left them closed.
+    // Release every envelope. Holding the manual GATE button (or a patched gate) while
+    // powering down otherwise leaves the Tone.Envelope parked at its sustain level, and
+    // since an envelope is not a source nothing else brings it back down — so the next
+    // power-up starts with that VCA already wide open and drones until something
+    // releases it. Same class as the VCO bus gates below.
+    for (const envId of ['env1', 'env2', 'env3']) { try { n[envId]?.triggerRelease(); } catch (_) {} }
+    dynInstancesRef.current.forEach((inst, id) => {
+      if (inst.type === 'env') { try { n[id]?.triggerRelease(); } catch (_) {} }
+    });
+
+    // Re-open every VCO's per-step gate. Powering down on a REST step would otherwise
+    // leave that VCO's bus at 0, so it stayed silent on the next power-up until the
+    // sequencer happened to reach a gated step. Latent before Phase 76 and easier to hit
+    // now that the mute also reaches VCOs fed through a quantizer / chord seq.
+    for (const vcoId of allVcoIdsRef.current) {
+      if (n[`${vcoId}bus`]) n[`${vcoId}bus`].gain.value = 1;
+    }
+
+    // Re-open the master gate so keyboard / manual playing is audible after the
+    // sequencer stops. (The per-seq GateNodes are gone as of Phase 71; the loop
+    // below is a guarded no-op, kept for a future per-seq output gate.)
     n.seqMasterGate.gain.value = 1;
     for (const id of Object.keys(seqLoopsRef.current)) {
       const gn = n[`${id}GateNode`];
@@ -2061,10 +2627,11 @@ export default function useMoogAudio() {
   const kickTuneRef   = useRef({ kick: 55 });
   const kickDecayRef  = useRef({ kick: 0.4 });
   const kickTrigCbRef = useRef({});
+  const kickLastTimeRef = useRef({});   // kid → last scheduled trigger time (monotonic clamp)
 
   // Single writer for a kick instance's synth params.
   // tune: Hz (40–200), pitchEnv: octave drop (0–5), decay: seconds (0.05–2), click: gain (0–1).
-  const applyKickParams = useCallback((kid, { tune, pitchEnv, decay, click } = {}) => {
+  const applyKickParams = useCallback((kid, { tune, pitchEnv, decay, click, clickTone } = {}) => {
     const n = nodesRef.current;
     const synth = n?.[`${kid}Synth`];
     if (!synth) return;
@@ -2076,6 +2643,10 @@ export default function useMoogAudio() {
     }
     if (pitchEnv !== undefined) synth.octaves = pitchEnv;
     if (click    !== undefined) safeRamp(n[`${kid}ClickGain`].gain, click, 0.02);
+    // setTargetAtTime, matching every other frequency-type param on the rack (rampTo
+    // dispatches an exponential ramp, which is unsafe near 0).
+    if (clickTone !== undefined)
+      n[`${kid}ClickFilter`]?.frequency.setTargetAtTime(kickClickToneHz(clickTone), Tone.now(), 0.02);
   }, []);
 
   // Single writer for a vocoder instance's params (Phase 60e part 3) — MIX
@@ -2085,7 +2656,7 @@ export default function useMoogAudio() {
   const applyVocoderParams = useCallback((vid, p = {}) => {
     const n = nodesRef.current;
     if (!n || !n[`${vid}Wet`]) return;
-    const { mix, hiss, buzz, clarity,
+    const { mix, hiss, buzz, clarity, gate, drive,
             pwidth, carrierMix, shift, res, shiftRate, shiftAmp, decay, volume, presence } = p;
     const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
@@ -2109,15 +2680,55 @@ export default function useMoogAudio() {
       safeRamp(n[`${vid}CarrExtGain`].gain, 1 - cm, 0.05);
       safeRamp(n[`${vid}CarrOscGain`].gain, cm, 0.05);
     }
-    // RES: carrier band Q. knob 0–1 → Q 1–7 (0.5 ≈ 4, the base VOC_BANDS Q).
+    // RES: carrier band Q, exponential 1 → 20 (Phase 83). The old range topped out at 7,
+    // which is why this could never sound like the VOWEL module: VOWEL's formants run at
+    // Q 11/13/15, so the vocoder's carrier bands were 3–4× too BROAD to cut the carrier
+    // into anything voice-shaped.
+    //
+    // Phase 73 aimed at the wrong target here. It derived Q ≈ 3.45 as the point where
+    // adjacent bands' −3 dB skirts exactly meet and called that "clean" — but contiguous
+    // coverage means the carrier's spectrum passes through largely INTACT, which is
+    // precisely the "loose synth sound". VOWEL has three filters with enormous gaps
+    // between them and sounds excellent *because* everything between the formants is
+    // discarded; a talk box is the same idea, a resonant tube with a few sharp peaks.
+    // Sparse and resonant is the goal, not flat and continuous.
+    //
+    // 20^res keeps the lower half almost exactly where it was (0.5 → 4.5 vs the old 4,
+    // 0.408 → 3.4 vs the old 3.45) so saved racks barely shift, and opens the top half
+    // into VOWEL territory.
     if (res !== undefined) {
-      const q = 1 + clamp01(res) * 6;
-      for (let i = 0; i < VOC_BANDS.length; i++) safeRamp(n[`${vid}CarrBPF${i}`].Q, q, 0.05);
+      const q = Math.pow(VOC_RES_MAX_Q, clamp01(res));
+      const aq = vocAnalysisQFor(q);
+      for (let i = 0; i < VOC_BANDS.length; i++) {
+        safeRamp(n[`${vid}CarrBPF${i}`].Q, q, 0.05);
+        // The ANALYSIS bank tracks it (Phase 85) — sharpening only the carrier left every
+        // formant opening ~5 bands, so the output stayed a smear of sharp peaks.
+        safeRamp(n[`${vid}ModBPF${i}`].Q, aq, 0.05);
+      }
+      // A bandpass keeps unity gain at its centre but its BANDWIDTH shrinks as 1/Q, so the
+      // energy it passes from a broadband carrier falls as amplitude ∝ √(1/Q). Without
+      // compensation, turning RES up just goes quiet and the resonance reads as "thin"
+      // rather than "vocal". VOWEL solves the same problem with a fixed ×7 makeup into a
+      // hard-knee limiter; here the makeup TRACKS Q so the level holds across the sweep.
+      // Sole writer of vocOut.gain (set at construction, touched only here afterwards).
+      safeRamp(n[`${vid}Out`].gain, VOC_OUT_MAKEUP * Math.sqrt(q / VOC_BASE_Q), 0.05);
     }
-    // DECAY: envelope-follower LP cutoff. knob 0–1 → ~56 Hz (snappy) … ~7 Hz (smeary), 0.5 ≈ 20 Hz.
+    // DECAY: the envelope follower's RELEASE. With the worklet wired, attack stays pinned
+    // fast and this knob only controls how quickly a band falls back — which is what lets
+    // consonants punch AND vowels stay smooth at the same time (see env-follower-worklet.js).
+    // The legacy symmetric ModEnv filters are still written when the worklet is absent, so
+    // a failed worklet load degrades to exactly the pre-Phase-84 behaviour rather than
+    // going silent.
     if (decay !== undefined) {
-      const cutoff = 20 * Math.pow(2, (0.5 - clamp01(decay)) * 3);
-      for (let i = 0; i < VOC_BANDS.length; i++) safeRamp(n[`${vid}ModEnv${i}`].frequency, cutoff, 0.05);
+      const d = clamp01(decay);
+      vocDecayRefs.current[vid] = d;
+      const ef = n.envFollowNodes?.[vid];
+      if (ef) {
+        try { ef.node.parameters.get('release').setTargetAtTime(vocEnvReleaseFor(d), Tone.now(), 0.01); } catch (_) {}
+      } else {
+        const cutoff = 20 * Math.pow(2, (0.5 - d) * 3);
+        for (let i = 0; i < VOC_BANDS.length; i++) safeRamp(n[`${vid}ModEnv${i}`].frequency, cutoff, 0.05);
+      }
     }
     // SHIFT / SH RATE / SH AMP — ref writes consumed by the spectral-shift rAF loop.
     if (shift !== undefined)     vocShiftBaseRefs.current[vid]    = Math.pow(2, (clamp01(shift) - 0.5) * 2); // ±1 octave
@@ -2128,6 +2739,17 @@ export default function useMoogAudio() {
     if (volume !== undefined)  safeRamp(n[`${vid}Volume`].gain, clamp01(volume) * 2, 0.05);
     // PRESENCE: peaking EQ gain at ~2.7 kHz. knob 0–1 → 0..+12 dB (boost only).
     if (presence !== undefined) safeRamp(n[`${vid}Presence`].gain, clamp01(presence) * 12, 0.05);
+    // GATE: mic noise-gate threshold. knob 0–1 → VOC_GATE_MIN_DB..VOC_GATE_MAX_DB, applied by
+    // scaling the detector into the fixed soft-knee curve. Sole writer of GateScale; the curve
+    // is the sole writer of GateGain.gain, so the two never collide.
+    if (gate !== undefined) safeRamp(n[`${vid}GateScale`].gain, vocGateScaleFor(gate), 0.05);
+    // DRIVE: rewrites all 16 per-band drive gains, each keeping its pre-emphasis tilt.
+    // Sole writer of those nodes (they are set once at construction and only here after).
+    if (drive !== undefined) {
+      const d = vocDriveFor(drive);
+      for (let i = 0; i < VOC_BANDS.length; i++)
+        safeRamp(n[`${vid}ModDrive${i}`].gain, d * vocBandTilt(VOC_BANDS[i].freq), 0.05);
+    }
   }, []);
 
   // ── Dynamic module add/remove (Phase 60b — pilot: 'vco' | 'noise') ──
@@ -2276,14 +2898,16 @@ export default function useMoogAudio() {
     if (type === 'vca') {
       const id = `vca${num}`;
       n[id] = new Tone.Gain(1.0);
+      const cvNames = buildVcaCv(n, id);   // ENV AMT attenuator + LOG/LIN curve
       const jackEntries = {
         [`${id}-in`]:  { type: 'in',  dest: n[id] },
-        [`${id}-cv`]:  { type: 'in',  dest: n[id].gain },
+        [`${id}-cv`]:  { type: 'in',  dest: n[`${id}Cv`] },
+        [`${id}-cv2`]: { type: 'in',  dest: n[`${id}Cv2`] },
         [`${id}-out`]: { type: 'out', node: n[id] },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, { type, num,
-        nodeNames: [id], sourceNames: [], jackIds: Object.keys(jackEntries) });
+        nodeNames: [id, ...cvNames], sourceNames: [], jackIds: Object.keys(jackEntries) });
       return { id, num };
     }
 
@@ -2294,7 +2918,7 @@ export default function useMoogAudio() {
       n[id].connect(n[`${id}Meter`]);
       const jackEntries = {
         [`${id}-gate`]: { type: 'in',  dest: null, isGate: true, envId: id },
-        [`${id}-trig`]: { type: 'in',  dest: null },
+        [`${id}-trig`]: { type: 'in',  dest: null, isGate: true, envId: id, isTrig: true },
         [`${id}-out`]:  { type: 'out', node: n[id] },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
@@ -2609,6 +3233,9 @@ export default function useMoogAudio() {
                                   envelope: { attack: 0.001, decay: 0.04, sustain: 0, release: 0.01 } });
       n[`${id}ClickFilter`] = new Tone.Filter({ frequency: 2000, type: 'highpass', rolloff: -12 });
       n[`${id}ClickGain`]   = new Tone.Gain(0.25);
+      n[`${id}TuneCv`]         = new Tone.Gain(1);
+      n[`${id}TuneCvAnalyser`] = new Tone.Analyser('waveform', 128);
+      n[`${id}TuneCv`].connect(n[`${id}TuneCvAnalyser`]);
       n[`${id}Out`]         = new Tone.Gain(1);
       n[`${id}Synth`].connect(n[`${id}Out`]);
       n[`${id}ClickSynth`].connect(n[`${id}ClickFilter`]);
@@ -2621,14 +3248,17 @@ export default function useMoogAudio() {
       const jackEntries = {
         [`${id}-gate-in`]:  { type: 'in',  dest: null, isGate: true, isKick: true, kickId: id },
         [`${id}-click-in`]: { type: 'in',  dest: n[`${id}ClickGain`].gain },
+        [`${id}-tune-cv`]:  { type: 'in',  dest: n[`${id}TuneCv`] },
         [`${id}-out`]:      { type: 'out', node: n[`${id}Out`] },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, { type, num,
-        nodeNames: [`${id}Synth`, `${id}ClickSynth`, `${id}ClickFilter`, `${id}ClickGain`, `${id}Out`],
+        nodeNames: [`${id}Synth`, `${id}ClickSynth`, `${id}ClickFilter`, `${id}ClickGain`, `${id}Out`,
+                    `${id}TuneCv`, `${id}TuneCvAnalyser`],
         sourceNames: [], jackIds: Object.keys(jackEntries) });
       return { id, num };
     }
+
 
     if (type === 'ffb') {
       const id = `ffb${num}`;
@@ -2750,14 +3380,17 @@ export default function useMoogAudio() {
       n[`${id}ModHP`]       = new Tone.Filter({ type: 'highpass', frequency: 150, rolloff: -12 });
       n[`${id}ModComp`]     = new Tone.Compressor({ threshold: -28, ratio: 4, attack: 0.003, release: 0.12 });
       n[`${id}Presence`]    = new Tone.Filter({ type: 'peaking', frequency: 2700, Q: 1, gain: 0 });
+      n[`${id}Limit`]       = new Tone.Compressor({ threshold: -1, ratio: 20, knee: 0, attack: 0.003, release: 0.05 });
       VOC_BANDS.forEach((b, i) => {
         n[`${id}ModBPF${i}`]  = new Tone.Filter({ type: 'bandpass', frequency: b.freq, Q: b.Q, rolloff: -12 });
-        n[`${id}ModRect${i}`] = new Tone.WaveShaper((x) => Math.min(1, Math.abs(x) * VOC_ENV_DRIVE));
+        n[`${id}ModDrive${i}`] = new Tone.Gain(VOC_ENV_DRIVE * vocBandTilt(b.freq));
+        n[`${id}ModRect${i}`] = new Tone.WaveShaper(vocRectShape, VOC_RECT_POINTS);
         n[`${id}ModEnv${i}`]  = new Tone.Filter({ type: 'lowpass', frequency: 20, Q: 0.5, rolloff: -12 });
         n[`${id}CarrBPF${i}`] = new Tone.Filter({ type: 'bandpass', frequency: b.freq, Q: b.Q, rolloff: -12 });
         n[`${id}CarrVCA${i}`] = new Tone.Gain(0);
         n[`${id}ModIn`].connect(n[`${id}ModBPF${i}`]);
-        n[`${id}ModBPF${i}`].connect(n[`${id}ModRect${i}`]);
+        n[`${id}ModBPF${i}`].connect(n[`${id}ModDrive${i}`]);   // drive + pre-emphasis tilt
+        n[`${id}ModDrive${i}`].connect(n[`${id}ModRect${i}`]);
         n[`${id}ModRect${i}`].connect(n[`${id}ModEnv${i}`]);
         n[`${id}ModEnv${i}`].connect(n[`${id}CarrVCA${i}`].gain); // audio-rate env → VCA gain
         n[`${id}CarrBank`].connect(n[`${id}CarrBPF${i}`]);
@@ -2777,7 +3410,7 @@ export default function useMoogAudio() {
       n[`${id}BuzzLP`].connect(n[`${id}BuzzGain`]);
       n[`${id}BuzzGain`].connect(n[`${id}CarrBank`]);
       n[`${id}ModRaw`].connect(n[`${id}ModHP`]);
-      n[`${id}ModHP`].connect(n[`${id}ModComp`]);
+      const gateNames = buildVocGate(n, id);   // splices ModHP → gate → ModComp
       n[`${id}ModComp`].connect(n[`${id}ModIn`]);
       n[`${id}Sum`].connect(n[`${id}Wet`]);
       n[`${id}Wet`].connect(n[`${id}Out`]);
@@ -2786,11 +3419,14 @@ export default function useMoogAudio() {
       n[`${id}ModIn`].connect(n[`${id}ClarityHP`]);
       n[`${id}ClarityHP`].connect(n[`${id}ClarityGain`]);
       n[`${id}ClarityGain`].connect(n[`${id}Volume`]);
-      n[`${id}Presence`].connect(n[`${id}Volume`]);
+      n[`${id}Presence`].connect(n[`${id}Limit`]);
+      n[`${id}Limit`].connect(n[`${id}Volume`]);
       n[`${id}ModIn`].connect(n[`${id}Analyser`]);
       // Shared mic fan-out — the singleton Tone.UserMedia feeds every instance's
       // modulator pre-chain (matching the static hardwire); silent until enabled.
-      n.extMicGain.connect(n[`${id}ModRaw`]);
+      n[`${id}MicGain`] = new Tone.Gain(1);          // this instance's MIC knob target
+      n.extMicGain.connect(n[`${id}MicGain`]);
+      n[`${id}MicGain`].connect(n[`${id}ModRaw`]);
       if (isPoweredRef.current) {
         [n[`${id}HissNoise`], n[`${id}BuzzNoise`], n[`${id}CarrOsc`]].forEach(s => { try { s.start(); } catch (_) {} });
       }
@@ -2798,6 +3434,7 @@ export default function useMoogAudio() {
       vocShiftLfoRateRefs.current[id] = 0.7;
       vocShiftLfoAmpRefs.current[id]  = 0;
       vocIdsRef.current = [...vocIdsRef.current, id];
+      wireEnvFollowRef.current?.(id);   // worklet may already have loaded
       const jackEntries = {
         [`${id}-mod-in`]:  { type: 'in',  dest: n[`${id}ModRaw`] },
         [`${id}-carr-in`]: { type: 'in',  dest: n[`${id}CarrIn`] },
@@ -2810,8 +3447,10 @@ export default function useMoogAudio() {
           `${id}CarrBank`, `${id}CarrOsc`, `${id}CarrOscGain`, `${id}CarrExtGain`, `${id}CarrSum`, `${id}Volume`,
           `${id}HissNoise`, `${id}HissHP`, `${id}HissGain`, `${id}BuzzNoise`, `${id}BuzzLP`, `${id}BuzzGain`,
           `${id}ClarityHP`, `${id}ClarityGain`, `${id}ModRaw`, `${id}ModHP`, `${id}ModComp`, `${id}Presence`,
+          `${id}MicGain`, `${id}Limit`,
+          ...gateNames,
           ...VOC_BANDS.flatMap((_, i) =>
-            [`${id}ModBPF${i}`, `${id}ModRect${i}`, `${id}ModEnv${i}`, `${id}CarrBPF${i}`, `${id}CarrVCA${i}`]),
+            [`${id}ModBPF${i}`, `${id}ModDrive${i}`, `${id}ModRect${i}`, `${id}ModEnv${i}`, `${id}CarrBPF${i}`, `${id}CarrVCA${i}`]),
         ],
         sourceNames: [`${id}HissNoise`, `${id}BuzzNoise`, `${id}CarrOsc`],
         jackIds: Object.keys(jackEntries) });
@@ -2933,6 +3572,39 @@ export default function useMoogAudio() {
     if (modDepth !== undefined) { lfoOffsetRefs.current[id] = modDepth; if (n[modName]) safeRamp(n[modName].gain, modDepth * 10); }
   }, []);
 
+  // id → last applied LOG/LIN state, so applyVcaParams can skip redundant curve
+  // writes. Seeded lazily; buildVcaCv constructs every shaper with the LIN curve.
+  const vcaLinRefs = useRef({});
+
+  // Single writer for one VCA instance's params — shared by the three static
+  // updaters and updateDynModuleParams (the applyLfoParams / applyChorusParams
+  // pattern), so every instance behaves identically.
+  //   gain   (0–1) → the Gain's own gain param: the manual bias / INITIAL GAIN.
+  //                  CV sums on top of it; set GAIN = 0 for full envelope gating.
+  //   envAmt (0–1) → the CV 1 attenuator (`${id}Cv`). Legacy param name — the knob is
+  //                  labelled CV 1 since Phase 77, but the key is kept so saved racks
+  //                  restore the value they were set to.
+  //   cv2Amt (0–1) → the CV 2 attenuator (`${id}Cv2`). Sums with CV 1 into one curve.
+  //   lin    (bool)→ the CV response curve (`${id}CvShape`). See buildVcaCv.
+  // Three disjoint nodes, one writer each — the knob owns the Gain's intrinsic
+  // value while the cable owns its connected input, the standard Moog knob+CV split.
+  const applyVcaParams = useCallback((id, { gain, envAmt, cv2Amt, lin } = {}) => {
+    const n = nodesRef.current;
+    if (!n || !n[id]) return;
+    if (gain   !== undefined) safeRamp(n[id].gain, gain);
+    if (envAmt !== undefined) safeRamp(n[`${id}Cv`].gain,  Math.max(0, Math.min(1, envAmt)));
+    if (cv2Amt !== undefined) safeRamp(n[`${id}Cv2`].gain, Math.max(0, Math.min(1, cv2Amt)));
+    if (lin !== undefined && vcaLinRefs.current[id] !== lin) {
+      // Delta-checked against a ref, not against `.curve`: the param effect
+      // re-sends the whole object on every knob move, and assigning `.curve`
+      // rebuilds the native curve table (the reverb-DAMP class of waste). The
+      // node's own getter is not a reliable identity check — Web Audio copies
+      // the array on set.
+      vcaLinRefs.current[id] = lin;
+      n[`${id}CvShape`].curve = lin ? VCA_CURVE_LIN : VCA_CURVE_LOG;
+    }
+  }, []);
+
   // Click-free crossfade between free (oscillator) and sync (rAF signal) output.
   const applyLfoMode = useCallback((id, synced) => {
     const n = nodesRef.current; if (!n || !n[`${id}OscGain`]) return;
@@ -2957,7 +3629,7 @@ export default function useMoogAudio() {
         if (params.envAmt    !== undefined) safeRamp(n[`${id}env`].gain, vcfEnvAmtCents(params.envAmt));
         break;
       case 'vca':
-        if (params.gain !== undefined) safeRamp(n[id].gain, params.gain);
+        applyVcaParams(id, params);
         break;
       case 'lfo':
         applyLfoParams(id, params);
@@ -2974,6 +3646,12 @@ export default function useMoogAudio() {
         // Write refs ONLY — vowelTick is the sole writer of the filter freqs.
         if (params.vowel !== undefined) vowelMorphRefs.current[id] = Math.max(0, Math.min(4, params.vowel * 4));
         if (params.shape !== undefined) vowelShapeRefs.current[id] = 0.7 + params.shape * 0.6; // tract scale 0.7..1.3
+        if (params.direct !== undefined) {
+          vowelDirectRefs.current[id] = !!params.direct;
+          vowelLastFreqRefs.current[id] = undefined;   // re-arm the delta gate across the mode change
+        }
+        if (params.from !== undefined) { vowelFromRefs.current[id] = params.from; vowelLastFreqRefs.current[id] = undefined; }
+        if (params.to   !== undefined) { vowelToRefs.current[id]   = params.to;   vowelLastFreqRefs.current[id] = undefined; }
         break;
       case 'panner':
         // PAN knob 0..1 → pan -1..1 (intrinsic value; CV sums on top of it).
@@ -3039,7 +3717,7 @@ export default function useMoogAudio() {
         break;
       default: break; // vco uses updateVcoParams, env uses updateEnvParams (both id-keyed already)
     }
-  }, [applyKickParams, applyVocoderParams, applyLfoParams, scheduleRevDamp, applyChorusParams]);
+  }, [applyKickParams, applyVocoderParams, applyLfoParams, applyVcaParams, scheduleRevDamp, applyChorusParams]);
 
   // Instantaneous LFO phase by instance id — generic name composition covers
   // static ('lfo'/'lfo2') and dynamic ('lfo3'+) analysers alike.
@@ -3071,7 +3749,17 @@ export default function useMoogAudio() {
     // node.disconnect() only drops a node's own outputs, never its inputs, so a
     // disposed ModRaw would leave a dangling edge on the singleton extMicGain.
     if (inst.type === 'voc') {
-      try { n.extMicGain.disconnect(n[`${id}ModRaw`]); } catch (_) {}
+      try { n.extMicGain.disconnect(n[`${id}MicGain`]); } catch (_) {}
+      // Native worklet/merger/splitter are not Tone nodes — disconnect, never dispose,
+      // and do it BEFORE the nodeNames sweep takes their neighbours (the hardSync order).
+      const ef = n.envFollowNodes?.[id];
+      if (ef) {
+        try { ef.node.disconnect(); }   catch (_) {}
+        try { ef.merger.disconnect(); } catch (_) {}
+        try { ef.split.disconnect(); }  catch (_) {}
+        delete n.envFollowNodes[id];
+      }
+      delete vocDecayRefs.current[id];
     }
     // Quantizer: its worklet is a native AudioWorkletNode — disconnect only
     // (no dispose), and BEFORE its Out/KeepAlive neighbors are disposed.
@@ -3091,11 +3779,7 @@ export default function useMoogAudio() {
       delete n[name];
     });
     if (inst.type === 'bbd') { delete chorusDepthRef.current[id]; delete chorusDelayRef.current[id]; }
-    if (inst.type === 'ffb') {
-      ffbIdsRef.current = ffbIdsRef.current.filter(v => v !== id);   // stop the sweep rAF iterating it
-      delete ffbSweepActiveRef.current[id];
-      delete ffbSweepLastRef.current[id];
-    }
+    if (inst.type === 'vca') delete vcaLinRefs.current[id];
     if (inst.type === 'rev') {
       // Kill any debounced DAMP write before the Freeverb is gone (Phase 70).
       clearTimeout(revDampTimerRef.current[id]);
@@ -3140,6 +3824,9 @@ export default function useMoogAudio() {
       delete vowelMorphRefs.current[id];
       delete vowelShapeRefs.current[id];
       delete vowelLastFreqRefs.current[id];
+      delete vowelDirectRefs.current[id];
+      delete vowelFromRefs.current[id];
+      delete vowelToRefs.current[id];
     }
     if (inst.type === 'lfo') {
       delete lfoSyncActiveRef.current[id]; // stop the sync rAF iterating it
@@ -3305,7 +3992,7 @@ export default function useMoogAudio() {
       } else {
         const env = n[to.envId];
         if (env) {
-          gateActionsRef.current.set(key, { env, fromId: effFrom });
+          gateActionsRef.current.set(key, { env, fromId: effFrom, isTrig: !!to.isTrig });
           connectionsRef.current.set(key, { isGate: true, toId: effTo });
         }
       }
@@ -3588,8 +4275,9 @@ export default function useMoogAudio() {
   }, []);
 
   // Trigger or release an envelope gate.  envId: 'env1' | 'env2'.
-  // Tone.Envelope outputs a 0–1 CV signal — when patched to vca-cv the Web Audio
-  // API adds it to vca.gain's base value (set by the GAIN knob / updateVcaParams).
+  // Tone.Envelope outputs a 0–1 CV signal — when patched to vca-cv it runs through
+  // that VCA's ENV AMT attenuator and LOG/LIN curve (buildVcaCv), and the Web Audio
+  // API adds the result to vca.gain's base value (the GAIN knob / updateVcaParams).
   const triggerGate = useCallback((envId, isDown) => {
     const n = nodesRef.current;
     if (!n) return;
@@ -3599,25 +4287,10 @@ export default function useMoogAudio() {
     else        env.triggerRelease();
   }, []);
 
-  // Update VCA initial gain (manual bias, 0–1 linear).
-  // The VCA is Tone.Gain; env CV adds on top — set GAIN=0 for full envelope gating.
-  const updateVcaParams = useCallback(({ gain } = {}) => {
-    const n = nodesRef.current;
-    if (!n) return;
-    if (gain !== undefined) safeRamp(n.vca.gain, gain);
-  }, []);
-
-  const updateVca2Params = useCallback(({ gain } = {}) => {
-    const n = nodesRef.current;
-    if (!n) return;
-    if (gain !== undefined) safeRamp(n.vca2.gain, gain);
-  }, []);
-
-  const updateVca3Params = useCallback(({ gain } = {}) => {
-    const n = nodesRef.current;
-    if (!n) return;
-    if (gain !== undefined) safeRamp(n.vca3.gain, gain);
-  }, []);
+  // Static VCA updaters — thin id-bound wrappers over the shared applier above.
+  const updateVcaParams  = useCallback((p) => applyVcaParams('vca',  p), [applyVcaParams]);
+  const updateVca2Params = useCallback((p) => applyVcaParams('vca2', p), [applyVcaParams]);
+  const updateVca3Params = useCallback((p) => applyVcaParams('vca3', p), [applyVcaParams]);
 
   // Update LFO parameters.
   // rate  (0–1) → exponential 0.1 Hz–30 Hz  (0.1 * 300^rate)
@@ -3894,10 +4567,13 @@ export default function useMoogAudio() {
     const n = nodesRef.current;
     const synth = n?.[`${kid}Synth`];
     if (!synth) return;
-    const now = Tone.now();
-    synth.triggerAttackRelease(kickTuneRef.current[kid] ?? 55, kickDecayRef.current[kid] ?? 0.4, now);
-    n[`${kid}ClickSynth`]?.triggerAttackRelease((kickDecayRef.current[kid] ?? 0.4) * 0.1, now);
-    onFlash?.();
+    // Clamped against the sequencer's already-scheduled hits — see nextKickTime.
+    const t  = nextKickTime(kickLastTimeRef.current, kid, Tone.now());
+    const kd = kickDecayRef.current[kid] ?? 0.4;
+    const khz = kickTuneHz(n, kid, connectionsRef.current, kickTuneRef.current[kid] ?? 55);
+    synth.triggerAttackRelease(khz, kd, t);
+    n[`${kid}ClickSynth`]?.triggerAttackRelease(kd * 0.1, t);
+    if (onFlash) drawAt(t, onFlash);   // lamp matches the (possibly nudged) hit
   }, []);
 
   const updateKickParams = useCallback((p = {}) => applyKickParams('kick', p), [applyKickParams]);
@@ -4035,10 +4711,12 @@ export default function useMoogAudio() {
   }, []);
 
   // External mic INPUT gain — single writer (this owns extMicGain.gain).
-  const updateExtMicParams = useCallback(({ gain } = {}) => {
-    const n = nodesRef.current;
-    if (!n) return;
-    if (gain !== undefined) safeRamp(n.extMicGain.gain, Math.max(0, gain), 0.05);
+  // Sole writer of ONE vocoder instance's mic level. vid: 'voc' (static) | 'voc2'+.
+  // extMicGain itself is never written — it is the shared tap for the singleton mic.
+  const updateVocMicGain = useCallback((vid, { gain } = {}) => {
+    const g = nodesRef.current?.[`${vid}MicGain`];
+    if (!g || gain === undefined) return;
+    safeRamp(g.gain, Math.max(0, gain), 0.05);
   }, []);
 
   // HARD SYNC enable — see the worklet-core note on the setters below.
@@ -4092,8 +4770,9 @@ export default function useMoogAudio() {
     kbdBaseHzRef.current = hz;
     if (isGateDown) kbdVibratoResetRef.current = true; // rAF will stamp its own `now` as onset
     n.kbdPitchOut.setValueAtTime(hz, Tone.now());
-    for (const [, { env, fromId }] of gateActionsRef.current) {
+    for (const [, { env, fromId, isTrig }] of gateActionsRef.current) {
       if (fromId !== 'kbd-gate-out') continue;
+      if (isTrig) { if (isGateDown) triggerEnvOneShot(env); continue; } // key-up does nothing
       if (isGateDown) env.triggerAttack();
       else            env.triggerRelease();
     }
@@ -4133,7 +4812,7 @@ export default function useMoogAudio() {
     getPanMeterData,
     getChronosDisplay,
     getFolderScope,
-    enableMic, disableMic, updateExtMicParams,
+    enableMic, disableMic, updateVocMicGain,
     updateKickParams, triggerKick, triggerKickById, setKickTrigCallbackById,
     setKickTrigCallback: (fn) => { kickTrigCbRef.current.kick = fn; },
     setVcoSyncEnabledById,

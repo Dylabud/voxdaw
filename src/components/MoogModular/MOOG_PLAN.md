@@ -27,13 +27,470 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 **Roadmap clear (2026-07-12).** Every planned phase is either shipped or resolved with a logged decision — see the Completed Phases Log. New phases go here.
 
-- **Phase 62 candidate (hardening, small):** monotonic-clamp kick trigger times (`Math.max(time, lastKickTime + ε)` at the `triggerKickById` sites). A load-induced Tone race ("Start time must be strictly greater than previous start time", `MembraneSynth ← seq Loop.callback`) surfaced once in ~18 heavy-rack stress runs — reachable whenever the main thread stalls past the Transport lookAhead. The class predates Phase 61 (pre-61 heavy racks stalled constantly at 30–40 ms/frame) and did not reproduce in 3 further 40 s stress runs on either code version.
+- **912 sub-octave (deferred from Phase 74):** the directive's "Synth Up / Synth Down" modes — a square sub-octave under the dry signal. A proper one is a flip-flop dividing the input's zero crossings by two, which is inherently sample-serial state, so unlike the envelope follower this genuinely *does* need an AudioWorklet (`sub-octave-worklet.js`, plus the loader + deferred-wiring pattern from `hard-sync-worklet.js`). Monophonic and glitchy on chords — true of the real pedal too.
+
+- **Vocoder pitch shift (deferred from Phase 72):** the "Alien" program shifts **formants** (SHIFT scales the carrier band centres — a different-sized head), which is the classic not-human cue but is not a transposition. A true pitch shift — `Tone.PitchShift` on the output, or on the modulator for a chipmunk/ogre modulator — does not exist anywhere on the vocoder. Raised while reviewing the "Formant Talker" directive; Dylan chose to ship the presets + gate first and see whether the formant version is enough.
 
 - **Phase 68b follow-up (VCO anti-aliasing):** the worklet VCO core (Phase 68b) generates naive, non-band-limited saw/pulse/phase-warped waveforms, so notes high in the range alias audibly — a regression vs the native `OscillatorNode` it replaced (which was band-limited). Add **PolyBLEP** at the saw/pulse discontinuities (+ polyBLAMP on the triangle corners) inside `hard-sync-worklet.js` to restore band-limiting while keeping the single-phase, 4-simultaneous-waveform core. Sine stays pure; the SHAPE phase-warp complicates but doesn't block a basic BLEP at the main reset edge.
 
 ---
 
 ## Completed Phases Log
+
+### [2026-08-07] Moog Phase 86 — Vocoder: kill the pitch-rate ripple (the "static")
+
+**Files modified:** `useMoogAudio.js`
+
+Dylan: "the sound still seems kind of loose and it almost seems like when I speak there's like a static sound of the wave sound."
+
+**"Static" is an artefact, not a tonal balance — and Phase 84 caused it.** That reframing is what finally located this. The 1.5 ms attack introduced in 84 is fast enough to track individual **glottal pulses**, so the follower re-imposes the speaker's PITCH onto the carrier as amplitude modulation. Measured on a voiced 730 Hz formant with 120 Hz glottal pulses:
+
+| configuration | pitch ripple | consonant 90 % rise |
+|---|---|---|
+| symmetric 8 ms (pre-Phase-84) | 28.7 % | — |
+| **asym 1.5/27 ms, flat 300 Hz post (shipped in 84)** | **18.9 %** | 8.4 ms |
+| asym, flat 60 Hz post (best single value) | 7.4 % | 15.1 ms |
+| **asym, per-band 20 → 121 Hz post** | **6.0 %** | **12.5 ms** |
+
+Phase 84 *did* improve it (28.7 → 18.9 %) but nowhere near enough, and the residue is plainly audible — which explains the otherwise puzzling "I can hear DECAY but it didn't make much difference": **release was never the culprit, and the post-filter was parked at 300 Hz, far too high to reject a 120 Hz ripple.**
+
+**Why per-band rather than one lower number.** Pitch ripple (~120 Hz) and consonant onset bandwidth (~30 Hz) are barely a decade apart, so a flat cutoff always trades one for the other — 60 Hz flat still leaves 7.4 % ripple *and* slows consonants to 15 ms. But the two problems live in **different bands**: pitch ripple is a VOICED phenomenon concentrated low and mid, while consonants are HIGH and mostly unvoiced noise with no pitch ripple to reject at all. `vocEnvPostHzFor(f) = 20 · (f/100)^0.41` (20 Hz at the 100 Hz band → 121 Hz at 8 kHz) therefore beats the best flat value on **both** axes simultaneously.
+
+Implemented by giving each band its own cutoff on the existing `ModEnv` filters at worklet-wire time — no new nodes, and the worklet-absent fallback (DECAY writing those same cutoffs) is untouched.
+
+**Verified numerically:** ripple/rise tables above; per-band cutoff table. Production build clean. **Not browser-verified** — Dylan's ear.
+
+### [2026-08-07] Moog Phase 85 — Vocoder: sharpen the ANALYSIS bank (the other half of Phase 83)
+
+**Files modified:** `useMoogAudio.js`
+
+Dylan after Phase 84: "I can hear the decay difference but it really didn't cause much of a difference. Still looking for cleaner and clearer. The VOWEL module still sounds better and is the kind of sound I'm going for."
+
+**Phase 83 fixed half the problem and I did not notice.** It raised the CARRIER bank's Q (1–7 → 1–20) so the bank could cut formant-shaped peaks. But the MODULATOR bank stayed at `VOC_BANDS`' Q of **4** — and at that width a single vocal formant is not resolved to one band at all:
+
+| 730 Hz formant → analysis band | 430 | 580 | 770 | 1035 | 1385 |
+|---|---|---|---|---|---|
+| response at Q 4 | 22% | 47% | **92%** | 33% | 18% |
+| response at Q 12 | — | 18% | **62%** | — | — |
+
+So every formant was being reproduced as a **smeared cloud of five carrier peaks**. Phase 83 made those peaks sharp; there were still five of them. VOWEL renders the same formant as exactly **one** peak — which is precisely the difference he keeps hearing, and it explains why raising RES helped but never arrived, and why DECAY barely moved the needle (a time-domain control cannot fix a frequency-domain smear).
+
+**As built:** `vocAnalysisQFor(carrierQ)` = `clamp(carrierQ × 0.8, 4, 14)`, written alongside the carrier Q in the RES branch. One knob now sharpens analysis and synthesis together.
+- **Floored at 4**, the historical value, so RES at or below centre is byte-identical to pre-85.
+- Formant isolation by setting: centre → 3 bands (unchanged), NUVO (aQ 8.3) → 2, **TALKBOX (aQ 12.6) → 1**, max (aQ 14) → 1.
+- **Accepted trade-off:** a constant-Q bank rings for ≈ `Q/(π·f)`, so narrow low bands ring longest — 40 ms at 100 Hz, 17 ms at 240 Hz, 5.5 ms at 730 Hz, 1.6 ms at 2.5 kHz. Worst exactly where it matters least: the 150 Hz highpass and the pre-emphasis tilt (−8.4 dB at 100 Hz) already suppress that region, and Phase 84's 1.5 ms attack tracks an onset before the ring settles.
+
+**Carrier density is now load-bearing** and worth telling the user: a Q-20 carrier band at 1 kHz is ~50 Hz wide, so a single low saw can have no harmonic inside it at a given instant and that band drops out. Denser carrier (several detuned VCOs / a chord) or a little HISS/BUZZ — which exist exactly to fill carrier-bank gaps — is the fix.
+
+**Verified numerically:** the leakage tables above; RES → carrier Q → analysis Q → bands-opened mapping; ring times. Production build clean. **Not browser-verified** — Dylan's ear.
+
+### [2026-08-07] Moog Phase 84 — Vocoder: asymmetric envelope followers (AudioWorklet)
+
+**Files added:** `public/env-follower-worklet.js`. **Modified:** `useMoogAudio.js`
+
+Dylan on Phase 83: "sounds better and clearer with the RES up and in TALKBOX mode, but still not as clear and clean as I'd like — we are stepping in the right direction." Greenlit the asymmetric-tracking idea held back from 82/83.
+
+**The problem, stated precisely.** The 16 `ModEnv` envelope followers were `Tone.Filter` lowpasses — **symmetric**, one time constant for both rise and fall. That forces a trade with no winning setting: fast → consonant onsets punch but the rectification ripple rides through and roughens vowels; slow → vowels smooth but consonants smear into the vowel that follows, i.e. *"the vocals aren't clear"*. DECAY was a knob for choosing which artefact you preferred.
+
+**Measured (120 Hz band, consonant burst → vowel):**
+
+| follower | consonant peak by 30 ms | vowel ripple |
+|---|---|---|
+| symmetric 8 ms (old centre) | 0.410 | 0.031 |
+| symmetric 3 ms (old fast end) | 0.518 | 0.082 |
+| **asymmetric 1.5 ms / 27 ms** | **0.829** | **0.020** |
+
+Asymmetric wins on **both** axes simultaneously — 2× the consonant definition of the old centre *and* the lowest ripple of the three — because a slow release holds the envelope near the ripple's peak between cycles instead of averaging through it. It rejects ripple *better* than a symmetric filter of the same speed, not worse.
+
+**Why a worklet here, having rejected worklets twice.** I pushed back on Gemini's worklet directives (72, 74) because that DSP was already sample-accurate on native nodes and a worklet's 128-sample block would have made it *worse*. This is the opposite case: **no native Web Audio node smooths asymmetrically.** WaveShaper holds no state; a DelayNode feedback loop is block-quantised and needs a nonlinear element inside the cycle. Per-sample state is the entire job — the same test that justified the deferred 912 sub-octave.
+
+**As built:**
+- `16× ModRect → ChannelMerger(16) → env-follower-processor → ChannelSplitter(16) → 16× ModEnv → CarrVCA.gain`; one worklet node per vocoder instance covering all 16 bands.
+- **Output re-enters through the EXISTING `ModEnv` filters**, keeping their `→ CarrVCA.gain` edges: no 16 adapter nodes, and no raw-splitter-to-Tone-param connection (SAC would object). They park at 300 Hz as a light de-stepper.
+- **Load-failure safety is the shape of the block.** `ModRect → ModEnv → CarrVCA.gain` stays wired at construction and is only unhooked inside the `.then()`, so a 404/refused module degrades to exactly the pre-84 symmetric behaviour rather than silence. `applyVocoderParams`'s DECAY branch mirrors it — worklet release when present, filter cutoffs when not.
+- **ATTACK pinned at 1.5 ms, no knob** (the useful range is tiny; 1 vs 3 ms isn't worth panel space). DECAY becomes RELEASE, 6 ms → 120 ms, centre ≈ 27 ms. One control, deliberately, after the Phase 82 lesson.
+- Deferred wiring via `wireEnvFollowRef` for vocoders added after load (the `wireHardSyncRef` pattern); `vocDecayRefs` replays the knob so a late-wired instance doesn't reset. Teardown disconnects (never disposes) the native nodes on `removeModule` and unmount, before the `nodeNames` sweep takes their neighbours.
+
+**Verified:** simulation table above; DECAY→release mapping; production build clean with `env-follower-worklet.js` present in `build/`. **Not browser-verified** — Dylan's ear.
+
+### [2026-08-04] Moog Phase 83 — Vocoder: reach VOWEL's resonance (RES range + limiter)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+**Dylan's reference, and it was the useful one:** "I like how the vowel module sounds — very clean and really morphs the sound wave to sound like a certain vowel. I want the vocoder to sound pretty much the same, but morphing to the word being spoken." Plus: more like a talk box / DigiTech Talker.
+
+That turns a taste problem into a **diff between two modules in the same file**, and the diff is stark:
+
+| | resonance |
+|---|---|
+| VOWEL formants (liked) | **Q = 11 / 13 / 15** |
+| Vocoder carrier bands | **Q = 1 … 7**, ~4 typical |
+
+The vocoder's bands were **3–4× too broad to ever make that sound**. No amount of drive, tilt or preset tuning could have got there; the range simply didn't reach.
+
+**Phase 73 aimed at the wrong target, and this supersedes it.** It derived Q ≈ 3.45 as the point where adjacent bands' −3 dB skirts exactly meet, and called contiguous coverage "clean". But contiguous coverage means the carrier's spectrum passes through **largely intact** — which is precisely the "loose synth sound" being complained about. VOWEL has three filters with enormous gaps between them and reads as clean and strongly vocal *because everything between the formants is discarded*. A talk box is the same principle: a resonant tube with a few strong peaks and near-nothing between. **Sparse and resonant, not flat and continuous.**
+
+**As built:**
+- **RES is now `Q = 20^res`** (1 → 20). Chosen so the lower half barely moves — 0.408 → 3.39 vs the old 3.45, centre → 4.5 vs the old 4.0 — while the upper half opens into VOWEL/talk-box territory for the first time.
+- **Q-tracking output makeup.** A bandpass holds unity gain at its centre but its bandwidth shrinks as 1/Q, so energy passed from a broadband carrier falls as amplitude ∝ √(1/Q). Without compensation, turning RES up just goes quiet and the resonance reads as "thin" rather than "vocal" — which would have made the new range feel broken. `vocOut` makeup is now `VOC_OUT_MAKEUP · √(Q/VOC_BASE_Q)`: ×3 at the base Q as before, ×4.8 at NUVO, ×6.7 at maximum. Sole writer of that gain.
+- **Hard-knee limiter (`vocLimit`) before VOLUME**, copied from VOWEL's output stage — `threshold −1, ratio 20, knee 0`, explicitly **not** `Tone.Limiter` (30 dB soft knee, barely compresses — the Phase 64a finding). It catches what the makeup lets through and is a large part of why VOWEL reads as "clean". Placed before VOLUME so the user's level control isn't fighting it; CLARITY still sums after it, so the real voice bypasses the bank's limiter exactly as in VOWEL. Also in the dynamic factory + dispose list.
+- **Programs retuned to resonance**: NUVO 0.78 (Q 10.3, ≈ VOWEL's F1), TALKBOX 0.92 (Q 15.7, past VOWEL's F3), ALIEN 0.86 (Q 13.1). The Phase 73 values were the flattest possible setting — the opposite of the goal.
+
+This also finally delivers the **output compression** flagged as a "next lever" in Phase 73 and again in 82, arriving here for a structural reason (Q compensation) rather than as a blind character change.
+
+**Verified numerically:** the full RES → Q → makeup table; backward compatibility across the lower half; VOWEL's Qs now reachable (they were not before). Production build clean. **Not browser-verified** — RES is the knob to move, and Dylan's ear decides where.
+
+### [2026-08-04] Moog Phase 82 — Vocoder: DRIVE exposed (the "loose synth sound")
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+
+**Dylan:** "the vocoder gives off a more loose synth sound and the vocals aren't very clear" — wanting a clean Daft-Punk robot.
+
+**Method change.** Two previous rounds (72, 73) picked DSP values blind and did not land. This one ships **one knob and one listening instruction** instead of a bundle of retuned constants, because the parameter that governs his exact complaint has been a hardcoded constant since Phase 42 and neither of us can pick its value without hearing the room, the mic and the carrier.
+
+**Diagnosis — "loose synth sound" is a measurable state, not a vibe.** `VOC_ENV_DRIVE` (8) scales each band before rectification. Too high and every band's detector pins against the rectifier ceiling, so the carrier VCAs sit near maximum *whatever you say* — and sixteen bandpasses of a saw, all open, sum back to roughly the saw. You hear the synth with vague vocal colour instead of a voice. Measured at the shipped value of 8:
+- the 8 kHz band pins at any band level above **0.031**;
+- a 4× change in voice level moves that band only **0.638 → 0.853**, i.e. it barely tracks speech at all.
+
+**Phase 73 made this worse at the top**, which is consistent with it not fixing his complaint: the pre-emphasis tilt multiplies the drive by up to 4× on the high bands, so exactly the bands carrying consonant detail were pushed hardest into the ceiling. The tilt was right for *brightness* and wrong for *headroom*, and with drive fixed there was no way to have both.
+
+**As built:** DRIVE knob, exponential, **centre = the historical 8** so saved racks are byte-identical until touched, range 2 → 32. Writes all 16 `${vid}ModDrive${i}` gains, each keeping its own pre-emphasis tilt; sole writer of those nodes (set at construction, only touched here after). Measured band response across the knob (gain at a quiet vs loud voice, 0.01 → 0.06):
+
+| knob | drive | 100 Hz | 1 kHz | 8 kHz | 8 kHz spread |
+|---|---|---|---|---|---|
+| 0.00 | 2 | 0.01→0.05 | 0.03→0.19 | 0.08→0.48 | 0.400 |
+| 0.25 | 4 | 0.02→0.09 | 0.06→0.37 | 0.16→0.84 | **0.677** |
+| 0.50 | 8 | 0.03→0.18 | 0.12→0.72 | 0.32→0.85 | 0.533 |
+| 0.75 | 16 | 0.06→0.37 | 0.25→0.85 | 0.64→0.85 | 0.215 |
+| 1.00 | 32 | 0.12→0.71 | 0.50→0.85 | 0.85→0.85 | 0.000 (pinned) |
+
+Peak responsiveness is around **knob 0.25–0.3**, i.e. *below* where it has been fixed all along — which is the direction his complaint points.
+
+**Deliberately NOT bundled** (one change at a time, so the experiment isn't confounded), in the order I'd try them if DRIVE alone doesn't finish it:
+1. **Asymmetric envelope followers** — fast attack, DECAY controlling release only. The followers are symmetric `Tone.Filter` lowpasses, so DECAY currently trades consonant smearing against vowel ripple and can't win both. Same principle as the 912's SPEED and the one technically sound idea in the Gemini envelope-filter directive.
+2. **Output compression** — flagged as the next lever back in Phase 73 and still unbuilt. Daft Punk's vocoder is heavily compressed; that is where "dense and present" comes from.
+
+DRIVE is also excluded from the PROGRAM presets on purpose — it is tuned to a particular voice, mic and carrier, and a preset stomping it mid-hunt would be maddening.
+
+**Layout:** knob grid 6 → 7 columns (13 knobs = 7 + 6). Widened rather than adding a third row: this module is tier row 3's `max-content` column so both axes cost, but Phase 49 spent real effort trading its height down and a third row would undo that.
+
+Production build clean. **Not browser-verified** — and this time that is the point: the value is Dylan's to find.
+
+### [2026-08-04] Moog Phase 81 — Vocoder audit: shared-mic single-writer + status desync
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+Bug sweep of the vocoder (tone was explicitly out of scope — Dylan set that aside after Phase 73). Two real defects, both in the same place: the mic is a **singleton** but its controls are drawn **per instance**, and both were wired straight through.
+
+#### MIC knob — two knobs, one node
+`updateExtMicParams` was the sole writer of the shared `extMicGain.gain`, and BOTH the static and dynamic vocoders bound their MIC knob to it. With two instances (the cap), turning voc2's MIC silently moved voc1's and the two knob positions disagreed with the actual level — a straight single-writer violation of the kind the last several phases have been clearing out. Each instance now owns `${id}MicGain` (`extMicGain → ${id}MicGain → ${id}ModRaw`), written by the new id-scoped `updateVocMicGain(vid, { gain })`. `extMicGain` is no longer written at all: it stays at unity as the shared tap point for the mic and its SIG meter. `removeModule` severs the shared edge at the new node, and `${id}MicGain` joins the dispose sweep.
+
+#### Mic STATUS — two buttons, one mic
+`micStatus` was per-instance `useState`, so enabling the mic on one vocoder left the other's button reading "○ MIC" for a mic that was live, and clicking it would have re-run `enableMic` (idempotent, but the UI was simply lying). Lifted to `MoogShell`, which now owns the async enable/disable and passes `micStatus` to every instance. `toggleMic` drops its local state writes and its `async` (it no longer awaits anything).
+
+#### Checked and found correct — not changed
+- **All 14 knobs are live.** The UI's param object and `applyVocoderParams`'s destructure match exactly — no dead controls, which is worth stating given how many the last few modules had.
+- **Dynamic/static parity holds** through Phases 72–73: `${id}ModDrive${i}` (drive + pre-emphasis tilt) and `buildVocGate` are both present in the factory, and `sourceNames` carries HissNoise/BuzzNoise/CarrOsc so powerOn/powerOff reach them.
+- **`vocShiftTick` is correctly NOT visibility-gated** — it writes carrier band frequencies, i.e. audio, and must keep running while the page is hidden (the QNT transpose-loop rule). The 16-LED meter loop, which *is* visual, is correctly gated on `offsetParent`.
+- **RES (`CarrBPF.Q`) and the shift rAF (`CarrBPF.frequency`) are disjoint writers** on the same filters.
+
+**Known limitation, logged not fixed:** removing or hiding every vocoder leaves the singleton mic open with no button left to close it (the OS indicator clears on page unload, which does `close()` + `dispose()`). The engine has no visibility into which modules are currently rendered, so fixing it properly means teaching it about UI presence — out of proportion to the edge case.
+
+Production build clean, no new lint warnings. **Not browser-verified** (no Playwright) — Dylan's ear.
+
+### [2026-08-03] Moog Phase 80 — KICK: CLICK TONE + TUNE CV
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+The two additions flagged at the end of the Phase 79 audit, both taken.
+
+#### CLICK TONE — the cheapest real improvement on the module
+`kickClickFilter` (highpass on the beater transient) was hardcoded at 2 kHz. The node already existed; only a knob was missing. Range is built **around** the old value so knob CENTRE is exactly 2000 Hz and saved racks are unchanged until touched: ratio 36 → √36 = 6 → min = 2000/6 ≈ 333 Hz, max = 2000×6 = 12 kHz. Soft mallet thud through to sharp beater tick. Written with `setTargetAtTime`, matching every other frequency-type param on the rack (`rampTo` dispatches an exponential ramp, unsafe near 0). Zero new nodes.
+
+#### TUNE CV — Hz-domain, because that is this rack's pitch convention
+Worth stating explicitly since MOOG_ARCHITECTURE's header describes 1V/oct: **the implementation is Hz-domain.** Every pitch out here — `seq-pitch-out`, `qnt-cv-out`, `chordseq-*-out`, `kbd-pitch-out` — emits the frequency itself, which is what the VCOs' glideBus consumes. A ±1-volt-style TUNE CV would therefore have been incompatible with every pitch source on the rack and only drivable by an LFO. So the jack takes the signal's **value as the fundamental**, which is what actually delivers sequenced tom fills and melodic drums.
+
+- **The TUNE knob stays live** — with a cable present it becomes a **transpose** around the incoming pitch rather than an absolute frequency, exactly as a VCO's FREQ knob behaves against its CV. Knob centre (40·√5 ≈ 89.4 Hz) is unity; the span works out to **±13.9 semitones**. Avoiding a knob that goes dead when you patch something is the whole lesson of Phases 70–71.
+- **Engagement is CABLE-driven, not level-driven** — a patched-but-idle pitch source reads 0, indistinguishable from no cable (the `isLfoSync` / FFB-sweep reasoning). Resolved at trigger time by scanning `connectionsRef` for `→${kid}-tune-cv` rather than cached: a kick fires a few times a second, so the scan is free next to a connect/disconnect invalidation surface. Same trade as Phase 76's `resolveCvOrigin`.
+- Sampled from a per-instance `Tone.Analyser('waveform', 128)` at trigger time — a nonlinear "read the pitch when the drum fires" lookup, not something an AudioParam connection can express.
+- Clamped to **20–2000 Hz**, so a silent source or a wildly out-of-range one degrades to a thud rather than something inaudible or screaming.
+
+**Layout follow-up (80a, Dylan-directed):** TONE was first placed in `.knobRow`, which made five knobs and wrapped the row onto a second line — taller module. Both beater controls moved to the **TRIG row** instead: `[lamp][TRIG][button] [CLICK] [TONE]`, leaving TUNE / P.ENV / DECAY alone on the knob row. That row's height was previously set by the 26 px button, so two `sm` knobs cost almost nothing, and the knob row drops from ~342 px to ~218 px so it can no longer wrap. Grouping CLICK (level) next to TONE (highpass) also reads correctly — they shape the same transient. `.gateBtnRow` is `align-items: center`, so both centre against the lamp and button with no CSS change.
+
+**Verified numerically:** TONE centre lands on exactly 2000 Hz with 333 Hz / 12 kHz endpoints; TUNE CV passes 110/220/55 Hz through unchanged at knob centre, transposes to 67.9 / 178.3 Hz at knob 0.2 / 0.8, and the clamps floor 5 Hz → 20 Hz and ceil 4000 Hz → 2000 Hz. Production build clean, no new lint warnings. **Not browser-verified** (no Playwright) — Dylan's ear.
+
+### [2026-08-03] Moog Phase 79 — Module-perfection pass: KICK
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+Next module in the pass. Two real bugs — one of them a crash that was already logged as a rare race and turns out to be trivially reachable — plus a timing defect shared with the sequencer.
+
+#### The trigger-time crash is NOT a rare race (retires the Phase 62 candidate)
+`MOOG_PLAN` logged this as "surfaced once in ~18 heavy-rack stress runs … reachable whenever the main thread stalls past the Transport lookAhead". Reading the two trigger sites shows a far more direct path:
+- the **sequencer** schedules its hits `lookAhead` (~0.1 s) **into the future**;
+- the **manual TRIG button** fires at `Tone.now()` — i.e. **in the past relative to an already-pending step**.
+
+So clicking TRIG while the sequencer is driving the same kick is a guaranteed `Source.start()` assert — *"Start time must be strictly greater than previous start time"* (`tone/build/esm/source/Source.js:133`) — which throws inside the step loop. Not load-dependent at all.
+
+Fixed with the clamp the candidate proposed, applied at **both** sites and to **both** voices (MembraneSynth and the click NoiseSynth, which is equally a Source): module-level `nextKickTime(lastMap, kid, time)` keyed per instance, `KICK_MIN_GAP_S` 1 ms — far below audibility on a drum. Verified: a manual hit at 9.950 against a pending step at 10.000 now lands at 10.0010 instead of throwing; a stalled loop repeating 5.000 walks forward 5.0000 / 5.0010 / 5.0020; instances are independent. Map cleared on unmount. **Future Phases entry removed.**
+
+#### Rhythmic LEDs led the sound by ~100 ms
+Both the kick lamp and the 960's step LED were fired straight from the Tone.Loop callback, which runs `lookAhead` **before** the audible moment. At 120 BPM that is 40% of an eighth note — visible. Tone's own `Draw` docs name this exact trap: Transport callbacks "always happen _before_ the scheduled time and are not synchronized to the animation frame so they are not good for triggering tightly synchronized visuals and sound."
+
+New `drawAt(time, fn)` wraps `getDraw().schedule`, with a fallback to calling immediately if the context exposes no Draw — so the worst case is today's behaviour, never a throw. Applied to the kick lamp (both sequencer and manual paths, the manual one at its *clamped* time so the lamp matches the nudged hit) **and to the 960 step LED**. The sequencer's LED is strictly outside this module, but fixing only the kick's would have left the two visibly disagreeing by 100 ms — worse than the shared lead.
+
+#### Small
+`flashTimer` is now cleared on unmount, so a removed instance can't touch a detached node 80 ms later. Harmless today (the callback guards on `ledRef`), free to do properly.
+
+#### Checked and found correct — not changed
+- **ACCT (`-click-in`)** correctly lands on `kickClickGain.gain` as a summing CV while the CLICK knob owns the intrinsic value — the standard knob+CV split, on statics and dynamics alike.
+- **DECAY drives both** `envelope.decay` and the note duration passed to `triggerAttackRelease`, so the hit's length tracks the knob. Deliberate, not a double-write.
+- **The click voice's length** is `decay * 0.1`, keeping the transient short regardless of body length.
+- **The LED-callback registration effect** references `flash` before its `const` appears in source order, which is fine — the effect body runs after the component function has fully evaluated.
+- **TUNE mapping** `40 · 5^x` → 40–200 Hz exponential; **P.ENV** → 0–5 octaves; **DECAY** → 0.05–2 s. All sane.
+
+**Verified numerically:** the clamp across the reachable crash path, the stall path, and per-instance isolation. Production build clean, no new lint warnings. **Not browser-verified** (no Playwright) — Dylan's ear.
+
+### [2026-08-03] Moog Phase 78 — Module-perfection pass: ENV
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+Next module in the one-by-one pass (68/69 VCO+Noise, 70 VCF/LFO/REV/BBD/914, 71+77 VCA). Three real bugs, all fixed; the module is otherwise sound.
+
+#### TRIG was a completely dead jack — since Phase 1
+`env{n}-trig` was `{ type: 'in', dest: null }` with **no `isGate` flag**. In `connect()` a gate source (`node: null`) bails at `if (from.node === null) return`, and anything else bails at `if (to.dest === null) return; // deferred jack — silently no-op`. So the jack rendered on the faceplate, accepted a cable, drew it, and did **nothing whatsoever** — for seventy-seven phases. The jackMap comment even admitted it ("trig deferred"). Same dead-affordance class as the VCA's LOG/LIN lever (71) and the LFO's FREE/SYNC toggle (70).
+
+**Wired rather than stripped**, because the GATE/TRIG distinction is real and useful:
+- **GATE** holds Sustain while high → note length comes from the *source*.
+- **TRIG** fires a one-shot attack → decay → release → note length comes from the envelope's *own A+D knobs*, so a clock pulse or a single-step gate plays a percussive hit regardless of how long the source is held.
+
+Implemented as `isGate: true` + `isTrig: true` on the jack (statics ×3 and the dynamic factory), the flag carried into `gateActionsRef` by `connect()`, and both firing sites — the 960 step loop and `updateKeyboard` — branching through a shared `triggerEnvOneShot(env, time)`. Duration is `attack + decay` (reaching the sustain point then releasing, so the knobs still shape it), floored at 2 ms so an all-zero envelope clicks rather than doing nothing. A rest step doesn't fire, and key-up does nothing — a trigger has no "off".
+
+#### The manual GATE button could cut a note it never started
+`onMouseUp` and `onMouseLeave` both fired `triggerRelease` unconditionally. So merely dragging the pointer across the button — or releasing a click that began elsewhere — sent a release to that envelope, cutting a note a patched sequencer or keyboard gate was holding open. Fixed with a `gateHeldRef` so the button only releases what it itself opened. A ref, not state: pointer bookkeeping has no business re-rendering the module.
+
+#### `powerOff` left envelopes stuck open
+An envelope is not a source, so nothing stops it. Holding the manual GATE (or a patched gate) while powering down parked the `Tone.Envelope` at its sustain level with nothing to bring it back — the next power-up then started with that VCA already wide open and droned until something released it. `powerOff` now releases every envelope, statics and dynamics. Same class as the Phase 76 VCO bus-gate reopen sitting a few lines below it.
+
+#### Checked and found correct — not changed
+- **The LED works on a DC signal.** `Tone.Meter.getValue` is RMS over the waveform buffer, and RMS of a constant *v* is *v*, so an envelope's level reads correctly. Worth confirming rather than assuming, since a meter that stripped DC would have read zero forever.
+- **A/D/R mapping** `0.01 · 1000^x` → 10 ms … 10 s, exponential. Sane range, sane taper.
+- **SUSTAIN** is a level (0–1), correctly passed straight through rather than time-mapped.
+- **Multiple gate sources into one envelope** are keyed by full cable key, so a sequencer and the keyboard can both drive one ENV independently. (Whichever releases first wins — inherent to one envelope having one state, not a defect.)
+
+**Verified numerically:** A/D/R taper across the knob range; TRIG one-shot length at the module defaults (99 ms), at A/D half (632 ms) and at zero (floored to 40 ms). Production build clean, no new lint warnings. **Not browser-verified** (no Playwright) — Dylan's ear.
+
+### [2026-08-03] Moog Phase 77 — VCA: second control input
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+Dylan asked what the VCA was still missing after the Phase 71 pass. The honest answer was "very little" — one modest gap and one deliberate omission (soft saturation, flagged but not built, because it retunes every existing patch and I cannot hear the result). He picked the gap.
+
+**The gap.** Cables fan in, so an envelope and an LFO could already both be patched to `-cv` and would sum. But they shared the single attenuator, so they could only be scaled together. The failure case is a **weak envelope with strong tremolo**: turning the attenuator down to soften the envelope also kills the tremolo, and the LFO's own DEPTH can't exceed maximum to compensate. Verified: targeting "envelope peaking 0.3, tremolo ±0.5", one shared attenuator caps the tremolo at **±0.30**; two independent ones deliver **±0.50** with the envelope still at 0.30.
+
+**As built:**
+- `buildVcaCv` mints a second attenuator `${id}Cv2`; both feed the SAME `${id}CvShape`. New jacks `-cv2` on all three statics and the dynamic factory; `cv2Amt` added to `applyVcaParams`, so statics and dynamics stay on one code path.
+- **The two CVs sum BEFORE the response curve.** That matches a real control port (several voltages meet at one node and the lin/exp response acts on the sum) and is why there is one shaper, not two. Shaping each separately and adding would make two half-open CVs read as two small gains rather than one large one — measured in LOG, two CVs at 0.5 give **1.000** summed-first vs **0.061** shaped-separately, i.e. near-silent and plainly wrong. Web Audio sums at a node's input, so this needed no extra summing node.
+- **Backward compatible in both directions.** The jack keeps its original id `vca-cv` (NOT renamed to `-cv1`), so cables in saved racks still resolve; only the panel label changed to "CV 1". The persistence key stays `envAmt` for the same reason — renaming it would have silently reset the attenuator to 1.0 in every rack where it had been dialled in. An unpatched CV 2 contributes exactly 0, so a CV-1-only rack is bit-identical to pre-Phase-77 (verified across the curve).
+- **CV 2 defaults to full**, matching CV 1: a patched cable that does nothing until you hunt for a second knob is the dead-control trap in reverse — the exact class Phases 70/71 spent their time removing.
+- **Layout:** both attenuators are now `sm` rather than CV 1's old `md`, so they read as a matched pair and the added knob costs ~48 px of row width instead of ~76. `.knobRow` and `.jackRow` both wrap, so a narrow column degrades to two lines rather than overflowing — the adaptive behaviour is why the knob went in the existing row rather than a forced second one.
+
+**Verified numerically:** unpatched CV 2 contributes 0 across the curve; the tremolo/envelope balance case above; sum-before-curve vs shape-separately in LOG. Production build clean, no new lint warnings. **Not browser-verified** (no Playwright) — Dylan's ear.
+
+**Still deliberately unbuilt:** soft saturation on the VCA output. `MOOG_ARCHITECTURE` describes the module as able to "drive into soft clipping at extreme settings", and with GAIN at its default plus a full envelope the VCA genuinely does exceed unity — so it is being driven. Not added unprompted: it changes the tone of every existing patch, and two blind character changes this week (the vocoder rounds) failed to land.
+
+### [2026-08-03] Moog Phase 76 — Rest steps mute through the quantizer / chord sequencer
+
+**Files modified:** `useMoogAudio.js`
+
+**Dylan-reported:** turning a step off on a 960 silences the VCO when the pitch is patched **directly** to `vco-cv`, but the same rest plays right through if the pitch is routed via the chord sequencer or the quantizer first.
+
+**Cause — the mute keys on jack identity, one hop only.** `buildSeqLoop` mutes with
+`if (vcoActiveCvRef.current[vcoId] === `${seqId}-pitch-out`)`, and `connect()` stores the **immediate** upstream jack in `vcoActiveCvRef`. Direct patch → the value is literally `seq-pitch-out` and matches. Insert a processor → it becomes `qnt-cv-out` or `chordseq-cv-out`, which can never match, so the gate write never happens for that VCO and it drones through every rest. Nothing logged an error; the feature just stopped existing depending on routing.
+
+**Fix — resolve the source transitively.** New module-level `cvPassthroughInput(jackId)` (the two module types that pass a pitch CV onward: `qnt*-cv-out ← qnt*-cv-in`, `chordseq*-{cv,root,3rd,5th}-out ← chordseq*-cv-in`) and `resolveCvOrigin(jackId, connections)`, which walks those links through the live `connectionsRef` map back to the originating jack.
+
+**The important constraint: only the GATE loop resolves transitively.** The glide/pitch write immediately above it in the same callback must keep matching on the IMMEDIATE source, because whoever sits directly upstream owns the pitch — the quantizer's own callback is already writing that VCO's GlideBus. Resolving both would have put two writers on one bus and broken the single-writer rule, quietly, in the hardest place to debug.
+
+**Termination and cost:**
+- Stops at a non-pass-through jack, at an unpatched pass-through input (that module is then the origin — so a chord sequencer running its own program correctly does NOT gate to an unrelated 960), or at a 4-hop guard that also makes a cable cycle harmless rather than a hang.
+- Resolved per step rather than cached on cable changes, deliberately: the origin depends on cables that never touch the VCO (patching `seq→qnt-cv-in` changes it for a VCO already fed by `qnt-cv-out`), so a cache would need invalidating from every connect/disconnect site — more failure surface than the few microseconds it saves at four steps a second. A `=== pitchSrc` short-circuit means direct patches never pay for the walk at all.
+
+**Also fixed while in there:** `powerOff` now reopens every `${vcoId}bus`. Powering down on a rest step left that VCO's gate at 0, so it stayed silent on the next power-up until the sequencer happened to reach a gated step. Latent before this phase and easier to hit now that the mute reaches more VCOs.
+
+**Verified:** 10-case resolver test — direct, via QNT, via chord seq, a chord VOICE out (3rd), a chained seq→chordseq→qnt, a `seq2`/`qnt2` instance pair, and three cases that must NOT resolve to a sequencer (unpatched QNT, chord seq on its own program, keyboard through a QNT) — all pass, plus the cycle guard terminating. Production build clean. **Not browser-verified** (no Playwright) — Dylan's ear confirms the musical result.
+
+### [2026-08-03] Moog Phase 75 — VOWEL: DIRECT morph mode; 912 removed
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+
+**Dylan found the sound he was after using existing modules, and asked to scratch the 912.** What he wanted instead was per-note control of *which* vowel goes to *which* — "start at U and go to A, or I to O — and go there directly rather than passing through the other vowels to get there."
+
+#### The 912 is removed (Phases 74 / 74a reverted)
+Every trace: the factory branch, `envfTick`, `fireEnvfGates`, all six `envf*` refs, the ENVF_* constants and curves, the param case, `getEnvFollowLevel`, `removeModule` cleanup, the `DYN_TYPES` entry, `EnvFollowModule`, its binding and render row. **Verified safe for saved racks first**: `addModule` returns `null` for an unknown type and the restore loop is `if (res) restored.push(...)`, so a rack containing an `envf` instance silently drops it instead of crashing, and its cables fail endpoint validation and are stripped. One orphaned `}, []);` was left by the first removal pass and caught by the build. Everything is recoverable from git if it is ever wanted back.
+
+#### The real limitation, and why it needed new code
+`vowelFreqsAt` treats the five vowels as an ordered **road** — A→E→I→O→U. Position 4 is U and position 0 is A, so travelling U→A necessarily drives the whole road backwards: **halfway through the move it is literally sounding the vowel I** (270/2290/3010). That is correct for a continuous morph and completely wrong for "start at U, land on A". No amount of knob or CV routing fixes it, because the path is baked into the mapping.
+
+**`vowelFreqsBetween(from, to, t)`** blends the two chosen endpoints' formant triples directly, so the sweep only ever contains shades of those two vowels. U→A at 50% is 515/980/2340 — genuinely between them, and not any other vowel.
+
+#### As built
+- **MODE selector: CHAIN / DIRECT.** CHAIN is the default and is the pre-Phase-75 behaviour bit-for-bit, so every saved rack is untouched and the feature is inert until clicked.
+- **FROM / TO selectors** (A/E/I/O/U each), defaulting to U → A. Rendered **dimmed but present** in CHAIN (`.selectorGroupIdle`) rather than hidden — hiding them would change the module's height between modes, and "real hardware, currently dark" is already the rack's language for this (the LFO division screen, Phase 70).
+- **Both modes read the same morph knob + FORMANT-CV sum**, so a CV drives either identically; only the path through vowel space differs. In DIRECT the knob is the manual position along the FROM→TO line and the CV rides on top, so a full-scale envelope with the knob at 0 travels exactly FROM → TO.
+- `vowelTick` remains the sole writer of the three formant frequencies; the mode/from/to refs are written by the param path only, and each change re-arms the delta gate so a mode flip is applied immediately.
+
+#### No gate input, deliberately
+Dylan chose driving it from the **existing ENV modules** (`kbd-gate-out → env1-gate`, `env1-out → vowel-cv-in`) over a built-in GATE + TIME knob on VOWEL. That gives full ADSR shaping of the vowel travel — ATTACK is how fast it reaches TO, SUSTAIN is the vowel held while the key is down, RELEASE is the drift back to FROM — with no second envelope generator on a rack that already has three. Same reasoning that had just retired the 912.
+
+**Verified numerically:** DIRECT endpoints land on the exact table values (t=0 → U 300/870/2240, t=1 → A 730/1090/2440); a 0→1→0 envelope traces a clean U→A→U with no third vowel appearing; the same sweep in CHAIN passes through 478/1930/2586 (an E/I blend) as expected; I→O direct verified. Production build clean, no new lint warnings. **Not browser-verified** (no Playwright) — the feel is Dylan's test.
+
+### [2026-08-03] Moog Phase 74a — 912 VOW mode (Gemini "critical fix" directive, partly acted on)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+**The directive:** the 912 "sounds too generic and acts like a simple low-pass filter"; replace it with parallel formant filters, raise Q, add a diode-style snappy/decaying envelope, and put soft clipping inside the filter feedback loop.
+
+**Flagged before acting — the premise was unverified.** Gemini has no codebase or audio access and cannot have heard the module; Dylan had not yet reported back on it. Said so rather than making a third round of blind DSP changes (the Phase 73 vocoder round had just failed to land). Two observations from actually reading the code:
+- **"Acts like a simple low-pass filter" is literally true — LP is the default TYPE.** Switching to BP and raising RES gets most of the requested vocal quack for free. My default choice, not an architecture problem.
+- **The rack already has a formant filter** (VOWEL, §13), and the 912's ENV jack drives it: `912 ENV → VOWEL FORM CV` is a complete talking wah with one cable. Verified VOWEL averages its CV buffer, so a 0–1 envelope sweeps the morph A→U.
+
+**Rejected outright:** *"soft clipping inside the filter feedback loop"* is not possible as written — `Tone.Filter` is a BiquadFilterNode with no accessible internal feedback path. It would need a hand-built ladder or state-variable filter, and Phase 70 built exactly that (Huovilainen worklet) and **reverted it because Dylan preferred the biquad**. Not silently re-litigated. Post-filter saturation was offered instead. Also noted SENS already scales the detector, so the "SENS should alter the sweep width" request was already satisfied.
+
+**Dylan chose the in-module VOW mode** over the one-cable patch and over the asymmetric-envelope option, having been shown the duplication cost. Built as asked, with the cost minimised:
+- **TYPE gains a fourth position, VOW**, which crossfades from the single biquad to a parallel 3-formant bank (`PathFilt` / `PathVow`) — a crossfade so a mid-note switch can't click, and so each path gain keeps one writer. The biquad's `type` is left untouched in VOW so switching back lands where you left.
+- **The formant table, interpolator, Qs and gains are SHARED with VOWEL**, not copied (`VOWEL_FORMANTS` / `vowelFreqsAt` / `VOWEL_Q` / `VOWEL_GAIN`). The duplication is ~8 audio nodes only, and the vowel table still moves both modules together. This is the mitigation for the concern I raised.
+- **Knobs are reused, none added.** RANGE = resting vowel, DEPTH (still bipolar) = how far/which direction a hit pushes it, RES = formant Q 0.4×–2×. Labels stay fixed silkscreen (the Phase 70 LFO rule); only hover hints change, plus a **SWEEP** readout showing the rest→peak vowel pair.
+- **`envfTick` extended as the sole writer of the three formant frequencies**, delta-gated at 1 Hz — a nonlinear map from one envelope to three correlated frequencies can't be an AudioParam connection, the `vowelTick` reasoning reused rather than rediscovered. Costs nothing when TYPE isn't VOW (single `continue`).
+- **Level handling mirrors §13 exactly** — ×7 makeup into a hard-knee limiter, because the parallel bank is ~7× down and open A peaks ~4× the closed I/U, so a fixed makeup alone clips A.
+- **Also fixed:** SENS default 0.5 → 0.3. At 2× a rack-level source (raw VCO, kick) rectifies to ~1.0 and pins the envelope wide open, making SENS useless in its top half.
+
+**Verified numerically:** RANGE 0 / DEPTH 1.0 walks a hit A→E→I→O→U with the exact table frequencies at each step; DEPTH 0.5 gives exactly zero sweep; DEPTH 0 sweeps backwards; RES spans Q 4.4–30. Production build clean. **Not browser-verified** (no Playwright) — whether it sounds like the pedal is Dylan's ear.
+
+**Still on the table if VOW isn't enough:** the asymmetric attack/release. The follower is one lowpass, so it rises and falls at the same speed; a real diode detector is fast-attack/slow-release and that asymmetry is a genuine part of the "snap then fall back" character. This was the one technically sound idea in the directive and it remains unbuilt.
+
+### [2026-08-02] Moog Phase 74 — 912 Envelope Follower (Gemini "Phase 62 X-Series Synth Wah" directive, redesigned)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+**A genuinely new module** — unlike the last directive, nothing in the rack could turn a signal's own dynamics into control voltage. The ENV modules are gate-triggered ADSRs; the vocoder's followers are internal. Real gap, correctly identified.
+
+**Critical review of the directive (Dylan chose the redesign after seeing the comparison):**
+- **Phase number collision, again** — 62 is a logged Future Phases candidate and 61–73 are used. This is 74. Also renamed: the real **Moog 912 IS an envelope follower**, which fits this rack far better than "X-Series Synth Wah".
+- **The AudioWorklet instruction was wrong and would have made it worse.** A follower is rectify → lowpass, both native, and its output drives a filter's frequency param at **audio rate, sample-accurate**. A worklet processes in **128-sample blocks**, adding granularity to exactly the transient snap the directive wanted to protect. "Zero-latency envelope tracking" is also self-contradictory — the follower's attack time *is* its latency; that tradeoff is the circuit.
+- **The spec omitted attack/release time entirely** (SENS / CONTROL / RANGE / TYPE). That is the knob that decides whether the thing snaps on a snare or swells on a pad — it matters more than any of the seven modes. Shipped as **SPEED**.
+- **Four of the seven modes aren't separate circuits.** Envelope Up/Down = one polarity flip → a **bipolar DEPTH knob** that can also sit anywhere in between. "Filter" = a filter-type choice → **TYPE (LP/BP/HP)**. **"Auto-Wah" was dropped** — an LFO patched into the CV jack already is one, and the rack has two LFOs; building it in would duplicate patching.
+- **The real miss: the envelope never left the module.** Gemini used it only to move its own filter. Exposing it as a **CV jack** costs nothing and lets a drum loop drive the VCF, a VCA (ducking), the VOWEL morph, the PANNER, the wavefolder — the whole rack. Same for replacing the "Step Filter" mode with a **TRIG** jack.
+- **Deferred:** the sub-octave (modes 3/4). A proper one is a flip-flop dividing zero crossings — inherently sample-serial state, so it genuinely does need a worklet. Ironic, given where the directive put the worklet.
+
+**Correction made mid-build:** I had told Dylan TRIG could clock the 960. It can't — `seq-clk-in` is a `dest: null` placeholder and the sequencers run on `Tone.Transport`. TRIG drives ENV/KICK gate inputs (the more useful target) and any CV input. Said so before building.
+
+**Design decisions worth keeping:**
+- **Hand-built follower, not `Tone.Follower`** — it wraps `OnePoleFilter`, the node whose `frequency` setter disposes and rebuilds its IIRFilter (Phase 70's scratching + dead AudioContext). SPEED is a live knob, so the smoother is a plain `Tone.Filter` lowpass instead: an ordinary biquad AudioParam, freely rampable. Rolloff **−24**, because rectification produces ripple at twice the input frequency and at −12 a 200 Hz ripple is only 21 dB down (audible buzz on the cutoff) vs 42 dB at −24.
+- **Cutoff modulation in CENTS on `detune`** (the Phase 70 VCF rule), so a given DEPTH is the same musical interval wherever RANGE sits. RANGE owns `frequency.value`, cables own `detune`.
+- **Detector taps the RAW input**, not the filter output — post-filter would let the resonance feed its own cutoff and self-oscillate.
+- **Both WaveShaper curves odd-length (1025)** so silence maps to exactly 0. Straight application of the rule Phase 73 established: a leaky rectifier would permanently detune the cutoff, a leaky trigger shaper would hold its gate open forever.
+- **TRIG jack carries `node` AND `isGate`** — `connect()`'s gate branch claims it for ENV/KICK gate inputs, and it falls through to a normal audio connection for CV inputs. One jack, both behaviours.
+- **`envfTick` scans the analyser BUFFER, not one level per frame.** A frame is ~16 ms ≈ 800 samples, so a hit that rises and falls between frames would be missed entirely — a functional bug, versus the ~16 ms of timing jitter that remains (musical, not sample-accurate). Hysteresis via `envfArmedRef`; attack on the rising crossing, release on falling, so a patched envelope's gate length follows the source's dynamics. **Not visibility-gated** — it drives audio, not pixels.
+
+**Verified numerically:** both curves return exactly 0 at silence; RANGE 20 Hz–20 kHz; SPEED τ 159 ms → 2.7 ms; DEPTH ±6 octaves bipolar with centre = exactly 0 cents; defaults sweep 224 Hz → 1795 Hz on a full hit. Production build clean; the only new lint entry is `fireEnvfGates` joining the setup effect's pre-existing omitted-deps list, alongside `buildSeqLoop`/`buildChordSeqLoop` for the same reason. **Not browser-verified** (no Playwright here) — patching and feel are Dylan's test.
+
+### [2026-08-02] Moog Phase 73 — Vocoder sound quality: the constant-carrier bug, rectifier contrast, analysis pre-emphasis
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+
+**Dylan's report after getting Phase 72 working:** "a constant low buzz from the saw wave, the vocals aren't very clear, and it's not much of a Daft Punk robotic sound." Three symptoms; the first two turned out to share the analysis rectifier as their cause.
+
+#### The constant low buzz was a real, shipped bug — an even-length WaveShaper
+`vocModRect{i}` was `new Tone.WaveShaper((x) => Math.min(1, Math.abs(x) * VOC_ENV_DRIVE))` at Tone's **default length of 1024**. `setMap` samples the mapping at `x = (i/(len−1))·2 − 1`, so with an even length **x = 0 falls between samples 511 and 512** — and because the mapping is `|x|·8`, both neighbours evaluate to 0.0078. Web Audio interpolates, so the curve returned **0.0078 for a silent input**.
+
+That is a permanent 0.0078 gain on all 16 carrier VCAs, whether or not anyone is talking. Summed across 16 bands and through the ×3 output makeup it is **raw carrier at about −8.5 dB, constantly** — and loudest wherever the carrier has the most energy, i.e. a sawtooth's fundamental. Exactly "a constant low buzz from the saw wave". It also explains why the Phase-72 gate didn't cure it: the gate stops the *modulator*, but this DC was manufactured by the shaper itself regardless of its input. Fixed by making `VOC_RECT_POINTS` **odd** (2049) so x = 0 lands exactly on a sample. **Verified: `curve(0)` is now exactly 0.**
+
+**Third time this class has appeared** — the VCA LOG/LIN curve (71) and the mic gate (72) were both built to pass through the origin for precisely this reason; this one predates them and was found by looking for it. Written into MOOG_ARCHITECTURE §11 as a rule: *any WaveShaper feeding an AudioParam must pass exactly through the origin, because a shaper fed silence still emits `curve(0)`.*
+
+#### "Vocals aren't clear", part 1 — the hard clip was destroying formant contrast
+`Math.min(1, …)` pinned **every band at or above 1/8 scale to exactly 1.0**. Vowel identity *is* the relative height of the formant peaks, so flattening the tops smears one vowel into the next. Replaced with a soft knee — linear below `VOC_RECT_KNEE` (0.6), asymptotic to 1 above — so contrast survives where it matters, nothing pins, nothing exceeds unity. Measured on a 4× input change at the 1 kHz band: old **0.16 → 0.64 with both ends clipping**; new **0.25 → 0.85**.
+
+Also moved the drive OUT of the curve into a per-band `ModDrive{i}` Gain. The shaper now sees an already-amplified signal spanning the full [−1, 1] domain, so every band gets the table's full resolution — with the drive inside the curve, a band driven ×32 would have used ~1/32 of the table and quantised its envelope into a few dozen steps.
+
+#### "Vocals aren't clear", part 2 — no analysis pre-emphasis
+Speech energy falls ~6–9 dB/octave above ~500 Hz. With a flat analysis bank the low bands sit wide open on the voice fundamental (adding to the droning bottom end) while the consonant bands at 2–8 kHz barely crack — a muffled robot. Every real vocoder pre-emphasises the analysis path; this one didn't. `vocBandTilt` now scales each band's drive gain by `(f/500)^0.6` (≈3.6 dB/oct) clamped to [0.35, 4.0] → **−8.4 dB at 100 Hz … +12 dB at 6–8 kHz**. One fix, both remaining symptoms: less low-end dominance *and* consonants that actually open their bands.
+- **Before the rectifier, not after the envelope** — tilting the *detector* makes low bands less sensitive and high bands more sensitive while every carrier VCA stays bounded at unity. Tilting after the envelope would push high carrier bands past unity and make the output level a function of the tilt.
+- **Deliberately partial** (3.6 dB/oct against a 6–9 dB/oct falloff). Full compensation measures "more correct" and sounds hissy.
+- Costs 16 Gain nodes per instance and no new controls.
+
+#### Band coverage — NUVO's RES is now derived, not chosen by ear
+Bands sit a fixed ratio **1.339** apart (0.421 octave). A bandpass's −3 dB width is `fc/Q`, so adjacent skirts exactly meet at **Q = (1+r)/(2(r−1)) = 3.45**. Above that there are literal holes in the spectrum between bands, which reads as hollow and phasey. The base `VOC_BANDS` Q of 4 is slightly gappy and Phase 72's NUVO made it worse at 0.62 (Q 4.7) — I had reasoned "sharper = more defined formants", which is wrong when the bands stop touching. NUVO now sets **RES 0.408** (Q 3.45, contiguous coverage) with CLAR/HISS trimmed since the pre-emphasis is doing that job now. TALKBOX and ALIEN keep high RES on purpose — resonant is the point there.
+
+#### Not changed, and why
+No output glue compressor. Daft Punk's vocoder is heavily compressed, and it is the obvious next lever, but it is a taste call I cannot make without hearing the result — PRESENCE and VOLUME exist and the three fixes above are large enough that they should be judged alone first.
+
+**Verified numerically:** `curve(0)` exactly 0 (was 0.0078 = −42 dB per band); tilt table −8.4 → +12 dB across the 16 bands; soft-knee contrast on a 4× input swing; contiguous-coverage Q derived from the band ratio. **Not browser-verified** (no Playwright here) — whether it now sounds like Daft Punk is Dylan's ear.
+
+### [2026-08-02] Moog Phase 72 — Vocoder: PROGRAM presets + modulator noise gate (Gemini "Phase 61 Formant Talker" directive, largely rejected)
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+
+**The directive:** build a new "Formant Talker" module (DigiTech Talker emulation) — dual carrier/modulator inputs, an 8–16 band filter bank spanning 100 Hz–8 kHz, envelope followers driving matching carrier bands, a high-pass sibilance booster for consonants, NuVo/Talk Box/Alien program modes, MIC GAIN with a tracking gate, EFFECT MIX, and the whole filter bank moved into an AudioWorklet.
+
+**Critical review — rejected, with Dylan's agreement after seeing the comparison:**
+- **Phase number collision (fourth time).** Phase 61 shipped (powered-rack frame rate); 71 shipped yesterday. This is 72.
+- **The module already exists.** The Vocoder (Phase 42–49) is not similar to the spec — it *is* the spec. `VOC_BANDS` is 16 log-spaced bands at **exactly 100 Hz → 8000 Hz**; `voc-mod-in`/`voc-carr-in` are the dual inputs; MIC knob + ENABLE MIC + SIG LED are the mic front end; MIX is the dry/wet balance; **HISS** (high-passed noise into the carrier bank) and **CLARITY** (high-passed real voice straight to the output) are the sibilance/consonant boosters, done twice over; **SHIFT** (+ SH RATE / SH AMP) is the formant-shift "Alien" routing. Building a second one means a second ~80-node bank, and the vocoder is already capped at 2 instances for CPU.
+- **The AudioWorklet instruction is backwards for this DSP.** Each modulator band's envelope follower connects **directly to the matching carrier band's `Tone.Gain.gain` AudioParam** — a native audio-rate connection, sample-accurate, zero polling, running in the browser's optimized DSP. A worklet runs the same maths in JS on the audio thread: slower, not faster. Nor does it deliver the stated benefits — "zero phase distortion" is a property of the *filters* (biquads shift phase wherever they run; only linear-phase FIR avoids it, at the cost of latency, the opposite of "instantaneous"), and tracking speed is set by the envelope-follower cutoff, which is already the **DECAY** knob.
+- **Genuinely valuable, and kept:** the **PROGRAM selector** (the module has fourteen knobs — a one-click voicing is the difference between a lab instrument and something playable) and the **mic gate** (correctly diagnosed; the one real gap).
+- **Noted for later:** "Alien" as specified wants *pitch* shifting. SHIFT moves formants only (a different-sized head, not a transposition). Real pitch shift does not exist on the module; Dylan chose to leave it out for now.
+
+#### Modulator noise gate — the real fix
+The mod pre-chain was `HP(150) → Compressor(−28 dB, 4:1)`. That compressor is what makes vocoding consistent, but at a −28 dB threshold it also pulls **room noise up between words**. New shared `buildVocGate(n, id)` splices a gate in — and **before** the compressor, because after it the compressor has already flattened the speech-vs-noise difference and no threshold works. Static id is `voc` and its nodes are named `vocModHP`/`vocModComp`, so the composed names match the dynamic factory's exactly and one helper serves both (the `buildVcaCv`/`buildNoiseColors` pattern).
+- **NOT `Tone.Gate`, though it exists and looked like an exact fit.** Tone.Gate is Follower → `GreaterThan` → gain, and GreaterThan emits a hard **0/1 step** — the gain snaps open the instant the threshold is crossed, clicking on every word and chattering on breaths. Its `smoothing` smooths *detection*, not the gain. Replaced the comparator with a soft-knee `WaveShaper` (smoothstep across the 6 dB below threshold); same three-stage shape, no switching artefact.
+- **Threshold scales the detector into a FIXED curve** (`x = followerAmp / thresholdAmp`) rather than rebuilding the curve per setting — one plain rampable gain param, curve table never rewritten (the reverb-DAMP rebuild-storm lesson). WaveShaper **clamps input to [-1,1]**, which is exactly right at the top: at or above threshold → `x ≥ 1` → fully open.
+- **`curve(0) = 0` is load-bearing** — a WaveShaper fed silence still emits `curve(0)`, so a curve missing the origin would park a DC offset on the gate gain (Phase 71's VCA lesson, second time it has mattered).
+- **`VOC_GATE_SMOOTH` (40 ms) is fixed at construction and never written.** `Tone.Follower` wraps a `OnePoleFilter` — the node whose `frequency` setter disposes and rebuilds its IIRFilter, and which killed the whole AudioContext in Phase 70. At 1/0.04 = 25 Hz it is nowhere near the `sr/π` stability ceiling, and never being written means no rebuild storm either.
+- Side-chain taps **before** the gate so a closed gate can still reopen. Default **OFF**, so saved racks are byte-identical until you touch it — a gate threshold is room-dependent, like mic gain, so it is not something to switch on for someone.
+- **Verified numerically:** OFF passes 1.00 at every level down to −70 dBFS (transparent); LOW/MID/HIGH thresholds land at −55/−43/−30 dB with a 6 dB knee; `curve(0)=0`, `curve(≥1)=1` exactly.
+
+#### PROGRAM presets
+`VOC_PROGRAMS` — NUVO / TALKBOX / ALIEN, click-to-cycle. Presets **write the knob state** (they visibly move and persist normally) rather than applying a hidden offset underneath: the knobs stay the single source of truth, so you can tweak straight from a preset and nothing fights. They touch **voice character only** (SHIFT/RES/DECAY/PRES/CLAR/HISS/BUZZ/S.RT/S.AMP) — never MIX, VOL, MIC, C.MIX or GATE, which are your level, routing and room. The readout is the last program *pressed* and is **not re-applied on mount**, or every reload would stomp knobs tuned afterwards (the Phase 60c "user events only" rule). Voicing rationale: TALKBOX sets CLAR low and HISS off on purpose — you genuinely cannot say "S" through a physical talk box.
+
+#### Placement — the constrained part
+Both controls went in the **plate header**, in the dead space beside the title, and that is a deliberate layout decision rather than an aesthetic one. The vocoder is tier row 3's **`max-content` column**, so its width sets the rack's floor width; and Phase 49 spent real effort trading its height down (knob grid 4×3 → 6×2, mic button moved under the knobs). Both axes are therefore expensive: a 7th grid column widens the whole rack, a 3rd grid row undoes Phase 49, and the left column is uniformly packed to ~140 px by `.vocMicTop`. The header costs neither — the title block is ~215 px inside a ~484 px module, and `.vocHeadSel`'s compact type keeps the pair **shorter** than the two-line title, so the header box stays title-sized. Reused the existing click-to-cycle `.selectorGroup` hardware language (VCO RANGE / QNT SCALE), which is period-correct and, being real controls with handlers, avoids the dead-affordance trap Phases 70–71 kept cleaning up.
+
+**Verified:** production build clean, no new lint warnings; gate curve and threshold mapping checked numerically across four settings and seven input levels. **Not browser-verified** — Playwright is not installed in this environment, so the audible checks (gate cutting room hiss between phrases without chopping word starts, and whether the three program voicings are worth keeping as tuned) are Dylan's ear test. The preset values are first-pass and expected to be adjusted.
+
+### [2026-08-02] Moog Phase 71 — Module-perfection pass: VCA
+
+**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.jsx`
+
+Next module in the one-by-one pass (68/69 = VCO + Noise, 70 = VCF/LFO/REV/BBD/914). The VCA turned out to be the least-finished module on the rack: of its four faceplate controls, **two were wired to nothing**, and its only OUT jack was secretly gated by a sequencer. Same two Phase-70 themes — kill dead affordances, fix things that were quietly wrong.
+
+#### ENV AMT wired (dead knob since Phase 2)
+The `-cv` jack landed **straight on the `Tone.Gain`'s `gain` param**, so the ENV AMT knob had nothing to write to. New shared `buildVcaCv(n, id)` inserts `-cv → ${id}Cv (attenuator) → ${id}CvShape (LOG/LIN) → .gain`, built identically for the three statics and the `addModule` factory. Default 1.0 = the old unity path, so saved racks are unchanged **unless the user had already dragged the (inert) knob** — those patches now genuinely attenuate. Same class as Phase 70's VCF ENV AMT fix.
+
+This also settles the Phase-70 attenuator debate in the VCA's favour. CV 1/CV 2 attenuators were declined on the VCF because "an LFO has its own DEPTH knob" — correct there, but the VCA's usual CV source is an **envelope**, which has no level knob at all. Phase 70's own note flagged level-less sources as the gap in that decision; this is that gap.
+
+#### LOG/LIN wired (dead switch — the item Phase 70 explicitly deferred here)
+`<ToggleSwitch labels={['LOG','LIN']} />` had **no click handler and no `active` prop**, so the lever sat between positions and neither word lit — worse than the LFO switch Phase 70 replaced, which at least reported real state. Now a real switch: `ToggleSwitch` gained an optional `onToggle` (present → `.toggleGroupLive` cursor + click; absent → read-only display, so the dead-affordance trap can't recur silently).
+- **DSP:** `${id}CvShape` is a `Tone.WaveShaper` on the CV path. LIN = identity. LOG = dB-linear over `VCA_LOG_RANGE_DB` (60 dB), the 902's LIN/EXP response — a linear envelope ramp fades perfectly evenly instead of holding loud and dropping off a cliff at the end.
+- **Both curves pass through the origin, which is load-bearing.** A WaveShaper fed silence still emits `curve(0)`, so a curve missing the origin would park a permanent DC offset on every VCA's gain with nothing patched. Verified numerically: f(0) = 0 exactly, f(1) = 1 exactly, LOG hits −60.1/−30.3/−18.1/−6.0 dB at CV 0.1/0.5/0.7/0.9. `VCA_CURVE_POINTS` is **odd** (1025) so x = 0 lands on a sample rather than being interpolated between two.
+- Negative CV clamps to 0 in LOG (there is no negative dB-domain gain); LIN passes it through, preserving the pre-existing behaviour where a bipolar LFO subtracts from the GAIN bias.
+- Curve writes are **delta-checked against a `vcaLinRefs` map, not against `node.curve`** — the param effect re-sends the whole object on every knob move, and Web Audio copies the array on set so read-back is not a reliable identity check. Cleared on `removeModule` and on unmount (a remount rebuilds every shaper at LIN, so a stale cache would swallow a saved LOG rack).
+
+#### VCA 1's OUT was hardwired to sequencer 1 — real bug
+`vca-out` tapped `seqGateNode`, a gain node written per step by seq 1's `Tone.Loop`. **With no cable patched anywhere near the sequencer, VCA 1's output was chopped to seq 1's rhythm.** MOOG_ARCHITECTURE has forbidden hardwired audio paths since Phase 10. Worse, its twin `vca-out2` (`seq2GateNode`) existed in the jack map but was never rendered by `VcaModule` — an unreachable orphan jack. Both nodes deleted; `-out` now taps the `Tone.Gain` on every instance, so vca1 finally matches vca2/vca3/dynamics. `buildSeqLoop`'s `n[`${seqId}GateNode`]?.gain` write is optional-chained and is now a no-op for statics exactly as it always was for dynamic seqs — whose gate paths (env/kick gate cables + per-VCO bus gating) are untouched, so normal sequenced patches sound identical.
+
+#### I/O PEAK lamp was metering the wrong node
+`masterMeter` was fed from `seqGateNode` — i.e. VCA 1's seq-gated output — so the master PEAK lamp was **blind to the MASTER knob and to every patch that didn't run through VCA 1**. The adjacent comment claimed it tapped `n.master`, which it hadn't since Phase 15 (when the VCA tap was chosen because `n.master`'s −14 dB read too low for the LED — a rationale that stopped applying once MASTER became a knob). Retapped to `n.master`, so it now reads what actually leaves the rack. Expect it to sit dimmer at low MASTER settings — that is correct for a peak indicator; flag if it reads too dim in practice.
+
+#### Added: OUT lamp (the only signal-path module with no indicator)
+`buildVcaCv` also mints `${id}Meter` as a dead-end tap on the **output** (the Phase 56 post-effect rule), driving a green `Led` on the faceplate. The VCA is the one module where "is anything getting through?" is the entire question, and it had nothing.
+- **Placed in the JACK row, beside OUT — deliberately.** `.knobRow` and `.jackRow` both `flex-wrap`, so each row's min-content is its widest single child; adding a 17 px lamp to the narrower row (jacks ≈ 134 px vs knobs ≈ 210 px) changes neither the module's min-content nor its line count, so the `0.85fr` grid column, `natH` and `fit()` are all untouched (Phase 55 oscillation trap). The header would NOT have been safe — `.plateHeader` doesn't wrap, so a lamp there adds ~25 px of min-content. `.vcaOutLed { align-self: center }` because `.jackRow` is `align-items: flex-end` (for the jack captions), which would otherwise drop a captionless lamp to the baseline.
+
+#### Small
+- `MoogKnob` gained an optional `hint` prop appended to the Phase-12 native tooltip, for controls whose job isn't obvious from a 3-letter label. Used on GAIN ("initial gain — the level that passes with no CV patched") and ENV AMT.
+- `applyVcaParams(id, params)` replaces three near-identical static updaters (the `applyLfoParams`/`applyChorusParams` pattern); `updateVcaParams`/`2`/`3` are now id-bound one-liners and `updateDynModuleParams` case `'vca'` delegates to the same body, so no instance can drift again. Declared above `updateDynModuleParams` so it can sit in that callback's dep array.
+- Stale comments corrected: the `seqMasterGate` block claimed the step loops gate it (they deliberately don't — that would silence the other sequencers; `powerOff` is its only writer), and the `masterMeter` line claimed a tap it didn't have.
+
+**Verified:** production build clean, no new lint warnings; response-curve endpoints and dB law checked numerically. **Not yet verified in-browser** — Playwright is not installed in this environment, so the audible checks (ENV AMT sweep, LOG vs LIN decay character, PEAK lamp brightness, VCA 1 no longer chopped by seq 1) are Dylan's ear test.
 
 ### [2026-08-01] Moog Phase 70 — Module-perfection pass: VCF · LFO · Reverb · BBD · 914
 
@@ -92,8 +549,8 @@ A real 4-pole Huovilainen nonlinear ladder worklet (`public/moog-ladder-worklet.
 
 **Keep for reference:** the biquad's shortcomings are real and unchanged — Q fans into BOTH cascaded biquads (resonance effectively squared → spiky rather than throaty), no self-oscillation, no passband thinning, no drive. Dylan prefers that character. If the ladder is ever wanted again, ship it as a **separate library module** so this VCF is left alone, not as a core swap.
 
-#### Known dead control, NOT addressed
-`VcaModule`'s `<ToggleSwitch labels={['LOG','LIN']} />` (`MoogShell.jsx`) has no click handler **and** no `active` prop, so the lever sits between positions and neither word lights — worse than the LFO switch, which at least reported real state. LOG vs LIN is a real feature (ear-matched vs mathematically linear VCA response). Wire or strip during the VCA pass.
+#### Known dead control, NOT addressed → **RESOLVED in Phase 71**
+`VcaModule`'s `<ToggleSwitch labels={['LOG','LIN']} />` (`MoogShell.jsx`) has no click handler **and** no `active` prop, so the lever sits between positions and neither word lights — worse than the LFO switch, which at least reported real state. LOG vs LIN is a real feature (ear-matched vs mathematically linear VCA response). Wire or strip during the VCA pass. **→ Wired in Phase 71** as a dB-linear CV response curve, along with the module's other dead control (ENV AMT).
 
 ### [2026-07-29] Moog Phase 69 — Noise module: six colours, retro scope, LEVEL CV
 
@@ -237,7 +694,7 @@ Diagnosis note for future: a hard-synced saw's spectral PEAK sits at the slave f
 
 **Verified (Playwright, 31-instance/18-cable seeded rack + default rack, headless final gate, zero attributable errors):** powered idle improved from 33–42 ms p50 (pre-61 baselines) to ~22–24 ms managed; a within-run A/B (managed vs all-modules-forced-visible, thermally fair) confirms the culling delta, and the write-dedupe alone lifted the everything-rendered state from ~34 to ~25 ms. The test rack is only 1.9 viewports tall (skip ceiling ~50%) — wins scale with rack height, which is exactly the failure mode this phase targets. Unpowered scroll untouched (manager dormant, p50 8.3 ms); default rack byte-identical (powered idle 8.4 ms, all 29 modules untouched); cables 18/18 across reload, redraw-while-skipped, zoom, and reorder; mid-fling and settled-bottom screenshots fully rendered.
 
-**Methodology notes:** (1) headed Playwright runs on the live desktop were polluted by stray physical pointer clicks — one landed on a cable and removed it via click-to-remove, a red herring that cost a debugging round (the persistence machinery was never at fault); perf gates now run headless with a stray-click detector. (2) The one-off Tone start-time race is logged as the Phase 62 candidate above.
+**Methodology notes:** (1) headed Playwright runs on the live desktop were polluted by stray physical pointer clicks — one landed on a cable and removed it via click-to-remove, a red herring that cost a debugging round (the persistence machinery was never at fault); perf gates now run headless with a stray-click detector. (2) The one-off Tone start-time race seen here was diagnosed and fixed in Phase 79 — it was never load-dependent (the manual TRIG button schedules behind the sequencer's lookAhead).
 
 ### [2026-07-11] Profiling session — external "Phase 52 scroll optimization" directive rejected; real bottleneck identified
 

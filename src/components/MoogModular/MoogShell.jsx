@@ -57,10 +57,17 @@ function ModeIndicator({ labels, active, title }) {
   );
 }
 
-function ToggleSwitch({ labels = ['OFF', 'ON'], active, title }) {
+// Pass `onToggle` to make the lever a real control (cursor + click); omit it and
+// the switch is a read-only state display. NEVER render one with an `active` state
+// but no handler — that is the dead-affordance trap ModeIndicator exists to avoid.
+function ToggleSwitch({ labels = ['OFF', 'ON'], active, title, onToggle }) {
   const on = active === true, off = active === false;
   return (
-    <div className={styles.toggleGroup} title={title}>
+    <div
+      className={`${styles.toggleGroup} ${onToggle ? styles.toggleGroupLive : ''}`}
+      title={title}
+      onClick={onToggle}
+    >
       <span className={`${styles.toggleLabel} ${on ? styles.toggleLabelActive : ''}`}>{labels[1]}</span>
       <div className={`${styles.toggle} ${on ? styles.toggleOn : ''} ${off ? styles.toggleOff : ''}`}>
         <div className={styles.toggleLever} />
@@ -779,21 +786,35 @@ function ReverbModule({ onParamUpdate, getAuraData, number = 1 }) {
   );
 }
 
-// onParamUpdate({ gain }) wires the GAIN knob to n.vca.gain.
-// GAIN is the initial/bias level (0=closed, 1=fully open).
-// Set GAIN=0 and patch an envelope to vca-cv for full gating behavior.
-// ENV AMT knob is visual-only this phase.
-function VcaModule({ onParamUpdate, number = 1 }) {
+// onParamUpdate({ gain, envAmt, cv2Amt, lin }) — all live (Phase 71, CV 2 Phase 77).
+//   GAIN    initial/bias level (0 = closed, 1 = fully open). CV sums on top, so
+//           set GAIN = 0 and patch an envelope to CV 1 for full gating.
+//   CV 1/2  independent attenuators on the two control inputs, which sum into one
+//           response curve. Two inputs exist so an envelope and an LFO can be
+//           balanced against each other — with one shared attenuator, softening the
+//           envelope also killed the tremolo.
+//   LOG/LIN response curve for the summed CV — the 902's LIN/EXP switch. The lever
+//           had no click handler and no state at all before Phase 71.
+// getLedValue() — stable getter (pre-bound in MoogShell) for the output meter.
+function VcaModule({ onParamUpdate, getLedValue, number = 1 }) {
   const p = number === 1 ? 'vca' : `vca${number}`;
   const saved = useSavedSettings(p);
   const [gain, setGain]     = useState(saved.gain   ?? 0.5);
-  const [envAmt, setEnvAmt] = useState(saved.envAmt ?? 1.0); // visual only
-  useModulePersist(p, { gain, envAmt });
+  // `envAmt` is the CV 1 attenuator. Legacy key name kept deliberately — the knob was
+  // labelled ENV AMT until Phase 77, and renaming the key would silently reset it to
+  // 1.0 in every rack where it had been dialled in.
+  const [envAmt, setEnvAmt] = useState(saved.envAmt ?? 1.0);
+  // Defaults to full, matching CV 1: a patched cable that does nothing until you find
+  // a second knob is the dead-control trap in reverse.
+  const [cv2Amt, setCv2Amt] = useState(saved.cv2Amt ?? 1.0);
+  // Default LIN = the pre-Phase-71 response, so saved racks sound unchanged.
+  const [lin, setLin]       = useState(saved.lin    ?? true);
+  useModulePersist(p, { gain, envAmt, cv2Amt, lin });
 
   useEffect(() => {
     if (!onParamUpdate) return;
-    onParamUpdate({ gain });
-  }, [gain, onParamUpdate]);
+    onParamUpdate({ gain, envAmt, cv2Amt, lin });
+  }, [gain, envAmt, cv2Amt, lin, onParamUpdate]);
 
   return (
     <div className={styles.module}>
@@ -808,15 +829,33 @@ function VcaModule({ onParamUpdate, number = 1 }) {
         </div>
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
-            <MoogKnob label="GAIN"    size="lg" value={gain}   onChange={setGain}   defaultValue={0.5} />
-            <MoogKnob label="ENV AMT" size="md" value={envAmt} onChange={setEnvAmt} defaultValue={1.0} />
-            <ToggleSwitch labels={['LOG', 'LIN']} />
+            <MoogKnob label="GAIN"    size="lg" value={gain}   onChange={setGain}   defaultValue={0.5}
+              hint="Initial gain — the level that passes with no CV patched. Set to 0 for full envelope gating." />
+            {/* Both attenuators are `sm` so they read as a matched pair, and so the added
+                knob costs ~48px rather than ~76px of row width. .knobRow wraps, so a
+                narrow column degrades to two lines instead of overflowing. */}
+            <MoogKnob label="CV 1" size="sm" value={envAmt} onChange={setEnvAmt} defaultValue={1.0}
+              hint="Attenuator on the CV 1 input — how far that control voltage opens the amp." />
+            <MoogKnob label="CV 2" size="sm" value={cv2Amt} onChange={setCv2Amt} defaultValue={1.0}
+              hint="Attenuator on the CV 2 input. Sums with CV 1 before the LOG/LIN curve, so an envelope and an LFO can be balanced independently." />
+            <ToggleSwitch labels={['LOG', 'LIN']} active={lin} onToggle={() => setLin(v => !v)}
+              title="CV response: LIN = voltage-proportional; LOG = decibel-proportional, the natural-sounding decay." />
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
-            <Jack id={`${p}-in`}  label="IN" />
-            <Jack id={`${p}-cv`}  label="CV" />
-            <Jack id={`${p}-out`} label="OUT" />
+            <Jack id={`${p}-in`}   label="IN" />
+            <Jack id={`${p}-cv`}   label="CV 1" />
+            <Jack id={`${p}-cv2`}  label="CV 2" />
+            <Jack id={`${p}-out`}  label="OUT" />
+            {/* Output lamp — deliberately in the JACK row, not the knob row or the
+                header. Both flex rows wrap, so their min-content is their widest
+                single child; a 17px lamp added to the narrower row (jacks ≈ 134px
+                vs knobs ≈ 210px) changes neither the module's min-content nor its
+                line count, so rack layout and fit() are untouched (Phase 55 trap).
+                It also lands where it belongs — beside the OUT jack. */}
+            <div className={styles.vcaOutLed}>
+              <Led getValue={getLedValue ?? ZERO_GETTER} color="green" />
+            </div>
           </div>
         </div>
       </div>
@@ -843,6 +882,15 @@ function EnvelopeModule({ label, onParamUpdate, onGate, getLedValue }) {
     onParamUpdate(envId, { attack, decay, sustain, release });
   }, [attack, decay, sustain, release, envId, onParamUpdate]);
 
+  // The manual GATE button must only RELEASE what it itself opened. Firing release on
+  // any mouseup/mouseleave meant that merely dragging the pointer across the button —
+  // or releasing a click that began somewhere else — cut a note a patched sequencer or
+  // keyboard gate was holding open. Ref, not state: this is pointer bookkeeping and has
+  // no business re-rendering the module.
+  const gateHeldRef = useRef(false);
+  const gateDown = () => { gateHeldRef.current = true;  onGate?.(envId, true); };
+  const gateUp   = () => { if (!gateHeldRef.current) return; gateHeldRef.current = false; onGate?.(envId, false); };
+
   return (
     <div className={styles.module}>
       <Screw pos="screwTL" /><Screw pos="screwTR" />
@@ -866,9 +914,9 @@ function EnvelopeModule({ label, onParamUpdate, onGate, getLedValue }) {
             <span className={styles.gateBtnLabel}>GATE</span>
             <button
               className={styles.gateBtn}
-              onMouseDown={() => onGate?.(envId, true)}
-              onMouseUp={() => onGate?.(envId, false)}
-              onMouseLeave={() => onGate?.(envId, false)}
+              onMouseDown={gateDown}
+              onMouseUp={gateUp}
+              onMouseLeave={gateUp}
             />
           </div>
           <PlateDivider />
@@ -1914,11 +1962,26 @@ function VowelModule({ number = 1, onParamUpdate, getAnalyserData }) {
   const saved = useSavedSettings(p);
   const [vowel, setVowel] = useState(saved.vowel ?? 0.5); // 0.5 → 'I'
   const [shape, setShape] = useState(saved.shape ?? 0.5); // 0.5 → tract scale 1.0
-  useModulePersist(p, { vowel, shape });
+  // DIRECT mode (Phase 75). Defaults to CHAIN so a saved rack that predates this is
+  // completely unchanged — the whole feature is inert until MODE is clicked.
+  const [direct, setDirect] = useState(saved.direct ?? false);
+  const [from, setFrom]     = useState(saved.from ?? 4);  // U
+  const [to,   setTo]       = useState(saved.to   ?? 0);  // A
+  useModulePersist(p, { vowel, shape, direct, from, to });
 
-  useEffect(() => { onParamUpdate?.({ vowel, shape }); }, [vowel, shape, onParamUpdate]);
+  useEffect(() => {
+    onParamUpdate?.({ vowel, shape, direct, from, to });
+  }, [vowel, shape, direct, from, to, onParamUpdate]);
 
-  const letter = VOWEL_LETTERS[Math.max(0, Math.min(4, Math.round(vowel * 4)))];
+  // In DIRECT the knob is the position along the FROM→TO line, so the readout has to
+  // report that blend rather than a position on the A..U chain.
+  const letter = direct
+    ? (vowel <= 0.01 ? VOWEL_LETTERS[from]
+      : vowel >= 0.99 ? VOWEL_LETTERS[to]
+      : `${VOWEL_LETTERS[from]}\u2009\u2192\u2009${VOWEL_LETTERS[to]}`)
+    : VOWEL_LETTERS[Math.max(0, Math.min(4, Math.round(vowel * 4)))];
+  const cycleFrom = () => setFrom(v => (v + 1) % 5);
+  const cycleTo   = () => setTo(v => (v + 1) % 5);
 
   return (
     <div className={styles.module}>
@@ -1934,8 +1997,37 @@ function VowelModule({ number = 1, onParamUpdate, getAnalyserData }) {
         </div>
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
-            <MoogKnob label={`VOWEL · ${letter}`} size="lg" value={vowel} onChange={setVowel} defaultValue={0.5} />
-            <MoogKnob label="SHAPE" size="md" value={shape} onChange={setShape} defaultValue={0.5} />
+            <MoogKnob label={`VOWEL · ${letter}`} size="lg" value={vowel} onChange={setVowel} defaultValue={0.5}
+              hint={direct
+                ? 'Manual position along the FROM → TO line. A CV patched into FORM CV rides on top of it.'
+                : 'Position along the A-E-I-O-U chain. A CV patched into FORM CV rides on top of it.'} />
+            <MoogKnob label="SHAPE" size="md" value={shape} onChange={setShape} defaultValue={0.5}
+              hint="Vocal-tract scale — shifts all three formants together. Smaller = smaller head." />
+          </div>
+          {/* MODE + FROM/TO. FROM and TO are dimmed in CHAIN rather than hidden: they
+              are real hardware that simply isn't in circuit yet, the same treatment the
+              LFO's division screen gets before a clock is patched (Phase 70). Hiding
+              them would also change the module's height between modes. */}
+          <div className={styles.selectorRow}>
+            <div className={styles.selectorGroup} onClick={() => setDirect(v => !v)}
+              title={direct
+                ? 'DIRECT: the sweep travels straight between FROM and TO, touching no other vowel. Click for CHAIN.'
+                : 'CHAIN: the sweep walks the whole A-E-I-O-U road. Click for DIRECT (pick two vowels and go straight between them).'}>
+              <span className={styles.selectorLabel}>MODE</span>
+              <span className={styles.selectorValue}>{direct ? 'DIRECT' : 'CHAIN'}</span>
+            </div>
+            <div className={`${styles.selectorGroup} ${direct ? '' : styles.selectorGroupIdle}`}
+              onClick={direct ? cycleFrom : undefined}
+              title={direct ? 'Vowel the sweep starts from' : 'Only active in DIRECT mode'}>
+              <span className={styles.selectorLabel}>FROM</span>
+              <span className={styles.selectorValue}>{VOWEL_LETTERS[from]}</span>
+            </div>
+            <div className={`${styles.selectorGroup} ${direct ? '' : styles.selectorGroupIdle}`}
+              onClick={direct ? cycleTo : undefined}
+              title={direct ? 'Vowel the sweep travels to' : 'Only active in DIRECT mode'}>
+              <span className={styles.selectorLabel}>TO</span>
+              <span className={styles.selectorValue}>{VOWEL_LETTERS[to]}</span>
+            </div>
           </div>
           <FormantDisplay getData={getAnalyserData} />
           <PlateDivider />
@@ -2211,7 +2303,10 @@ function KickModule({ number = 1, onParamUpdate, onTrigger, onSetTrigCallback })
   const [pitchEnv, setPitchEnv] = useState(saved.pitchEnv ?? 0.7);  // 0–1 → 0–5 octaves drop
   const [decay,    setDecay]    = useState(saved.decay    ?? 0.35); // 0–1 → 0.05–2 s
   const [click,    setClick]    = useState(saved.click    ?? 0.3);  // 0–1 gain
-  useModulePersist(p, { tune, pitchEnv, decay, click });
+  // Centre = exactly the 2 kHz the click highpass used to be hardcoded at, so saved
+  // racks are unchanged until the knob is touched.
+  const [clickTone, setClickTone] = useState(saved.clickTone ?? 0.5);
+  useModulePersist(p, { tune, pitchEnv, decay, click, clickTone });
 
   const ledRef     = useRef(null);
   const flashTimer = useRef(null);
@@ -2230,8 +2325,13 @@ function KickModule({ number = 1, onParamUpdate, onTrigger, onSetTrigCallback })
       pitchEnv: pitchEnv * 5,
       decay:    0.05 + decay * 1.95,
       click,
+      clickTone,
     });
-  }, [tune, pitchEnv, decay, click, onParamUpdate]);
+  }, [tune, pitchEnv, decay, click, clickTone, onParamUpdate]);
+
+  // Clear a pending flash-off on unmount so a removed instance can't touch a detached
+  // node 80 ms later. Harmless today (the callback guards on ledRef) but free to do right.
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
 
   const flash = () => {
     const el = ledRef.current;
@@ -2260,10 +2360,10 @@ function KickModule({ number = 1, onParamUpdate, onTrigger, onSetTrigCallback })
         </div>
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
-            <MoogKnob label="TUNE"  size="md" value={tune}     onChange={setTune}     defaultValue={0.2}  />
+            <MoogKnob label="TUNE"  size="md" value={tune}     onChange={setTune}     defaultValue={0.2}
+              hint="Fundamental pitch, 40–200 Hz. With a cable in TUNE CV this becomes a TRANSPOSE around the incoming pitch instead (centre = unchanged)." />
             <MoogKnob label="P.ENV" size="md" value={pitchEnv} onChange={setPitchEnv} defaultValue={0.7}  />
             <MoogKnob label="DECAY" size="md" value={decay}    onChange={setDecay}    defaultValue={0.35} />
-            <MoogKnob label="CLICK" size="sm" value={click}    onChange={setClick}    defaultValue={0.3}  />
           </div>
           <div className={styles.gateBtnRow}>
             <div ref={ledRef} className={styles.kickLed} style={{ opacity: 0.12 }} />
@@ -2272,11 +2372,23 @@ function KickModule({ number = 1, onParamUpdate, onTrigger, onSetTrigCallback })
               className={styles.gateBtn}
               onMouseDown={() => onTrigger?.(flash)}
             />
+            {/* Beater pair lives in the TRIG row, not the knob row (Phase 80a).
+                Five knobs wrapped .knobRow onto a second line and made the module
+                taller; this row had spare width and its height was set by the 26px
+                button, so two sm knobs land here nearly for free. CLICK (level) and
+                TONE (highpass) shape the same transient, so they sit adjacent, with
+                the trigger controls to their left. .gateBtnRow is align-items:center,
+                so both centre against the lamp and button with no CSS change. */}
+            <MoogKnob label="CLICK" size="sm" value={click}     onChange={setClick}     defaultValue={0.3}
+              hint="Level of the beater transient." />
+            <MoogKnob label="TONE"  size="sm" value={clickTone} onChange={setClickTone} defaultValue={0.5}
+              hint="Beater tone — highpass on the click, 333 Hz (soft mallet thud) to 12 kHz (sharp tick). Centre is the original 2 kHz." />
           </div>
           <PlateDivider />
           <div className={styles.jackRow}>
             <Jack id={`${p}-gate-in`}  label="GATE" />
             <Jack id={`${p}-click-in`} label="ACCT" />
+            <Jack id={`${p}-tune-cv`}  label="TUNE CV" />
             <Jack id={`${p}-out`}      label="OUT" />
           </div>
         </div>
@@ -2396,14 +2508,67 @@ function FFBModule({ number = 1, onParamUpdate, getAnalyserData }) {
 
 // ──────────── 16-Band Vocoder ────────────
 
+// PROGRAM presets (Phase 72). Each is a set of VOICING knob positions recalled in one
+// click — the module has fourteen knobs, and finding a usable robot voice by hand is a
+// long afternoon. Clicking a program WRITES the knobs (they visibly move and persist
+// normally), rather than applying a hidden offset underneath them: the knobs stay the
+// single source of truth, so you can tweak straight from a preset and nothing fights.
+//
+// Programs deliberately touch VOICE character only. MIX / VOL / MIC / C.MIX / GATE are
+// left alone — those are your level, your carrier routing and your room, and a preset
+// that reset them would be actively annoying.
+const VOC_PROGRAMS = [
+  {
+    key: 'NUVO',
+    title: 'NUVO — crisp, high-intelligibility robot voice: fast tracking, seamless band coverage, real consonants blended in',
+    // RES 0.78 = Q ≈ 11, i.e. the VOWEL module's formant resonance. Phase 73 set this to
+    // 0.408 (Q 3.45) on the theory that adjacent bands' skirts should exactly meet — that
+    // was the wrong target. Contiguous coverage passes the carrier through largely intact,
+    // which IS the "loose synth" sound; VOWEL has three filters with big gaps between them
+    // and reads as clean and strongly vocal precisely because everything between the
+    // formants is discarded. Sparse and resonant, not flat and continuous.
+    values: { shift: 0.5, res: 0.78, decay: 0.25, presence: 0.45, clarity: 0.35, hiss: 0.18, buzz: 0.0, shiftRate: 0.5, shiftAmp: 0.0 },
+  },
+  {
+    key: 'TALKBOX',
+    title: 'TALK BOX — resonant mid-forward honk with low-end body; consonants deliberately poor, like the real thing',
+    // A physical talk box is a driver and a plastic tube: very resonant, mid-heavy,
+    // slightly darker formants, and you genuinely cannot say "S" through one — hence
+    // CLAR low and HISS off. BUZZ adds the moving-air thump.
+    // RES 0.92 = Q ≈ 15.6, past VOWEL's sharpest formant — a tube has a few very strong
+    // resonances and almost nothing between them, which is the whole character.
+    values: { shift: 0.46, res: 0.92, decay: 0.55, presence: 0.2, clarity: 0.1, hiss: 0.0, buzz: 0.35, shiftRate: 0.5, shiftAmp: 0.0 },
+  },
+  {
+    key: 'ALIEN',
+    title: 'ALIEN — formants shifted up into a smaller "head", with a slow drift so the voice never sits still',
+    // SHIFT scales the carrier band centres, i.e. it resizes the vocal tract rather
+    // than transposing pitch — the classic "not-human" cue. S.AMP adds slow drift.
+    values: { shift: 0.78, res: 0.86, decay: 0.35, presence: 0.35, clarity: 0.15, hiss: 0.15, buzz: 0.0, shiftRate: 0.28, shiftAmp: 0.22 },
+  },
+];
+
+// GATE positions (Phase 72). Discrete rather than continuous on purpose: a noise gate
+// is a set-once-for-your-room control, and the vocoder has no spare panel width for
+// another knob. Values are normalized 0–1 like every other param, so the engine keeps
+// one continuous threshold mapping and this could become a knob later with no change.
+const VOC_GATE_STEPS = [
+  { key: 'OFF',  value: 0.0,  title: 'GATE OFF — modulator passes at all times (the pre-Phase-72 behaviour)' },
+  { key: 'LOW',  value: 0.5,  title: 'GATE LOW — trims a quiet room' },
+  { key: 'MID',  value: 0.75, title: 'GATE MID — typical desk/laptop mic' },
+  { key: 'HIGH', value: 1.0,  title: 'GATE HIGH — noisy room; may clip quiet singing' },
+];
+
 // onParamUpdate({ mix }) — wires the MIX knob to useMoogAudio.
 // getAnalyserData() — stable getter for the modulator FFT analyser; drives the 16-seg meter.
 // Patch MOD (modulator: voice/drum/sequence) + CARR (carrier: VCOs) in, take OUT to the mixer.
-function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable, onMicDisable, onMicGainChange, getMicLevel }) {
+// micStatus is OWNED BY THE SHELL, not by this module (Phase 81). The Tone.UserMedia is
+// a singleton shared by every vocoder instance, so per-instance status state let one
+// instance read "● LIVE" while the other still read "○ MIC" for the same live mic.
+function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable, onMicDisable, onMicGainChange, getMicLevel, micStatus = 'off' }) {
   const p = number === 1 ? 'voc' : `voc${number}`; // jack prefix = engine instance id
   const saved = useSavedSettings(p);
   const [micGain, setMicGain]       = useState(saved.micGain    ?? 0.5);  // built-in mic input level
-  const [micStatus, setMicStatus]   = useState('off'); // 'off' | 'connecting' | 'on' | 'error' — runtime, not persisted
   const [mix, setMix]               = useState(saved.mix        ?? 1.0);
   const [volume, setVolume]         = useState(saved.volume     ?? 0.5);  // 0.5 = nominal (×3 internal makeup → 3×)
   const [carrierMix, setCarrierMix] = useState(saved.carrierMix ?? 0.0);  // 0 = external carrier only
@@ -2417,7 +2582,16 @@ function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable
   const [clarity, setClarity]       = useState(saved.clarity    ?? 0.0);
   const [hiss, setHiss]             = useState(saved.hiss       ?? 0.0);
   const [buzz, setBuzz]             = useState(saved.buzz       ?? 0.0);
-  useModulePersist(p, { micGain, mix, volume, carrierMix, pwidth, shift, res, shiftRate, shiftAmp, decay, presence, clarity, hiss, buzz });
+  const [gate, setGate]             = useState(saved.gate       ?? 0.0);  // 0 = OFF, the pre-Phase-72 behaviour
+  // Centre = the drive value hardcoded from Phase 42 to 82, so saved racks are unchanged.
+  // Deliberately NOT touched by PROGRAM — it is the control you tune by ear for your own
+  // voice and carrier, and a preset stomping it mid-hunt would be maddening.
+  const [drive, setDrive]           = useState(saved.drive      ?? 0.5);
+  // Last PROGRAM recalled. Purely a readout of what you last pressed — it is NOT
+  // re-applied on mount, or every reload would stomp the knobs you tuned afterwards
+  // (the Phase 60c "write on user events only" rule).
+  const [program, setProgram]       = useState(saved.program    ?? null);
+  useModulePersist(p, { micGain, mix, volume, carrierMix, pwidth, shift, res, shiftRate, shiftAmp, decay, presence, clarity, hiss, buzz, gate, drive, program });
 
   // DOM refs for the 16 spectrum LEDs — written by rAF loop (Zero-Re-render Rule).
   const ledRefs = useRef([]);
@@ -2425,21 +2599,34 @@ function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable
 
   useEffect(() => {
     onParamUpdate?.({ mix, volume, carrierMix, pwidth, shift, res,
-                     shiftRate, shiftAmp, decay, presence, clarity, hiss, buzz });
+                     shiftRate, shiftAmp, decay, presence, clarity, hiss, buzz, gate, drive });
   }, [mix, volume, carrierMix, pwidth, shift, res,
-      shiftRate, shiftAmp, decay, presence, clarity, hiss, buzz, onParamUpdate]);
+      shiftRate, shiftAmp, decay, presence, clarity, hiss, buzz, gate, drive, onParamUpdate]);
+
+  // PROGRAM / GATE cycling. Both write React state only — the existing param effect
+  // above carries the change to the engine, so there is no second writer.
+  const KNOB_SETTERS = { shift: setShift, res: setRes, decay: setDecay, presence: setPresence,
+                         clarity: setClarity, hiss: setHiss, buzz: setBuzz,
+                         shiftRate: setShiftRate, shiftAmp: setShiftAmp };
+  const cycleProgram = () => {
+    const i = VOC_PROGRAMS.findIndex(pr => pr.key === program);
+    const next = VOC_PROGRAMS[(i + 1) % VOC_PROGRAMS.length];
+    Object.entries(next.values).forEach(([k, v]) => KNOB_SETTERS[k]?.(v));
+    setProgram(next.key);
+  };
+  const gateIdx  = Math.max(0, VOC_GATE_STEPS.findIndex(g => g.value === gate));
+  const gateStep = VOC_GATE_STEPS[gateIdx];
+  const cycleGate = () => setGate(VOC_GATE_STEPS[(gateIdx + 1) % VOC_GATE_STEPS.length].value);
 
   // Built-in mic — INPUT level (knob 0–1 → 0–2×, 0.5 = unity) and enable/disable toggle.
   useEffect(() => {
-    onMicGainChange?.({ gain: micGain * 2 });
-  }, [micGain, onMicGainChange]);
+    onMicGainChange?.(p, { gain: micGain * 2 });   // id-scoped: each instance owns its own gain node
+  }, [p, micGain, onMicGainChange]);
 
-  const toggleMic = async () => {
+  const toggleMic = () => {
     if (micStatus === 'connecting') return;
-    if (micStatus === 'on') { onMicDisable?.(); setMicStatus('off'); return; }
-    setMicStatus('connecting');
-    const ok = await onMicEnable?.();
-    setMicStatus(ok ? 'on' : 'error');
+    if (micStatus === 'on') onMicDisable?.();
+    else                    onMicEnable?.();
   };
   const micBtnText = micStatus === 'on'         ? '● LIVE'
                    : micStatus === 'connecting' ? '○ …'
@@ -2488,6 +2675,27 @@ function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable
             <span className={styles.plateTitle}>VOCODER</span>
             <span className={styles.plateSub}>16-BAND SPECTRAL VOCODER</span>
           </div>
+          {/* PROGRAM + GATE live in the HEADER, in the empty space beside the title.
+              This module is the `max-content` column of tier row 3, so it sets the
+              rack's floor width — and Phase 49 spent real effort trading its height
+              down (4×3 knob grid → 6×2). Both axes are therefore expensive: a 7th
+              grid column widens the whole rack, a 3rd grid row undoes Phase 49.
+              The header is the one place that costs neither — the title block is
+              ~215px inside a ~484px module, and these two selectors are shorter
+              than the two-line title, so the header box doesn't grow either way.
+              Compact (.vocHeadSel) for exactly that reason. */}
+          <div className={styles.vocHeadCtrls}>
+            <div className={`${styles.selectorGroup} ${styles.vocHeadSel}`} onClick={cycleProgram}
+              title={VOC_PROGRAMS.find(pr => pr.key === program)?.title
+                ?? 'PROGRAM — click to recall a voicing (NuVo / Talk Box / Alien). Writes the voice knobs; MIX, VOL, MIC and GATE are left alone.'}>
+              <span className={styles.selectorLabel}>PROGRAM</span>
+              <span className={styles.selectorValue}>{program ?? '--'}</span>
+            </div>
+            <div className={`${styles.selectorGroup} ${styles.vocHeadSel}`} onClick={cycleGate} title={gateStep.title}>
+              <span className={styles.selectorLabel}>GATE</span>
+              <span className={styles.selectorValue}>{gateStep.key}</span>
+            </div>
+          </div>
         </div>
         <div className={styles.plateBody}>
           <div className={styles.vocLayout}>
@@ -2520,9 +2728,12 @@ function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable
                 <MoogKnob label="C.MIX" size="sm" value={carrierMix} onChange={setCarrierMix} defaultValue={0.0} />
                 <MoogKnob label="PWID"  size="sm" value={pwidth}     onChange={setPwidth}     defaultValue={0.5} />
                 <MoogKnob label="SHIFT" size="sm" value={shift}      onChange={setShift}      defaultValue={0.5} />
-                <MoogKnob label="RES"   size="sm" value={res}        onChange={setRes}        defaultValue={0.5} />
+                <MoogKnob label="RES"   size="sm" value={res}        onChange={setRes}        defaultValue={0.5}
+                  hint="Carrier band resonance, Q 1–20. This is the control that decides whether it sounds like a synth or like a voice — high Q cuts sharp formant peaks (VOWEL runs 11–15); low Q passes the carrier through nearly intact." />
                 <MoogKnob label="S.RT"  size="sm" value={shiftRate}  onChange={setShiftRate}  defaultValue={0.5} />
                 <MoogKnob label="S.AMP" size="sm" value={shiftAmp}   onChange={setShiftAmp}   defaultValue={0.0} />
+                <MoogKnob label="DRIVE" size="sm" value={drive}      onChange={setDrive}      defaultValue={0.5}
+                  hint="How hard the voice gates the carrier. Too high and every band pins open, so you hear the raw synth with vague vocal colour; too low and it goes thin. Centre is the value this was fixed at until now." />
                 <MoogKnob label="DECAY" size="sm" value={decay}      onChange={setDecay}      defaultValue={0.5} />
                 <MoogKnob label="PRES"  size="sm" value={presence}   onChange={setPresence}   defaultValue={0.0} />
                 <MoogKnob label="CLAR"  size="sm" value={clarity}    onChange={setClarity}    defaultValue={0.0} />
@@ -2780,6 +2991,17 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
   const getRev2Aura    = useCallback(() => audio.getReverbAuraData?.(2),  [audio.getReverbAuraData]);
   const getVocData     = useCallback(() => audio.getVocAnalyserData?.(),  [audio.getVocAnalyserData]);
   const getExtMicLevel = useCallback(() => audio.getMeterValue('extMic'), [audio.getMeterValue]);
+  // The mic is ONE Tone.UserMedia shared by every vocoder instance, so its status lives
+  // here rather than in each module — otherwise two instances disagree about whether the
+  // same mic is live. 'off' | 'connecting' | 'on' | 'error'; runtime only, never persisted.
+  const [micStatus, setMicStatus] = useState('off');
+  const handleMicEnable = useCallback(async () => {
+    setMicStatus('connecting');
+    const ok = await audio.enableMic();
+    setMicStatus(ok ? 'on' : 'error');
+    return ok;
+  }, [audio.enableMic]);
+  const handleMicDisable = useCallback(() => { audio.disableMic(); setMicStatus('off'); }, [audio.disableMic]);
   const getLfoLevel    = useCallback(() => audio.getMeterValue('lfo'),    [audio.getMeterValue]);
   const getLfo2Level   = useCallback(() => audio.getMeterValue('lfo2'),   [audio.getMeterValue]);
   // Instantaneous LFO phase for rate LEDs — pulses at the actual modulated rate
@@ -2789,6 +3011,9 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
   const getEnv1Level   = useCallback(() => audio.getMeterValue('env1'),   [audio.getMeterValue]);
   const getEnv2Level   = useCallback(() => audio.getMeterValue('env2'),   [audio.getMeterValue]);
   const getEnv3Level   = useCallback(() => audio.getMeterValue('env3'),   [audio.getMeterValue]);
+  const getVca1Level   = useCallback(() => audio.getMeterValue('vca'),    [audio.getMeterValue]);
+  const getVca2Level   = useCallback(() => audio.getMeterValue('vca2'),   [audio.getMeterValue]);
+  const getVca3Level   = useCallback(() => audio.getMeterValue('vca3'),   [audio.getMeterValue]);
   const getMasterLevel = useCallback(() => audio.getMeterValue('master'), [audio.getMeterValue]);
   const getIoCh1Level  = useCallback(() => audio.getMeterValue('ioCh1'),  [audio.getMeterValue]);
   const getIoCh2Level  = useCallback(() => audio.getMeterValue('ioCh2'),  [audio.getMeterValue]);
@@ -3191,7 +3416,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
         : m.type === 'noise' ? <NoiseModule number={m.num} onParamUpdate={audio.updateNoiseParams} />
         : m.type === 'vcf'   ? <VcfModule number={m.num} onParamUpdate={b.params} />
         : m.type === 'lfo'   ? <LfoModule number={m.num} onParamUpdate={b.params} getLedValue={b.lfoLed} />
-        : m.type === 'vca'   ? <VcaModule number={m.num} onParamUpdate={b.params} />
+        : m.type === 'vca'   ? <VcaModule number={m.num} onParamUpdate={b.params} getLedValue={b.meter} />
         : m.type === 'env'   ? <EnvelopeModule label={`ENV ${m.num}`} onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={b.meter} />
         : m.type === 'rev'   ? <ReverbModule number={m.num} onParamUpdate={b.params} getAuraData={b.aura} />
         : m.type === 'bbd'   ? <ChorusModule number={m.num} onParamUpdate={b.params} isPowered={audio.isPowered} />
@@ -3199,7 +3424,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
         : m.type === 'ffb'   ? <FFBModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.ffbData} />
         : m.type === 'seq'   ? <SequencerModule number={m.num} onStepsChange={b.seqSteps} onTempoChange={audio.setTempo} onSetCallback={b.seqStepCb} onGlideChange={b.seqGlide} />
         : m.type === 'chordseq' ? <ChordSeqModule number={m.num} onStepsChange={b.chordSteps} onDivisionChange={b.chordDiv} onSetCallback={b.chordStepCb} onRootOctaveChange={b.chordRootOct} onGlideChange={b.chordGlide} />
-        : m.type === 'voc'   ? <VocoderModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vocData} onMicEnable={audio.enableMic} onMicDisable={audio.disableMic} onMicGainChange={audio.updateExtMicParams} getMicLevel={getExtMicLevel} />
+        : m.type === 'voc'   ? <VocoderModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vocData} onMicEnable={handleMicEnable} onMicDisable={handleMicDisable} onMicGainChange={audio.updateVocMicGain} getMicLevel={getExtMicLevel} micStatus={micStatus} />
         : m.type === 'qnt'   ? <QuantizerModule number={m.num} onParamUpdate={b.params} onSetCallback={b.qntCb} getTransposeData={b.qntTrp} />
         : m.type === 'vowel' ? <VowelModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vowelData} />
         : m.type === 'panner' ? <PanningModule number={m.num} onParamUpdate={b.params} getL={b.panL} getR={b.panR} />
@@ -3316,9 +3541,9 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
             <section className={styles.case}>
               <div className={styles.caseInterior}>
                 <div className={`${styles.tier} ${styles.tierRow3}`}>
-                  {mod('vca1', <VcaModule key="vca1" number={1} onParamUpdate={audio.updateVcaParams} />)}
-                  {mod('vca2', <VcaModule key="vca2" number={2} onParamUpdate={audio.updateVca2Params} />)}
-                  {mod('vca3', <VcaModule key="vca3" number={3} onParamUpdate={audio.updateVca3Params} />)}
+                  {mod('vca1', <VcaModule key="vca1" number={1} onParamUpdate={audio.updateVcaParams} getLedValue={getVca1Level} />)}
+                  {mod('vca2', <VcaModule key="vca2" number={2} onParamUpdate={audio.updateVca2Params} getLedValue={getVca2Level} />)}
+                  {mod('vca3', <VcaModule key="vca3" number={3} onParamUpdate={audio.updateVca3Params} getLedValue={getVca3Level} />)}
                   {mod('env1', <EnvelopeModule key="env1" label="ENV 1" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv1Level} />)}
                   {mod('env2', <EnvelopeModule key="env2" label="ENV 2" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv2Level} />)}
                   {mod('env3', <EnvelopeModule key="env3" label="ENV 3" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv3Level} />)}
@@ -3327,9 +3552,10 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                     key="vocoder"
                     onParamUpdate={audio.updateVocoderParams}
                     getAnalyserData={getVocData}
-                    onMicEnable={audio.enableMic}
-                    onMicDisable={audio.disableMic}
-                    onMicGainChange={audio.updateExtMicParams}
+                    onMicEnable={handleMicEnable}
+                    onMicDisable={handleMicDisable}
+                    onMicGainChange={audio.updateVocMicGain}
+                    micStatus={micStatus}
                     getMicLevel={getExtMicLevel}
                   />)}
                 </div>
