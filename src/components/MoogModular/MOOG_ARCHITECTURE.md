@@ -51,7 +51,7 @@ All connections carry one of two signal classes. The patch cable simulator must 
 | Sawtooth OUT | Output | AUDIO | Brightest, richest. All harmonics. Classic Moog bass/lead. |
 | Square OUT | Output | AUDIO | Hollow, woody. Odd harmonics only. |
 
-**Tone.js Node:** `Tone.Oscillator` (type: sine / triangle / sawtooth / square). Frequency controlled via `oscillator.frequency.rampTo(hz, 0.02)`. Tune knob: `oscillator.detune.rampTo(cents, 0.02)`.
+**Engine (Moog Phase 68b — worklet CORE):** the VCO is no longer a `Tone.Oscillator`. Its core is the `hard-sync-worklet.js` AudioWorklet: **one phase accumulator emits all four waveforms simultaneously** on a 4-channel output (0=sine 1=triangle 2=sawtooth 3=pulse), so all four output jacks are live at once. Signal path: worklet → `${id}coreGate` (power gate, 0 while unpowered) → `${id}bus` (sequencer per-step gate) → a `ChannelSplitter(4)` → four tap gains (`Sin/Tri/Saw/Pulse`) → the jacks. Per-VCO `Tone.Signal`s sum into the worklet's a-rate params: `GlideBus` + `fm`(×500) → `slaveFreq` (Hz), `DetuneSig` → `slaveDetune` (cents), `WidthSig` + `pw` → `pulseWidth`. **SHAPE** knob phase-warps all four waveforms (pulse duty for the SQR out). **HARD SYNC** = the worklet's `syncEnabled` param: a master patched to SYNC IN resets the shared phase, syncing all four outs; SYNC OUT taps the SAW (sharp reset edge). **Known limitation:** the core is naive (non-band-limited) so high notes alias — PolyBLEP is a logged follow-up (MOOG_PLAN Future Phases).
 
 ---
 
@@ -59,11 +59,15 @@ All connections carry one of two signal classes. The patch cable simulator must 
 
 **Function:** Mechanically identical to the VCO but tuned to sub-audio rates (0.01 Hz – ~20 Hz). It is **never heard directly** — its output is always CV, used to automatically modulate other modules (vibrato, filter wobble, tremolo, etc.).
 
-**Controls:**
+**Controls (as built — Moog Phase 70):**
 | Knob | Function |
 |---|---|
-| **Speed** | Oscillation rate (very slow → ~20 Hz). |
-| **Output Level** | Amplitude of the outgoing CV voltage (depth of the modulation effect). |
+| **RATE** | Free-run rate, exponential **0.01 Hz – 100 Hz** (`LFO_RATE_MIN_HZ · LFO_RATE_SPAN^knob`, span 10000 = a **decade per quarter-turn**: 0.01/0.1/1/10/100). The low end is a 100-second sweep; the top crosses into audio rate for FM. In SYNC mode this same knob selects a musical division instead (`LFO_SYNC_DIVS`) — it stores the raw 0..1 in `lfoRateRefs` and never touches Hz. |
+| **DEPTH** | Amplitude of the outgoing CV (modulation depth). |
+| **MOD** | Rate-modulation depth in free mode; doubles as the sync **OFFSET** (start phase). |
+| ~~WAVE selector~~ | **Removed** Phase 70 — waveform is chosen by **which output jack you patch** (the real module has four simultaneous shape outs and no shape switch). `connect()` sets the oscillator type AND keeps `lfoWaveRefs` in step, so free and sync both follow the cable; cable restore re-fires `connect()`, so shape survives a reload without being persisted. An LFO with no output cable sits at its constructor default (sine). |
+
+**Panel readouts are READ-ONLY (Phase 70).** Knob labels are fixed silkscreen — they no longer relabel themselves to DIV/OFFSET when synced. The old FREE/SYNC `ToggleSwitch` drew a full lever with **no click handler** (mode is cable-driven), so it is now a `ModeIndicator`: two printed words, the live one burning red, the other dark. The division is a permanent `.lfoDivScreen` — dead glass until a clock is patched, then lit. Both are exempt from the lights-out fade via `.selectorRowEmissive` **on the row**, because `opacity` on a parent creates a stacking context a child cannot opt out of.
 
 **Ports (5 Total):**
 | Port | Direction | Signal | Description |
@@ -103,28 +107,55 @@ All connections carry one of two signal classes. The patch cable simulator must 
 | Pitch CV OUT | Output | CV — Continuous (1V/Oct) | Outputs the voltage of the currently active step's dial. Patch to VCO CV IN. |
 | Gate OUT | Output | CV — Gate | Goes HIGH when an active step fires, LOW at the step boundary. Patch to Envelope Gate IN. |
 
+**Rest-step muting is TRANSITIVE (Phase 76).** A 960 mutes the VCOs it drives on rest steps by writing each `${vcoId}bus` gain, and it identifies "the VCOs it drives" by jack identity — `vcoActiveCvRef[vcoId] === '${seqId}-pitch-out'`. That matches on a direct patch but **not** once a quantizer or chord sequencer sits in between, because the VCO's active CV becomes `qnt-cv-out` / `chordseq-cv-out`. Off-steps then silently stopped muting and the note droned through every rest. The gate loop now resolves the source through `resolveCvOrigin(src, connections)`, which walks `cvPassthroughInput` links (`qnt*-cv-out ← qnt*-cv-in`, `chordseq*-{cv,root,3rd,5th}-out ← chordseq*-cv-in`) back to the originating jack.
+- **Only the GATE loop resolves transitively — the glide/pitch write above it must keep using the IMMEDIATE source**, because whoever sits directly upstream owns the pitch. Resolving both would give a VCO two writers on its GlideBus (the seq and the quantizer callback).
+- Terminates at a non-pass-through jack, at an unpatched pass-through input (that module is then the origin — e.g. a chord seq running its own program, which correctly does NOT gate to an unrelated 960), or at a 4-hop guard that also makes a cable cycle harmless.
+- Resolved per step rather than cached on cable changes: the origin depends on cables that never touch the VCO (patching `seq→qnt-cv-in` changes it for a VCO already fed by `qnt-cv-out`), so a cache would need invalidating from every connect/disconnect site. A `=== pitchSrc` short-circuit means direct patches never pay for the walk.
+- `powerOff` now reopens every `${vcoId}bus`: powering down on a rest step used to leave that VCO muted until the sequencer next reached a gated step.
+
 **Tone.js Node:** `Tone.Sequence` or a custom `setInterval`-based stepper. Step voltages map to Hz via the 1V/Oct formula: `hz = 440 * Math.pow(2, (volts - 0.75))`. Clock IN: advance the sequence on each trigger event.
 
 ---
 
-### 4. VCA — Voltage Controlled Amplifier
+### 4. VCA — Voltage Controlled Amplifier [Implemented: Moog Phase 6 · ENV AMT / LOG-LIN / OUT lamp + seq-gate removal: Phase 71]
 
 **Function:** The volume gate. The VCO is always on — the VCA is the dam that lets sound through only when CV tells it to. Without a VCA, every note drones forever.
 
-**Controls:**
+Static ×3 (`vca`, `vca2`, `vca3`) plus library instances (`vca4`+). All instances are built by the same helper and behave identically.
+
+**Controls (as built — Moog Phase 71):**
 | Knob | Function |
 |---|---|
-| **Gain** | Sets a static base volume boost. At zero, audio passes only when CV is present. At max, audio passes at full level regardless of CV. Can drive into soft clipping at extreme settings. |
-| **CV Attenuator** | Scales how strongly the incoming CV moves the gain. 0 = CV has no effect; max = full CV range. |
+| **GAIN** | INITIAL GAIN / bias, linear 0–1, written straight to the `Tone.Gain`'s own `gain` param. This is the level that passes with **no** CV patched. CV sums on top of it, so GAIN = 0 gives full envelope gating and GAIN = 1 passes at full level regardless of CV. Sole writer of the intrinsic value; the cable owns the connected input (the standard Moog knob+CV split). |
+| **CV 1** / **CV 2** | Independent attenuators (`${id}Cv` / `${id}Cv2`) on the two control inputs. 0 = that input has no effect, 1 = full range. CV 1 was visual-only until Phase 71 (labelled ENV AMT); CV 2 added Phase 77. |
+| **LOG / LIN** | Response curve of that CV (`${id}CvShape`), the 902's LIN/EXP switch. Clickable; defaults to **LIN** (the pre-Phase-71 behaviour). |
 
 **Ports (3 Total):**
 | Port | Direction | Signal | Description |
 |---|---|---|---|
-| Audio IN | Input | AUDIO | Receives the raw (forever-on) audio signal from VCO or VCF. |
-| Volume CV IN | Input | CV — Gate / Continuous | Tells the VCA when and how much to open. Usually from an Envelope OUT. |
-| Audio OUT | Output | AUDIO | The gated, shaped audio signal. Patch to VCF IN or I/O From-Rig IN. |
+| Audio IN (`-in`) | Input | AUDIO | Receives the raw (forever-on) audio signal from VCO or VCF. |
+| Volume CV 1 (`-cv`) | Input | CV — Gate / Continuous | Tells the VCA when and how much to open. Usually from an Envelope OUT. Lands on its attenuator, **never on `gain` directly**. Jack id is `-cv`, not `-cv1` — kept so cables saved before CV 2 existed still resolve. |
+| Volume CV 2 (`-cv2`) | Input | CV — Gate / Continuous | Second control input with its own attenuator (Phase 77). |
+| Audio OUT (`-out`) | Output | AUDIO | The gated, shaped audio signal. Taps the `Tone.Gain` itself on every instance. |
 
-**Tone.js Node:** `Tone.AmplitudeEnvelope` or `Tone.Gain` with `.gain.rampTo()`. For true CV control: a `Tone.Gain` node whose `.gain` AudioParam is driven by a connected CV source (connect the Envelope's output signal to `gain.gain`).
+**Signal (per instance, `buildVcaCv(n, id)`):**
+```
+-in  ─────────────────────────────► ${id} (Tone.Gain) ──┬──► -out
+-cv  ► ${id}Cv  ─┐                                       └──► ${id}Meter (OUT lamp)
+     (CV 1 att)  ├─► ${id}CvShape ─► ${id}.gain
+-cv2 ► ${id}Cv2 ─┘    (LOG/LIN)
+     (CV 2 att)
+```
+
+**The two CVs sum BEFORE the response curve, not after (Phase 77).** That is how a real VCA behaves — several control voltages meet at one control port and the amplifier's linear or exponential response acts on their SUM — and it is why there is ONE shaper rather than two. Shaping each input separately and adding the results would make two half-open CVs read as two small gains instead of one large one: measured in LOG, two CVs at 0.5 give **1.000** summed-first (fully open, correct) versus **0.061** shaped-separately (near-silent). Web Audio sums multiple connections into a node's input, so no summing node is required.
+
+**Why two inputs.** With one shared attenuator an envelope and an LFO could be patched together (cables fan in) but only scaled together, so softening the envelope also killed the tremolo. Verified: at a target of "envelope peaking 0.3, tremolo ±0.5", one shared attenuator caps the tremolo at ±0.30; two independent ones deliver ±0.50 with the envelope still at 0.30. An unpatched CV 2 contributes exactly 0, so a rack using only CV 1 is bit-identical to pre-Phase-77.
+
+**LOG vs LIN — both curves pass through the origin, and that is load-bearing.** `${id}CvShape` is a `Tone.WaveShaper`; LIN is the identity, LOG is dB-linear across `VCA_LOG_RANGE_DB` (60 dB): `y = (10^((x−1)·60/20) − 10^(−3)) / (1 − 10^(−3))`, normalised so **f(0) = 0 and f(1) = 1**. A WaveShaper fed silence still emits `curve(0)`, so a curve that missed the origin would park a permanent DC offset on every VCA's gain with nothing patched. `VCA_CURVE_POINTS` is **odd** (1025) so x = 0 lands exactly on a sample rather than being interpolated. Negative CV clamps to 0 in LOG (no negative dB-domain gain); LIN passes it, so a bipolar LFO can still subtract from the GAIN bias as it always could. Musically: a linear envelope ramp through LIN stays loud then drops away sharply at the very end; through LOG it fades perfectly evenly, because hearing is logarithmic — that is the "natural instrument decay" setting. Curve writes are **delta-checked against `vcaLinRefs`**, not against the node's `.curve` getter (Web Audio copies the array on set, so read-back is not a reliable identity check).
+
+**No hardwired seq gate (Phase 71).** `vca-out` used to tap `seqGateNode`, a gain node written per step by sequencer 1's `Tone.Loop`, so VCA 1's output was chopped to seq 1's rhythm **with no cable patched** — a hardwired audio path, which this document has forbidden since Phase 10. A twin `vca-out2` on `seq2GateNode` existed in the jack map but was never rendered, so it was unreachable. Both nodes are gone; `buildSeqLoop`'s `n[`${seqId}GateNode`]?.gain` write is optional-chained and is now a no-op for statics exactly as it always was for dynamic sequencers, whose musical gate paths (env/kick gate cables + per-VCO bus gating) are unaffected.
+
+**Tone.js Nodes:** `Tone.Gain` (the amp) + `Tone.Gain` (CV attenuator) + `Tone.WaveShaper` (response) + `Tone.Meter` (OUT lamp).
 
 ---
 
@@ -148,9 +179,13 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 **Ports (3 Total):**
 | Port | Direction | Signal | Description |
 |---|---|---|---|
-| Trigger IN | Input | CV — Trigger | Fires the Attack phase. A brief spike suffices. |
-| Gate IN | Input | CV — Gate | Holds the Sustain phase open while HIGH. Closing fires Release. **[MVP: combine with Trigger as one port]** |
+| Trigger IN (`-trig`) | Input | CV — Trigger | Fires a ONE-SHOT: attack → decay → release, length taken from the envelope's own A+D knobs, so the source's gate length is irrelevant. A rest step simply doesn't fire (a trigger has no "off"). **Dead from Phase 1 until Phase 78** — the jack was `dest: null` with no `isGate`, so `connect()` hit its `if (to.dest === null) return` no-op and the cable did nothing at all. |
+| Gate IN (`-gate`) | Input | CV — Gate | Holds Sustain open while HIGH; closing fires Release, so the note's length is the incoming gate's length. |
 | Envelope CV OUT | Output | CV — Continuous | The ADSR voltage shape. Patch to VCA CV IN and/or VCF Cutoff CV IN. |
+
+**GATE vs TRIG is the whole point of two ports.** GATE length comes from the source; TRIG length comes from the knobs. Both register in `gateActionsRef` via `connect()`'s gate branch (the jack carries `isGate: true` plus `isTrig` for the trigger), and both firing sites — the 960 step loop and `updateKeyboard` — branch on `action.isTrig` through the shared `triggerEnvOneShot(env, time)` helper. Its duration is `attack + decay`, floored at 2 ms so an all-zero envelope still clicks rather than doing nothing.
+
+**`powerOff` releases every envelope** (statics + dynamics). An envelope is not a source, so holding the manual GATE button or a patched gate while powering down parked the `Tone.Envelope` at its sustain level with nothing to bring it back — the next power-up then started with that VCA wide open and droned until something released it.
 
 **Tone.js Node:** `Tone.AmplitudeEnvelope` for VCA control. For VCF control: use `Tone.Envelope` whose output signal is scaled and added to the filter frequency AudioParam.
 
@@ -162,21 +197,28 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 
 **Filter Type:** **24 dB/octave Moog Ladder Filter** — a 4-pole lowpass design with distinctive resonance character. **[Note: Tone.js's built-in `Tone.Filter` uses a `BiquadFilterNode` which maxes at 12 dB/oct. For true Moog ladder sound, consider `Tone.Filter` at 24 dB or a custom `MoogLadderFilter` using cascaded biquads. Flag for Phase 3.]**
 
-**Controls:**
+**Controls (as built — Moog Phase 70):**
 | Knob | Function |
 |---|---|
-| **Cutoff Frequency** | The frequency point below which audio passes, above which is cut. Low = muffled; High = full brightness. |
-| **Resonance** | Boosts the band around the Cutoff. Low = gentle shaping; above ~0.7 = self-oscillation (the filter generates its own pitch). |
-| **CV Attenuator** | Scales how much the incoming CV moves the Cutoff. |
+| **Cutoff Frequency** | Exponential 20 Hz–20 kHz (`20 · 1000^knob`). Writes `filter.frequency` — the knob is its sole writer. |
+| **Resonance** | `Q = knob · 20` (floored 0.001 — Q=0 breaks the exponential ramp). |
+| **ENV AMT** | Attenuator on the ENV jack's cutoff depth. Sole writer of `vcfenv.gain`. At max, a peaking envelope lifts a fully-closed cutoff across the WHOLE knob range (`VCF_ENV_CENTS` ≈ 11959 cents ≈ 9.97 oct, derived from the cutoff span itself). |
+| ~~CV Attenuator~~ | **Not built** — declined Phase 70. CV 1/CV 2 carry a fixed `VCF_CV_CENTS` (≈5980, i.e. ±5 oct, half of ENV because CV is bipolar); depth belongs to the source's own level knob. Genuinely missing for fan-out and for level-less sources (ENV, seq/kbd pitch out, VCO outs) — revisit if those bite. |
+| ~~KBD tracking~~ | **Removed** Phase 70 — it was never wired, and keyboard tracking is a *Minimoog* feature, not a 904A one. |
 
-**Ports (3 Total):**
+**Ports (5 Total, as built):**
 | Port | Direction | Signal | Description |
 |---|---|---|---|
-| Audio IN | Input | AUDIO | Receives the audio signal from VCO or VCF chain. |
-| Audio OUT | Output | AUDIO | Filtered audio out. Patch to VCA IN or I/O. |
-| Cutoff CV IN | Input | CV — Continuous | Moves the Cutoff Frequency dynamically. Source: Envelope, LFO, or Sequencer. |
+| Audio IN (`-in`) | Input | AUDIO | From VCO, mixer, or another filter. |
+| CV 1 / CV 2 (`-cv1`/`-cv2`) | Input | CV — Continuous | Cutoff modulation, fixed depth. |
+| ENV (`-env`) | Input | CV — Continuous | Cutoff modulation, depth set by ENV AMT. |
+| Audio OUT (`-out`) | Output | AUDIO | Filtered audio. |
 
-**Tone.js Node:** `Tone.Filter` (type: 'lowpass', rolloff: -24). `filter.frequency.rampTo(hz, 0.02)`. `filter.Q.rampTo(q, 0.02)`. CV input: connect envelope/LFO signal to `filter.frequency` AudioParam.
+**Tone.js Node:** `Tone.Filter` (type `lowpass`, rolloff −24 = **two cascaded biquads**). Cutoff uses `setTargetAtTime` — frequency-type params dispatch `rampTo` → exponential, which is unsafe near 0.
+
+**CV summing is EXPONENTIAL, on `detune` (Moog Phase 70).** All three CV inputs are **cents scalers** feeding `filter.detune`, never `frequency`. Native BiquadFilter computes `frequency · 2^(detune/1200)`, so a given depth moves the cutoff by the same musical interval wherever the CUTOFF knob sits; linear-Hz summing made one envelope a 3.5-octave slam at a low cutoff and an inaudible nudge at a high one. Cents also sum correctly across the three inputs (= multiply in Hz), which is how 1V/oct CV behaves. `Tone.Filter` fans its `detune` Signal to both cascaded biquads. Single-writer holds: the knob owns `frequency.value`, the cables own the connected `detune` input.
+
+**Not a true ladder — deliberate.** The faceplate says "24 dB/OCT LADDER" but the core is cascaded biquads, which cannot self-oscillate, do not thin the passband as resonance rises, have no drive, and (because Tone fans `Q` into *both* biquads) produce an effectively squared, spiky resonance. A real Huovilainen ladder worklet was built in Phase 70 and **reverted — Dylan preferred the biquad's smoother character.** If it is ever revisited, ship it as a separate library module rather than swapping this core (see MOOG_PLAN Phase 70).
 
 ---
 
@@ -205,22 +247,24 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 
 ---
 
-### 8. Noise Generator [Implemented: Moog Phase 8b, 2026-07-11]
+### 8. Noise Generator [Implemented: Moog Phase 8b, 2026-07-11 · six colours + scope + LEVEL CV: Phase 69, 2026-07-29]
 
-**Function:** Generates random electrical signals across all frequencies simultaneously. White noise has equal energy per frequency (Hz). Pink noise rolls off at −3 dB/octave, giving equal energy per octave — it sounds perceptually "flatter" and more natural. Used as a sound source (wind, ocean, percussion transients), as a random CV source for organic pitch drift, or as a test signal.
+**Function:** Generates random electrical signals — a sound source (wind, ocean, percussion transients), a random CV source, or a test signal. **Six colours** are available simultaneously, each on its own output jack (spectral tilt in parentheses): WHITE (flat), PINK (−3 dB/oct), RED (−6 dB/oct, deep — aka brown noise), BLUE (+3 dB/oct, bright), VIOLET (+6 dB/oct, brightest/thinnest), GREY (perceptually even). A shared LEVEL knob + a LEVEL-CV jack scale all six.
 
 **Controls:**
 | Knob | Function |
 |---|---|
-| **Level** | Output amplitude of the noise signal before the output jacks. |
+| **Level** | Output amplitude of all six colours before the jacks (knob 0–1 → gain 0–1.43×, unity at 0.7). |
 
-**Ports (2 Total):**
+**Ports (7 Total):**
 | Port | Direction | Signal | Description |
 |---|---|---|---|
-| WHITE OUT | Output | AUDIO / CV | Flat spectrum — full-range randomness. Harsh, bright. |
-| PINK OUT | Output | AUDIO / CV | −3 dB/oct rolloff — perceptually even energy distribution. Warmer. |
+| WHITE / PINK / RED / BLUE / VIOLET / GREY OUT | Output | AUDIO / CV | The six colours, each tapping its own LEVEL gain. |
+| LEVEL CV IN | Input | CV — Continuous | LFO/CV that modulates the LEVEL of all six colours (jack `-lvl-cv`, right of the LEVEL knob). |
 
-**Tone.js Node:** `Tone.Noise` (type: `'white'` or `'pink'`). Two separate noise instances per module, each through a `Tone.Gain` level stage (`${id}WGain`/`${id}PGain`) that the WHT/PNK jacks tap. One LEVEL knob drives both gains via id-keyed `updateNoiseParams(id, { level })` — knob 0–1 → gain 0–1.43× with **unity at the 0.7 default** (pre-8b patches, which had no gain stage, sound identical until the knob moves). Applies to the 3 static modules and every dynamic instance.
+**Tone.js graph (per instance, `buildNoiseColors(n, id)`):** three real sources — `Tone.Noise('white'|'pink'|'brown')`. Each colour has its own `Tone.Gain` LEVEL stage the jack taps. Derived colours filter off the shared sources (fewer running sources): **RED** = brown → gain; **BLUE** = pink → native `IIRFilter([1,-1],[1])` differentiator (−3 + 6 = +3 dB/oct); **VIOLET** = white → same differentiator (+6 dB/oct); **GREY** = white → lowshelf(+) → peaking(−9 @3.5 kHz) → highshelf(+) (inverse equal-loudness). A biquad shelf cannot make a constant broadband slope — hence the IIR differentiators. `updateNoiseParams(id, { level })` is the single writer of all six gains, each scaled by a per-colour makeup (`NOISE_LEVEL_GAINS`) so the colours sit at comparable loudness. **LEVEL CV** fans through per-colour makeup scalers into each gain's AudioParam (knob owns intrinsic value, CV sums — makeup-balanced like the knob). Jack ids: `-wht/-pnk/-brn/-blu/-vio/-gry` + `-lvl-cv` (kept `-brn` internally though the label reads RED). Applies to the 3 static modules and every dynamic instance.
+
+**Visualizer:** a retro CRT scope (`NoiseScope`) draws a procedural noise trace tinted to whichever colour is currently patched (`useMoogPatch().cables`, most-recent wins); trace roughness varies per colour, amplitude tracks LEVEL. Zero-Re-render (canvas-in-rAF, Phase-61 visibility-gated); stays emissive-bright in lights-out with the I/O-oscilloscope bezel treatment.
 
 ---
 
@@ -242,6 +286,22 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 
 ---
 
+### 9b. KICK — Membrane Drum Synthesizer [Implemented: Moog Phase 60d · trigger hygiene Phase 79 · CLICK TONE + TUNE CV Phase 80]
+
+**Function:** A `Tone.MembraneSynth` body plus a filtered-noise beater transient. Static `kick` plus library instances (`kick2`+).
+
+**Signal:** `Synth → Out` and `ClickSynth → ClickFilter → ClickGain → Out`. Jacks `-gate-in` (isGate/isKick) / `-click-in` (ACCT) / `-tune-cv` / `-out`.
+
+**Controls:** TUNE (40–200 Hz) · P.ENV (0–5 oct drop) · DECAY (0.05–2 s, also the note length) · CLICK (transient level) · **TONE** (beater highpass, 333 Hz–12 kHz; knob centre is exactly the 2000 Hz it was hardcoded at before Phase 80).
+
+**Trigger times are clamped strictly forward (`nextKickTime`, Phase 79) — load-bearing.** Tone's monophonic voices are Sources, and `Source.start()` asserts *"Start time must be strictly greater than previous start time"*. The sequencer schedules `lookAhead` (~0.1 s) into the future while the manual TRIG button fires at `Tone.now()`, so **clicking TRIG while a step is pending is in the past relative to it** — a guaranteed throw inside the step loop, not a load-dependent race. `KICK_MIN_GAP_S` is 1 ms, far below audibility on a drum, and the clamp is applied per instance to **both** voices (body and click are both Sources).
+
+**TUNE CV is Hz-DOMAIN.** Despite this document's 1V/oct header, every pitch out on the rack (`seq-pitch-out`, `qnt-cv-out`, `chordseq-*-out`, `kbd-pitch-out`) emits the frequency itself — that is what the VCOs' glideBus consumes. So the patched signal's **value becomes the drum's fundamental**, which is what makes sequenced tom fills and melodic drums work; a ±1-style CV would have been incompatible with every pitch source here. With a cable present the **TUNE knob becomes a transpose** around the incoming pitch (centre = unity, span ±13.9 semitones), so neither control goes dead. Engagement is **cable-driven** (a patched-but-idle source reads 0, indistinguishable from no cable — the `isLfoSync` pattern) and resolved at trigger time by scanning `connectionsRef`, not cached. Sampled from a per-instance `Tone.Analyser` because "read the pitch at the moment the drum fires" is a lookup, not an AudioParam connection. Clamped 20–2000 Hz.
+
+**Rhythmic LEDs go through `drawAt` (Phase 79).** Firing them straight from the Loop callback lit them `lookAhead` early — ~40% of an eighth note at 120 BPM. `drawAt` wraps `getDraw().schedule` with a fallback to an immediate call. Applies to the kick lamp (both paths) and the 960 step LED.
+
+---
+
 ### 10. I/O — Input / Output Module
 
 **Function:** The bridge between the modular world and the real world. Routes external audio (mic, guitar) into the patch system as an audio signal source, and routes the final patched signal out to speakers or a recording interface.
@@ -250,7 +310,7 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 | Knob | Function |
 |---|---|
 | **Input Gain** | Boosts or attenuates the incoming external audio signal before it enters the rig. |
-| **Output Gain** | Master volume for the entire modular output. |
+| **Output Gain** | Master volume for the entire modular output. The **PEAK lamp** taps `n.master` (post-knob, i.e. what actually leaves the rack). Until Phase 71 it tapped `seqGateNode` — VCA 1's seq-gated output — so it was blind to the MASTER knob and to every patch that didn't happen to run through VCA 1. |
 
 **Ports (4 Total):**
 | Port | Direction | Signal | Description |
@@ -264,7 +324,7 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 
 ---
 
-### 11. Vocoder — 16-Band Spectral Vocoder [Implemented: Moog Phase 42]
+### 11. Vocoder — 16-Band Spectral Vocoder [Implemented: Moog Phase 42 · PROGRAM presets + mic noise gate: Phase 72]
 
 **Function:** Imposes the spectral envelope of a **modulator** signal (voice, drum machine, sequence) onto a harmonically rich **carrier** signal (VCOs). Each of 16 frequency bands measures the modulator's energy and uses it to gate the matching band of the carrier — the classic "transfer of characteristics" / talking-synth effect.
 
@@ -278,14 +338,16 @@ For MVP a single combined port is acceptable, but the distinction must be unders
 | **PWIDTH** | Internal carrier pulse width (PWM duty). Knob 0–1 → width −0.95..0.95 (0.5 = square). The internal carrier runs at a fixed pitch (130 Hz, set at construction). |
 | **CARR MIX** | Crossfade between the external carrier (`voc-carr-in`) and the internal pulse osc. 0 = external only (default), 1 = internal only. Lets the vocoder run standalone (mic + internal carrier, no patched VCOs). |
 | **SHIFT** | Spectral/formant shift — scales all 16 carrier bandpass center freqs by a ratio. Knob 0–1 → ±1 octave (0.5 = no shift). Up = chipmunk/feminine formants, down = deeper. |
-| **RES** | Q of the 16 carrier bandpass filters. Knob 0–1 → Q 1–7 (0.5 ≈ the base Q of 4). Higher = sharper, more resonant/vocal formants. |
+| **RES** | Q of the 16 carrier bandpass filters, **exponential `20^res` (Q 1–20)**. *The control that decides whether this sounds like a synth or a voice.* VOWEL's formants (§13) run at Q 11/13/15; before Phase 83 this topped out at 7, so the bands were 3–4× too broad to cut formant-shaped peaks. **Sparse and resonant beats flat and continuous** — contiguous band coverage passes the carrier through largely intact, which is the "loose synth" failure mode; VOWEL sounds vocal precisely because everything between its three formants is discarded. Output makeup tracks Q (`×√(Q/4)`) because a bandpass's bandwidth shrinks as 1/Q, so without it raising RES just goes quiet. |
 | **SH RATE** | Rate of the LFO that modulates SHIFT. Knob 0–1 → 0.05–10 Hz. |
 | **SH AMP** | Depth of the SHIFT LFO. Knob 0–1 → 0–1 octave of swing. Creates sweeping/phaser-like formant motion. Default 0. |
-| **DECAY** | Envelope-follower smoothing (the 16 env LP cutoffs). Knob 0–1 → ~56 Hz (snappy) … ~7 Hz (smeary/sustained), 0.5 ≈ 20 Hz. Lower = longer vowel tails. |
+| **DECAY** | Envelope-follower **RELEASE**, 6 ms … 120 ms (centre ≈ 27 ms). Attack is pinned fast at 1.5 ms — see the asymmetric-follower note below. Falls back to writing the 16 symmetric LP cutoffs when the worklet is unavailable. |
 | **PRESENCE** | Peaking-EQ boost (~2.7 kHz, Q 1) on the vocoded output so the robot voice cuts through a mix. Knob 0–1 → 0..+12 dB (boost only, default 0). |
 | **CLARITY** | Blends the high-passed (~1.5 kHz) **real voice** (modulator consonants/sibilance) straight into the output, bypassing the band bank. Knob 0–1 → 0–0.9×. The headline word-intelligibility control — keeps vocoded vowels while letting actual consonants cut through. Default 0. |
 | **HISS** | Level of high-passed (~3.5 kHz) white noise injected into the carrier bank so unvoiced consonants (s, sh, t, f) surface through the high bands. Default 0. Synthetic sibilance — compare with CLARITY (real voice). |
 | **BUZZ** | Level of low-passed (~250 Hz) pink noise injected into the carrier bank for low-end body/thump, thickening vowels. Default 0. |
+| **PROGRAM** (header) | One-click voicing recall — **NUVO** (crisp, fast tracking, both intelligibility aids up) / **TALKBOX** (resonant mid honk, low-end body, consonants deliberately poor like the real thing) / **ALIEN** (formants shifted up + slow drift). Presets **write the knobs** (`VOC_PROGRAMS` in `MoogShell.jsx`) rather than applying a hidden offset, so the knobs stay the single source of truth and persist normally. They touch **voice character only** — SHIFT/RES/DECAY/PRES/CLAR/HISS/BUZZ/S.RT/S.AMP — never MIX, VOL, MIC, C.MIX or GATE (your level, routing and room). The readout is the last program *pressed*; it is **not re-applied on mount**, or every reload would stomp knobs tuned afterwards (the Phase 60c "user events only" rule). |
+| **GATE** (header) | Modulator noise-gate threshold, 4 positions OFF / LOW / MID / HIGH → normalized 0 / 0.5 / 0.75 / 1.0. Default **OFF** = the pre-Phase-72 signal path. Discrete because a gate is a set-once-per-room control and the faceplate has no spare width; the engine mapping is continuous, so it could become a knob with no engine change. |
 
 **Ports (3 Total):**
 | Port | Direction | Signal | Description |
@@ -310,13 +372,73 @@ internal PulseOsc → vocCarrOscGain ┴→ vocCarrSum ─→ vocCarrBank ─→
 vocModIn ─→ HP(1.5k) → vocClarityGain (CLARITY: real voice) ───────────────────────────────────────────────────────────────────────────────┴─→ vocVolume(VOLUME ×0–2) → voc-out
 vocModIn ─→ vocAnalyser (FFT 512)   ← drives the 16-segment LED spectrum meter
 ```
-Each modulator band rectifies + smooths to an envelope follower, whose output connects directly to the matching carrier band's `Tone.Gain.gain` AudioParam (audio-rate, zero polling). `VOC_ENV_DRIVE` (≈8) scales the rectifier; **DECAY** sets the env-LP cutoff. The carrier is the external `voc-carr-in` and an internal `Tone.PulseOscillator` blended by **CARR MIX** into `vocCarrSum`, which feeds both the bank and `vocDry` — so HISS/BUZZ (bank-only) never leak into dry. The **spectral-shift rAF loop** (sole writer of `vocCarrBPF*.frequency`) applies SHIFT + its LFO; **RES** writes `vocCarrBPF*.Q`. Output: `wet+dry → vocOut` (fixed ×3 makeup) `→ vocPresence` (PRESENCE peaking EQ) `→ vocVolume` (VOLUME ×0–2, the jack); CLARITY sums at `vocVolume`, bypassing makeup + EQ. `getVocAnalyserData()` feeds the 16-LED meter via the same per-band-peak rAF loop as `FFBModule`.
+Each modulator band rectifies + smooths to an envelope follower, whose output connects directly to the matching carrier band's `Tone.Gain.gain` AudioParam (audio-rate, zero polling). Per band the chain is `ModBPF → ModDrive → ModRect → ModEnv`; `VOC_ENV_DRIVE` (8) × the pre-emphasis tilt sets the drive gain.
+
+**Asymmetric envelope followers (Phase 84, `public/env-follower-worklet.js`) — the one place in this rack where a worklet is genuinely required.** A biquad/one-pole lowpass, which is what the 16 `ModEnv` filters were, is inherently **symmetric**: one time constant serves both directions, forcing a losing trade — fast enough for consonant onsets lets the rectification ripple through and roughens vowels; slow enough for smooth vowels smears consonants into the vowel that follows. No native node smooths asymmetrically (a WaveShaper holds no state; a DelayNode feedback loop is quantised to a 128-sample block and needs a nonlinear element inside the cycle), and per-sample state is exactly what an AudioWorklet is for. Measured on a 120 Hz band carrying a consonant burst then a vowel:
+
+| follower | consonant peak by 30 ms | vowel ripple |
+|---|---|---|
+| symmetric 8 ms (the old centre) | 0.410 | 0.031 |
+| symmetric 3 ms (the old fast end) | 0.518 | 0.082 |
+| **asymmetric 1.5 ms / 27 ms** | **0.829** | **0.020** |
+
+It wins on **both** axes at once — twice the consonant definition of the old centre *and* the lowest ripple of the three — because a slow release holds the envelope near the ripple's PEAK between cycles rather than averaging through it.
+
+**Topology:** `16× ModRect → ChannelMerger(16) → env-follower-processor (16 ch) → ChannelSplitter(16) → 16× ModEnv → CarrVCA.gain`. The worklet's output re-enters through the **existing** `ModEnv` filters rather than 16 new adapter nodes — which also avoids connecting a raw splitter straight to a Tone param — and those filters become the **per-band de-ripple stage** described next. **Load-failure safety is the shape of the whole block:** `ModRect → ModEnv → CarrVCA.gain` is wired at construction and only unhooked once the worklet actually exists, so a 404 or a refused module degrades to exactly the pre-Phase-84 symmetric behaviour instead of silence. `Tone.context.createAudioWorkletNode` (never `new AudioWorkletNode`) for the SAC reason noted in the quantizer; `channelInterpretation: 'discrete'` so the 16 bands are never up/down-mixed.
+
+**Analysis rectifier — three rules, all load-bearing (Phase 73):**
+1. **`VOC_RECT_POINTS` must be ODD (2049).** `Tone.WaveShaper.setMap` samples at `x = (i/(len−1))·2 − 1`; at the default even length 1024, x = 0 falls *between* samples 511 and 512, and with a `|x|·8` mapping both neighbours are 0.0078. Web Audio interpolates, so the curve returned **0.0078 for a silent input** — a permanent gain on all 16 carrier VCAs, i.e. raw carrier at ≈ **−8.5 dB, always**, loudest wherever the carrier has most energy (a saw's fundamental). This was a real, shipped bug: the "constant low buzz". An odd count puts x = 0 exactly on a sample. *Same class as the VCA LOG/LIN curve (§4) and the mic gate above — any WaveShaper feeding an AudioParam must pass exactly through the origin, because a shaper fed silence still emits `curve(0)`.*
+2. **The ceiling is a soft knee, not `Math.min(1, …)`.** A hard clip pinned every band at or above 1/8 scale to exactly 1.0, so the loudest bands became indistinguishable — and vowel identity *is* the relative height of the formant peaks, so flattening the tops smears vowels together. Now linear below `VOC_RECT_KNEE` (0.6) and asymptotic to 1 above it: contrast preserved where it matters, nothing pins, nothing exceeds unity.
+3. **The drive lives in a Gain node, not in the curve.** The shaper then sees an already-amplified signal spanning the full [−1, 1] domain, so every band gets the table's full resolution. With the drive inside the curve, a band driven ×32 would use ~1/32 of the table and quantise its envelope into a few dozen steps.
+
+**Analysis pre-emphasis (`vocBandTilt`, Phase 73).** Speech energy falls ~6–9 dB/octave above ~500 Hz, so a flat analysis bank leaves the low bands wide open on the voice fundamental while the consonant bands (2–8 kHz) barely crack — a muffled robot with a droning bottom. Each band's drive gain is scaled by `(f/500)^0.6` (≈3.6 dB/oct), clamped to [0.35, 4.0] → **−8.4 dB at 100 Hz … +12 dB at 6–8 kHz**. Applied **before** the rectifier on purpose: tilting the *detector* makes low bands less sensitive and high bands more sensitive while every carrier VCA stays bounded at unity; tilting after the envelope would instead push high carrier bands past unity and make output level depend on the tilt. The correction is deliberately partial — full compensation measures "more correct" and sounds hissy.
+
+**Per-band envelope de-ripple (Phase 86) — the fix for "a static sound".** The Phase 84 attack of 1.5 ms is fast enough to track individual **glottal pulses**, so the follower re-imposes the speaker's PITCH on the carrier as amplitude modulation. Measured at the flat 300 Hz post-filter it originally shipped with: **18.9 % ripple** on a voiced band — heard as buzzy static on every voiced sound. (The pre-84 symmetric follower measured 28.7 %, so Phase 84 helped and simply did not go far enough — which is exactly why DECAY "didn't make much difference": release was never the culprit.)
+
+A **flat** cutoff cannot win, because pitch ripple (~120 Hz) and consonant onsets (~30 Hz bandwidth) are barely a decade apart:
+
+| post-LP | pitch ripple | consonant 90 % rise |
+|---|---|---|
+| 300 Hz (as shipped in 84) | 18.9 % | 8.4 ms |
+| 60 Hz flat (best single value) | 7.4 % | 15.1 ms |
+| **per-band, 20 → 121 Hz** | **6.0 %** | **12.5 ms** |
+
+Scaling with band frequency breaks the trade because the two problems live in different bands: pitch ripple is a **voiced** phenomenon concentrated low and mid, while consonants are **high** and mostly unvoiced noise with no pitch ripple to reject at all. `vocEnvPostHzFor(f) = 20 · (f/100)^0.41` — 20 Hz at the 100 Hz band rising to 121 Hz at 8 kHz — beats the best flat value on **both** counts.
+
+**The ANALYSIS bank tracks RES too (Phase 85) — sharpening only the carrier was half the job.** Phase 83 raised the carrier Q but left the modulator bank at `VOC_BANDS`' Q of 4, and at that width **one vocal formant opens five analysis bands**: a 730 Hz formant reads 22 / 47 / 92 / 33 / 18 % across the 430 / 580 / 770 / 1035 / 1385 Hz bands. So every formant was reproduced as a smeared cloud of five carrier peaks — *sharp* peaks after 83, but still five. VOWEL renders the same formant as exactly **one** peak, which is the difference that kept being audible. At analysis Q ≈ 12 the leakage collapses to a single band.
+
+`vocAnalysisQFor` = `clamp(carrierQ × 0.8, 4, 14)`, so one knob sharpens analysis and synthesis together; floored at the historical 4 so **RES at or below centre is byte-identical to before**, and TALKBOX (analysis Q 12.6) reaches the one-band point.
+
+**Accepted trade-off:** a constant-Q bank rings for ≈ `Q/(π·f)`, so narrow LOW bands ring longest — 40 ms at 100 Hz, 17 ms at 240 Hz, but only 5.5 ms at 730 Hz and 1.6 ms at 2.5 kHz. It matters least exactly where it is worst: the 150 Hz highpass and the pre-emphasis tilt (−8.4 dB at 100 Hz) already suppress that region, and Phase 84's fast attack tracks an onset before the ring settles.
+
+**Carrier density becomes load-bearing at high RES.** A Q-20 carrier band at 1 kHz is only ~50 Hz wide, so a single low saw may have no harmonic inside it at a given moment and that band drops out. Fixes, in order: a denser carrier (several detuned VCOs, or a chord), or a little **HISS**/**BUZZ**, which exist precisely to fill spectral gaps in the carrier bank.
+
+**Band Q and coverage.** Bands sit a fixed ratio 1.339 apart (0.421 octave). A bandpass's −3 dB width is `fc/Q`, so adjacent skirts exactly MEET at **Q = (1+r)/(2(r−1)) ≈ 3.45**; above that there are holes in the spectrum between bands and the voice sounds hollow/phasey. The base `VOC_BANDS` Q of 4 is therefore slightly gappy, and **RES** (Q = 1 + knob·6) is the control — knob **0.408** is the contiguous-coverage point, which is what the NUVO program sets. Higher Q is a legitimate voicing choice (more resonant/robotic), not an error — it is simply not "clean".
+
+The carrier is the external `voc-carr-in` and an internal `Tone.PulseOscillator` blended by **CARR MIX** into `vocCarrSum`, which feeds both the bank and `vocDry` — so HISS/BUZZ (bank-only) never leak into dry. The **spectral-shift rAF loop** (sole writer of `vocCarrBPF*.frequency`) applies SHIFT + its LFO; **RES** writes `vocCarrBPF*.Q`. Output: `wet+dry → vocOut` (Q-tracking makeup, ×3 at the base Q) `→ vocPresence` (PRESENCE peaking EQ) `→ vocLimit` (hard-knee brick wall, `−1 dB / 20:1 / knee 0`, copied from VOWEL's output stage — **not** `Tone.Limiter`, whose 30 dB soft knee barely compresses) `→ vocVolume` (VOLUME ×0–2, the jack); CLARITY sums at `vocVolume`, so the real voice bypasses makeup, EQ **and** the limiter, exactly as in VOWEL. `getVocAnalyserData()` feeds the 16-LED meter via the same per-band-peak rAF loop as `FFBModule`.
 
 **Tone.js Nodes:** modulator pre-chain (`vocModRaw`, `vocModHP`, `vocModComp`) + buses (`vocModIn/vocCarrIn/vocCarrExtGain/vocCarrOscGain/vocCarrSum/vocCarrBank/vocSum/vocWet/vocDry/vocOut/vocPresence/vocVolume`) + internal carrier (`vocCarrOsc` PulseOscillator + `vocCarrOscGain`) + `Tone.Analyser('fft', 512)` + HISS/BUZZ chain (`Tone.Noise`×2, HP+LP `Tone.Filter`, `Tone.Gain`×2) + CLARITY (`vocClarityHP` + `vocClarityGain`) + per band: `Tone.Filter(bandpass)` ×2 (mod + carr), `Tone.WaveShaper` (rectifier), `Tone.Filter(lowpass)` (env follower), `Tone.Gain(0)` (carrier VCA) — ~80 always-on band nodes. The PulseOscillator + HISS/BUZZ noise are started/stopped in `powerOn`/`powerOff`.
 
+**The mic is a SINGLETON; its LEVEL and STATUS are not (Phase 81).** One `Tone.UserMedia` → `extMicGain` is shared by every vocoder instance, but the MIC knob and the ENABLE button are drawn per instance, and both were wired straight to the shared thing:
+- **MIC knob** — both instances wrote the one `extMicGain.gain`, so turning voc2's MIC silently moved voc1's and the two knob positions disagreed with reality. A single-writer violation. Each instance now owns a `${id}MicGain` (`extMicGain → ${id}MicGain → ${id}ModRaw`), written by `updateVocMicGain(vid, …)`. `extMicGain` stays at unity and is purely the shared tap for the mic and its SIG meter.
+- **Mic STATUS** — was per-instance `useState`, so one instance could read "● LIVE" while the other read "○ MIC" for the same live mic. Lifted to `MoogShell`, which owns `enableMic`/`disableMic` and passes `micStatus` down to every instance.
+- **Known limitation:** removing/hiding every vocoder leaves the mic open with no button to close it (the OS indicator stays lit until page unload, which does `close()` + `dispose()`). The engine has no visibility into which modules are rendered, so this is not fixed here.
+
 **Built-in mic (modulator):** the vocoder has an integrated mic (ENABLE MIC button + MIC IN level knob + SIG LED, top of the faceplate). It opens a `Tone.UserMedia` stream (`enableMic()`) → `extMicGain` → `vocModRaw` (the modulator pre-chain front), so enabling the mic + a carrier vocodes instantly with **no patching**. The `MOD` jack still accepts external modulator sources (drum machine, sequence), which sum with the mic. There is no separate EXT IN module — it was merged into the vocoder (Phase 48). Use headphones to avoid carrier→mic feedback.
 
-**Modulator pre-processing (always on, voice-optimized):** both the mic and the `voc-mod-in` jack land on `vocModRaw → vocModHP (highpass 150 Hz) → vocModComp (Tone.Compressor −28 dB / 4:1) → vocModIn`. The highpass removes rumble/plosives (safe — voice intelligibility lives in formants >300 Hz); the compressor evens the drive into the envelope followers for consistent vocoding. Tuned for voice; a low-frequency modulator (e.g. a kick) loses content below 150 Hz.
+**Modulator pre-processing (always on, voice-optimized):** both the mic and the `voc-mod-in` jack land on `vocModRaw → vocModHP (highpass 150 Hz) → [noise gate] → vocModComp (Tone.Compressor −28 dB / 4:1) → vocModIn`.
+
+**Noise gate (Phase 72, `buildVocGate(n, id)` — shared by the static and the factory):**
+```
+${id}ModHP ─┬─────────────────────────────────────────► ${id}GateGain ─► ${id}ModComp
+            └─► GateFollow ─► GateScale ─► GateCurve ──┘ (drives .gain)
+                (envelope)    (1/thresh)   (soft knee)
+```
+The compressor is what makes vocoding consistent, but at a −28 dB threshold it also pulls **room noise up between words**. The gate sits **before** it — after it, the compressor has already flattened the difference between speech and noise and no threshold works.
+
+**Not `Tone.Gate`, though it exists and looks like an exact fit.** Tone.Gate is Follower → `GreaterThan` → gain, and GreaterThan emits a hard **0/1 step**: the gain snaps open the instant the threshold is crossed (clicks on every word, chatters on breaths), and its `smoothing` smooths *detection* only, not the gain. The comparator is therefore replaced by a soft-knee `WaveShaper` — same three-stage shape, but the gain eases open across the 6 dB below the threshold.
+
+**Threshold is applied by scaling the detector into a FIXED curve**, never by rebuilding the curve: `x = followerAmp / thresholdAmp`, so the control writes one plain gain param (rampable, single-writer) and the curve table is never rewritten (the reverb-DAMP rebuild-storm lesson). WaveShaper **clamps input to [-1, 1]**, which is exactly the wanted behaviour at the top — any level at or above the threshold gives `x ≥ 1` → fully open. `curve(0) = 0` is **load-bearing**: a WaveShaper fed silence still emits `curve(0)`, so a curve missing the origin would park a DC offset on the gate gain (the Phase-71 VCA LOG/LIN lesson). `VOC_GATE_SMOOTH` (40 ms) is **fixed at construction and never written** — `Tone.Follower` wraps a `OnePoleFilter`, whose `frequency` setter disposes and rebuilds its IIRFilter (§17 hazard 2). Range `VOC_GATE_MIN_DB` −80 (transparent for anything above −80 dBFS) … `VOC_GATE_MAX_DB` −30. The highpass removes rumble/plosives (safe — voice intelligibility lives in formants >300 Hz); the compressor evens the drive into the envelope followers for consistent vocoding. Tuned for voice; a low-frequency modulator (e.g. a kick) loses content below 150 Hz.
 
 The bank runs continuously even when unpatched; gating it to "carrier + modulator present" is a possible future CPU optimization.
 
@@ -324,7 +446,7 @@ The bank runs continuously even when unpatched; gating it to "carrier + modulato
 
 ### 12. EXT IN — merged into the Vocoder (§11) [Phase 48]
 
-The external-mic input was originally a standalone module (Phase 43) but was **merged into the Vocoder** (Phase 48) since its only real use was as the vocoder modulator. The mic controls (ENABLE MIC, MIC IN, SIG LED) now live on the vocoder faceplate and feed `vocModRaw` directly — see §11 "Built-in mic". `Tone.UserMedia` lifecycle (`enableMic`/`disableMic`/`updateExtMicParams`, `extMicRef`, `extMicGain`, `extMicMeter`) is unchanged; only the routing (now → `vocModRaw` instead of a separate `ext-out` jack) and the UI host changed.
+The external-mic input was originally a standalone module (Phase 43) but was **merged into the Vocoder** (Phase 48) since its only real use was as the vocoder modulator. The mic controls (ENABLE MIC, MIC IN, SIG LED) now live on the vocoder faceplate and feed `vocModRaw` directly — see §11 "Built-in mic". `Tone.UserMedia` lifecycle (`enableMic`/`disableMic`, `extMicRef`, `extMicGain`, `extMicMeter`) is unchanged; only the routing (now → `vocModRaw` instead of a separate `ext-out` jack) and the UI host changed. **Mic LEVEL is per-instance since Phase 81** — see §11.
 
 **Note on AEC:** uses `Tone.UserMedia` defaults (browser echo-cancellation/AGC may be on). Use **headphones** so the carrier doesn't bleed into the mic. If raw-signal quality becomes an issue, switch to native `getUserMedia` with `echoCancellation:false, noiseSuppression:false, autoGainControl:false` (as `useVocoder.js` does) wrapped via `createMediaStreamSource`.
 
@@ -338,11 +460,98 @@ The external-mic input was originally a standalone module (Phase 43) but was **m
 
 **Output level (makeup + limiter):** the parallel bandpass bank is intrinsically quiet (~7× down vs. the raw source), so `${id}Mix` applies a ×7 makeup. But the vowels are hugely unequal in level — open **A**/**O** (low F1 in a strong region of the source) peak ~4× the closed **I**/**U** — so a fixed makeup alone clips A. `${id}Out` is therefore a `Tone.Compressor` used as a **hard-knee limiter** (`threshold −1 dB, ratio 20, knee 0`) — *not* `Tone.Limiter` (whose default 30 dB soft knee barely compresses). Net: closed vowels stay at full makeup (RMS ~0.43, matching a raw VCO) while A/O are brick-walled just above unity. The jack `-out` and the FFT display both tap post-limiter `${id}Out`.
 
-**Controls / jacks:** VOWEL knob (morph A→E→I→O→U), SHAPE knob (0.7–1.3 vocal-tract scale on all formants), jacks `-in` / `-cv-in` (FORMANT CV) / `-out`.
+**Controls / jacks:** VOWEL knob (morph position), SHAPE knob (0.7–1.3 vocal-tract scale on all formants), **MODE** (CHAIN / DIRECT) + **FROM** / **TO** selectors, jacks `-in` / `-cv-in` (FORMANT CV) / `-out`.
+
+**MODE — CHAIN vs DIRECT (Phase 75).** `vowelFreqsAt` treats the five vowels as an ordered **road** (A→E→I→O→U), so a sweep from U to A necessarily drives back through O, I and E — halfway through it is literally sounding the vowel **I** (270/2290/3010). That is right for a continuous morph and wrong for "start at U, land on A".
+- **CHAIN** (default, and the pre-Phase-75 behaviour bit-for-bit) — the knob + CV walk the whole road.
+- **DIRECT** — `vowelFreqsBetween(from, to, t)` blends the two chosen endpoints' formant triples straight, so the sweep only ever contains shades of those two vowels and touches no third. U→A at 50% is 515/980/2340, which lies between them and is not any other vowel.
+
+Both modes read the **same** morph knob + FORMANT-CV sum, so a CV patched into `-cv-in` drives either identically — only the path through vowel space differs. In DIRECT the knob is the manual position along the FROM→TO line and the CV rides on top, so a full-scale envelope with the knob at 0 travels exactly FROM → TO (verified: endpoints land on the exact table values).
+
+**There is deliberately no gate input or internal sweep timer.** The envelope shape comes from the rack's existing ENV modules — `kbd-gate-out → env1-gate`, `env1-out → vowel-cv-in` — which gives full ADSR control of the vowel travel (ATTACK = how fast it reaches TO, SUSTAIN = the vowel held while the key is down, RELEASE = the drift back to FROM) without a second envelope generator. Chosen over a built-in GATE + TIME knob for exactly that reason.
+
+FROM/TO render **dimmed but present** in CHAIN (`.selectorGroupIdle`) rather than hidden — hiding them would change the module's height between modes, and "real hardware, currently dark" is already the rack's language for this (the LFO division screen, §2).
 
 **Formant frequencies:** `VOWEL_FORMANTS` (module const in `useMoogAudio.js`) — classic male-voice table; `vowelFreqsAt(pos 0..4)` linearly interpolates adjacent columns. A/E/I/O/U = [730,1090,2440] / [530,1840,2480] / [270,2290,3010] / [570,840,2410] / [300,870,2240] Hz.
 
 **Single-writer rAF (`vowelTick`):** the SOLE writer of the 3 filter frequencies — combines the morph ref (VOWEL knob), shape ref (SHAPE), and the sampled CV level (`cv*4` = full A↔U sweep) into the final formants, with a per-instance delta gate (idle module = 0 writes). `updateDynModuleParams` case `'vowel'` writes the refs only (never the filters), preserving single-writer-per-node. This is why FORMANT CV works at all — a preset morph is a nonlinear map to 3 freqs, not a direct AudioParam connection.
+
+---
+
+### 14. PANNER — Voltage-Controlled Stereo Panner [Implemented: Moog Phase 67]
+
+**Function:** Places a (typically mono) source in the stereo field. **Dynamic-only.** `${id}In → Tone.Panner(0) → ${id}Out` — `Tone.Panner` wraps the native `StereoPannerNode`, already **equal-power**, so one node gives the pan law (no dual-VCA matrix). The whole rack downstream of `io-in` is 2-channel, so it pans to both the speakers and the Workstation record tap.
+
+**Controls / jacks:** PAN knob (writes `pan.pan` intrinsic value), CV DEPTH knob (attenuator). Jacks `-in` / `-cv-in` (a CV summed onto `pan.pan` via `${id}CvDepth`, clamped [−1,1]) / `-out`. `getPanMeterData(id)` computes per-channel level (input peak × equal-power gain at the effective pan) for the two L/R meter LEDs.
+
+---
+
+### 15. CHRONOS — Multi-Zone Stereo Delay [Implemented: Moog Phase 68]
+
+**Function:** MONO in → STEREO out. **Dynamic-only.** A **hand-built** stereo feedback loop around two native `Tone.Delay` lines (not a `Tone.FeedbackDelay` black box) so COLOR (loop lowpass), HALO (allpass diffusion + L↔R cross-feedback smear) and a `tanh` soft-clip all live INSIDE the feedback path. Modulating `delayTime` (TIME knob / TIME CV) varispeed-warps pitch with no dropouts (native interpolation) = tape-stop/skid. Stereo width is synthesized (L/R times drift apart + cross-feed); wet L/R hard-pan to their own buses, dry sums to both (centre), all → one stereo OUT jack.
+
+**As built:** per channel `Sum → Delay(maxDelay 4 s) → HP → LP → Ap1 → Ap2 → Wet(→ its OutBus)`, with `Ap2 → Sat(tanh) → Fb(self) + Xfb(cross)` back into the sum. Zones `CHRONOS_RANGES = { micro:[0.003,0.03], mini:[0.03,0.28], macro:[0.28,3.0] }`; TIME is log-mapped within the zone. `updateDynModuleParams` case `'chronos'` takes the full `{zone,time,repeats,halo,color,mix}` and derives all node values (feedback + cross share headroom, `|self|+|cross| ≤ ~0.9`, tanh guards the rest). NB Web Audio clamps any delay inside a feedback cycle to ≥1 render quantum (~2.9 ms), so Micro floors there. Jacks `-in` / `-time-cv` / `-rep-cv` / `-out`; `getChronosDisplay(id)` drives an echo-ring visualizer (energy = post-diffusion peak, ring gap = live delay time).
+
+---
+
+### 16. WAVEFOLDER — West-Coast Sine Folder [Implemented: Moog Phase 68c]
+
+**Function:** Drives a signal into a fixed multi-fold sine transfer curve — more drive = more folds = more added harmonics. **Dynamic-only.** Output-domain waveshaping, so it works on ANY audio in (VCO, chord, external) — which is why it's its own module rather than a VCO knob (the VCO's SHAPE is phase-domain).
+
+**As built:** `In → Drive(FOLD pre-gain 0.2..1.0) → BiasSum → Shaper → Out`, where `Shaper = Tone.WaveShaper(x ⇒ sin(x·π·4))` (4 folds across ±1 at max drive) and `Bias` (a `Tone.Signal`, SYMMETRY −0.5..0.5) adds a DC offset before the fold for asymmetric/even-harmonic folding. FOLD-CV (`${id}FoldCv`) sums onto `Drive.gain`. Jacks `-in` / `-fold-cv` / `-out`; `getFolderScope(id)` draws the folded output waveform.
+
+---
+
+### 17. REV — Studio Reverb [Implemented: Moog Phase 3 · DAMP + MIX CV + ROOM clamp: Phase 70]
+
+**Function:** Freeverb-based room/hall reverb. Static ×2 (`reverb`, `reverb2`) plus library instances (`reverb3`+).
+
+**Controls / jacks:** **ROOM** (size), **DAMP** (tail brightness), **MIX** (dry/wet). Jacks `-in` / `-mix-cv` / `-out`.
+
+**ROOM is CLAMPED to `REV_MAX_ROOM` (0.95) — load-bearing.** `Tone.Freeverb` wires `roomSize` straight to the feedback gain of its eight comb filters (`roomSize.connect(lowpassCombFilter.resonance)`); at 1.0 the feedback reaches unity, the tail never decays, and the combs sum into a runaway build-up. Same value the Workstation's `effectDefs` uses.
+
+**DAMP → Freeverb `dampening`, with two hazards (both hit in Phase 70):**
+1. **Stability ceiling.** It reaches `OnePoleFilter`, whose lowpass coefficients are `a0 = 2π·f/sr`, `b1 = a0 − 1`, fed to `createIIRFilter([a0,0],[1,b1])`. A one-pole IIR is stable only while `|b1| < 1`, i.e. **f < sr/π** (≈14 kHz @44.1 kHz). Beyond it the filter diverges, NaN floods the comb feedback loop, and the **whole AudioContext dies** (rack-wide silence, reload required). The range is therefore derived from the live sample rate and capped at 70% of that limit, with the midpoint pinned to exactly 3000 Hz (the value dampening was hardcoded to before the knob existed).
+2. **Every write rebuilds nodes.** `OnePoleFilter.frequency`'s setter calls `_createFilter()`, disposing and re-creating its IIRFilter and re-wiring the graph — ×8 combs per write. Writing per knob-frame is a teardown storm that sounds like loud scratching. All writes therefore go through **`scheduleRevDamp`**: delta-checked (an identical target is a no-op — this is what stops ROOM/MIX moves touching it, since the param effect re-sends the whole object) and **debounced 120 ms**, so a continuous drag produces zero writes and one lands when the knob settles. Timers are cleared on instance removal and unmount.
+
+**MIX CV** sums onto Freeverb's `wet` (a CrossFade fade Signal — connectable, self-clamping 0..1). Unity gain; depth belongs to the source. **Display:** the Aura sphere taps the reverb's OUTPUT (Phase 56 rule) so it keeps moving through the tail.
+
+---
+
+### 18. BBD — Bucket Brigade Chorus / Flanger [Implemented: Moog Phase 3 · composite + FBK/DELAY/TONE + RATE CV: Phase 70]
+
+**Function:** Chorus through flanger. Static `chorus` plus library instances (`chorus2`+).
+
+**As built — a COMPOSITE, not a bare `Tone.Chorus`:**
+```
+${id}In ─┬──────────────────────────────► ${id}Dry ──┐
+         └─► ${id} (Chorus, wet 1) ─► ${id}Tone ─► ${id}Wet ─┴─► ${id}Out
+                    ▲                        │
+                    └─ ${id}FbDly ◄─ ${id}Fb ◄─ ${id}Sat(tanh) ◄─ ${id}FbHp(120 Hz) ◄┘
+```
+The Chorus runs 100% wet and MIX crossfades the two external gains, because the **BBD colour filter must sit on the WET path only** — Tone's own dry/wet is internal, so a filter after it would darken the dry signal too. Same shape as the Workstation delay's dry-through.
+
+**Controls / jacks:** RATE (0.1–5 Hz), DEPTH, MIX, **FBK**, **DELAY** (2–20 ms), **TONE** (700 Hz–14 kHz lowpass). Jacks `-in` / `-rate-cv` / `-out`.
+
+**FEEDBACK is hand-built; Tone's internal `feedback` stays 0.** Tone's loop is a bare gain — nothing damps the resonance as it recirculates and nothing stops low frequencies accumulating, so at high settings the comb peak (which tracks `delayTime`, ≈190–560 Hz at DELAY 3.5 ms / DEPTH 0.5) sings as a low bee-like hum, one per channel offset by the 180° stereo spread. The return path puts **TONE inside the loop**, adds a 120 Hz highpass to kill the mud, and a `tanh` to bound runaway. Clamped to `BBD_MAX_FEEDBACK` (0.9). Same reasoning as CHRONOS's hand-built loop (§15).
+
+**`BBD_FB_DELAY_S` (5 ms) in the return path is LOAD-BEARING.** Web Audio **mutes any cycle that contains no DelayNode**, and `Tone.Chorus` has an internal DRY branch (input → CrossFade → output) with no delay in it — so feeding back into the chorus input creates a delay-free cycle and Chrome silences the entire loop. Symptom: the wet path goes dead, MIX only makes things quieter, and every wet-side knob does nothing. **Cycle detection is topological**, so running the chorus at `wet: 1` does NOT help. 5 ms clears one render quantum at every sample rate.
+
+**DEPTH and DELAY are plain setters** (both recompute the two LFOs' min/max), re-sent on every unrelated knob move, so both are delta-checked. The **rate LED is synthetic** (`Date.now()`-driven, not meter-fed), so unlike every other LED on the rack it must be **explicitly gated on power** or it keeps pulsing on a dead rack.
+
+---
+
+### 19. 914 — Fixed Filter Bank [Implemented: Moog Phase 60d · meter fixes + FLAT/MSTR CV/SWEEP CV: Phase 70]
+
+**Function:** 14 parallel fixed-frequency bands (`FFB_BANDS`: lowpass 100 Hz, twelve bandpasses 125 Hz–5.6 kHz at Q 2.8, highpass 8 kHz), each with its own level knob. Frequencies and Q are **fixed** — that is what "fixed filter bank" means; do not add tuning controls.
+
+**Signal:** `${id}In` → fan to 14 × [`Filter` → **`Sweep`** → `Gain`] → `${id}Sum` → `${id}Master` → out. **The Sweep stage exists so single-writer holds**: the `ffbSweepTick` rAF owns `Sweep`, the band knobs own `Gain`; without the split both would write the same node.
+
+**Controls / jacks:** 14 band knobs, **MSTR**, **FLAT** (resets all bands to unity). Jacks `-in` / `-master-cv` / `-sweep-cv` / `-out`.
+
+**SWEEP CV** moves a resonant gain hump across the bank (a filter-bank formant sweep) — a nonlinear map from one voltage to 14 correlated gains, which is why it is an rAF and not an AudioParam connection (the `vowelTick` reason). Engagement is **cable-driven** (`recomputeFfbSweep`, the `isLfoSync` pattern): a patched-but-silent CV reads 0 V, indistinguishable from no cable, so without the flag an unpatched bank would sit permanently humped at its centre band. `FFB_SWEEP_FLOOR` 0.10, `FFB_SWEEP_SIGMA` 2.2 bands.
+
+**Meter (fixed Phase 70 — it had never been correct):** the analyser taps **`${id}Master`, post-bank** (the Phase 56 rule), so pulling a band knob down visibly darkens its LED; it previously tapped the INPUT and was blind to both the band knobs and the master. Bin width comes from **`fftBinHz(bins)`** — `Tone.Analyser('fft', N)` sets `fftSize = N*2` and returns N bins, so a bin spans `sampleRate/(N*2)`, **not** `sampleRate/N`. The old `44100 / 512` was double the true width *and* ignored the device rate, putting every band roughly an octave low. The vocoder's 16-LED meter shared the identical bug and the same helper now backs both.
 
 ---
 

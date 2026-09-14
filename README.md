@@ -10,7 +10,7 @@ A browser-based music-making suite built on React, [Tone.js](https://tonejs.gith
 |---|---|
 | **VoxTool** | Gesture-controlled synthesizer: your webcam + MediaPipe hand tracking drive pitch, chords, filter, arpeggiator, vocoder, and autotune in real time. Fully user-configurable signal/trigger routing. |
 | **Workstation** | A DAW: multitrack arrangement with piano-roll editing, per-track insert effects (16 types), sampled + synth instruments (incl. three drum kits), ADSR overrides, WAV/MP3/`.voxdaw` export, and audio transcription from the Moog. |
-| **Moog Modular** | A photorealistic 1960s System 55-style modular synth: drag patch cables between 14 module types (VCOs, VCFs, LFOs, envelopes, 960 sequencers, chord sequencer, CV quantizer, 16-band vocoder, 914 filter bank, kick…), add/remove/duplicate modules from a library, and the whole custom rack — modules **and** cables — persists across reloads. Hard sync and CV quantization run in AudioWorklets. |
+| **Moog Modular** | A photorealistic 1960s System 55-style modular synth: drag patch cables between 18 module types (VCOs, VCFs, LFOs, multi-colour noise, envelopes, 960 sequencers, chord sequencer, CV quantizer, 16-band vocoder, 914 filter bank, kick, formant/vowel, stereo panner, multi-zone delay, wavefolder…), add/remove/duplicate modules from a library, and the whole custom rack — modules **and** cables — persists across reloads. The VCO core, hard sync, and CV quantization run in AudioWorklets. |
 
 Projects live on a homepage dashboard (create, rename, duplicate, import/export `.voxdaw`).
 

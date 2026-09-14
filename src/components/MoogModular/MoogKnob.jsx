@@ -5,12 +5,12 @@ const TICK_COUNT = 11;
 const MIN_DEG = -135;
 const MAX_DEG =  135;
 
-const BODY_PX = { xl: 64, lg: 50, md: 38, sm: 30, xs: 22 };
-const WRAP_PX = { xl: 104, lg: 86, md: 66, sm: 52, xs: 26 };
+const BODY_PX = { xxl: 80, xl: 64, lg: 50, md: 38, sm: 30, xs: 22 };
+const WRAP_PX = { xxl: 130, xl: 104, lg: 86, md: 66, sm: 52, xs: 26 };
 
 function KnobScale({ size }) {
   if (size === 'xs') return null; // ultra-compact: no tick ring (keeps the wrap tight)
-  const showNums = size === 'xl' || size === 'lg';
+  const showNums = size === 'xxl' || size === 'xl' || size === 'lg';
   return (
     <div className={styles.knobScale}>
       {Array.from({ length: TICK_COUNT }, (_, i) => {
@@ -39,7 +39,7 @@ function KnobScale({ size }) {
 }
 
 // glow — mint pulse on the indicator line (knob-stepper / quantized mode).
-export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', defaultValue = 0.5, variant = 'black', glow = false }) {
+export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', defaultValue = 0.5, variant = 'black', glow = false, hint }) {
   const bodyPx = BODY_PX[size] ?? 26;
   const wrapPx = WRAP_PX[size] ?? 48;
   const rotateDeg = MIN_DEG + value * (MAX_DEG - MIN_DEG);
@@ -83,8 +83,9 @@ export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', de
 
   // Native hover tooltip (Phase 12) — label + 0–10 dial reading (matches the
   // tick numerals). Shift = fine mode, double-click = reset, documented here
-  // since there is no other in-UI affordance for either.
-  const tooltip = `${label ? label + ': ' : ''}${(value * 10).toFixed(1)} / 10 · shift = fine · double-click = reset`;
+  // since there is no other in-UI affordance for either. `hint` (Phase 71) adds
+  // a per-knob sentence for controls whose job isn't obvious from the label.
+  const tooltip = `${label ? label + ': ' : ''}${(value * 10).toFixed(1)} / 10 · shift = fine · double-click = reset${hint ? `\n${hint}` : ''}`;
 
   return (
     <div className={`${styles.knobGroup} ${size === 'xs' ? styles.groupXs : ''}`} title={tooltip}>
