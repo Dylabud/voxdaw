@@ -14,6 +14,7 @@
 // (→ graceful default-synth fallback in makeSynth).
 
 import { sanitizePatch } from '../AIGen/patchSchema';
+import { deleteSampleSet } from './customSampleStore';
 
 const LS_KEY = 'voxdaw.customInstruments';
 const ID_PREFIX = 'custom:';
@@ -91,6 +92,9 @@ export function renameCustom(id, name) {
 export function deleteCustom(id) {
   registry.delete(id);
   writeLibrary(readLibrary().filter((r) => r.id !== id));
+  // Rendered "sampled mode" WAVs can be ~200 MB per instrument — don't orphan
+  // them in IndexedDB. Fire-and-forget (deleteSampleSet is best-effort).
+  deleteSampleSet(id);
 }
 
 // ── Project-embedded registration (runtime only, not persisted) ──────────────

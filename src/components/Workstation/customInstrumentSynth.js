@@ -33,8 +33,9 @@ import { makePatchSynth, patchVoiceSpec } from '../AIGen/patchSynth';
 import { layersOf, layerDetuneCents } from '../AIGen/patchSchema';
 import { makeFxGraph } from './fxChain';
 
-// Transparent filter when a layer's filter is null (matches useAIInstrument).
-const FILTER_NEUTRAL = { type: 'lowpass', frequency: 18000, q: 0.7071 };
+// Transparent filter when a layer's filter is null — the single shared
+// constant (useAIInstrument + the AIGen chassis import it too).
+export const FILTER_NEUTRAL = { type: 'lowpass', frequency: 18000, q: 0.7071 };
 
 // Build one layer's static output chain (filter → FX → per-layer volume) and
 // connect a source node into it. Returns the disposables + the layer's tail

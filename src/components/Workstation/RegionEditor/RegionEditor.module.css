@@ -539,7 +539,9 @@
   left: 0;
   bottom: 0;
   height: 3px;
-  background: #000;
+  /* --piano-key-black is the one var that stays dark in ALL themes (incl.
+     slate/light) — the bar must always read as dark ink on the note block */
+  background: var(--piano-key-black);
   min-width: 2px;
   max-width: 100%;
   border-radius: 0 0 0 2px; /* hug the noteBlock's bottom-left corner */

@@ -5,7 +5,8 @@ import DrumKitPanel from './DrumKitPanel';
 import KeyboardPanel from './KeyboardPanel';
 import RotaryKnob from './RotaryKnob';
 import { DRUM_KITS, isDrumKit } from '../drumKits';
-import { isSampledInstrument, defaultEnvelopeFor } from '../synthFactory';
+import { isSampledInstrument, isCustomInstrument, defaultEnvelopeFor } from '../synthFactory';
+import { getSampleStatus } from '../customSampleStore';
 
 /**
  * Instrument-tab performance UI: routes to the visual drum kit (drum kit
@@ -41,7 +42,9 @@ const MAX_OCT = 7;
 const VOL_META = { min: 0, max: 100 };
 const ENV_META = {
   attack:  { min: 0.001, max: 2, scale: 'log', label: 'atk' },
-  decay:   { min: 0.001, max: 2, scale: 'log', label: 'dcy' },
+  // 20 s ceiling matches the AIGen patch schema — sustain-0 + long decay is
+  // how a layer fades out while held (piano/bell); keep the two in sync.
+  decay:   { min: 0.001, max: 20, scale: 'log', label: 'dcy' },
   sustain: { min: 0,     max: 1,               label: 'sus' },
   release: { min: 0.001, max: 3, scale: 'log', label: 'rel' },
 };
@@ -94,6 +97,7 @@ const inTextInput = () => {
 export default function InstrumentPanel({
   trackId, instrument, isLoading,
   volume = 75, envelope, onVolumeChange, onEnvelopeChange,
+  useSampled = false, onToggleSampled, onCancelSampling, samplingProgress,
   auditionAttack, auditionRelease, auditionReleaseAll, auditionPrime,
 }) {
   const rootRef        = useRef(null);
@@ -143,10 +147,11 @@ export default function InstrumentPanel({
   }, [trackId, auditionRelease, setPressed]);
 
   // Prime: build the audition synth (and start any sample download) as soon
-  // as the tab opens; re-runs on instrument change to rebuild it.
+  // as the tab opens; re-runs on instrument change — and on a sampled-mode
+  // toggle, whose synthKey change makes the prime rebuild the audition synth.
   useEffect(() => {
     if (trackId) auditionPrime?.(trackId);
-  }, [trackId, instrument, auditionPrime]);
+  }, [trackId, instrument, useSampled, auditionPrime]);
 
   // QWERTY — single window listener for both panel kinds.
   useEffect(() => {
@@ -210,10 +215,20 @@ export default function InstrumentPanel({
 
   // Chassis knob values. Sampled melodic instruments (Tone.Sampler) only expose
   // attack/release, so decay/sustain are hidden; drum kits get no ADSR/octave.
-  const sampledMelodic   = !drums && isSampledInstrument(instrument);
+  // A custom instrument in sampled (CPU friendly) mode IS a Tone.Sampler, so
+  // it joins the attack/release-only surface.
+  const custom = isCustomInstrument(instrument);
+  const customSampled    = custom && useSampled;
+  const sampledMelodic   = !drums && (isSampledInstrument(instrument) || customSampled);
   const showDecaySustain = !drums && !sampledMelodic;
-  const defEnv = defaultEnvelopeFor(instrument) || {};
+  const defEnv = defaultEnvelopeFor(instrument, { useSampled: customSampled }) || {};
   const curEnv = { ...defEnv, ...(envelope || {}) };
+
+  // Sampled-mode toggle state (custom instruments only). `rendering` while
+  // this instrument's offline render runs; 'ready'/'loading'/'missing' come
+  // from the sample store (the shell re-renders on store status changes).
+  const sampleStatus = custom ? getSampleStatus(instrument) : null;
+  const rendering = samplingProgress?.instrumentId === instrument;
 
   const envKnob = (key) => {
     const meta = ENV_META[key];
@@ -282,6 +297,58 @@ export default function InstrumentPanel({
                 >+</button>
               </div>
             </div>
+
+            {/* Sampled (CPU friendly) mode — custom instruments only. Renders
+                every chromatic note offline once, then plays a Tone.Sampler
+                instead of the N-layer live composite. Best for fading /
+                percussive patches (sustaining ones store big sample sets). */}
+            {custom && (
+              <div className={styles.knobGroup}>
+                <span className={styles.groupLabel}>engine</span>
+                <div className={styles.octaveRow}>
+                  {rendering ? (
+                    <>
+                      <span className={styles.octaveDisplay}>
+                        rendering {samplingProgress.done}/{samplingProgress.total}
+                      </span>
+                      <button className={styles.engineBtn} onClick={() => onCancelSampling?.()}>
+                        cancel
+                      </button>
+                    </>
+                  ) : !useSampled ? (
+                    <button
+                      className={styles.engineBtn}
+                      onClick={() => onToggleSampled?.(trackId)}
+                      title="Render every note to samples once — then playback costs one buffer per note instead of the full layer stack. Best for fading/percussive patches."
+                    >sample this patch</button>
+                  ) : sampleStatus === 'ready' ? (
+                    <>
+                      <span className={styles.octaveDisplay}>SAMPLED</span>
+                      <button className={styles.engineBtn} onClick={() => onToggleSampled?.(trackId)}
+                        title="Back to the live synth engine (full ADSR, more CPU)">
+                        off
+                      </button>
+                    </>
+                  ) : sampleStatus === 'loading' ? (
+                    <span className={styles.octaveDisplay}>loading…</span>
+                  ) : (
+                    <>
+                      {/* Project from another machine: flag is on, WAVs aren't here. */}
+                      <span className={styles.octaveDisplay} title="This project uses sampled mode, but the rendered samples aren't on this machine yet — playing live until rendered.">
+                        render needed
+                      </span>
+                      <button className={styles.engineBtn}
+                        onClick={() => onToggleSampled?.(trackId, { render: true })}>
+                        render
+                      </button>
+                      <button className={styles.engineBtn} onClick={() => onToggleSampled?.(trackId)}>
+                        off
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

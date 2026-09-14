@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import * as Tone from 'tone';
-import { makeSynth, makeGlideVoice, applyEnvelope, defaultEnvelopeFor, customMaxRelease, isSampledInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
+import { makeSynth, makeGlideVoice, applyEnvelope, defaultEnvelopeFor, customMaxRelease, isSampledInstrument, isCustomInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
+import { getSampleStatus, primeSampleSet, subscribeSampleSets } from '../components/Workstation/customSampleStore';
 import { makeFx } from '../components/Workstation/fxChain';
 import { HEAVY_EFFECT_TYPES, EFFECT_DEFS, metaForTarget } from '../components/Workstation/effectDefs';
 import {
@@ -51,6 +52,16 @@ const GLIDE_VOICE_CAP_REDUCED = 4;
 // group un-pans. Shared by pan sync (#3b), the group-pan automation resolve,
 // and the offline bounce (audioBounce.js).
 export const clampPan = (v) => Math.max(-1, Math.min(1, v));
+
+// The identity a track's synth must be rebuilt on — instrument PLUS the
+// effective sampled/live engine choice. 'S' only when the flag is on AND the
+// rendered set is decoded (before that makeSynth would fall back to the live
+// composite anyway, and the prime completion re-runs the reconciler to swap).
+// Consulted by the region reconciler (#4) and the audition cache.
+function synthKeyFor(t) {
+  const sampled = t.useSampled && getSampleStatus(t.instrument) === 'ready';
+  return `${t.instrument}|${sampled ? 'S' : 'L'}`;
+}
 
 export default function useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality = 'high', globalAutomations = [], groups = [] }) {
   // Read at synth-creation time (effect #4 / audition) so synths built while
@@ -284,6 +295,21 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     return entry.voice;
   };
 
+  // ── Sampled custom instruments (customSampleStore) ─────────────────────
+  // A version counter bumped on any sample-set status change re-runs the
+  // reconciler (deps below) so a completed prime hot-swaps the live composite
+  // for the rendered Tone.Sampler. The priming effect starts IDB loads for
+  // tracks whose flag is on but whose set was never probed this session.
+  const [sampleSetsVersion, setSampleSetsVersion] = useState(0);
+  useEffect(() => subscribeSampleSets(() => setSampleSetsVersion(v => v + 1)), []);
+  useEffect(() => {
+    for (const t of tracks) {
+      if (t.useSampled && isCustomInstrument(t.instrument) && getSampleStatus(t.instrument) === 'unknown') {
+        primeSampleSet(t.instrument);
+      }
+    }
+  }, [tracks]);
+
   // Sampler-load tracking: which regions are still downloading buffers,
   // and the derived per-track set for the UI loading indicator.
   const loadingRegionsRef = useRef(new Map()); // regionId → trackId
@@ -309,7 +335,8 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     if (!volume || !track) return null;
     const cache = auditionByTrackIdRef.current;
     const entry = cache.get(trackId);
-    if (entry && entry.instrument === track.instrument) return entry.synth;
+    const synthKey = synthKeyFor(track);
+    if (entry && entry.synthKey === synthKey) return entry.synth;
 
     if (entry) {
       entry.synth.dispose();
@@ -321,7 +348,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       loadingRegionsRef.current.set(`audition:${trackId}`, trackId);
       recomputeLoadingTrackIds();
     }
-    const opts = { envelope: track.envelope };
+    const opts = { envelope: track.envelope, useSampled: track.useSampled };
     if (perfQualityRef.current !== 'high') opts.maxPolyphony = REDUCED_MAX_POLYPHONY;
     if (sampled) {
       opts.onLoad = () => {
@@ -333,7 +360,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     }
     const synth = makeSynth(instrument, opts);
     synth.connect(volume);
-    cache.set(trackId, { synth, instrument });
+    cache.set(trackId, { synth, instrument, synthKey });
     return synth;
   }, [recomputeLoadingTrackIds]);
 
@@ -1081,7 +1108,9 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     for (const t of tracks) {
       if (envApp.get(t.id) === t.envelope) continue;
       envApp.set(t.id, t.envelope);
-      const env = t.envelope ?? defaultEnvelopeFor(t.instrument);
+      // Sampled custom mode defaults to the Sampler surface (attack 0 /
+      // customMaxRelease) — applyEnvelope's Sampler branch applies A/R only.
+      const env = t.envelope ?? defaultEnvelopeFor(t.instrument, { useSampled: t.useSampled });
       const audition = auditionByTrackIdRef.current.get(t.id);
       if (audition && audition.instrument === t.instrument) applyEnvelope(audition.synth, env);
       for (const rid of regsByTrack.get(t.id) ?? []) {
@@ -1139,13 +1168,15 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     }
 
     // Helper — build a synth, wire sampler loading bookkeeping if needed.
-    const buildSynthForRegion = (regionId, trackId, instrument, destination, envelope) => {
+    // (Sampled CUSTOM instruments need none: their buffer urls are pre-decoded,
+    // so the Sampler reports loaded synchronously.)
+    const buildSynthForRegion = (regionId, trackId, instrument, destination, envelope, useSampled) => {
       const sampled = isSampledInstrument(instrument);
       if (sampled) {
         loadingRegionsRef.current.set(regionId, trackId);
         recomputeLoadingTrackIds();
       }
-      const opts = { envelope };
+      const opts = { envelope, useSampled };
       if (perfQualityRef.current !== 'high') opts.maxPolyphony = REDUCED_MAX_POLYPHONY;
       if (sampled) {
         opts.onLoad = () => {
@@ -1169,23 +1200,27 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       const prev = applied.get(r.id);
       const partKey = computePartKey(r, notes);
       const fadeKey = computeFadeKey(r);
-      const instrumentChanged = !prev || prev.instrument !== track.instrument;
-      const partChanged       = !prev || prev.partKey  !== partKey;
-      const fadeChanged       = !prev || prev.fadeKey  !== fadeKey;
+      // synthKey = instrument + sampled/live engine — a useSampled toggle (or
+      // a completed sample-set prime) rebuilds exactly like an instrument change.
+      const synthKey = synthKeyFor(track);
+      const synthChanged = !prev || prev.synthKey !== synthKey;
+      const partChanged  = !prev || prev.partKey  !== partKey;
+      const fadeChanged  = !prev || prev.fadeKey  !== fadeKey;
 
-      // (Re)build synth + fadeGain on first appearance OR when instrument changed.
+      // (Re)build synth + fadeGain on first appearance OR when the synth
+      // identity (instrument / sampled mode) changed.
       if (!synths.has(r.id)) {
         const fadeGain = new Tone.Gain(1).connect(trackVolume);
-        const synth    = buildSynthForRegion(r.id, r.trackId, track.instrument, fadeGain, track.envelope);
+        const synth    = buildSynthForRegion(r.id, r.trackId, track.instrument, fadeGain, track.envelope, track.useSampled);
         synths.set(r.id, synth);
         fades.set(r.id, fadeGain);
       } else {
-        if (instrumentChanged) {
+        if (synthChanged) {
           // Clear any pending sampler load for the prior instrument.
           if (loadingRegionsRef.current.delete(r.id)) recomputeLoadingTrackIds();
           synths.get(r.id)?.dispose();
           disposeGlidePool(r.id); // pool voices are instrument-specific
-          const synth = buildSynthForRegion(r.id, r.trackId, track.instrument, fades.get(r.id), track.envelope);
+          const synth = buildSynthForRegion(r.id, r.trackId, track.instrument, fades.get(r.id), track.envelope, track.useSampled);
           synths.set(r.id, synth);
         }
         // Region moved to another track: re-parent its fadeGain into the new
@@ -1202,7 +1237,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       // (Re)build Part. A region with a live Moog recording (hasAudio) plays via
       // its Tone.Player in WorkstationShell — its transcription notes are silenced
       // here so the two don't layer (the transcription is for piano-roll editing).
-      if (partChanged || instrumentChanged) {
+      if (partChanged || synthChanged) {
         const existing = parts.get(r.id);
         if (existing) { existing.dispose(); parts.delete(r.id); }
         const events = r.hasAudio ? [] : buildRegionEvents(r, notes);
@@ -1221,7 +1256,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
 
       // (Re)schedule fade envelope — durations resolve at fire time through
       // tempoMapRef, so BPM/tempo-lane changes need no reschedule here.
-      if (fadeChanged || instrumentChanged) {
+      if (fadeChanged || synthChanged) {
         const prevEvt = fadeIds.get(r.id);
         if (prevEvt != null) Tone.Transport.clear(prevEvt);
         const fadeGain = fades.get(r.id);
@@ -1232,11 +1267,13 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
 
       const prevLoaded = applied.get(r.id)?.loaded;
       const loaded = isSampledInstrument(track.instrument)
-        ? (instrumentChanged ? !!synths.get(r.id)?.loaded : (prevLoaded ?? !!synths.get(r.id)?.loaded))
+        ? (synthChanged ? !!synths.get(r.id)?.loaded : (prevLoaded ?? !!synths.get(r.id)?.loaded))
         : true;
-      applied.set(r.id, { instrument: track.instrument, partKey, fadeKey, loaded, trackId: r.trackId });
+      applied.set(r.id, { instrument: track.instrument, synthKey, partKey, fadeKey, loaded, trackId: r.trackId });
     }
-  }, [tracks, regions, notes, bpm, recomputeLoadingTrackIds, disposeGlidePool]);
+    // sampleSetsVersion: a finished primeSampleSet flips synthKeyFor to 'S',
+    // and this re-run performs the live→Sampler hot swap.
+  }, [tracks, regions, notes, bpm, sampleSetsVersion, recomputeLoadingTrackIds, disposeGlidePool]);
 
   // Silence in-flight voices on pause/stop/seek (Tone.Transport.pause keeps
   // tails alive). Three layers:
@@ -1508,6 +1545,9 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     auditionAttack, auditionRelease, auditionReleaseAll,
     auditionPrime: ensureAuditionSynth,
     applyAutomationValue,
+    // Bumps on any customSampleStore status change — the shell threads it to
+    // the InstrumentPanel so the sampled-toggle state re-derives.
+    sampleSetsVersion,
   };
 }
 
@@ -1734,8 +1774,10 @@ function maxAutomatedParam(t, effectId, type, param, staticVal) {
 }
 
 // FX-only ring-out for any channel (track OR group) — non-bypassed delay
-// feedback decay to −60 dB + Freeverb heuristic, automation-aware.
-function fxTailSec(c) {
+// feedback decay to −60 dB + Freeverb heuristic, automation-aware. Exported
+// for customSampleRenderer, which bounds a patch layer-chain's ring-out with
+// the same math (patch effects are {type, params} — no bypass, no automation).
+export function fxTailSec(c) {
   let tail = 0;
   for (const e of c.effects ?? []) {
     if (e.bypass) continue;

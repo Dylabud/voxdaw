@@ -14,7 +14,7 @@ import MidiModal from './components/MidiModal/MidiModal';
 import GestureSettings from './components/GestureSettings/GestureSettings';
 import { DEFAULT_MAPPINGS, DEFAULT_TRIGGER_MAPPINGS } from './utils/gestureMappings';
 
-export default function App({ onNavigateHome, isDarkMode, onThemeToggle }) {
+export default function App({ onNavigateHome, theme, onThemeToggle }) {
   const pitchRef     = useRef(null);
   const reverbRef    = useRef(null);
   const velocityRef  = useRef(null);
@@ -147,7 +147,7 @@ export default function App({ onNavigateHome, isDarkMode, onThemeToggle }) {
         onOpenRecordModal={() => setIsRecordTerminalOpen(v => !v)}
         isRecording={isRecording}
         onGestureSettingsOpen={() => setShowGestureSettings(true)}
-        isDarkMode={isDarkMode}
+        theme={theme}
         onThemeToggle={onThemeToggle}
         onCollapseToggle={() => setShowControls(v => !v)}
         onNavigateHome={onNavigateHome}

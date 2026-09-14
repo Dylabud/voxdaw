@@ -1,4 +1,4 @@
-import { sanitizePatch, DEFAULT_PATCH, MAX_EFFECTS, MAX_LAYERS, maxLayersForTier, layerDetuneCents } from './patchSchema';
+import { sanitizePatch, DEFAULT_PATCH, MAX_EFFECTS, MAX_LAYERS, maxLayersForTier, layerDetuneCents, samePatchStructure } from './patchSchema';
 
 // A patch is always { name, volume, layers: [...] }. sanitizePatch normalizes a
 // legacy flat patch (voice/envelope/… at the top level) into a single layer.
@@ -57,6 +57,16 @@ describe('sanitizePatch', () => {
 
   it('defaults semitone to 0 when absent', () => {
     expect(only(sanitizePatch({ layers: [{ voice: { engine: 'simple', oscillator: 'sine' } }] })).semitone).toBe(0);
+  });
+
+  it('allows fade-out envelopes: decay up to 20 s, sustain 0 passes through', () => {
+    const layer = (envelope) => ({ voice: { engine: 'simple', oscillator: 'sine' }, envelope });
+    // A long piano-style fade survives sanitize untouched…
+    const fade = only(sanitizePatch({ layers: [layer({ attack: 0.005, decay: 12, sustain: 0, release: 0.4 })] }));
+    expect(fade.envelope.decay).toBe(12);
+    expect(fade.envelope.sustain).toBe(0);
+    // …and out-of-range decay clamps to the 20 s ceiling.
+    expect(only(sanitizePatch({ layers: [layer({ decay: 35 })] })).envelope.decay).toBe(20);
   });
 
   it('maxLayersForTier unlocks 5 only on xhigh', () => {
@@ -135,5 +145,38 @@ describe('sanitizePatch', () => {
 
   it('accepts a null layer filter', () => {
     expect(sanitizePatch({ layers: [{ voice: { engine: 'simple', oscillator: 'sine' }, filter: null }] }).layers[0].filter).toBeNull();
+  });
+});
+
+describe('samePatchStructure (param-only undo fast path)', () => {
+  const base = () => sanitizePatch({
+    layers: [
+      { voice: { engine: 'fm', oscillator: 'sine' }, effects: [{ type: 'reverb', params: {} }] },
+      { voice: { engine: 'simple', oscillator: 'fatsawtooth' }, effects: [] },
+    ],
+  });
+
+  it('true for pure parameter deltas (envelope, volume, fx params, filter)', () => {
+    const a = base();
+    const b = base();
+    b.volume = -20;
+    b.layers[0].envelope.decay = 15;
+    b.layers[0].effects[0].params.wet = 0.9;
+    b.layers[1].filter = { type: 'highpass', frequency: 200, q: 3 };
+    expect(samePatchStructure(a, b)).toBe(true);
+  });
+
+  it('false for structural deltas: layer count, engine, oscillator, effect types', () => {
+    const a = base();
+    const removed = base(); removed.layers = removed.layers.slice(0, 1);
+    const engine = base(); engine.layers[0].voice.engine = 'am';
+    const osc = base(); osc.layers[1].voice.oscillator = 'sawtooth';
+    const fx = base(); fx.layers[0].effects = [{ type: 'delay', params: {} }];
+    for (const b of [removed, engine, osc, fx]) expect(samePatchStructure(a, b)).toBe(false);
+  });
+
+  it('treats a legacy flat patch and its layered form as same-structure', () => {
+    const flat = { voice: { engine: 'simple', oscillator: 'sine' } };
+    expect(samePatchStructure(sanitizePatch(flat), sanitizePatch({ layers: [flat] }))).toBe(true);
   });
 });

@@ -37,7 +37,7 @@ function arcPath(cx, cy, r, fromDeg, toDeg) {
   return `M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`;
 }
 
-export default function RotaryKnob({ value01, onChange, label, display, defaultValue01 = 0, size = 44, disabled = false, disabledHint }) {
+function RotaryKnob({ value01, onChange, label, display, defaultValue01 = 0, size = 44, disabled = false, disabledHint }) {
   const dragRef = useRef(null); // { lastY, v } while dragging, else null
 
   const handlePointerDown = (e) => {
@@ -115,3 +115,7 @@ export default function RotaryKnob({ value01, onChange, label, display, defaultV
     </div>
   );
 }
+
+// Memoized (shallow): pages with many knobs (AIGen chassis) re-render only the
+// dragged knob per pointermove — provided the caller passes a stable onChange.
+export default React.memo(RotaryKnob);

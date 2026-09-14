@@ -7,9 +7,12 @@ import { KEYS } from './pitchKeys';
 import { firstLoopOffsetMeasures, loopBoundaries } from './loopMath';
 import useWorkstationAudio from '../../hooks/useWorkstationAudio';
 import PanKnob from './PanKnob';
-import { serializeProject, deserializeProject, downloadJSON, readJSONFile } from './projectIO';
-import { registerInstruments, customInstrumentsForIds, isCustomInstrument, isInLibrary, addToLibrary } from './customInstruments';
-import { saveProject as storeSaveProject } from '../../utils/projectStore';
+import { serializeProject, deserializeProject, downloadJSON, readJSONFile, hashProjectData } from './projectIO';
+import { remapProjectAsGroup } from './projectImport';
+import { registerInstruments, customInstrumentsForIds, isCustomInstrument, isInLibrary, addToLibrary, getCustomInstrument } from './customInstruments';
+import { getSampleStatus, primeSampleSet, saveSampleSet } from './customSampleStore';
+import { renderInstrumentSamples, SAMPLE_NOTE_COUNT } from './customSampleRenderer';
+import { saveProject as storeSaveProject, savePreview, listProjects as storeListProjects, getProject as storeGetProject } from '../../utils/projectStore';
 import { EFFECT_DEFS, defaultParamsFor, automationTargetsFor, labelForTarget, metaForTarget } from './effectDefs';
 import {
   TRACK_H, AUTO_LANE_H, GLOBAL_STRIP_H, computeLaneTops, yToTrackIndex, targetKey, toKnob, denorm,
@@ -20,11 +23,12 @@ import AutomationLane from './AutomationLane';
 import GroupModal from './GroupModal';
 import GroupFxPanel from './GroupFxPanel';
 import { bounceProject } from './audioBounce';
-import { exportWAV, exportMP3, trimExportBuffer } from '../../utils/audioExport';
+import { exportWAV, exportMP3, trimExportBuffer, encodeWavArrayBuffer, computePeaks } from '../../utils/audioExport';
 import { transcribeAudio } from './transcribeAudio';
 import { TRACK_COLORS } from './trackColors';
-import { defaultEnvelopeFor } from './synthFactory';
+import { defaultEnvelopeFor, customMaxRelease } from './synthFactory';
 import { tickOf, normalizeGlide, retargetConnectedGlides, planChordConnections } from './glideMath';
+import { THEME_GLYPHS, THEME_LABELS, nextTheme } from '../../utils/theme';
 
 const PIXELS_PER_BEAT    = 25;
 const PIXELS_PER_MEASURE = PIXELS_PER_BEAT * 4;  // 100px at zoom 1
@@ -171,7 +175,7 @@ const transposeWithRetarget = (prev, hit, semis) => {
   return rt.size ? next.map(n => rt.has(n.id) ? { ...n, glide: rt.get(n.id) } : n) : next;
 };
 
-export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeToggle, getMoogBusNode, resetMoogSequencers, isMoogPowered, setMoogRecordingActive, pendingProject }) {
+export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle, getMoogBusNode, resetMoogSequencers, isMoogPowered, setMoogRecordingActive, pendingProject }) {
   const [isPlaying,      setIsPlaying]      = useState(false);
   const [tracks,         setTracks]         = useState([]);
   const [regions,        setRegions]        = useState([]);
@@ -430,6 +434,9 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   // ── Project save / load / audio bounce ────────────────────────
   const loadInputRef = useRef(null);
+  const importGroupInputRef = useRef(null);
+  const [showImportMenu, setShowImportMenu] = useState(false);
+  const [importProjectList, setImportProjectList] = useState(null); // lazy-loaded on menu open
   const [isBouncing, setIsBouncing] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
 
@@ -494,14 +501,22 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
     nextGroupIdRef.current  = data.nextGroupId ?? 1;
   }, []);
 
+  // ONE payload builder shared by save, .voxdaw export, and the audio-export
+  // preview stamp — the preview-freshness contract compares hashProjectData of
+  // the save-time and export-time payloads, so they must serialize identically.
+  const buildProjectPayload = useCallback(() =>
+    serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups, customInstruments: customInstrumentsForIds(tracks.map(t => t.instrument)) }),
+  [bpm, totalMeasures, tracks, regions, notes, globalAutomations, groups, projectName]);
+
   // [ save ] writes to the browser project store (IndexedDB) — the homepage
   // Projects grid reads from it. Producing a .voxdaw file moved to the export menu.
   const handleSaveProject = useCallback(async () => {
     try {
-      const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups, customInstruments: customInstrumentsForIds(tracks.map(t => t.instrument)) });
+      const payload = buildProjectPayload();
       const id = currentProjectId ?? crypto.randomUUID();
       await storeSaveProject({
-        id, name: projectName, bpm, trackCount: tracks.length, data: payload,
+        id, name: projectName, bpm, trackCount: tracks.length,
+        dataHash: hashProjectData(payload), data: payload,
       });
       if (!currentProjectId) setCurrentProjectId(id);
       showToast(`saved "${projectName}"`);
@@ -509,15 +524,15 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       console.error('save project failed', e);
       showToast(`save failed: ${e.message}`);
     }
-  }, [bpm, totalMeasures, tracks, regions, notes, globalAutomations, groups, projectName, currentProjectId, showToast]);
+  }, [buildProjectPayload, bpm, tracks, projectName, currentProjectId, showToast]);
 
   const handleExportProjectFile = useCallback(() => {
     setShowExportMenu(false);
-    const payload = serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups, customInstruments: customInstrumentsForIds(tracks.map(t => t.instrument)) });
+    const payload = buildProjectPayload();
     const filename = `${sanitizeFilename(projectName)}.voxdaw`;
     downloadJSON(payload, filename);
     showToast(`exported ${filename}`);
-  }, [bpm, totalMeasures, tracks, regions, notes, globalAutomations, groups, projectName, showToast]);
+  }, [buildProjectPayload, projectName, showToast]);
 
   const handleLoadProject = useCallback(async (file) => {
     if (!file) return;
@@ -535,6 +550,82 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       showToast(`load failed: ${e.message}`);
     }
   }, [applyProjectData, showToast]);
+
+  // ── Import another project as a track group ────────────────────
+  // Additive merge into the running session (NEVER applyProjectData — that
+  // wipes it). Parsing/validation reuses deserializeProject (repair pass,
+  // sanitizers); the pure remapper mints every id from the live counters.
+  const applyImportedGroup = useCallback((clean) => {
+    // Embedded custom-instrument defs must register BEFORE the state commit so
+    // the audio reconciler's makeSynth resolves their ids.
+    registerInstruments(clean.customInstruments);
+    const newInstrIds = [...new Set((clean.tracks ?? []).map(t => t.instrument))]
+      .filter(id => isCustomInstrument(id) && !isInLibrary(id));
+    if (newInstrIds.length &&
+        window.confirm(`This project uses ${newInstrIds.length} custom instrument${newInstrIds.length !== 1 ? 's' : ''} not in your library. Save ${newInstrIds.length !== 1 ? 'them' : 'it'} to your instruments?`)) {
+      newInstrIds.forEach(addToLibrary);
+    }
+    // Ids minted eagerly here in the event handler, never inside updaters
+    // (StrictMode double-invokes updaters).
+    const out = remapProjectAsGroup(clean, {
+      nextTrackId: nextIdRef.current,
+      nextRegionId: nextRegionIdRef.current,
+      nextNoteId: nextNoteIdRef.current,
+      nextEffectId: nextEffectIdRef.current,
+      nextAutomationId: nextAutomationIdRef.current,
+      nextGroupId: nextGroupIdRef.current,
+      groupColor: TRACK_COLORS[(nextGroupIdRef.current - 1) % TRACK_COLORS.length],
+    });
+    if (!out) { showToast('nothing to import — project has no tracks'); return; }
+    nextIdRef.current           = out.counters.nextTrackId;
+    nextRegionIdRef.current     = out.counters.nextRegionId;
+    nextNoteIdRef.current       = out.counters.nextNoteId;
+    nextEffectIdRef.current     = out.counters.nextEffectId;
+    nextAutomationIdRef.current = out.counters.nextAutomationId;
+    nextGroupIdRef.current      = out.counters.nextGroupId;
+    // One batched commit → the passive history recorder sees a single change
+    // → the whole import is ONE undo entry. Purely additive; the audio
+    // reconcilers build the new nodes (no silenceAll needed).
+    setGroups(prev => [...prev, out.group]);
+    setTracks(prev => [...prev, ...out.tracks]); // appended → contiguous group run
+    if (out.regions.length) setRegions(prev => [...prev, ...out.regions]);
+    if (out.notes.length)   setNotes(prev => [...prev, ...out.notes]);
+    if (out.maxRegionEnd > 0) setTotalMeasures(prev => Math.max(prev, out.maxRegionEnd + 16));
+    const dropped = out.warnings.droppedGroups > 0 || out.warnings.droppedTempoLanes > 0;
+    showToast(`imported "${out.group.name}" as group (${out.tracks.length} track${out.tracks.length !== 1 ? 's' : ''})`
+      + (dropped ? ' — its groups/tempo automation were dropped' : ''));
+  }, [showToast]);
+
+  const handleImportGroupFile = useCallback(async (file) => {
+    if (!file) return;
+    try {
+      const raw = await readJSONFile(file);
+      applyImportedGroup(deserializeProject(raw));
+    } catch (e) {
+      console.error('import as group failed', e);
+      showToast(`import failed: ${e.message}`);
+    }
+  }, [applyImportedGroup, showToast]);
+
+  const handleImportGroupFromStore = useCallback(async (projectId) => {
+    setShowImportMenu(false);
+    try {
+      const record = await storeGetProject(projectId);
+      if (!record?.data) throw new Error('project not found');
+      applyImportedGroup(deserializeProject(record.data));
+    } catch (e) {
+      console.error('import as group failed', e);
+      showToast(`import failed: ${e.message}`);
+    }
+  }, [applyImportedGroup, showToast]);
+
+  const handleImportMenuToggle = useCallback(() => {
+    setShowExportMenu(false); // the two transport dropdowns are mutually exclusive
+    setShowImportMenu(v => {
+      if (!v) storeListProjects().then(setImportProjectList).catch(() => setImportProjectList([]));
+      return !v;
+    });
+  }, []);
 
   // Open-from-homepage / New Project. Root bumps requestId on every request, so
   // the same project can be re-opened (intentional reload) while StrictMode
@@ -583,13 +674,29 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       a.click();
       URL.revokeObjectURL(url);
       showToast(`exported project.${format}`);
+      // Persist the bounce as the dashboard preview for the saved project
+      // (any full-mix export refreshes it; the preview itself is always WAV).
+      // Skipped for never-saved sessions; a preview failure never breaks the
+      // export that already downloaded.
+      if (currentProjectId) {
+        try {
+          await savePreview(currentProjectId, {
+            wav: encodeWavArrayBuffer(trimmed),
+            peaks: computePeaks(trimmed, 200),
+            durationSec: trimmed.length / trimmed.sampleRate,
+            dataHash: hashProjectData(buildProjectPayload()),
+          });
+        } catch (previewErr) {
+          console.error('preview save failed', previewErr);
+        }
+      }
     } catch (e) {
       console.error('bounce failed', e);
       showToast(`bounce failed: ${e.message}`);
     } finally {
       setIsBouncing(false);
     }
-  }, [tracks, regions, notes, bpm, globalAutomations, groups, totalMeasures, isBouncing, showToast]);
+  }, [tracks, regions, notes, bpm, globalAutomations, groups, totalMeasures, isBouncing, showToast, currentProjectId, buildProjectPayload]);
 
   // Mute and Solo are mutually exclusive per track: turning one ON clears the
   // other; turning one OFF changes nothing else.
@@ -604,9 +711,10 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
 
   // Instrument change clears any ADSR override so the knobs snap to the new
   // instrument's defaults (and a decay/sustain override never lands on a
-  // Sampler after a melodic→drum switch).
+  // Sampler after a melodic→drum switch). The sampled-mode flag is cleared
+  // too — it belongs to the departing custom instrument.
   const handleInstrumentChange = useCallback((trackId, instrument) => setTracks(prev =>
-    prev.map(t => t.id === trackId ? { ...t, instrument, envelope: undefined } : t)), []);
+    prev.map(t => t.id === trackId ? { ...t, instrument, envelope: undefined, useSampled: undefined } : t)), []);
 
   // Merge a partial ADSR edit into the track's override, seeding from the
   // instrument default on first touch so the stored object is always complete.
@@ -615,9 +723,57 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const handleEnvelopeChange = useCallback((trackId, partial) => setTracks(prev =>
     prev.map(t => {
       if (t.id !== trackId) return t;
-      const base = t.envelope ?? defaultEnvelopeFor(t.instrument) ?? {};
+      const base = t.envelope ?? defaultEnvelopeFor(t.instrument, { useSampled: t.useSampled }) ?? {};
       return { ...t, envelope: { ...base, ...partial } };
     })), []);
+
+  // ── Sampled (CPU friendly) custom-instrument mode ─────────────────────────
+  // Toggle flow: OFF is instant. ON with a decoded/persisted set is instant;
+  // otherwise render all chromatic notes offline (customSampleRenderer),
+  // persist them (customSampleStore → IndexedDB), then flip the flag — the
+  // audio hook's synthKey reconciler swaps the live composite for a real
+  // Tone.Sampler. track.envelope clears in BOTH directions (the toggle is an
+  // instrument-kind change: full-ADSR ↔ attack/release surface — a kept
+  // synth-mode override would fight the rendered set's own release).
+  const [samplingProgress, setSamplingProgress] = useState(null); // { instrumentId, done, total } | null
+  const samplingAbortRef = useRef(null);
+  const cancelSampling = useCallback(() => { samplingAbortRef.current?.abort(); }, []);
+  // `render: true` forces a (re)render even when the flag is already on — the
+  // "render needed" state of a project imported on a machine without the WAVs.
+  const handleToggleSampled = useCallback(async (trackId, { render = false } = {}) => {
+    const track = tracksRef.current.find(t => t.id === trackId);
+    if (!track || !isCustomInstrument(track.instrument)) return;
+    const id = track.instrument;
+    const setFlag = (on) => setTracks(prev => prev.map(t =>
+      t.id === trackId ? { ...t, useSampled: on || undefined, envelope: undefined } : t));
+
+    if (!render) {
+      if (track.useSampled) { setFlag(false); return; }
+      if (getSampleStatus(id) === 'ready') { setFlag(true); return; }
+    }
+    if (samplingAbortRef.current) return; // one render at a time
+
+    const def = getCustomInstrument(id);
+    if (!def) { showToast('instrument definition not found'); return; }
+    const ac = new AbortController();
+    samplingAbortRef.current = ac;
+    setSamplingProgress({ instrumentId: id, done: 0, total: SAMPLE_NOTE_COUNT });
+    try {
+      const notes = await renderInstrumentSamples(def.patch, {
+        signal: ac.signal,
+        onProgress: (done, total) => setSamplingProgress({ instrumentId: id, done, total }),
+      });
+      await saveSampleSet(id, notes, { release: customMaxRelease(id) ?? 1 });
+      await primeSampleSet(id); // no-op (save seeds the cache) but settles status
+      setFlag(true);
+      showToast(`sampled "${def.name}" — CPU friendly mode on`);
+    } catch (e) {
+      if (e?.name !== 'AbortError') showToast(`sample render failed: ${e.message}`);
+    } finally {
+      samplingAbortRef.current = null;
+      setSamplingProgress(null);
+    }
+  }, [showToast]);
 
   // ── Per-track effects rack CRUD ──────────────────────────────────────────────
   // Effects live on the track object (track.effects), so they ride existing prop
@@ -762,7 +918,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   const {
     silenceAll, recomputeFades, loadingTrackIds,
     auditionAttack, auditionRelease, auditionReleaseAll, auditionPrime,
-    applyAutomationValue,
+    applyAutomationValue, sampleSetsVersion,
   } = useWorkstationAudio({ tracks, regions, notes, bpm, performanceQuality, globalAutomations, groups });
 
   // ── History recorder ────────────────────────────────────────
@@ -2479,7 +2635,7 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
   // Redraw on zoom/unit change + theme toggle (layout phase, in lockstep with the grid
   // rescale + playhead so they move together). Scroll redraws are wired in
   // handleTimelineScroll; resize redraws ride the existing ResizeObserver below.
-  useLayoutEffect(() => { drawTimelineGrid(); }, [drawTimelineGrid, isDarkMode, totalMeasures]);
+  useLayoutEffect(() => { drawTimelineGrid(); }, [drawTimelineGrid, theme, totalMeasures]);
 
   useEffect(() => {
     if (!isPlaying) return;
@@ -3347,8 +3503,8 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
       <div className={styles.transport}>
         <div className={styles.transportLeft}>
           <button className={styles.themeBtn} onClick={onThemeToggle}
-            title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
-            {isDarkMode ? '◑' : '○'}
+            title={`Switch to ${THEME_LABELS[nextTheme(theme)]} mode`}>
+            {THEME_GLYPHS[theme]}
           </button>
           <button className={styles.homeBtn} onClick={onNavigateHome}>[ ⌂ home ]</button>
           <button className={styles.transportBtn} onClick={() => undoRef.current?.()} disabled={!canUndo} title="Undo (⌘Z)">↶</button>
@@ -3357,8 +3513,43 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
           <button className={`${styles.transportBtn} ${styles.transportTextBtn}`} onClick={() => loadInputRef.current?.click()} title="Load project from .voxdaw">[ load ]</button>
           <div className={styles.exportWrap}>
             <button
+              className={`${showImportMenu ? styles.transportBtnActive : styles.transportBtn} ${styles.transportTextBtn}`}
+              onClick={handleImportMenuToggle}
+              title="Import another project into this one as a track group">
+              [ import group ]
+            </button>
+            {showImportMenu && (
+              <div className={styles.exportMenu}>
+                {importProjectList === null && (
+                  <span className={styles.exportMenuItem}>loading…</span>
+                )}
+                {importProjectList?.length === 0 && (
+                  <span className={styles.exportMenuItem}>no saved projects</span>
+                )}
+                {importProjectList?.map(p => (
+                  <button key={p.id} className={styles.exportMenuItem}
+                    onClick={() => handleImportGroupFromStore(p.id)}>
+                    {p.name}
+                  </button>
+                ))}
+                <button className={styles.exportMenuItem}
+                  onClick={() => { setShowImportMenu(false); importGroupInputRef.current?.click(); }}>
+                  from .voxdaw file…
+                </button>
+              </div>
+            )}
+          </div>
+          <input
+            ref={importGroupInputRef}
+            type="file"
+            accept=".voxdaw,.json,application/json"
+            style={{ display: 'none' }}
+            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; handleImportGroupFile(f); }}
+          />
+          <div className={styles.exportWrap}>
+            <button
               className={`${isBouncing ? styles.transportBtnActive : styles.transportBtn} ${styles.transportTextBtn}`}
-              onClick={() => setShowExportMenu(v => !v)}
+              onClick={() => { setShowImportMenu(false); setShowExportMenu(v => !v); }}
               disabled={isBouncing}
               title="Export audio bounce">
               {isBouncing ? '[ bouncing… ]' : '[ export ]'}
@@ -4228,12 +4419,16 @@ export default function WorkstationShell({ onNavigateHome, isDarkMode, onThemeTo
               onInstrumentChange={handleInstrumentChange}
               onVolumeChange={handleVolumeChange}
               onEnvelopeChange={handleEnvelopeChange}
+              onToggleSampled={handleToggleSampled}
+              onCancelSampling={cancelSampling}
+              samplingProgress={samplingProgress}
+              sampleSetsVersion={sampleSetsVersion}
               onEffectAdd={addEffect}
               onEffectRemove={removeEffect}
               onEffectToggleBypass={toggleBypassEffect}
               onEffectUpdate={updateEffectSettings}
               automatedFxKeys={editingTrack ? automatedFxKeys(editingTrack) : undefined}
-              isDarkMode={isDarkMode}
+              theme={theme}
               performanceQuality={performanceQuality}
               loadingTrackIds={loadingTrackIds}
               auditionAttack={auditionAttack}

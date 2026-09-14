@@ -56,12 +56,16 @@ export default function RegionEditor({
   onInstrumentChange,
   onVolumeChange,
   onEnvelopeChange,
+  onToggleSampled,
+  onCancelSampling,
+  samplingProgress,
+  sampleSetsVersion,
   onEffectAdd,
   onEffectRemove,
   onEffectToggleBypass,
   onEffectUpdate,
   automatedFxKeys,
-  isDarkMode,
+  theme,
   performanceQuality,
   loadingTrackIds,
   auditionAttack,
@@ -119,7 +123,7 @@ export default function RegionEditor({
 
   // Redraw on zoom/theme/tab/totalMeasures (layout phase). Scroll redraws ride the
   // .pianoRoll onScroll wrapper; resize redraws ride the ResizeObserver below.
-  useLayoutEffect(() => { drawPianoGrid(); }, [drawPianoGrid, isDarkMode, totalMeasures, activeTab]);
+  useLayoutEffect(() => { drawPianoGrid(); }, [drawPianoGrid, theme, totalMeasures, activeTab]);
   useEffect(() => {
     const el = pianoScrollRef.current;
     if (!el) return;
@@ -1466,6 +1470,11 @@ export default function RegionEditor({
           isLoading={!!(track?.id && loadingTrackIds?.has(track.id))}
           onVolumeChange={onVolumeChange}
           onEnvelopeChange={onEnvelopeChange}
+          useSampled={!!track?.useSampled}
+          onToggleSampled={onToggleSampled}
+          onCancelSampling={onCancelSampling}
+          samplingProgress={samplingProgress}
+          sampleSetsVersion={sampleSetsVersion}
           auditionAttack={auditionAttack}
           auditionRelease={auditionRelease}
           auditionReleaseAll={auditionReleaseAll}

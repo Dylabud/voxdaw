@@ -3,6 +3,7 @@ import { SAMPLED_INSTRUMENTS, SAMPLED_INSTRUMENT_NAMES, SAMPLED_MELODIC_NAMES } 
 import { DRUM_KIT_NAMES, isDrumKit, chokeTargetsFor } from './drumKits';
 import { isCustomInstrument, getCustomInstrument } from './customInstruments';
 import { makeCustomInstrumentNode, makeMonoGlideVoice } from './customInstrumentSynth';
+import { getSampleSet } from './customSampleStore';
 
 // sampleInstruments added Phase 131 — re-exported for RegionEditor / audioBounce consumers
 export const SYNTH_INSTRUMENTS = [
@@ -38,7 +39,7 @@ const envFor = (instrument) => ({ ...(SYNTH_ENVELOPES[instrument] ?? DEFAULT_SYN
 // The effective amplitude envelope a track starts from before any override.
 // Melodic PolySynths → full ADSR; sampled melodic → attack/release only (the
 // only fields Tone.Sampler exposes); drum kits → null (no ADSR surface).
-export function defaultEnvelopeFor(instrument) {
+export function defaultEnvelopeFor(instrument, { useSampled = false } = {}) {
   if (isDrumKit(instrument)) return null;
   // Custom instrument: a patch is a STACK of layers, each with its own envelope
   // baked in at build. A SINGLE layer → its own ADSR (applying it is a no-op).
@@ -46,7 +47,10 @@ export function defaultEnvelopeFor(instrument) {
   // make the envelope-sync (effect 3c) clobber every layer with it — the
   // multi-layer "silent/wrong layer" bug. Null makes applyEnvelope a no-op, so
   // each layer keeps the envelope makePatchSynth built it with.
+  // In SAMPLED mode the instrument is a real Tone.Sampler → attack/release
+  // only, with the release the render was fading with (customMaxRelease).
   if (isCustomInstrument(instrument)) {
+    if (useSampled) return { attack: 0, release: customMaxRelease(instrument) ?? 1 };
     const layers = getCustomInstrument(instrument)?.patch?.layers;
     return layers && layers.length === 1 ? { ...layers[0].envelope } : null;
   }
@@ -143,8 +147,21 @@ export function makeSynth(instrument, opts = {}) {
     // Baked composite (voice + filter + FX + level). Missing def (imported id
     // this machine never registered) → graceful default synth, same spirit as
     // the deserialize instrument fallback.
+    // SAMPLED mode (opts.useSampled + a rendered set in the cache) → a REAL
+    // Tone.Sampler over the pre-rendered per-note buffers: one buffer source
+    // per note instead of N layer synths + FX. Buffer urls make `loaded` true
+    // synchronously, so none of the sampler loading bookkeeping applies. Being
+    // a genuine Sampler also opts it into the engine's _activeSources paths
+    // (ghost-note fix, silenceAll hard-cut, glide playbackRate chains). No set
+    // in the cache yet → live composite fallback (the UI shows render/prime).
     const def = getCustomInstrument(instrument);
-    if (def) {
+    const set = opts.useSampled ? getSampleSet(instrument) : null;
+    if (set) {
+      synth = new Tone.Sampler({
+        urls: set.urls,
+        release: set.release ?? customMaxRelease(instrument) ?? 0.1,
+      });
+    } else if (def) {
       synth = makeCustomInstrumentNode(def.patch);
     } else {
       const { Voice, options } = voiceSpecFor('analog');

@@ -279,7 +279,11 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
       }
 
       const fadeGain = new Tone.Gain(1).connect(trackVolume);
-      const synth    = makeSynth(track.instrument, { envelope: track.envelope }).connect(fadeGain);
+      // useSampled: a rendered custom set (module-level customSampleStore cache,
+      // native AudioBuffers — context-free) builds a real Tone.Sampler here in
+      // the offline context, matching live playback. Set not decoded → live
+      // composite fallback, identical audible result.
+      const synth    = makeSynth(track.instrument, { envelope: track.envelope, useSampled: track.useSampled }).connect(fadeGain);
 
       scheduleFadeEnvelope(fadeGain, r, { current: tempoMap });
 

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import styles from './HomePage.module.css';
+import PreviewWave from './PreviewWave';
 
 // Short human date for the card meta line: time for today, date otherwise.
 function formatWhen(ts) {
@@ -11,7 +12,12 @@ function formatWhen(ts) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric', ...(d.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {}) });
 }
 
-export default function ProjectCard({ project, onOpen, onRename, onDuplicate, onDelete, onDownload }) {
+const STALE_TIP = 'preview outdated — export to update';
+
+export default function ProjectCard({
+  project, onOpen, onRename, onDuplicate, onDelete, onDownload,
+  previewMeta, fresh, playing, onPreviewToggle,
+}) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [tempName, setTempName] = useState(project.name);
@@ -39,7 +45,7 @@ export default function ProjectCard({ project, onOpen, onRename, onDuplicate, on
       className={styles.card}
       onClick={() => { if (!renaming && !menuOpen) onOpen(project.id); }}
     >
-      <div className={styles.cardTop}>
+      <div className={styles.cardInfo}>
         {renaming ? (
           <input
             autoFocus
@@ -56,29 +62,53 @@ export default function ProjectCard({ project, onOpen, onRename, onDuplicate, on
         ) : (
           <span className={styles.cardName} title={project.name}>{project.name}</span>
         )}
-
-        <div className={styles.kebabWrap} ref={menuRef} onClick={(e) => e.stopPropagation()}>
-          <button
-            className={styles.kebabBtn}
-            title="Project actions"
-            onClick={() => setMenuOpen(v => !v)}
-          >
-            ⋮
-          </button>
-          {menuOpen && (
-            <div className={styles.kebabMenu}>
-              <button className={styles.kebabItem} onClick={() => { setMenuOpen(false); setTempName(project.name); setRenaming(true); }}>rename</button>
-              <button className={styles.kebabItem} onClick={() => { setMenuOpen(false); onDuplicate(project.id); }}>duplicate</button>
-              <button className={styles.kebabItem} onClick={() => { setMenuOpen(false); onDownload(project.id); }}>download</button>
-              <button className={`${styles.kebabItem} ${styles.kebabDanger}`} onClick={() => { setMenuOpen(false); onDelete(project.id, project.name); }}>delete</button>
-            </div>
-          )}
+        <div className={styles.cardMeta}>
+          <span>{project.trackCount ?? 0} track{(project.trackCount ?? 0) !== 1 ? 's' : ''} · {project.bpm ?? 120} bpm</span>
+          <span className={styles.cardWhen}>{formatWhen(project.updatedAt)}</span>
         </div>
       </div>
 
-      <div className={styles.cardMeta}>
-        <span>{project.trackCount ?? 0} track{(project.trackCount ?? 0) !== 1 ? 's' : ''} · {project.bpm ?? 120} bpm</span>
-        <span className={styles.cardWhen}>{formatWhen(project.updatedAt)}</span>
+      {/* Audio preview (last full-mix export). Playable only while it matches
+          the saved project version; clicks here never open the project. */}
+      <div className={styles.cardPreview} onClick={(e) => e.stopPropagation()}>
+        {previewMeta ? (
+          <>
+            <button
+              className={styles.playBtn}
+              disabled={!fresh}
+              title={fresh ? (playing ? 'pause preview' : 'play preview') : STALE_TIP}
+              onClick={() => fresh && onPreviewToggle(project.id)}
+            >
+              {playing ? '❚❚' : '▶'}
+            </button>
+            <div
+              className={`${styles.waveWrap} ${fresh ? '' : styles.waveStale}`}
+              title={fresh ? undefined : STALE_TIP}
+            >
+              <PreviewWave peaks={previewMeta.peaks} />
+            </div>
+          </>
+        ) : (
+          <div className={styles.previewEmpty} />
+        )}
+      </div>
+
+      <div className={styles.kebabWrap} ref={menuRef} onClick={(e) => e.stopPropagation()}>
+        <button
+          className={styles.kebabBtn}
+          title="Project actions"
+          onClick={() => setMenuOpen(v => !v)}
+        >
+          ⋮
+        </button>
+        {menuOpen && (
+          <div className={styles.kebabMenu}>
+            <button className={styles.kebabItem} onClick={() => { setMenuOpen(false); setTempName(project.name); setRenaming(true); }}>rename</button>
+            <button className={styles.kebabItem} onClick={() => { setMenuOpen(false); onDuplicate(project.id); }}>duplicate</button>
+            <button className={styles.kebabItem} onClick={() => { setMenuOpen(false); onDownload(project.id); }}>download</button>
+            <button className={`${styles.kebabItem} ${styles.kebabDanger}`} onClick={() => { setMenuOpen(false); onDelete(project.id, project.name); }}>delete</button>
+          </div>
+        )}
       </div>
     </div>
   );

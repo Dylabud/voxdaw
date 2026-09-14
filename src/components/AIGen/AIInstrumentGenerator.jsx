@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styles from './AIInstrumentGenerator.module.css';
 import ipStyles from '../Workstation/RegionEditor/InstrumentPanel.module.css';
 import KeyboardPanel from '../Workstation/RegionEditor/KeyboardPanel';
@@ -8,11 +8,13 @@ import { EFFECT_DEFS, effectLabel } from '../Workstation/effectDefs';
 import useAIInstrument from '../../hooks/useAIInstrument';
 import useMidiInput from '../../hooks/useMidiInput';
 import { saveToLibrary } from '../Workstation/customInstruments';
+import { FILTER_NEUTRAL as NEUTRAL_FILTER } from '../Workstation/customInstrumentSynth';
 import { serializeProject, downloadJSON } from '../Workstation/projectIO';
+import { THEME_GLYPHS, THEME_LABELS, nextTheme } from '../../utils/theme';
 import { generatePatch, describeApiError } from './claudeService';
 import {
   AI_MODELS, DEFAULT_MODEL, DEFAULT_PATCH, DEFAULT_LAYER, maxLayersForTier,
-  TOKEN_TIERS, DEFAULT_TOKEN_TIER,
+  TOKEN_TIERS, DEFAULT_TOKEN_TIER, samePatchStructure,
   VOL_META, LAYER_VOL_META, ENV_META, VOICE_META, SPREAD_META, COUNT_META,
   PORTAMENTO_META, OCTAVE_META, SEMITONE_META, FILTER_META, FILTER_TYPES,
 } from './patchSchema';
@@ -80,13 +82,14 @@ const fmtSigned = (v) => `${v > 0 ? '+' : ''}${Math.round(v)}`;
 const engineLabel = (voice) => (voice.engine === 'simple' ? 'osc' : voice.engine);
 const layerLabel = (l) => `${engineLabel(l.voice)}·${l.voice.oscillator}${l.octave ? ` ${fmtSigned(l.octave)}oct` : ''}`;
 
-// Transparent stand-in when a layer's filter is null — the chassis always shows
-// the filter group (mirrors useAIInstrument/customInstrumentSynth FILTER_NEUTRAL).
-const NEUTRAL_FILTER = { type: 'lowpass', frequency: 18000, q: 0.7071 };
-
 const clampOct = (o) => Math.max(OCTAVE_META.min, Math.min(OCTAVE_META.max, o));
 
-export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onThemeToggle }) {
+// count/spread are oscillator sub-params (Tone deep-merges the .set partial);
+// harmonicity/modulationIndex/portamento are top-level synth params.
+const voiceSetObj = (key, val) =>
+  (key === 'count' || key === 'spread') ? { oscillator: { [key]: val } } : { [key]: val };
+
+export default function AIInstrumentGenerator({ onNavigateHome, theme, onThemeToggle }) {
   const rootRef      = useRef(null);
   const heldByKeyRef = useRef(new Map());        // e.key → note captured at keydown
   const genPatchRef  = useRef(DEFAULT_PATCH);    // knob double-click restore target (per layer)
@@ -116,9 +119,16 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
   const [hist, setHist] = useState({ canUndo: false, canRedo: false });
 
   const {
-    applyPatch, noteOn, noteOff, releaseAll,
+    applyPatch, applyPatchParams, noteOn, noteOff, releaseAll,
     setVolume, setLayerVolume, setLayerMute, setEnvelope, setVoiceParam, setLayerPitch, setFilter, setEffectParam,
   } = useAIInstrument();
+
+  // Inline-synced refs so param handlers can be identity-stable (built once)
+  // while always reading the latest state — the memoized-RotaryKnob contract.
+  const patchRef = useRef(patch);
+  patchRef.current = patch;
+  const activeLayerRef = useRef(activeLayer);
+  activeLayerRef.current = activeLayer;
 
   // INIT patch — keyboard playable before the first generation.
   useEffect(() => { applyPatch(DEFAULT_PATCH); }, [applyPatch]);
@@ -165,14 +175,22 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
     syncHist();
   }, [syncHist]);
 
-  // Restore a patch snapshot to both state and audio (full rebuild). Mute is
+  // Restore a patch snapshot to both state and audio. Same graph structure
+  // (param-only undo — the common case) → re-drive setters against the live
+  // graph, no dispose/rebuild, no audible tail-cut, mute state preserved.
+  // Structural change (layer/effect/oscillator delta) → full rebuild; mute is
   // transient, so a rebuild lands all layers unmuted.
   const applyRestored = useCallback((p) => {
+    const paramOnly = samePatchStructure(patchRef.current, p);
     setPatch(p);
+    if (paramOnly) {
+      applyPatchParams(p);
+      return;
+    }
     applyPatch(p);
     setActiveLayer(a => Math.min(a, p.layers.length - 1));
     setMuted(p.layers.map(() => false));
-  }, [applyPatch]);
+  }, [applyPatch, applyPatchParams]);
 
   const undo = useCallback(() => {
     commitPending();
@@ -275,9 +293,14 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
     return () => window.removeEventListener('mousedown', onDown);
   }, [showSaveMenu, nameMenu]);
 
+  // QWERTY map — built once per octave change, shared by the window listener
+  // and the KeyboardPanel hotkeys prop (stable identity keeps the memoized
+  // keyboard inert during knob drags).
+  const melodicMap = useMemo(() => buildMelodicMap(octaveBase), [octaveBase]);
+
   // QWERTY — single window listener (InstrumentPanel pattern, melodic only).
   useEffect(() => {
-    const { keyToNote } = buildMelodicMap(octaveBase);
+    const { keyToNote } = melodicMap;
     const held = heldByKeyRef.current;
 
     const releaseAllHeld = () => {
@@ -316,7 +339,7 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
       releaseAllHeld();
       releaseAll();
     };
-  }, [octaveBase, handleNoteOn, handleNoteOff, releaseAll]);
+  }, [melodicMap, handleNoteOn, handleNoteOff, releaseAll]);
 
   // ── Generate ────────────────────────────────────────────────────────────
   const openSettings = () => { setKeyDraft(apiKey); setShowSettings(true); };
@@ -376,21 +399,30 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
   };
 
   // ── Knob handlers — audio imperatively, React state for the visual ──────
-  const updateLayer = (i, fn) =>
-    setPatch(p => ({ ...p, layers: p.layers.map((l, j) => (j === i ? fn(l) : l)) }));
+  // Every hot-path (RotaryKnob) handler is identity-stable, reading live state
+  // through patchRef/activeLayerRef — combined with React.memo(RotaryKnob),
+  // a drag re-renders only the dragged knob. Cold-path controls (steppers,
+  // selects, mute) stay plain closures.
+  const updateLayer = useCallback((i, fn) =>
+    setPatch(p => ({ ...p, layers: p.layers.map((l, j) => (j === i ? fn(l) : l)) })), []);
 
-  const onVolKnob = (v01) => {
-    recordEdit(patch);
+  const onVolKnob = useCallback((v01) => {
+    recordEdit(patchRef.current);
     const db = fromKnob(v01, VOL_META);
     setVolume(db);
     setPatch(p => ({ ...p, volume: db }));
-  };
-  const changeLayerVolume = (i, v01) => {
-    recordEdit(patch);
+  }, [recordEdit, setVolume]);
+  const changeLayerVolume = useCallback((i, v01) => {
+    recordEdit(patchRef.current);
     const db = fromKnob(v01, LAYER_VOL_META);
     setLayerVolume(i, db);
     updateLayer(i, l => ({ ...l, volume: db }));
-  };
+  }, [recordEdit, setLayerVolume, updateLayer]);
+  // One stable per-strip volume handler, re-derived only when the layer count
+  // changes (drags never change it).
+  const layerVolHandlers = useMemo(
+    () => Array.from({ length: patch.layers.length }, (_, i) => (v01) => changeLayerVolume(i, v01)),
+    [patch.layers.length, changeLayerVolume]);
   const changeLayerOctave = (i, octave) => {
     recordEdit(patch);
     const oct = clampOct(octave);
@@ -408,36 +440,63 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
     setLayerMute(i, next); // transient — no history entry
     setMuted(m => m.map((v, j) => (j === i ? next : v)));
   };
-  const onEnvKnob = (key) => (v01) => {
-    recordEdit(patch);
-    const val = fromKnob(v01, ENV_META[key]);
-    setEnvelope(activeLayer, { [key]: val });
-    updateLayer(activeLayer, l => ({ ...l, envelope: { ...l.envelope, [key]: val } }));
-  };
-  // count/spread are oscillator sub-params (Tone deep-merges the .set partial);
-  // harmonicity/modulationIndex/portamento are top-level synth params.
-  const voiceSetObj = (key, val) =>
-    (key === 'count' || key === 'spread') ? { oscillator: { [key]: val } } : { [key]: val };
-  const onVoiceKnob = (key, meta) => (v01) => {
-    recordEdit(patch);
-    const val = fromKnob(v01, meta);
-    setVoiceParam(activeLayer, voiceSetObj(key, val));
-    updateLayer(activeLayer, l => ({ ...l, voice: { ...l.voice, [key]: val } }));
-  };
-  const onFilterChange = (partial) => {
-    recordEdit(patch);
-    setFilter(activeLayer, partial);
-    updateLayer(activeLayer, l => ({ ...l, filter: { ...(l.filter ?? NEUTRAL_FILTER), ...partial } }));
-  };
-  const onFxParam = (fxIndex, key, value) => {
-    recordEdit(patch);
-    setEffectParam(activeLayer, fxIndex, key, value);
-    updateLayer(activeLayer, l => ({
+  const envHandlers = useMemo(() => Object.fromEntries(
+    ['attack', 'decay', 'sustain', 'release'].map((key) => [key, (v01) => {
+      recordEdit(patchRef.current);
+      const val = fromKnob(v01, ENV_META[key]);
+      setEnvelope(activeLayerRef.current, { [key]: val });
+      updateLayer(activeLayerRef.current, l => ({ ...l, envelope: { ...l.envelope, [key]: val } }));
+    }])), [recordEdit, setEnvelope, updateLayer]);
+  const voiceHandlers = useMemo(() => {
+    const make = (key, meta) => (v01) => {
+      recordEdit(patchRef.current);
+      const val = fromKnob(v01, meta);
+      setVoiceParam(activeLayerRef.current, voiceSetObj(key, val));
+      updateLayer(activeLayerRef.current, l => ({ ...l, voice: { ...l.voice, [key]: val } }));
+    };
+    return {
+      portamento:      make('portamento', PORTAMENTO_META),
+      harmonicity:     make('harmonicity', VOICE_META.harmonicity),
+      modulationIndex: make('modulationIndex', VOICE_META.modulationIndex),
+      count:           make('count', COUNT_META),
+      spread:          make('spread', SPREAD_META),
+    };
+  }, [recordEdit, setVoiceParam, updateLayer]);
+  const onFilterChange = useCallback((partial) => {
+    recordEdit(patchRef.current);
+    setFilter(activeLayerRef.current, partial);
+    updateLayer(activeLayerRef.current, l => ({ ...l, filter: { ...(l.filter ?? NEUTRAL_FILTER), ...partial } }));
+  }, [recordEdit, setFilter, updateLayer]);
+  const onFilterCutoff = useCallback(
+    (v01) => onFilterChange({ frequency: fromKnob(v01, FILTER_META.frequency) }), [onFilterChange]);
+  const onFilterRes = useCallback(
+    (v01) => onFilterChange({ q: fromKnob(v01, FILTER_META.q) }), [onFilterChange]);
+  const onFxParam = useCallback((fxIndex, key, value) => {
+    recordEdit(patchRef.current);
+    setEffectParam(activeLayerRef.current, fxIndex, key, value);
+    updateLayer(activeLayerRef.current, l => ({
       ...l,
       effects: l.effects.map((fx, j) =>
         j === fxIndex ? { ...fx, params: { ...fx.params, [key]: value } } : fx),
     }));
-  };
+  }, [recordEdit, setEffectParam, updateLayer]);
+  // Stable per-(fxIndex, key) knob handlers. The effect TYPE at an index can
+  // change across generations, so the meta is looked up at call time from the
+  // live patch — a cached closure never goes stale.
+  const fxKnobHandlersRef = useRef(new Map());
+  const fxKnobHandler = useCallback((fxIndex, key) => {
+    const cacheKey = `${fxIndex}|${key}`;
+    let h = fxKnobHandlersRef.current.get(cacheKey);
+    if (!h) {
+      h = (v01) => {
+        const fx = patchRef.current.layers[activeLayerRef.current]?.effects?.[fxIndex];
+        const m = fx && EFFECT_DEFS[fx.type]?.params[key];
+        if (m) onFxParam(fxIndex, key, fromKnob(v01, m));
+      };
+      fxKnobHandlersRef.current.set(cacheKey, h);
+    }
+    return h;
+  }, [onFxParam]);
 
   const gen = genPatchRef.current;
   const L = patch.layers[activeLayer] ?? DEFAULT_LAYER;
@@ -445,9 +504,9 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
   const curFilter = L.filter ?? NEUTRAL_FILTER;
   const genFilter = genL.filter ?? NEUTRAL_FILTER;
   const engine = L.voice.engine;
-  const meta = patch.layers.length === 1
-    ? layerLabel(L) + (L.effects.length ? ` · ${L.effects.map(e => effectLabel(e.type).toLowerCase()).join(' · ')}` : '')
-    : `${patch.layers.length} layers · ${patch.layers.map(layerLabel).join(' · ')}`;
+  const meta = useMemo(() => (patch.layers.length === 1
+    ? layerLabel(patch.layers[0]) + (patch.layers[0].effects.length ? ` · ${patch.layers[0].effects.map(e => effectLabel(e.type).toLowerCase()).join(' · ')}` : '')
+    : `${patch.layers.length} layers · ${patch.layers.map(layerLabel).join(' · ')}`), [patch.layers]);
 
   const knobGroup = (label, children, key = label) => (
     <div className={ipStyles.knobGroup} key={key}>
@@ -483,7 +542,7 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
         key={key}
         value01={toKnob(val, m)}
         defaultValue01={toKnob(genVal, m)}
-        onChange={(v01) => onFxParam(fxIndex, key, fromKnob(v01, m))}
+        onChange={fxKnobHandler(fxIndex, key)}
         label={m.label}
         display={fmtVal(val, m)}
         size={38}
@@ -504,38 +563,41 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
   );
 
   // Voice group children — portamento always; harm/mod-idx for fm/am; fat unison.
-  const voiceKnobs = [
-    <RotaryKnob key="glide" value01={toKnob(L.voice.portamento ?? 0, PORTAMENTO_META)}
-      defaultValue01={toKnob(genL.voice.portamento ?? 0, PORTAMENTO_META)}
-      onChange={onVoiceKnob('portamento', PORTAMENTO_META)} label="glide"
-      display={fmtTime(L.voice.portamento ?? 0)} size={38} />,
-  ];
-  if (engine !== 'simple') {
-    voiceKnobs.push(
-      <RotaryKnob key="harm" value01={toKnob(L.voice.harmonicity ?? 3, VOICE_META.harmonicity)}
-        defaultValue01={toKnob(genL.voice.harmonicity ?? 3, VOICE_META.harmonicity)}
-        onChange={onVoiceKnob('harmonicity', VOICE_META.harmonicity)} label="harm"
-        display={(L.voice.harmonicity ?? 3).toFixed(2)} size={38} />
-    );
-    if (engine === 'fm') voiceKnobs.push(
-      <RotaryKnob key="modidx" value01={toKnob(L.voice.modulationIndex ?? 10, VOICE_META.modulationIndex)}
-        defaultValue01={toKnob(genL.voice.modulationIndex ?? 10, VOICE_META.modulationIndex)}
-        onChange={onVoiceKnob('modulationIndex', VOICE_META.modulationIndex)} label="mod idx"
-        display={String(Math.round(L.voice.modulationIndex ?? 10))} size={38} />
-    );
-  }
-  if (L.voice.oscillator.startsWith('fat')) {
-    voiceKnobs.push(
-      <RotaryKnob key="voices" value01={toKnob(L.voice.count ?? 3, COUNT_META)}
-        defaultValue01={toKnob(genL.voice.count ?? 3, COUNT_META)}
-        onChange={onVoiceKnob('count', COUNT_META)} label="voices"
-        display={String(Math.round(L.voice.count ?? 3))} size={38} />,
-      <RotaryKnob key="spread" value01={toKnob(L.voice.spread ?? 20, SPREAD_META)}
-        defaultValue01={toKnob(genL.voice.spread ?? 20, SPREAD_META)}
-        onChange={onVoiceKnob('spread', SPREAD_META)} label="spread"
-        display={String(Math.round(L.voice.spread ?? 20))} size={38} />
-    );
-  }
+  const voiceKnobs = useMemo(() => {
+    const knobs = [
+      <RotaryKnob key="glide" value01={toKnob(L.voice.portamento ?? 0, PORTAMENTO_META)}
+        defaultValue01={toKnob(genL.voice.portamento ?? 0, PORTAMENTO_META)}
+        onChange={voiceHandlers.portamento} label="glide"
+        display={fmtTime(L.voice.portamento ?? 0)} size={38} />,
+    ];
+    if (engine !== 'simple') {
+      knobs.push(
+        <RotaryKnob key="harm" value01={toKnob(L.voice.harmonicity ?? 3, VOICE_META.harmonicity)}
+          defaultValue01={toKnob(genL.voice.harmonicity ?? 3, VOICE_META.harmonicity)}
+          onChange={voiceHandlers.harmonicity} label="harm"
+          display={(L.voice.harmonicity ?? 3).toFixed(2)} size={38} />
+      );
+      if (engine === 'fm') knobs.push(
+        <RotaryKnob key="modidx" value01={toKnob(L.voice.modulationIndex ?? 10, VOICE_META.modulationIndex)}
+          defaultValue01={toKnob(genL.voice.modulationIndex ?? 10, VOICE_META.modulationIndex)}
+          onChange={voiceHandlers.modulationIndex} label="mod idx"
+          display={String(Math.round(L.voice.modulationIndex ?? 10))} size={38} />
+      );
+    }
+    if (L.voice.oscillator.startsWith('fat')) {
+      knobs.push(
+        <RotaryKnob key="voices" value01={toKnob(L.voice.count ?? 3, COUNT_META)}
+          defaultValue01={toKnob(genL.voice.count ?? 3, COUNT_META)}
+          onChange={voiceHandlers.count} label="voices"
+          display={String(Math.round(L.voice.count ?? 3))} size={38} />,
+        <RotaryKnob key="spread" value01={toKnob(L.voice.spread ?? 20, SPREAD_META)}
+          defaultValue01={toKnob(genL.voice.spread ?? 20, SPREAD_META)}
+          onChange={voiceHandlers.spread} label="spread"
+          display={String(Math.round(L.voice.spread ?? 20))} size={38} />
+      );
+    }
+    return knobs;
+  }, [L.voice, genL.voice, engine, voiceHandlers]);
 
   return (
     <div ref={rootRef} className={styles.page}>
@@ -549,7 +611,7 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
         </div>
         <div className={styles.headerRight}>
           <button className={styles.iconBtn} onClick={() => (showSettings ? setShowSettings(false) : openSettings())} title="API settings">⚙</button>
-          <button className={styles.iconBtn} onClick={onThemeToggle} title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}>{isDarkMode ? '◑' : '○'}</button>
+          <button className={styles.iconBtn} onClick={onThemeToggle} title={`Switch to ${THEME_LABELS[nextTheme(theme)]} mode`}>{THEME_GLYPHS[theme]}</button>
         </div>
       </header>
 
@@ -668,7 +730,7 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
                 </div>
                 <RotaryKnob value01={toKnob(l.volume ?? 0, LAYER_VOL_META)}
                   defaultValue01={toKnob(gen.layers?.[i]?.volume ?? 0, LAYER_VOL_META)}
-                  onChange={(v01) => changeLayerVolume(i, v01)} label="vol"
+                  onChange={layerVolHandlers[i]} label="vol"
                   display={fmtVal(l.volume ?? 0, LAYER_VOL_META)} size={34} />
                 {stepper('octave', fmtSigned(l.octave),
                   () => changeLayerOctave(i, l.octave - 1), () => changeLayerOctave(i, l.octave + 1),
@@ -690,7 +752,7 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
         <div className={ipStyles.chassis}>
           {knobGroup('envelope', ['attack', 'decay', 'sustain', 'release'].map(key => (
             <RotaryKnob key={key} value01={toKnob(L.envelope[key], ENV_META[key])}
-              defaultValue01={toKnob(genL.envelope[key], ENV_META[key])} onChange={onEnvKnob(key)}
+              defaultValue01={toKnob(genL.envelope[key], ENV_META[key])} onChange={envHandlers[key]}
               label={ENV_META[key].label}
               display={key === 'sustain' ? L.envelope[key].toFixed(2) : fmtTime(L.envelope[key])} size={38} />
           )), `env-${activeLayer}`)}
@@ -707,10 +769,10 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
               </label>
               <RotaryKnob value01={toKnob(curFilter.frequency, FILTER_META.frequency)}
                 defaultValue01={toKnob(genFilter.frequency, FILTER_META.frequency)}
-                onChange={(v01) => onFilterChange({ frequency: fromKnob(v01, FILTER_META.frequency) })}
+                onChange={onFilterCutoff}
                 label="cutoff" display={fmtVal(curFilter.frequency, FILTER_META.frequency)} size={38} />
               <RotaryKnob value01={toKnob(curFilter.q, FILTER_META.q)} defaultValue01={toKnob(genFilter.q, FILTER_META.q)}
-                onChange={(v01) => onFilterChange({ q: fromKnob(v01, FILTER_META.q) })}
+                onChange={onFilterRes}
                 label="res" display={curFilter.q.toFixed(1)} size={38} />
             </>
           ), `filter-${activeLayer}`)}
@@ -724,7 +786,7 @@ export default function AIInstrumentGenerator({ onNavigateHome, isDarkMode, onTh
         </div>
 
         <KeyboardPanel octaveBase={octaveBase} onNoteOn={handleNoteOn} onNoteOff={handleNoteOff}
-          hotkeys={buildMelodicMap(octaveBase).noteToKey} />
+          hotkeys={melodicMap.noteToKey} />
         <span className={ipStyles.hint}>a–' play · w e t y u o p ] sharps · z / x octave</span>
       </main>
     </div>

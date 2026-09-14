@@ -70,7 +70,11 @@ A patch is a STACK of 1–${MAX_LAYERS} "layers" that all sound together when a 
 - "portamento" (0–0.5 s, any engine): glide time between successive notes — 0 for none, small values for a legato slide. Optional; omit for none.
 
 ## Envelope (seconds, per layer)
-attack 0.001–2 (percussive <0.01, pads 0.3–2), decay 0.001–2, sustain 0–1 (plucks/keys near 0, sustained tones 0.5–1), release 0.001–3.
+attack 0.001–2 (percussive <0.01, pads 0.3–2), decay 0.001–20, sustain 0–1, release 0.001–3.
+Decide PER LAYER whether a held note fades out over time or holds forever:
+- FADING (struck/plucked sources — pianos, bells, plucks, mallets, guitars, percussive keys): sustain 0, decay = the fade-out time. Typical fades 2–8 s; long piano/bell tails 8–20 s; short plucks under 1 s.
+- SUSTAINING (organs, pads, strings, brass, leads): sustain 0.5–1 — the note holds as long as the key is down.
+A stack may mix both (e.g. a fading hammer/attack layer over a sustaining pad bed).
 
 ## Filter (per layer)
 Optional static filter: type lowpass|highpass|bandpass, frequency 40–18000 Hz, q 0.1–12 (higher q = resonant peak). Use null for no filtering. Most layers benefit from a gentle lowpass to tame digital edge.
