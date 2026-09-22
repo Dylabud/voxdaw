@@ -37,6 +37,492 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-09-21] Moog Phase 104 — I/O: knobs → faders, and 4 input channels become 8
+
+Dylan: *"give the IN jack in the i/o a volume knob like all the other ones… make it IN 5… we need more in jacks… using up the space that is already given in the module not making it any wider or longer… change the volume aspect from a knob to a fader."*
+
+**The fader is the whole mechanism, not a style choice.** A `sm` `MoogKnob` reserves **52 px** of width for its tick ring; the new `MoogFader` reserves **26 px**. That halving is what let the channel count double inside an unchanged plate: the column is now sized by the **jack** (29 px), not by the level control. Measured from the real constants — eight fader channels come to **253 px** against the old five knob channels' **276 px**, so the module actually got *narrower* per channel while gaining three.
+
+**`MoogFader`** is a late-60s console fader: a slot milled into the faceplate (deep inset shadow, machined lip catching the lamp upper-right), a knurled aluminium cap riding in it with a pointer line, and etched travel ticks flanking the slot. Materials follow the rack's existing lamp-at-upper-right convention, same as `MoogKnob`, `.jack` and the screws. Whole body is the grab target, not just the cap — that is how a real fader behaves and makes a 26 px control easy to hit. Double-click resets, matching `MoogKnob`'s gesture. **`cursor: ns-resize` is load-bearing**, not decoration: it is what tells the cabinet's `isInteractive` check this is a control rather than faceplate to grab and pan the rack with.
+
+**The one real hazard was the jack id.** `io-in` — the old unmixed "IN ✦" — becomes channel 5, but **its id stays `io-in`, not `io-in5`**. Saved racks persist cables as `{ from: jackId, to: jackId }`, so renaming it would silently orphan every cable anyone has ever patched to it. Only the panel *label* says "IN 5". `IO_JACK_IDS` carries the historical id in position 5 with a comment, and the test asserts both that `io-in` survives and that `io-in5` was never introduced.
+
+Channel 5 also **gains what it never had**: it used to run straight into `master` with no fader and no meter, which is precisely the inconsistency that prompted the request. It now has both, like every other channel.
+
+**Saved racks migrate rather than reset.** Pre-104 settings hold a four-entry `chVols`; a bare `?? [...]` would have kept the short array and left channels 5–8 reading `undefined`. The seed pads to eight, **preserving the user's existing four fader positions** and opening the new channels at the default. Non-arrays and holes fall back safely.
+
+Routing and meters moved to one `for` loop over `IO_CHANNELS`, and the four hand-written level getters became one memoised array — the memo matters, because an unstable array identity restarts every `Led`'s rAF on each shell re-render.
+
+**Lights-out, corrected after Dylan spotted it.** The first version hid only `.faderLabel`, on the reasoning that the cap and slot are real objects that should persist in the dark — which had the rule backwards, and left the faders plainly visible with the lights off. **Being a physical control is exactly why it disappears**: with the room dark there is no light for its aluminium cap to catch. `MoogKnob` has always hidden its whole `.knobGroup`; `.faderGroup` now does the same. Only emissive things — LEDs, the QNT screen, the scope — stay lit.
+
+*Verified: build clean (2 pre-existing warnings, unchanged). `io-verify104.mjs` (53 checks): the jack-id compatibility case from both directions, all eight gain nodes + meters + jacks present and loop-routed, the migration driven through five stored shapes (4-entry preserved, empty, non-array, hole, absent), the width arithmetic computed from the real constants, JS travel vs CSS slot height in lockstep, the `ns-resize` camera contract, and a regression pass on Phases 102–103. Look and feel is Dylan's eye test.*
+
+---
+
+### [2026-09-21] Moog Phase 103 — I/O: real PEAK/CLIP lamp, output brick wall, true-silent MASTER
+
+Three of the four suggestions from the Phase 102 audit, approved by Dylan. (The fourth — a level knob + meter for the legacy `IN ✦` — was declined.)
+
+**1. PEAK became an actual peak/clip lamp.** It was labelled PEAK but fed `getMeterValue('master')`: a **smoothed RMS** meter, clamped to 1. Both halves were wrong for the job. The clamp meant full scale and 3× over read *identically*, so the one thing a peak lamp exists to tell you — you are out of headroom — was the one thing it could not. And smoothing averages away exactly the short transients that clip: a measured 1-sample spike of 1.4 reads `peak 1.40` but `rms 0.080`.
+
+New `getMasterPeak()` takes max |sample| over the waveform analyser already tapping `master` (the scope's buffer — no new node), and returns it **uncapped**, so `> 1` means clipping. `Led` gained an optional `clipAt`; PEAK passes `0.99`.
+
+**The latch is the part that makes it usable.** A clip is often a single sample, which at 60 fps you would see in ~0.125% of frames — i.e. never. Any reading at/over `clipAt` now pins the lamp hot-red for 900 ms (~54 frames). Class writes are diffed, keeping the Phase-61 rule that an unchanged style never invalidates paint.
+
+**2. Output brick wall.** Four channels summing into `master` can pass 0 dBFS, and past that the DAC hard-clips — the ugly digital crunch. VOWEL and the vocoder both already carry a limiter; the master had none. `masterLimit` is the same hard-knee recipe (`threshold −1, ratio 20, knee 0`) and explicitly **not** `Tone.Limiter`, whose 30 dB soft knee barely compresses (the Phase 64a finding). Computed: +12 dB in → −0.35 dB out; −6 dB passes through untouched.
+
+**Placement is the load-bearing decision: `master → masterLimit → seqMasterGate`, with PEAK and the scope still tapping `master` PRE-limiter.** They must show what you are *feeding* the output. Tapping post-limiter would mean the lamp could never light — the limiter would have already fixed it — so the rack would silently compress with no indication why it sounded squashed. Now the limiter protects the speakers *and* the lamp tells you it is working.
+
+**3. MASTER at zero is true silence.** The bottom of the travel was −60 dB: 0.1% amplitude, quiet but audible on a loud patch. A knob turned fully down on real hardware is *off*. Values ≤ 0.005 now map to `-Infinity` dB (`Tone.Volume` converts that to a gain of exactly 0). The threshold rather than a bare `v === 0` avoids a dead zone at the end of the travel; everything above it is unchanged (max still +6 dB, default 0.7 still −13.8 dB).
+
+*Verified: build clean (2 pre-existing warnings, unchanged). `io-verify103.mjs` (34 checks) reads the real source AND computes the DSP claims rather than asserting them: the old clamp proven to collapse loud and clipping to one value, the transient proven to survive peak but not RMS, the unlatched-visibility arithmetic that justifies the latch, the limiter's transfer curve at 0/+6/+12 dB with quiet signal untouched, the volume map at 0 / 0.7 / 1.0 and just above the threshold, plus a regression section confirming Phase 102's gate and tempo fixes survive. Ear and eye test is Dylan's.*
+
+---
+
+### [2026-09-21] Moog Phase 102 — I/O audit: POWER OFF now actually powers off
+
+Module-perfection pass reaches the I/O. Two real bugs found and fixed; the feature suggestions are with Dylan and nothing has been added.
+
+**1. POWER OFF did not silence the rack.** `seqMasterGate` is the sole gateway to the speakers, and `powerOff` *re-opened* it (`gain.value = 1`). That was Phase 71 reasoning — a sequencer stopping should not leave the gate shut — but the per-seq GateNodes that could shut it are gone, and `powerOff` is now the node's only writer. The effect was that power-down relied on every **source** stopping rather than on the **output** being cut.
+
+Most sources do stop. **The microphone does not** — it is a `Tone.UserMedia` with its own enable/disable lifecycle that `powerOff` never touches. So mic on + vocoder **CLARITY** up + `voc-out → io-in` played straight through a power-down. CLARITY is the part that makes it reachable: it is a direct voice blend that needs no carrier, and the carriers *are* what stops.
+
+Fixed by gating the **output**: `powerOff` ramps `seqMasterGate` to 0, `powerOn` ramps it back to 1 **before** starting the sources (so nothing ever arrives at a shut gate). Ramped, not stepped — a hard gain jump on a live signal clicks. Chosen over adding the mic to `powerOff`'s stop list because gating the one gateway covers every future source like it, instead of chasing each one.
+
+**Confirmed after the fact that the bug was WIDER than the mic.** Dylan, on testing: *"i remember there was a bug where even if i turned the i/o off but i was using the delay module, there would still be a humming from the delay module… now that doesn't happen anymore."* That is the same root cause in a different place — CHRONOS has a **feedback loop**, so audio already circulating inside it keeps circulating and feeding the output no matter what the sources do. The reverb tail and the BBD chorus are the same shape. The mic was simply the instance traceable by reading the graph; **any node that rings, loops or self-oscillates leaked through**, which is precisely why gating the single gateway was the right call over enumerating sources. A long-standing symptom nobody had written down, fixed as a side effect and only identified once Dylan recognised it was gone.
+
+*Accepted limitation:* the delay's buffer is muted, not cleared, so powering straight back on can replay a moment of the old tail. Arguably correct — analogue hardware behaves the same — and left alone deliberately.
+
+**2. A restored tempo was never validated.** `readSavedTempo` ended in `?? 120`, which only catches `null`/`undefined` — a string, a `NaN` or an out-of-range number went straight to `Transport.bpm.rampTo`. This value can come from a hand-edited `.moog` file or from either of the two older storage layouts it migrates, neither of which was ever clamped. Every *other* route to the tempo is bounded (the knob's 0–1 map, the BPM field's commit); this was the one that was not. Now `Number()` → finite check → clamp to `BPM_MIN…BPM_MAX` → round.
+
+*Verified: build clean (2 pre-existing warnings, unchanged). `io-verify102.mjs` (31 checks) reads the real source: both gate transitions present, ramped, and ordered (open before sources start); the old re-opening line gone; the mic→CLARITY→`io-in`→gate chain that made the bug reachable traced node by node; the tempo validator driven through nine stored values (absurd high/low, numeric string, garbage, NaN, null, fractional); and a regression sweep that MASTER is still the single writer of `master.volume`, PEAK still taps post-MASTER, the scope still taps master, all four channel meters still tap post-fader, and `io-in` still lands on master. One check initially failed on my own new comment matching a regex meant for code — the assertion now strips comments first.*
+
+---
+
+### [2026-09-20] Moog Phase 101 — QNT chips stop resizing themselves
+
+Dylan: *"whenever i turn [LEARN] on it jumps to below scale and root and snap buttons and jumps back… hardware can't randomly adjust to a different size."*
+
+**The bug had two halves and needed both fixed.** The chip row was `flex-wrap: wrap` (added in Phase 96 as a "safety net" when the row gained a fourth control — this is it turning into the failure it was meant to prevent), and every chip sized itself to its own text. So LEARN going `OFF` → `PLAY…` widened the row past the plate, the row wrapped, and controls jumped to a second line — then jumped back when it changed again. SCALE had the same latent problem: `MAJOR` → `CHROMATIC` is four characters wider.
+
+**Fix 1 — two explicit rows, `nowrap`.** SCALE / ROOT / OCT / GLIDE, then SNAP / LEARN. SNAP and LEARN now live below permanently instead of being wherever the text length put them. (GLIDE moved up beside OCT at Dylan's request straight after; a knob is a fixed size already, so it cannot re-flow a row either way.)
+
+**Fix 2 — every chip is a fixed box, measured rather than estimated.** New `ChipValue` renders **every reading the chip can take** into one CSS grid cell and hides all but the current one, so the box is exactly as wide as its longest option *in the real font*. The alternative — a hand-tuned `px` width per chip, like the older `.selectorValueRange` — would have meant guessing font metrics I cannot see, and re-guessing every time a label is reworded. `visibility: hidden` is load-bearing here, not `display: none`: the hidden copies must stay in layout or they contribute no width and the whole mechanism silently does nothing.
+
+The reading lists are **derived, not retyped** (`Object.values(SCALE_LABELS)`, `OCT_STEPS.map(octText)`, `SNAP_MODES.map(…)`), so adding a preset or rewording a label cannot leave a chip too narrow for its own text. `octText` is shared between the chip and its sizing list for the same reason — two formatters would be two chances to disagree. Widest readings: SCALE `CHROMATIC` (of 15, including `CUSTOM` and the chord-seq `CHORD`), ROOT `C#`, OCT `-3`, SNAP `NEAR`, LEARN `PLAY…`.
+
+Checked while here: LEARN uses `cursor: pointer` rather than the drag chips' `ns-resize`, and `pointer` is already in the camera's `isInteractive` allow-list — so clicking it does not grab the rack and pan.
+
+*Verified: build clean (2 pre-existing warnings, unchanged). Phases 98–100 all still pass. New `qnt-verify101.mjs` (32 checks) reads the real source: rows are `nowrap` and there are exactly two of them with the right controls in each, all five chips route through `ChipValue`, no raw content-sized `.selectorValue` remains in the module, each box is proven to cover **every** reading it can display (15 / 12 / 7 / 3 / 2), the lists are derived from the label tables, and the glow / drag / click behaviour of each chip survived. Width is asserted structurally — no headless browser here — but "every reading is always in the box and nothing in it can change size" is the property that matters, and that is exact. How it looks is Dylan's eye test.*
+
+---
+
+### [2026-09-20] Moog Phase 100 — QNT: hysteresis, SNAP direction, SCALE LEARN, and the TRP keyboard-root bug
+
+Four items off the post-Phase-99 audit, all approved by Dylan.
+
+**1. The keyboard lit the wrong notes under a 960-driven TRP.** Phase 96 taught the display to follow a **chord sequencer** in TRP (`chordOverride`), but any *other* TRP source — a 960's pitch out — sets only `transposeActiveRef`, so the cable owned the root for the audio while the keyboard kept drawing the scale from the **knob's** root. The lit notes and the audible notes disagreed. Found while building Phase 99 and deliberately left alone rather than quietly widening that job. The panel now publishes the external root as state (`extRoot`, written from the TRP rAF's existing delta check, so one `setState` per note change, not per frame) and the display resolves **chord seq → any TRP cable → knob**.
+
+**2. Hysteresis — the one with teeth.** The quantizer picked the nearest note per sample with no deadband, so a CV sitting near a boundary flipped on every wobble. It always did; Phase 96 made it *audible* by firing TRIG↑ on each change, turning the flutter into a machine-gunned envelope. Measured on a 2 s E4→F4 sweep that should produce exactly **2** note changes:
+
+| wobble | before | after |
+|---|---|---|
+| 0 cents | 2 | 2 |
+| 10 cents | 6 | **2** |
+| 25 cents | 14 | **2** |
+| 50 cents | 26 | 10 |
+| 120 cents | 26 | 26 |
+
+`HYST_SEMI = 0.35`. The rule is **"re-snap the input, biased back toward the note being held"** — if the biased input still resolves to the held note, we have not travelled far enough. That formulation is **mode-agnostic**, which matters because a plain distance comparison is correct for NEAREST (boundary at the midpoint) and *wrong* for UP/DOWN (boundary on the note itself). 50 cents legitimately does not collapse to 2: a ±50-cent vibrato genuinely spans a semitone, so retriggering is real movement, not chatter — suppressing it would be a stuck quantizer. Mirrored into `snapMidiHeldJs` for **quantized FM**, which is the other path an LFO can chatter through; held per VCO. **Not** applied to knob-stepper — a knob is not a noisy source and the stickiness would just feel wrong.
+
+**3. SNAP direction** — `NEAR` / `UP` / `DOWN` chip. UP and DOWN resolve to the next in-scale note above/below, so a rising sweep climbs without overshooting. Correct across gaps: in A minor pentatonic, UP from A♯ lands on C (the next *scale* note), not B. Chip values ARE the worklet's `SNAP_*` codes, so there is no lookup table to drift.
+
+**4. SCALE LEARN** — arm, play the notes you want, disarm. Hooks **`updateKeyboard`**, the single function every keyboard note already passes through, so the 953's mouse clicks, QWERTY and MIDI all work with no changes to any of them. Note-ON only. The first note clears the scale (`learnFreshRef`), and learned notes go through the same `commitMask` path as clicks — so Phase 99's identification runs and you watch the name appear as you play. Deliberately **not persisted**: a rack restored mid-learn would silently eat your first notes.
+
+**A detour worth recording, because the lesson is reusable.** The cross-check comparing the worklet against its `quantizeHzJs` mirror reported 8 disagreements at exact ties. I "fixed" them with a half-up tie-break in both copies — then the count went 8 → 30 → 28, which is what finally made me look instead of guess. The real cause: **the test fed the two implementations different inputs.** Audio buffers are `Float32`, so a value that is an exact tie in double precision stops being one the moment it enters the buffer; the mirror was being handed the pristine `float64` note number. The tie case is **unreachable through the audio path**, the two implementations never disagreed, and my "fix" had added a branch to a **per-sample loop** for a case that cannot occur. **Both edits reverted**, the test now feeds the mirror the Float32-rounded value, and it passes 873/873 against the original code. A comment now records why that `<` stays a `<`.
+
+*Verified: build clean (2 pre-existing warnings, unchanged). Phases 98 and 99 pass (two Phase-99 string assertions updated — `commitMask` reads a ref now; behaviour unchanged). New `qnt-verify100.mjs` (52 checks) drives the **real** worklet and the **real** JS mirror: the chatter table above, hysteresis proven never to park on the wrong note (a full-semitone jump is followed immediately, and the margin is under half a semitone by construction), all three snap directions including across a 3-semitone pentatonic gap, worklet↔mirror agreement over 873 mode×scale×pitch cases, held-note release on a scale change and on cable pull, and wiring sweeps for the TRP fix, learn and snap. Feel is Dylan's test.*
+
+---
+
+### [2026-09-20] Moog Phase 99 — QNT names the scale you built instead of saying CUSTOM
+
+Dylan: *"instead of the scale display saying custom when i manually select the notes… have it actually just display what the scale is."*
+
+`CUST` was a shrug — the panel knew the notes and refused to name them. `identifyScale(mask, root, lockRoot)` (pure, module-level, tested) now names them.
+
+**The interesting part is that the request is ambiguous, and the ambiguity is real music theory, not a gap in the spec.** A set of notes is *several scales at once*: the white keys are C major **and** D dorian **and** A minor **and** four more. Worse for this request specifically — Dylan's own two examples collide. **G lydian is the identical seven notes as D major.** Nothing in the note set alone separates them.
+
+**ROOT is the tiebreaker, so ROOT is tried first.** The set is tested against the user's current root before anything else, which is exactly what makes his second example work: with ROOT on G, lydian-from-G reads `LYDIAN`; the same notes with ROOT on D read `MAJOR`. Both are true, and the root says which is meant. Only when no preset explains the set at the current root does the search widen to the other eleven — and then **the ROOT chip moves too**, which he asked for (*"and of course on root: C"*). Preference order for naming (`SCALE_ID_ORDER`) is deliberately **not** `SCALE_KEYS`: the chip's order is brightest→darkest for drag-feel, but naming leads with MAJ/MIN, the labels a musician reaches for.
+
+**Moving the root is a relabelling, never a retune.** `rebaseMask` re-expresses the same absolute notes against the new root (`newMask[o] = mask[o + (new − old)]`). The worklet allows pitch classes `(root + interval) mod 12`, so preserving that set means the audio is byte-identical before and after — asserted directly, and exhaustively across all 12×12 root pairs for every preset.
+
+**Two constraints fell out of the existing design.** Identification runs **inside the click handler, not in an effect on `mask`** — a successful identification can move ROOT, which rewrites the mask, which would re-fire that effect: a loop. One handler, one decision, one render. And a **cable in TRP owns the root**, so `lockRoot` forbids moving it there; such a set is either nameable where it stands or it is CUSTOM. Fighting a patched cable for control of ROOT would have been the obvious bug.
+
+**LOCRIAN added** (panel + engine), completing the seven modes. Without it the white keys at ROOT B — a perfectly ordinary thing to build — came back `CUSTOM`, which would have looked like the feature failing rather than like a missing preset.
+
+`CUST` survives for sets that genuinely have no name (two notes, `C D E`, and so on). That is honest rather than a failure.
+
+*Verified: build clean (2 pre-existing warnings, unchanged). Phase 98's 38 checks still pass. New `qnt-verify99.mjs` (38 checks) drives the **real** `identifyScale`/`rebaseMask` sliced out of `MoogShell.jsx`: **both of Dylan's examples verbatim**, all seven modal readings of the white keys, the G-lydian/D-major collision proven to be one note set read two ways, root-moves-when-it-must with the absolute set proven unchanged, `rebaseMask` exhaustive over 12×12×13, every preset nameable at every root (156/156 keep their own name at their own root), unnameable sets still CUSTOM, the TRP lock in both directions, and the panel↔engine table identity that Phase 96 flagged as the standing drift risk. Feel on the panel is Dylan's test.*
+
+---
+
+### [2026-09-20] Moog Phase 98 — The QNT keyboard becomes a phosphor SCREEN
+
+Dylan: *"make it look more like a digital screen that would be on an actual module in real life. i want the whole moog modular to always have a look of it being actual hardware."*
+
+Phase 97 built a literal miniature piano — ivory keys, ebony keys, a drop shadow under the keybed. Correct as a keyboard, wrong as *hardware*: no 1960s module has a tiny piano bolted to its faceplate, but plenty have a **display** showing one. Same information, honest housing.
+
+**No new visual language was invented — the rack already has two screens**, and this is deliberately both of them at once:
+- from the I/O **oscilloscope** (`Oscilloscope.module.css`): near-black phosphor bed, the two-axis graticule, the tube vignette, and the scanline recipe *exactly* (1 px dark every 3 px)
+- from the **Aura OLED**: the `#767066` chrome mounting ring over a dark outer ring, the recessed inner darkening, and the studio-lamp sheen in the upper right — *"catches the studio lamp like all hardware"*, which is the line in that file that made the decision
+
+Mint phosphor rather than the scope's green, because the QNT's indicators were always mint.
+
+**The three key states stopped being materials and became lit segments**, which is what a monochrome display actually does: out-of-scale is a dim phosphor outline (an unlit segment), in-scale fills and glows, and the note sounding is driven to full brightness with a bloom spilling past its own edges. Geometry is untouched from Phase 97 — the 953's derived layout, black keys still on the higher z-index for overlap *and* click priority.
+
+**Two details that make it read as glass rather than as a dark box.** The sheen (`::before`, z 5) and the scanlines (`::after`, z 6) both paint **over** the keys, so the keys are *on* the display rather than objects sitting in it; both are `pointer-events: none` so neither eats a click. And in **lights-out the screen stays lit** like the scope and the Aura, but the chrome ring swaps for the dark ring + brighter phosphor halo — chrome has no lamp to catch in the dark. The note names moved *out* of the lights-out hide list in the same change: they are on the glass now, not printed on the faceplate.
+
+**One real hazard, caught by the test.** `litKeyStyle` gained a `borderColor` write (the segment's lit edge), and `dimActiveLed` has to clear **exactly** the properties the press sets or a released key keeps a bright border forever. The suite asserts the two property lists are identical rather than eyeballing them.
+
+*Verified: build clean (2 pre-existing warnings, unchanged). New `qnt-verify98.mjs` (38 checks) compares the **real** CSS against the **real** `Oscilloscope.module.css` and `.auraScreen` rules — so "matches the rack's language" is asserted, not asserted-by-me: shared chrome ring, shared sheen placement, identical scanline period, scanlines/sheen above the keys and click-transparent, no ivory or moulded gradients left anywhere, press/release property symmetry, the lights-out bezel swap, and a section proving Phases 96–97 survived the reskin (refs still keyed by semitone, inline write intact, keys still edit the scale, chord takeover still drives the display, geometry constants unchanged). **The 95/96/97 suites could not be re-run — the scratchpad was cleared between sessions** — but §7 of this suite covers their cross-phase invariants, which is the surface a reskin can break. How it actually looks is Dylan's eye test.*
+
+---
+
+### [2026-09-07] Moog Phase 97 — The QNT scale editor becomes an actual keyboard
+
+Dylan: *"let's make the keyboard on it bigger and look more like a keyboard that way it's easier for the user to understand."*
+
+Phase 96 made the 12 lights clickable and called them a scale editor, but they were still twelve identical 9×12 rectangles in a row — accurate and unreadable. Finding F♯ meant counting rectangles. **The rack already contains a keyboard**, so this is not a new visual language: the QNT's is built the same way as the 953's (`KeyboardModule`), which is also the module Dylan already likes the look of.
+
+**Geometry is derived, not hand-placed.** Black-key lefts come from `nextWhiteIdx × WW − BW/2` with the same `BLACK_NEXT_WHITE` table the 953 uses — five hand-typed offsets would have been the obvious shortcut and exactly the kind of constant that drifts. Sizes: `WW 48 / BW 28 / WH 64 / BH 40`, giving a 336×64 keyboard (**1.8× wider and 5.3× taller** than the strip) whose black/white width and height ratios sit within 0.02 of the 953's, so the two read as one instrument at two sizes. Fixed px like every other module — the camera scales the cabinet, panels do not reflow. 336px fits the module's existing ~300px chip row without widening the rack.
+
+**The scale is now shown by material rather than by brightness.** An out-of-scale key is drawn "switched off" (the ivory/ebony, darkened and desaturated); an in-scale key looks like a real key. So the scale reads as *these keys exist* instead of *these rectangles are lighter*, which is the actual comprehension win. The layering is four-deep and order matters: material class → `.qntKeyInScale` compound rules → root marker → the **inline** mint write for the note sounding. `dimActiveLed`'s Phase-96 contract gets more load-bearing, not less: it still CLEARS the inline props rather than repainting, because the resting look is now **four** cases (white/black × in/out) and only React knows which — a hardcoded repaint would turn every released key into an out-of-scale white one.
+
+**Two small additions in service of the same goal.** White keys carry their note name (black keys are too narrow and are unambiguous from the whites they sit between; the 953 labels even more sparsely, C keys only). And **the root note gets a mint dot** — the mask is stored as offsets *from* the root, so seeing where the root sits is what makes a transposed pattern legible rather than arbitrary.
+
+Black keys keep `z-index: 2`, which is doing two jobs at once: it is what makes them overlap the whites they sit between, and what makes them win the click in the shared hit area.
+
+*Verified: build clean (2 pre-existing warnings, unchanged). Phases 95 (24) and 96 (113) still pass. New `qnt-verify97.mjs` (55 checks) evaluates the **real** geometry block sliced out of `MoogShell.jsx` and cross-checks it against the **real** 953 constants: 7 white + 5 black with the right note names, white keys tiling edge-to-edge with no gap or overlap, **every black key centred exactly on its white/white seam**, the two-then-three grouping (no black key at E|F or B|C — the thing that makes it read as a piano at a glance), nothing escaping the bounds or colliding, both keyboards proven to share one derivation rather than one set of copied numbers, size-vs-the-old-strip, click-target minimums, and a sweep asserting the LED-callback wiring survived the rewrite. How it actually looks is Dylan's eye test.*
+
+---
+
+### [2026-09-06] Moog Phase 96 — QNT gains a scale editor, seven scales, TRIG↑ and GLIDE
+
+Second half of the QNT perfection pass — Phase 95 fixed what was broken, this adds what was missing. Four features, all approved by Dylan up front.
+
+**1. The 12 note lights ARE the scale now.** They were display-only: they lit the note being played and nothing else. Click one to add or remove that note, and SCALE flips to `CUSTOM`. Three resting looks instead of one — out-of-scale white, out-of-scale black (the piano-echo dimming, kept), and in-scale — while the *playing* look stays the inline mint write it always was. That layering is the one subtle part: **`dimActiveLed` now CLEARS the inline props rather than painting a resting colour**, because which of the three resting looks applies is React's knowledge, not the callback's; the old hardcoded repaint would have redrawn every extinguished light as out-of-scale.
+
+The mask is stored as **offsets from ROOT, not absolute notes**, so dragging ROOT transposes the pattern (C major → D major lights F♯ and C♯) rather than scrambling it, and presets and custom sets behave identically under it. **The last lit note cannot be switched off** — an empty scale makes both snap implementations fall through to "nearest chromatic", which reads as broken; one note left is legitimate and musical (every input snaps to octaves of it), and is in fact Phase 94's chord-voice trick.
+
+**2. Seven more scales** — LYDIAN, MIXOLYDIAN, DORIAN, PHRYGIAN, HARM MIN, BLUES, WHOLE — bringing the chip to twelve, ordered chromatic → modes brightest-to-darkest → gapped, so a drag walks through neighbouring sounds. `SCALE_INTERVALS` in the panel duplicates `SCALE_DEFS` in the engine (the panel needs them to seed the lights; the engine stays the audio authority). **That duplication is the drift risk this phase introduces, so the test asserts the two tables are identical key-for-key**, plus the modal identities (MAJ rotated to its 2nd degree == DOR, 5th == MIX, 6th == MIN).
+
+**3. `TRIG↑` jack** — a pulse on every *new* quantized note, so an ENV can re-articulate per step and a slow CV sweep gets a plucked attack. Cost almost nothing: gate outs in this rack are purely logical (`{ type: 'out', node: null, isGate: true }`), so one jack entry plus a `dispatchStepActions` call reaches ENV gate/trig, KICK **and** a 960's CLK↓ with no new plumbing. Fired from **all three** places a note can change — worklet port message, knob-stepper, quantized FM — each already delta-checked except `applyVcoKnobQuantize`, which wrote the display unconditionally; harmless for a self-diffing callback, but it would have fired TRIG on every pixel of knob travel, so it is delta-checked now too. Width is a fixed 20 ms *trigger*, not a gate: a quantizer knows when a note starts and has no idea when it ends, so holding the gate open would be a guess.
+
+**4. `GLIDE` knob** — 0–1.5 s, same range/size/units as the 960's. Applies to the worklet note path and to knob-stepper (whose old fixed `0.02` de-click ramp became the floor, so GLIDE at 0 is byte-identical to before). **Deliberately NOT applied to `qntFmTick`**, whose whole purpose is crisp stepped modulation — a glide there smears the steps back into the smooth sweep quantized FM exists to replace. This knob wins over `glideForPitchSource`; gliding *into* a quantizer is largely pointless (the staircase eats it), so the source glide stays a fallback for racks built before the knob.
+
+**One new lie, found and closed in the same phase.** Making the lights mean "the scale" created an inconsistency that did not exist when they only showed the playing note: **while a chord sequencer drives TRP it owns root AND scale**, so the lights would have been asserting the panel's mask while the audio followed the chord. The chord-label callback (Phase 95) now carries the chord's **intervals** as a third argument, so the lights render the live chord — Am7 lights A C E G — the SCALE chip reads `CHORD` and takes the same mint glow as the ROOT chip beside it, and note clicks refuse rather than accepting an edit the override rAF would overwrite within a frame. Chord-follow is now legible instead of invisible: you can see the chord you are locked to. This is React state written once per chord (a bar or more) — nowhere near the rAF path the Zero-Re-render Rule governs.
+
+*Verified: build clean (2 pre-existing warnings, unchanged). Phase 95's 24 checks still pass. New `qnt-verify96.mjs` (113 checks) slices the **real** constant tables out of both source files rather than transcribing them: panel↔engine scale identity, every preset well-formed (root-first, 0–11, no dupes, ascending), music-theory spot checks incl. the three modal rotations, mask↔intervals round-trip for all twelve, ROOT-transposes-the-pattern, the engine sanitiser against duplicates / out-of-range / non-integers / empty, chord-takeover light math (Am7, C, Fmaj7), and a wiring sweep asserting every call site exists. Panel feel — click targets, glow, GLIDE by ear, TRIG↑ into an ENV — is Dylan's test.*
+
+---
+
+### [2026-09-05] Moog Phase 95 — Module-perfection pass: QNT (audit, BYPASS removal)
+
+Module-by-module perfection pass reaches the quantizer. Full read of the panel, the engine wiring and `public/quantizer-worklet.js`. **The snapping core was correct** — a chromatic sweep quantizes exactly right in every scale — so everything here is edges.
+
+**Four real defects, all in the panel layer; the audio was never wrong.**
+
+1. **Dynamic instances had no chord label.** `chordMapRef` was passed at the static call site only, so QNT 2/3/4 rendered the EXT chord-quality span with `ref={undefined}` — a slot nothing could ever write to.
+2. **The label was addressed by the wrong key.** `setChordSeqChordCallback` bound to `'chordseq'` and wrote one shell-owned ref pointing at QNT 1, with **no check that the two were patched together**. So chordseq2 lit nothing, and chordseq1 stamped its chord onto QNT 1 even when its TRP cable went somewhere else. The engine had the correct pairing the whole time in `qntChordOverrideRef` (qid → csId) — the audio override used it; the label didn't. **Fix: the label is now keyed by QUANTIZER** (`qntChordLabelCbRefs[qid]`, `setQuantizerChordLabelCallbackById`), fired from inside the same `Object.entries(qntChordOverrideRef)` walk that already pushes the scale, at `drawAt` time with the step LED. The per-chord-seq callback (`chordSeqChordCbRefs` + both setters) is deleted — it could not express the pairing, so keeping it was keeping the bug's shape.
+3. **Display and LEDs never cleared on cable pull.** The worklet posts `hasSignal:false`, the IN LED went dark, then `if (noteClass === null) return` left the note LED lit and the Hz readout frozen on a note nothing was playing. Now the callback clears both on that transition — **and the worklet resets `_lastMidiNote = -1` on every `hasSignal` change**, without which re-patching the *same* source at the *same* pitch is swallowed by the delta check and the panel stays blank.
+4. **The chord name outlived its sequencer.** Nothing ever cleared it; the EXT row was only hidden. Patch a 960 into TRP afterwards and you got a live root beside a dead chord quality. Cleared now on TRP disconnect, on chord-seq removal, and on EXT re-connect; filled immediately on connect rather than at the next bar.
+
+**BYPASS removed.** Dylan: *"i never use it and everything works great without it. check to see if it's even needed."* It is not. Phase 22 shipped it as a patching aid — *"useful to confirm cable patching without quantization"* — never as a fix, and nothing depends on it for correctness. It later picked up two incidental musical uses (a smooth LFO slide in Phase 58's modulation mode; returning a qnt-patched FREQ knob to continuous in Phase 57's knob-stepper), and **both are just "don't route through the quantizer"** — one cable pull, which is the modular answer. Gone from the worklet, `quantizeHzJs`, `qntFmTick`, `applyVcoKnobQuantize`, `knobQuantizedVcoIds`, `applyQuantizerParams`, the panel chip and the persisted blob. `saved.bypass` may still sit in old localStorage racks; it is ignored, which is the intended migration.
+
+Removing it also **dissolved a design wart rather than forcing a decision on it**: OCT was silently inert while BYPASS was on (verified: C4 at OCT ±2 stayed C4), because both `_quantize` and `quantizeHzJs` applied `octShift` *inside* the branch bypass skipped. With no branch, OCT always applies.
+
+**Two smaller items.**
+
+- **`applyQuantizerParams` had a missing-braces trap:** `if (bypass !== undefined) notifyKnobQuantize(); recomputeQntFmRef.current?.();` — one statement guarded, the next only *looking* guarded because it shared the line. Harmless (both idempotent) but it is precisely the invisible drift that cost us the 7TH in 94b, so it does not get to stay. `notifyKnobQuantize` is gone from here entirely: post-BYPASS the glow depends only on cable state, which this function cannot change.
+- **Output clamp (`QNT_HZ_MIN/MAX`, MIDI 0…127), mirrored in the worklet and `quantizeHzJs`.** Two paths could hand a VCO an unrenderable frequency: modulation mode is `baseHz · 2^v` bounded only by `MOD_MAX = 8`, and Web Audio **sums** multiple cables into one `cv-in`, so a few stacked modulators reach 8 octaves above base — measured 56,320 Hz, past Nyquist; separately C7 + OCT +3 measured 16,744 Hz. `0` passes through unclamped: it is the no-signal value, not a pitch.
+
+**ROOT chip glows while TRP overrides it.** A TRP cable outranks the chip, but the chip kept showing and scrubbing its stale number with no indication — while the analogous case on the VCO FREQ knob has had a mint glow since Phase 57. New `.chipOverridden` (same 1.6 s mint pulse, `box-shadow` rather than `filter` so it sits clear of the chip's inset shading) keeps **one indicator with one meaning**: *this control is being driven from somewhere else.*
+
+*Verified: build clean (2 pre-existing warnings, unchanged). Node script (scratchpad `qnt-verify95.mjs`) drives the **real** `QuantizerProcessor` — loaded from `public/` with the AudioWorklet globals stubbed — and the **real** `quantizeHzJs` sliced out of `useMoogAudio.js`, so it tests shipped code rather than a transcription: 24/24 pass covering a snapping regression guard, OCT at ±2, both clamp ends, 0-stays-0, worklet↔mirror agreement, and a three-block connect/pull/reconnect sequence proving the same note re-posts. Panel behaviour (glow, label clearing, multi-instance labels) is Dylan's ear-and-eye test.*
+
+---
+
+### [2026-08-27] Moog Phase 94b — The 7TH took the wrong branch in connect()
+
+Dylan: *"it all seems to work perfectly except for the 7th."*
+
+**My bug, from Phase 91.** Adding the 7TH output touched seven places and I updated six. The one I missed decides how a chord output is *wired* when patched to a VCO:
+
+```js
+const chordOutKind = effFrom.match(/^(chordseq\d*)-(cv|root|3rd|5th)-out$/);   // no 7th
+```
+
+With `chordOutKind` null, the 7TH failed the managed-source test and fell into the **audio pass-through** branch — `from.node.connect(glideBus)`. So that VCO's GlideBus had **two writers at once**: the chord loop's snapped `setValueAtTime` *and* the raw `SeventhOut` Signal summing in through the cable. A Tone.Signal adds its connected input to its offset, so the VCO played roughly the sum of the two — sharp, and unresponsive to the FREQ knob, since the raw term ignores the octave snap. The other three voices were fine, which is exactly why only the 7th looked broken.
+
+I'd updated `CHORD_OUT_SUFFIX` in the very next line to include `'7th': 'SeventhOut'`, which made the miss invisible on review: the seed lookup was ready for a match that could never happen.
+
+**Fix — remove the ability to drift.** `CHORD_VOICE_KINDS = ['root','3rd','5th','7th']` is now the single source, and all three lookups derive from it: `CHORD_VOICE_OUT_RE` (octave-select eligibility), `CHORD_OUT_RE` (managed-source test + seed), and `CHORD_OUT_SUFFIX` (node-name composition), all colocated at module level rather than one being buried inside `connect()`. Adding a 9th is one array entry plus a suffix.
+
+*Verified: build clean. Node script (scratchpad `voice94b.mjs`) replays `connect()`'s branch decision under the old and new regexes for all five chord outputs — 7TH is the only one that changes, moving from pass-through to managed; node-name composition resolves for every kind incl. `chordseq2-7th-out → chordseq2SeventhOut`; `cv-out` correctly stays OUT of octave-select; and an assertion that no kind in `CHORD_OUT_SUFFIX` is unmatched by `CHORD_OUT_RE`, which is the drift this phase removes.*
+
+---
+
+### [2026-08-26] Moog Phase 94 — Chord voice → VCO: the knob picks the octave
+
+Dylan: *"if the root is patched to the cv of a vco, then it overrides the frequency knob… and the only way to change the octave is by changing root oct on the chord sequencer but that changes all the octaves. we should make it where … you can go up or down an octave by turning the frequency knob. it kind of begins to act like a quantizer but only quantizes to the nearest octaves of the same note."*
+
+Exactly the right framing, and the rack already had the pattern: this is the 902's **knob-stepper** mode (Phase 57) with a coarser grid — a quantizer whose scale is *the octaves of one pitch class*.
+
+**`snapVoiceToKnobOctave(voiceHz, knobHz)`** = `voiceHz · 2^round(log2(knobHz / voiceHz))`. The chord owns the note; the knob owns the register. Rounding in **log2** space puts each switch-over a **tritone** above the octave — the widest possible dead zone either side, so a knob sweep steps cleanly instead of chattering near a boundary.
+
+**Applied at three sites, and all three are needed.** Miss any one and the knob feels broken:
+1. the chord loop's voice write (each new chord lands in the knob's register);
+2. `updateVcoParams` — re-snaps off a new `chordVoiceLastHzRef` so the knob responds **while a chord is held**, not only at the next chord;
+3. `connect()`'s seed — otherwise patching parks the VCO on the chord's own octave until the next step moves it.
+
+**The FREQ knob takes the same mint glow as quantizer knob-stepper mode.** `knobQuantizedVcoIds` now returns chord-voice VCOs too, so one indicator keeps one meaning: *this knob is stepping — its position is not literally the pitch.* Without it the knob reads 220 Hz while the VCO plays 261.6 and nothing explains why.
+
+**ROOT OCT is mathematically absorbed for a knob-controlled VCO.** Octave-shifting a note cannot change the set of its own octaves, so the knob always wins — verified across ROOT OCT −2…+2, all landing on the same pitch. That is the intended trade (per-voice registers were the entire request), and ROOT OCT still governs any voice patched somewhere other than a VCO `cv-in`. Flagged to Dylan rather than left to be discovered.
+
+**Unplanned bonus worth recording:** because each voice's octave is now independent, **inversions and open voicings are hand-buildable** — at some knob positions the 5th naturally sits below the root. That is a manual subset of the auto voice-leading discussed as future work (#5), which lowers the value of building the automatic version first.
+
+*Verified: build clean, no new warnings (also cleared a stale `dispatchStepActions` dep warning left by 92). Node script (scratchpad `octave94.mjs`): pitch class preserved at every knob position across all four voices; step points land on F# for a C voice; ROOT OCT absorbed; zero/negative Hz guarded.*
+
+---
+
+### [2026-08-26] Moog Phase 93b — CLK ÷ folded into CLOCK DIV
+
+Dylan on 93: *"the clk ÷ … essentially does the same thing the clock div does, which is a feature that i want. is it possible to just take away the clk ÷ and have the clock div do the same thing when the 960 is synced to the chord sequencer?"*
+
+Right, and I should have built it this way. Both chips answered one question — *how long does a chord last* — and only the unit differed with the clock source. Two controls where one has a spare state is clutter, and the rack already had the pattern for this: the **LFO's RATE becomes a musical division in sync mode** (Phase 65), one control whose meaning follows the cable.
+
+- **`CLK ÷` deleted.** CLOCK DIV now scrubs `CHORD_DIVS` (½–4 BAR) when unpatched and `CHORD_CLK_DIVS` (÷1–÷8) when a cable is on CLK↓ — one `dragChipProps` call with the value list chosen by `extClocked`.
+- **Both values persist independently**, so patching and unpatching never loses the other setting — the LFO's behaviour across free/sync.
+- **The label stays `CLOCK DIV`.** Phase 70 settled this: *"a real faceplate is silkscreened — it never relabels itself."* The VALUE carries the mode instead, and a `÷` prefix cannot be mistaken for a bar count.
+- The chip no longer greys out while externally clocked — it is live in both modes now, so the old `EXT` placeholder (which said "this does nothing right now") is gone with it.
+
+---
+
+### [2026-08-26] Moog Phase 93 — CYCLE↑: picking which 960 a chord progression follows
+
+Dylan: *"since there's two 960s and there could be more added, it's hard to tell the chord sequencer which 960 to follow in terms of steps so that we could get a 3/4 or 5/4 etc chord progression."*
+
+**The Phase 92 clock jacks answered "which 960" but not "how often".** CLK↑ pulses once per *step*, so patching it into a chord seq's CLK↓ changed the chord on every eighth note — three chords per bar of 3/4, not one. What was missing is a pulse at the **top of the cycle**.
+
+**`${seqId}-cycle-out` — one pulse per completed cycle.** Picking which 960 a progression follows is now a cable, in the module's own idiom: patch that 960's **CYCLE↑** → chord seq **CLK↓**.
+
+**Detection is derived, not counted, and that is the whole point.** The step scan only ever moves forward and wraps, so landing on the **first playing step** means the cycle just came round — `idx === firstPlaying`, recomputed per step. So CYCLE↑ tracks the 960's *real* length as skips are edited **mid-run**: skip down to 3 steps and the chords change every 3 with nothing else to touch. The obvious alternative — a "divide by N" setting on the chord seq — would have made the user keep N in step with the 960 by hand, which is exactly the coordination problem being reported. The per-step scan costs one pass over ≤16 array entries at a few steps a second.
+
+- **CYCLE↑ is a pulse, not a gate.** On a step that is not the top of the cycle it emits *nothing* — it does not release, the way an unfired GATE↑ does. `dispatchStepActions` gained `cycleSrc` / `isCycleStart` for this rather than a second dispatch path, so the shared clock-recursion guard still covers it.
+- **Also added: a divider** (1/2/3/4/6/8 incoming pulses per chord). *Beyond the literal ask* — with CYCLE↑ alone a progression can only change every bar, and "every two bars" is too common to leave out. Shipped as a separate `CLK ÷` chip and **folded into CLOCK DIV in 93b** (below) after Dylan pointed out the duplication.
+- **Divider phase is "advance on the FIRST pulse, then every Nth."** Counting the other way swallows the downbeat and leaves the opening bar chordless while the counter warms up. Re-phased by `powerOn`, `resetSequencers` (so a Workstation take opens on chord 1) and any CLK ÷ change.
+
+*Verified: build clean, no new warnings. Node script (scratchpad `cycle93.mjs`) replays the scan + divider — 4/4, 3/4, 5/4 and 7/8 each advance the chord exactly once per bar at ÷1; 3/4 at ÷2 advances every 6 steps; chord 1 always lands on the downbeat; a skipped first step correctly moves the cycle top to step 2; a single-playing-step 960 pulses every tick.*
+
+---
+
+### [2026-08-24] Moog Phase 92 — CHORD SEQ reaches parity with the 960; one drag gesture everywhere
+
+Dylan, in one batch: drag selectors on the chord seq's CLOCK DIV / ROOT OCT **and the quantizer**; the chord seq should **follow the 960**; per-chord **turn-off** so a 7-bar or 3-bar progression is possible; **clock jacks**; **gate out**; and drag for the per-step root/quality.
+
+**1. Per-step PLAY / REST / SKIP — the 960's Phase 89 contract, instance-for-instance.** SKIP leaves the cycle (3- and 7-chord progressions); REST advances the chord but fires no gate, so a progression can move underneath a sustained note without re-articulating it. Same bounded scan, same all-skipped early return, same three-state lamp — the chord step reuses `.seqGateBtn` / `.seqGateOn` / `.seqGateSkip` **wholesale**, so the two modules are the same control rather than lookalikes: one place to restyle, identical colour semantics. Plate subtitle carries the live length (`8-CHORD CYCLE (1 SKIPPED)`).
+
+**2. GATE↑.** Fires on every PLAY chord at 80 % of the instance's division. Chord stabs no longer have to borrow a 960's gate, which fires on *its* rhythm rather than the chord's.
+
+**3. CLK↓ / CLK↑ — the chord seq follows the 960.** Same contract as Phase 87's: CLK↓ stops the internal Loop and each pulse advances one chord; CLK↑ pulses once per executed step. `advanceChordSeq` extracted from the Loop body exactly as `advanceSeq` was, plus `applyChordSeqClockSource` (connection-counted, not a boolean, so two cables into one CLK↓ don't have the first removal re-arm the internal clock) and the `powerOn` ext-clock skip.
+
+**The one genuinely new hazard: a MIXED clock cycle.** 960 CLK↑ → chord CLK↓ → chord CLK↑ → 960 CLK↓ is a legal patch and an infinite mutual recursion *inside the audio callback*. That is why the gate/clock dispatch was **extracted into a shared `dispatchStepActions`** rather than copied into the chord loop: the depth guard has to be **one counter across both module types**, and two copies would each have had their own. Verified capped, no overflow.
+
+**4. One drag gesture for every value chip.** `beginDragSelect` now backs nine chips — VCO RANGE, 960 CLOCK, chord CLOCK DIV / ROOT OCT / per-step root + quality, QNT SCALE / ROOT / OCT. **Drag to scrub, click to step one**, so single nudges stay one click (the old click-cycle behaviour is preserved, not replaced). `wrap: true` on the circular lists — pitch class and chord quality — because clamping made B→C a twelve-step crawl; ordered ranges clamp so their ends are felt. QNT BYPASS stays a plain click: it is binary, there is nothing to scrub.
+   - **Scope note:** this also converted **VCO RANGE**, which Dylan didn't ask about. It was the duplicate implementation everything else was being matched to, and leaving it forked would have meant two drag gestures to keep in step. Its drag behaviour is unchanged; it *gains* click-to-step.
+   - `ns-resize` on the chips is load-bearing, not decoration — it is what the cabinet's `isInteractive` check reads to know this is a control rather than empty faceplate (the pan listener is native on `.cabinet`; React dispatches from `#root`, an ancestor, so `stopPropagation` cannot reach it — the Phase 87c lesson).
+
+*Verified: build clean, no new warnings. Node script (scratchpad `chordseq92.mjs`): 3-chord / 7-chord / mid-gap cycles, all-skipped (no hang), gate-vs-clock firing per step state, the mixed 960⇄chord recursion cap, and a pre-92 chord step with neither key still playing and gating.*
+
+**Answered but not built:** inversions / voicings (#5) — explained to Dylan rather than implemented, pending his call. **Declined by Dylan:** 16 chord steps (#6).
+
+---
+
+### [2026-08-22] Moog Phase 91 — LFO waveform glyphs + CHORD SEQ audit
+
+**LFO waveform taps now match the VCO.** Dylan: *"the lfo has the wave forms listed as abreviations… make it like the vco where it is the symbol of the wave form and have it be in the same order."* Swapped the `SIN/TRI/SQR/SAW` text for the existing `<WaveIcon>` glyphs and reordered to the VCO's **SIN · TRI · SAW · SQR**. They are the same four shapes on both modules, so a word-vs-symbol split plus a swapped saw/square order made two identical rows read as unrelated. **Jack ids are untouched** (`-sqr`, `-saw`) — a saved rack stores cables by jack id, so only render order moved and existing patches reload correctly.
+
+---
+
+**CHORD SEQ audit — four fixes.**
+
+**1. The chord-type selector barely affected the sound.** `CHORD_VOICE_INTERVALS` has always held **four** tones per chord and the loop computed all four — but only three jacks existed, so `voiceHz[3]` was discarded every step. Measured: ROOT/3RD/5TH emitted `[0,4,7]` for **CMAJ, CDOM and CMAJ7 alike**, and `[0,3,7]` for **CMIN and CMIN7**. Choosing "dom7" or "maj7" changed the panel label and the quantizer scale but not one note of the chord you could actually patch. Added the **7TH output** (the 7th on a 7th chord, the octave on a triad) across its seven touchpoints — static node + jack map, dynamic node + jack map + disposal `nodeNames`, `CHORD_OUT_SUFFIX` in `connect()`'s seed lookup, the loop write, the `VOICE_HZ` glide map, and the panel. Verified: all seven chord types are now distinct. *This adds a jack to the panel* — the only visible change in this phase, and the reason the defect is worth calling a defect rather than a missing feature: the code's own comment said "4-note chords use all four tones."
+   - Deliberately **not** added to `cvPassthroughInput`, per Phase 90 — it is the chord seq's own program, not an incoming note travelling onward.
+
+**2. Step LED and chord-name label fired `lookAhead` early.** They were called straight from the `Tone.Loop` callback, which runs 100 ms ahead of the audio (200 ms at reduced performance quality) — so the LED and the chord name ran ahead of the chord you could hear. This is exactly the Phase 79 `drawAt` fix the 960 already had; the chord seq never got it. Both are pure DOM writes, so draw time is where they belong. The quantizer `postMessage` deliberately **stays** at schedule time — it is audio-domain config that must land *before* the audio does.
+
+**3. Hardcoded `% 8` with no step guard** — the same class as the 960's `% 16` fixed in Phase 87. A steps array that is not exactly 8 long reads `undefined`, and the next line (`step.rootClass`) throws **inside the audio callback**, killing the Loop for the session. Now `% steps.length` with a `!step` bail.
+
+**4. Same unguarded index in the snapper rAF** — worse there, because one bad instance throws out of the loop that serves **every** chord seq in the rack, not just itself. Optional-chained with a `continue`.
+
+*Verified: build clean, no new warnings. Node scripts (scratchpad `chordaudit.mjs`, `chord7.mjs`) quantified the LED lead time and proved the voice-out collisions before → all seven types distinct after.*
+
+**Deliberately NOT changed:** the chord seq's CLOCK DIV / ROOT OCT are still click-to-cycle while the 960's CLOCK is now a drag selector. Click-to-cycle is the rack's majority pattern (the quantizer's four selectors sit right beside these), so converting them is a design call for Dylan, not a bug fix to make unilaterally.
+
+---
+
+### [2026-08-21] Moog Phase 90 — A 960 rest was muting the chord sequencer's voice outs
+
+**Dylan-reported.** Patch: `seq pitch-out → chordseq cv-in`, plus VCOs driven from the chord seq's `root-out` / `3rd-out` / `5th-out`. Turning a step OFF on the 960 silenced those chord-voice VCOs too — *"the sequencer's note being off shouldn't affect anything else except itself."*
+
+**Cause — a Phase 76 over-reach, not a new regression.** The rest-step mute walks `resolveCvOrigin` to find which VCOs a 960 drives, and `cvPassthroughInput` declared **all four** chord-seq outputs to be pass-throughs of its `cv-in`:
+
+```
+chordseq*-{cv,root,3rd,5th}-out ← chordseq*-cv-in
+```
+
+Only `cv-out` actually is. The voice outs are generated from the chord sequencer's **own step program** — `CHORD_BASE_HZ · 2^(rootClass/12)` scaled by ROOT OCT and the chord intervals — and `buildChordSeqLoop` fires them *"always… regardless of cv-in state"*. They never carry the incoming 960's note. So a VCO on ROOT resolved back to `seq-pitch-out` and got gated by a step that has nothing to do with it. The bug needed a 960 **and** a chord seq **and** a VCO on a voice out to show up, which is why it survived from 76 to here.
+
+**Fix:** one regex — `(cv|root|3rd|5th)` → `cv`. A rest may only silence the note it is a rest *for*.
+
+**The general rule, written on the function**, because this is the natural failure mode of a transitive walk and the list will tempt future additions: an output belongs in `cvPassthroughInput` only if *the value at that output is literally the value that arrived at the input*. `cv-out` qualifies (snapped to the chord, but the same note travelling onward); ROOT/3RD/5TH do not.
+
+*Verified: build clean. Node script (scratchpad `mute.mjs`) transcribing `cvPassthroughInput` + `resolveCvOrigin` over Dylan's exact patch — on a rest, `cv-out`-fed and directly-patched VCOs mute; ROOT/3RD/5TH-fed VCOs do not. Both Phase 76 behaviours regression-checked: a quantizer in the path still resolves to its 960 (`seq2 → qnt → vco` ⇒ `seq2-pitch-out`), and a chord seq running its own program with nothing in `cv-in` still terminates at itself rather than gating to an unrelated 960.*
+
+---
+
+### [2026-08-14] Moog Phase 89b — SKIP becomes a lit red lamp
+
+Dylan: *"for the third one, it doesn't go dim and have a red line through the button, but instead let's make it where the button lights up red and the buttons don't go dim and the red button indicates that the step is skipped."*
+
+Better than what I shipped, and for a reason worth writing down: I had treated skip as an *absence* (unlit button, struck through, whole column faded), but the user's model is three **positive** states — green lamp, dark, red lamp. A lamp colour is read instantly; a slash plus a fade is read by comparison against neighbours.
+
+- `.seqGateSkip` rebuilt on exactly the `.seqGateOn` recipe — same radial gradient geometry, same inset highlight, same outer glow — in the red family already established by `.seqLedActive`. The two states now read as one control with two colours rather than two different treatments.
+- `.seqStepSkipped` deleted outright (both the rule and its JSX application); nothing dims. Grepped clean, no dead references.
+- **Lights-out follow-through:** its rule was `.seqGateBtn:not(.seqGateOn)` → hide, which would have hidden the new red lamp. Lights-out hides what *isn't lit*, and skip is now a lit state, so the selector gained `:not(.seqGateSkip)`. Both lamps survive the dark; only REST vanishes.
+
+---
+
+### [2026-08-14] Moog Phase 89 — Per-step SKIP: odd time signatures on a 16-step 960
+
+Dylan: *"give it the ability to not only turn off a note and have it not be played, but also have it be skipped… my goal is to make it possible to have songs with different time signatures… right now everything is set to be 4/4 because of the 16 step sequencer."*
+
+**The distinction is time.** A REST holds the gate low but still consumes its slice of the bar — 16 steps of anything is still 16 steps long. A **SKIP leaves the cycle**: `advanceSeq` now walks forward to the next non-skipped index, so a skipped step never becomes current and never costs a tick. Skip 13–16 and the 960 is a 12-step sequencer. Workflow for a meter: **CLOCK = the denominator, playing steps = the numerator** (3/4 = CLOCK `1/4` + 3 steps; 7/8 = CLOCK `1/8` + 7).
+
+- **`step.skip`, additive.** Steps saved before this phase have no such key; `undefined` is falsy, so every existing rack loads as a full 16-step cycle. Rides the existing wholesale `steps` persistence — no store migration.
+- **The scan is bounded by `steps.length`.** An all-skipped sequencer would otherwise spin forever *inside the audio callback*. It returns early having consumed the tick, writes no pitch, fires no gate, and clears the position LED.
+- **CLK↑ still pulses once per played step** — one Loop tick resolves to exactly one non-skipped step, so a chained 960 advances in lockstep rather than in the master's un-skipped time. Fell out of the design; verified rather than assumed.
+- **UI: three states on the one button** (PLAY → REST → SKIP), not a second per-step control — 16 columns have no room for another affordance, and cycling is how hardware step switches behave. SKIP renders as an amber **slash across an unlit button**, deliberately not just "darker", because REST is already dark and the two must not read the same. The whole column dims to 0.34 so pattern length is legible at a glance, with the gate button exempted back to full opacity (it is the way *out* of skip, so it must not be the hardest thing to see). Skipped columns stay interactive — a step can be pre-dialled while skipped, and skipping never destroys programming.
+- **The plate subtitle now carries the LIVE length** (`SEQUENTIAL CONTROLLER · 12-STEP CYCLE (4 SKIPPED)`) instead of a fixed `16-STEP`. Counting greyed-out columns by eye is precisely what this feature exists to avoid. The dynamic string is *shorter* than the old fixed one in every case, so it cannot grow the tier and re-scale the rack (the Phase 87d lesson).
+- **Known and intended:** the cycle floats free of the Transport bar line. 12 steps at `1/8` is 1.5 bars of 4/4, so it phases against a chord seq at `1m` and against the Workstation timeline. That is a modular sequencer behaving correctly — its cycle is its own length — not a drift bug.
+
+*Verified: build clean, no new warnings. Node script (scratchpad `skip.mjs`) transcribing the advance block across wrap-around, `3/4`/`5/4` tail-skips, a mid-pattern gap, skip-step-1, a single playable step, **all-skipped (no hang)**, an 8-entry legacy array, and the pre-89 step shape with no `skip` key. Feel is Dylan's ear test.*
+
+**Follow-up worth considering:** a **LENGTH** control (play steps 1..N) would be one gesture for the common "just make it 12 steps" case, where skip is four clicks. Skip stays strictly more general — it can punch a hole mid-pattern, which LENGTH cannot — so the two complement rather than replace each other.
+
+---
+
+### [2026-08-09] Moog Phase 88 — Two notes per step through the chord sequencer
+
+**Dylan-reported.** Patch: `seq pitch-out → chordseq cv-in`, `chordseq cv-out → vco cv`, `vco out → vca in`, `env out → vca cv`, `seq gate-out → env gate`. *"there seems to be two notes playing on a single step… it sounds like it's playing the previous note and going to the correct note real fast"*, worst on a step that is switched **off**.
+
+**Cause: the pitch was polled while the gate was scheduled.** Everything a 960 step does is scheduled sample-accurately at the step's audio `time` — pitch Signal, rest-step VCO mute, and the env gate, all `lookAhead` ahead of now. But a chord seq's `cv-in` is an **analyser**, and the pitch reached the VCO only when the snapper rAF next polled it: an analyser buffer plus up to a frame of wall-clock latency. So the envelope attacked at exactly `time` while the VCO was still on the **previous** step's pitch, and the correct pitch arrived tens of ms later. Two notes, every step.
+
+The rest-step case is louder for a reason worth recording: with a rest before it, the previous note's release has fully died, so the late pitch gets a **fresh gate opening on the wrong note** — a distinct articulation — instead of blending into a note that is already ringing. Nothing was wrong with the rest itself; Phase 76's transitive mute resolves `chordseq-cv-out → chordseq-cv-in → seq-pitch-out` correctly and does gate the VCO. The rest just exposed the race.
+
+**Fix — split ownership by source kind, the same split `connect()` already applies at a VCO's `cv-in`.** Polling is right for a genuine audio source (an LFO, a VCO) and wrong for a 960, whose value and timing the step loop already knows. New module-level `managedPitchSourceFor(csId, connections)` returns the 960 feeding a chord seq's `cv-in`, or null:
+- **`advanceSeq`** now writes that chord seq's `PitchOut` and every downstream VCO `glideBus` — snapped to the chord seq's current step — at the step's `time`, right beside the direct-VCO write it already did. Glide is the **seq's**, which is what `glideForPitchSource` resolves for this path today.
+- **The snapper rAF stands down** for a managed instance (Single Writer). It flags `chordSeqInputActive` true by definition rather than inferring it from the analyser — no warm-up dependency — and clears its delta gate so a cable pull resumes cleanly.
+- **`buildChordSeqLoop` re-snaps on chord change**, via a new `seqLastHzRef`. Without this the fix would be half-done: at a bar line the held pitch would stay snapped to the *previous* chord until that 960's next step, because the 60 fps rAF that used to cover it has just stood down.
+
+**Order-independence, verified rather than assumed.** At a bar line both Loops fire at the same `time` and both write the same param. A same-time `setValueAtTime` replaces the earlier event, so whichever Loop Tone runs second wins — and by then both refs it reads (`seqLastHzRef`, `chordSeqCurrentStepRefs`) are current. Node script (scratchpad `seqchord.mjs`, transcribing `managedPitchSourceFor` + `snapToChordHz`): seq-first and chord-first both land on **261.6256 Hz**, so the result does not depend on Loop creation order. Source detection also checked against a plain-audio source (`lfo-out`, → null, snapper keeps it) and an unpatched second instance (→ null).
+
+*Out of scope, deliberately:* `kbd-pitch-out → chordseq-cv-in` still polls. The same race exists but is far milder — the keyboard writes at `Tone.now()` with no lookAhead to open a gap — and fixing it means a second write site in `updateKeyboard`, tangled with the vibrato rAF that owns kbd-connected glideBuses. Logged here rather than half-done.
+
+*Verified: production build clean, no new warnings; convergence + detection unit-tested as above. The audible result is Dylan's ear test.*
+
+---
+
+### [2026-08-08] Moog Phase 87e — BPM field back to chip type scale
+
+Dylan: *"now the bpm stays the same size but it's kind of small. make it bigger like the size it was before while insuring that it stays that size always."*
+
+My bug, introduced in 87c and carried through 87d. `.bpmInput` was written as a chrome-stripping layer over `.selectorValue` and included `font-size: inherit`, `letter-spacing: inherit`, `font-weight: inherit` alongside the `font-family: inherit` that was actually needed. A form control doesn't inherit `font-family` by default — but it *does* pick up `font-size`/`weight`/`letter-spacing` from `.selectorValue`, which the element also carries. `.bpmInput` is declared later at equal specificity, so each `inherit` **won**, and the field rendered at the body's ~13 px while every chip beside it stayed at 21. Fixing the box in 87d was correct and unrelated; the type was the visible problem all along.
+
+- Dropped the three unwanted `inherit`s; kept `font-family: inherit`, with a comment on the rule saying why the other three must not come back.
+- Width `3.6em → 3.2em`. The `em` now resolves against the element's own restored 21 px rather than the inherited 13 px, so the old value would have made the chip far wider than its neighbours. 3.2em fits "300" plus caret room and stays fixed, so digit count never reflows the row.
+- Swept the rest of the stylesheet for the same pattern: no other rule uses `font-size`/`letter-spacing`/`font-weight: inherit`.
+
+---
+
+### [2026-08-08] Moog Phase 87d — BPM field: stop rescaling the rack, commit on click-away
+
+Dylan on 87c: *"when i select the bpm to type in one that i want, the whole display get's smaller and then back to the normal size when i press enter… also if i select it but then tap a different area, then it will automatically unselect it."*
+
+**1. The rack was rescaling, and the BPM chip was only the trigger.** 87c swapped a `<span>` readout for an `<input>` on click. Both carried the same `.selectorValue` + fixed-width `.bpmValue`, so the *width* matched — but as flex items both are blockified, and an `<input>`'s intrinsic content height comes from the browser's own field metrics, not the span's line box. A 1–2 px difference in one module grows the tier, which grows the cabinet's natural height, which makes `fit()` recompute the global scale: the **whole rack** shrinks on click and springs back on commit. Exactly the mechanism `tierRow2`'s extra VCF width exists to avoid ("a wrap adds ~110px to the tier and shrinks the whole rack via fit()") — this one just needed 1 px, because `fit()` doesn't care how big the delta is.
+
+Trying to match the two boxes pixel-for-pixel would be a guess against browser field metrics. **The fix is to make the question unaskable: the field is an `<input>` in both states and is never swapped.** Unfocused it renders `String(tempo)` (so the knob still drives it); focused it renders the draft. "Editing" is now just `:focus`, no element mounts or unmounts, and there is no second box to differ.
+
+- That moved the mint editing cue into CSS, where it promptly lost: `.selectorGroup:hover .selectorValue` is (0,3,0) and a bare `.bpmInput:focus` is (0,2,0), so the border reverted to the hover colour whenever the cursor sat on the field being edited. Rescoped to `.selectorGroup .bpmInput:focus` and placed after the hover/active rules so it wins the tie on source order.
+
+**2. Click-away didn't commit, and blur is the wrong tool for it.** `onBlur` was already wired. It never fired, because most rack controls — jacks, `MoogKnob`, the RANGE and CLOCK selectors — call `preventDefault()` on mousedown to own their drag, and preventDefault on mousedown suppresses the browser's focus change. Click a knob mid-edit and the BPM field simply kept focus. Fixed with a **capture-phase `window` mousedown listener** bound only while editing: capture so a target that `stopPropagation`s can't hide the click, and `contains(e.target)` so clicking inside the field is not a click-away. It calls `commitBpm()` then `blur()`; `commitBpm` is idempotent behind an `editingBpmRef` guard because that `blur()` re-fires it.
+
+**Note for the next control like this:** `editingBpmRef` / `bpmDraftRef` are written **eagerly in the handlers**, not only by the render-time inline sync. A focus and a blur that both land before the next render would otherwise leave the ref stale, `commitBpm` would early-return, and the edit would vanish silently.
+
+---
+
+### [2026-08-07] Moog Phase 87c — CLOCK becomes a drag selector; BPM becomes typeable
+
+Dylan: *"move the clock cycle to the right of the glide knob and make it like range button on the vco's where you can scroll up and down to change it… for the tempo on the i/o, make it where the bpm is displayed that it can be selected and a user can type in what bpm they want."*
+
+- **CLOCK chip moved into the 960's `.knobRow`, right of GLIDE**, and converted from click-to-cycle to the **VCO RANGE gesture** — `handleClockDragStart` is a direct peer of `handleRangeDragStart` (window mousemove/mouseup bound on mousedown, `CLOCK_DRAG_PX` 16 px per step, clamped rather than wrapped). `.seqBpmDisplay` deleted; nothing else used it.
+- **`SEQ_DIVS` reordered slowest → fastest** (`1m … 16n`). RANGE's convention is up = higher pitch = "more", so up must mean *more steps per bar*, i.e. the shorter division. Click-cycling had no direction, so the old fastest-first order was arbitrary; a drag gesture makes it meaningful.
+- **The chip is inert while `extClocked`** — `handleClockDragStart` early-returns and the `ns-resize` cursor is dropped, so an externally-clocked sequencer can't be scrubbed to a division that isn't in effect.
+- **I/O BPM is click-to-type.** Click swaps the readout for a text input carrying the same `.selectorValue` chrome plus a shared `.bpmValue` fixed width, so the chip doesn't resize on entry; `.bpmInput` only strips browser field chrome and recolours the border mint as the editing cue. Enter/blur commits clamped to 20–300 (`BPM_MIN`/`BPM_MAX`, now also feeding the knob's mapping so knob and field share one range constant), Escape reverts via `escapeRef`, empty/non-numeric keeps the old tempo.
+- **Camera-pan interaction, and a correction to a comment that has been wrong since the VCO RANGE shipped.** The pan listener is native and lives on `.cabinet`; React dispatches from `#root`, an *ancestor*, so a React `stopPropagation` runs **after** the pan handler and cannot stop it. What actually protects an interactive control is the camera's own `isInteractive(e.target)` guard — `closest('button, input, select, [data-jack-id]')` or a computed cursor in its allow-list. The BPM input was already covered by `closest('input')`; the readout was **not**, so `'text'` was added to the cursor list (cursor is an inherited property, which is also why the CLOCK chip's `ns-resize` on the wrapper protects the spans inside it). `stopPropagation` genuinely does work for **keydown**, because those listeners (QWERTY notes, Escape reset-view) are on `window`, *below* `#root` in the bubble order, and React's synthetic `stopPropagation` calls the native one — so Escape-to-cancel can't also reset the camera.
+
+---
+
+### [2026-08-07] Moog Phase 87b — Master clock moves to I/O
+
+Dylan, on the Phase 87 shared-tempo store: *"since the tempo for the whole rack is always going to be one tempo, i'm thinking we should take away all the tempo knobs from the sequencers and have there be one tempo on the i/o that will control all the tempo."* Correct, and simpler than what 87 shipped — 87 kept N knobs in sync; this removes N−1 of them.
+
+- **TEMPO knob + BPM readout deleted from `SequencerModule`**, along with its `onTempoChange` prop and all three call sites (seq1, seq2, dynamic `seq3+`). A 960 no longer has *any* tempo concept — only CLOCK DIV, its own subdivision of the master clock.
+- **`IoModule` owns it.** It already owns the other two rack-wide controls (POWER, MASTER volume), so the master clock belongs in the same row: `lg` TEMPO knob + BPM chip beside MASTER, subtitle now `4-CH MIXER · MASTER CLOCK · OUTPUT · POWER`. `IoModule` is the sole caller of `audio.setTempo` — a real Single Writer, not N writers kept in agreement.
+- **The Phase 87 shared store is gone** (`useSharedTempo` / `tempoSubs` / module-level `sharedTempo`). With one owner the subscriber machinery was dead weight; `tempo` is now plain `useState` persisted in the existing `io` settings blob. What survives is `readSavedTempo()`, which walks the migration chain `io.tempo → tempo.bpm → seq.tempo → 120` so racks saved under either earlier layout restore their BPM.
+- **GLIDE promoted `sm` → `lg`** into the space TEMPO vacated. Keeps the left column's height matched to the step grid (a short column would have shrunk the module and re-scaled the whole rack through `fit()`) and glide is a fine-adjustment control that genuinely wants the bigger knob and its tick numerals.
+- CLOCK DIV chip moved to its own fixed-width class (`.seqClockValue`, 5em) — `.selectorValueRange`'s 3em would have clipped `1 BAR`, and a fixed width stops the column jittering as the label cycles.
+
+---
+
+### [2026-08-07] Moog Phase 87 — 960 audit: dead CLK ports, stuck rest-mute, one shared TEMPO
+
+Module-perfection pass moves from the vocoder to the 960. Five defects, all found by reading the module against MOOG_ARCHITECTURE §3 rather than by report.
+
+**1. CLK↓ / CLK↑ were dead jacks — since Phase 9.** Both were registered as `{ dest: null }` / `{ node: null }` with no `isGate` flag, so `connect()` hit its `if (to.dest === null) return` / `if (from.node === null) return` no-ops. The jacks rendered, accepted cables, drew the cable, and did **nothing** — exactly the 911 TRIG class of bug fixed in Phase 78, and the same silent-no-op signature. §3 has listed both as functional ports since day one.
+
+Fixed by putting them in the **gate domain**, not the audio domain (a clock is a pulse, not a signal to route):
+- `${seqId}-clk-out` → `{ type: 'out', node: null, isGate: true }`. Fires from the step body on **every** step — a clock is a metronome, so unlike GATE↑ it ignores the step switch and the probability roll.
+- `${seqId}-clk-in` → `{ type: 'in', dest: null, isGate: true, isSeqClock: true, seqId }`. `connect()`'s gate branch gets an `isSeqClock` case ahead of the kick case; the action advances that sequencer.
+- **External clock replaces the internal one** (§3: "Overrides internal clock"). `applySeqClockSource(seqId)` counts live `isSeqClock` connections for that instance and `loop.stop()`s / `loop.start(0)`s accordingly. Counted over connections rather than kept as a boolean so two cables into one CLK↓ (cables fan in) don't have the first removal re-arm the internal clock. `powerOn` skips ext-clocked loops — starting one would run the sequencer at two rates at once.
+- **Recursion guard.** seq1 CLK↑ → seq2 CLK↓ → seq2 CLK↑ → seq1 CLK↓ is a legal patch and an infinite loop. `seqClockDepthRef` + `SEQ_CLOCK_MAX_DEPTH = 4` turns a cycle into a harmless truncation instead of a stack overflow inside the audio callback.
+- Any gate-domain source drives CLK↓, so **KBD GATE↑ → CLK↓ = one step per keypress**, for free.
+
+**2. A pulled cable could mute a VCO permanently.** The rest-step mute writes `${vcoId}bus`, and the 960's step loop is that gain's single writer. Pull the cable while the sequencer sits **on a rest** and nothing ever writes it again — the VCO is silent until the next power cycle (`powerOff` has had a re-open loop for exactly this reason since Phase 76). Worse through a quantizer or chord seq: pulling the cable feeding *that* module leaves the VCO's own cable intact, so the mute becomes unreachable and permanent. New `reopenUngatedVcoBuses()` runs after every disconnect (both the `isVcoCv` branch and the generic tail — the tail is what covers the transitive case) and on `removeModule('seq')`. It re-opens only VCOs whose resolved CV origin is no longer a live sequencer, so it never fights the loop for a VCO the loop still owns.
+
+**3. Every 960 wrote the same global TEMPO.** Each module had its own TEMPO knob → `Tone.Transport.bpm`. With two sequencers the knobs fought, each panel displayed its own stale number, and whichever mounted last silently won — a Single Writer violation hiding as a feature. Tempo genuinely *is* one shared value (the Transport is the rack's master clock), so it now lives in one module-level store (`useSharedTempo`, subscriber set + `useModulePersist` under the pseudo-id `tempo`, migrating from seq1's old saved value). Every 960 reads and writes the same number.
+
+**4. Per-sequencer speed had nowhere to live — new CLOCK DIV.** The loop interval was a hardcoded `'8n'`, so with tempo shared there was literally no way to run two sequencers at different speeds. Added `seqDivisionRefs` + `setSeqDivisionById` (the same shape as the chord seq's `setChordSeqDivisionById`, which has shipped since 60e) and a CLOCK selector chip: 1/16 · 1/8T · 1/8 · 1/4T · 1/4 · 1/2 · 1 BAR. The chip reads **EXT** and goes idle-styled when a cable is on CLK↓ (cable-derived, the LFO SYNC-chip pattern) — a stopped sequencer whose knob no longer does anything otherwise reads as a dead module. **Gate length now follows the instance's own division**; it was computing `Tone.Time('8n')` regardless, which would have held envelopes for the wrong slice of every non-8n step.
+
+**5. Two smaller ones.** The plate silkscreen still read `8-STEP` after the 16-step expansion (Phases 14–18). And the step modulo was a hardcoded `% 16` — a rack saved with an 8-entry array would have indexed `undefined` and thrown inside the audio callback; it is now `% steps.length` with a `!step` guard.
+
+**Bonus, adjacent:** `updateKeyboard`'s gate loop destructured `{ env }` unconditionally and called `env.triggerAttack()`. A kick action carries **no env**, so patching **KBD GATE↑ → KICK GATE IN** threw a TypeError on every keypress instead of playing the drum. It now branches on `isKick` and triggers the kick properly (same body as the step loop's), plus a `!action.env` guard.
+
+*Verified: production build clean (no new warnings). The audible behaviour — clock chaining, EXT freeze, rest-mute recovery, division timing — is Dylan's ear test.*
+
+---
+
 ### [2026-08-07] Moog Phase 86 — Vocoder: kill the pitch-rate ripple (the "static")
 
 **Files modified:** `useMoogAudio.js`

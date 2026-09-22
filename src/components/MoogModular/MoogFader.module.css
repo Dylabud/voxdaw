@@ -1,0 +1,117 @@
+/* ══════════════════════════════════════════════════════
+   MOOG FADER (Phase 104) — late-60s console slide fader
+   A slot milled into the faceplate, with a knurled
+   aluminium cap riding in it. Materials follow the rack's
+   existing language: the same lamp-at-upper-right that
+   MoogKnob, .jack and the screws are all lit by.
+   ══════════════════════════════════════════════════════ */
+
+.faderGroup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+/* The grab target is the whole body, not just the cap — that is how a real
+   fader behaves, and it makes a 26px-wide control comfortably hittable.
+   ns-resize is load-bearing: it tells the cabinet camera this is a control
+   (see MoogFader.jsx). */
+.faderBody {
+  padding: 3px 4px;
+  cursor: ns-resize;
+  user-select: none;
+  touch-action: none;
+}
+
+/* The milled slot. Deeply recessed so the cap reads as sitting INSIDE the
+   faceplate rather than on top of it. */
+.faderSlot {
+  position: relative;
+  width: 18px;
+  height: 76px;          /* TRAVEL_PX (58) + cap height (18) — keep in lockstep */
+  border-radius: 3px;
+  background: linear-gradient(to right, #0a0908 0%, #171512 42%, #100e0c 100%);
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.95),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.8),
+    /* the machined lip catching the lamp on its upper-right */
+    inset -1px 0 0 rgba(255, 255, 255, 0.05),
+    0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+/* Etched travel ticks, flanking the slot on both sides like a console scale. */
+.faderTicks {
+  position: absolute;
+  inset: 8px -5px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  pointer-events: none;
+}
+.faderTick {
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    rgba(234, 229, 217, 0.34) 0 4px,
+    transparent 4px calc(100% - 4px),
+    rgba(234, 229, 217, 0.34) calc(100% - 4px) 100%
+  );
+}
+
+/* The cap. Brushed aluminium with a knurled grip band, lit upper-right and
+   casting down-left — the rack's lamp convention. */
+.faderCap {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 26px;
+  height: 18px;
+  border-radius: 2.5px;
+  background:
+    /* knurl: fine vertical ribs across the grip face */
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.10) 0px 1px,
+      rgba(0, 0, 0, 0.22) 1px 3px
+    ),
+    linear-gradient(to bottom,
+      #d8d4cc 0%, #b4b0a8 22%, #8a8880 50%, #6e6c66 74%, #4a4844 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.55),
+    -2px 3px 6px rgba(0, 0, 0, 0.85),
+    0 0 0 1px rgba(0, 0, 0, 0.65);
+}
+
+/* The pointer line across the cap — what you actually read the level off. */
+.faderCapLine {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-50%);
+  border-radius: 1px;
+  background: linear-gradient(to bottom, #2a2724, #0d0c0a);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+.faderLabel {
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  color: rgba(234, 229, 217, 0.72);
+  text-shadow: 0 0 0.6px rgba(234, 229, 217, 0.5);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Lights out: the WHOLE fader goes, exactly as MoogKnob's `.knobGroup` does.
+   A fader is a physical control, not a lamp — with the room dark there is no
+   light for its aluminium cap to catch, so it has nothing to be seen by. Only
+   emissive things (LEDs, the QNT screen, the scope) stay lit.
+   This originally hid just the label, on the reasoning that the cap was a real
+   object that should persist — which had it backwards: being a real object is
+   precisely why it disappears. */
+:global([data-lights-out="true"]) .faderGroup { opacity: 0; }

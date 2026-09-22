@@ -967,6 +967,19 @@
   align-items: center;
 }
 
+/* QNT's chip rows (Phase 96; fixed in Phase 101). There are TWO of them now —
+   SCALE / ROOT / OCT, then SNAP / GLIDE / LEARN — and `flex-wrap` is explicitly
+   OFF. Wrapping was meant as a safety net and became the bug: every chip sized
+   itself to its own text, so LEARN going OFF → PLAY… widened the row enough to
+   wrap, controls jumped to a second line, and they jumped back when it changed
+   again. Real hardware does not rearrange its own front panel.
+   Fixed-width chips (see .chipValue) are the other half of the cure — together
+   they mean the row's width is a constant, so there is nothing left to wrap. */
+.qntSelectorRow {
+  flex-wrap: nowrap;
+  justify-content: center;
+}
+
 .selectorGroup {
   display: flex;
   flex-direction: column;
@@ -1001,6 +1014,50 @@
   transition: color 0.1s, border-color 0.1s;
 }
 
+/* ── Overridden by a cable (Phase 95) ──
+   A patched jack outranks this chip, so its number is no longer what the module
+   is using. Same mint pulse as MoogKnob's .knobGlow (Phase 57) at the same 1.6s
+   period, so one indicator keeps one meaning across the rack: "this control is
+   being driven from somewhere else." Currently: QNT ROOT while TRP is patched.
+   Animating box-shadow rather than filter keeps it off the chip's inset shading. */
+.chipOverridden .selectorValue {
+  border-color: rgba(93, 202, 165, 0.55);
+  animation: chipOverriddenPulse 1.6s ease-in-out infinite;
+}
+.chipOverridden .selectorLabel {
+  color: rgba(93, 202, 165, 0.85);
+}
+@keyframes chipOverriddenPulse {
+  0%, 100% {
+    box-shadow:
+      inset 0 1px 3px rgba(0, 0, 0, 0.7),
+      0 0 2px rgba(93, 202, 165, 0.5);
+  }
+  50% {
+    box-shadow:
+      inset 0 1px 3px rgba(0, 0, 0, 0.7),
+      0 0 6px rgba(93, 202, 165, 0.95);
+  }
+}
+
+/* ── Fixed-width chip value (Phase 101) ──
+   Same intent as .selectorValueRange below, but measured instead of estimated:
+   ChipValue renders EVERY possible reading into this one grid cell and hides all
+   but the current one, so the box is exactly as wide as the longest option in the
+   real font — and stays that width when the selection changes. No px constant to
+   guess, and nothing to re-tune when a label is reworded.
+   The hidden copies use `visibility: hidden`, NOT `display: none`: they have to
+   stay in layout or they contribute no width and the whole mechanism does nothing. */
+.chipValue {
+  display: grid;
+  justify-items: center;
+  align-items: center;
+}
+.chipOption {
+  grid-area: 1 / 1;
+  white-space: nowrap;
+}
+
 /* RANGE value only — fixed width so single- ("8'") and double-digit ("32'")
    labels share one box and never reflow the components beside them. em-based
    so it tracks the .vcoBig 26px size; border-box so padding stays inside the
@@ -1009,6 +1066,39 @@
   box-sizing: border-box;
   width: 3em;
   min-width: 0; /* override the base 28px floor — width is authoritative here */
+}
+
+/* 960 CLOCK DIV chip. Fixed width so dragging 1/16 → 1 BAR → EXT doesn't jitter the
+   column; sized for the longest label ("1 BAR") plus the base 6px side padding. */
+.seqClockValue {
+  box-sizing: border-box;
+  width: 5em;
+  min-width: 0;
+}
+
+/* I/O master-clock BPM field. Rides .selectorValue for the chip look; these rules only
+   strip the browser's field chrome so it is indistinguishable from the other readouts.
+   It is an <input> at ALL times — never swapped in when editing begins — because the
+   cabinet auto-scales to its own natural size, so any box difference between a read
+   state and an edit state rescaled the whole rack. "Editing" is just :focus. */
+.bpmInput {
+  box-sizing: border-box;
+  /* em resolves against THIS element's own 21px, so the box tracks the chip type scale.
+     Sized for "300" plus caret room; fixed, so no digit count ever reflows the row. */
+  width: 3.2em;
+  min-width: 0;  /* override the base 28px floor — width is authoritative here */
+  appearance: none;
+  -webkit-appearance: none;
+  /* ONLY font-family is inherited. A form control doesn't inherit the family by default,
+     but it does take font-size/weight/letter-spacing from .selectorValue above — and
+     since .bpmInput is declared later at equal specificity, an `inherit` here WINS and
+     silently drops the field to the body's ~13px while every neighbouring chip stays 21.
+     That is exactly how this rendered small. Do not re-add the other three. */
+  font-family: inherit;
+  color: #ffffff;
+  outline: none;
+  cursor: text;
+  caret-color: #5DCAA5;
 }
 
 /* A selector that exists but isn't in circuit yet (VOWEL's FROM/TO outside DIRECT
@@ -1034,6 +1124,15 @@
 .selectorGroup:active .selectorValue {
   color: #ffffff;
   background: linear-gradient(to bottom, #181612, #1c1a14);
+}
+
+/* Editing cue for the click-to-type BPM field. Scoped through .selectorGroup and placed
+   AFTER the two rules above deliberately: `.selectorGroup:hover .selectorValue` is
+   (0,3,0), so a bare `.bpmInput:focus` (0,2,0) would lose and the border would snap back
+   to the hover colour whenever the cursor sat on the field being edited. */
+.selectorGroup .bpmInput:focus {
+  border-color: #5DCAA5;
+  color: #ffffff;
 }
 
 /* ══════════════════════════════════════════════════════
@@ -1346,11 +1445,8 @@
   min-width: 96px;
 }
 
-.seqBpmDisplay {
-  display: flex;
-  justify-content: center;
-  width: 100%;
-}
+/* (.seqBpmDisplay removed — TEMPO/BPM moved to the I/O panel and the CLOCK DIV chip
+   now sits inside .knobRow beside GLIDE.) */
 
 /* 16 steps in an 8×2 grid — top row steps 1–8, bottom row steps 9–16.
    flex: 1 tells the parent flex row (.seqLayout) to give this grid all remaining space.
@@ -1436,11 +1532,20 @@
    CHORD SEQUENCER — step editor buttons
    ══════════════════════════════════════════════════════ */
 
-/* 8-column step grid — tighter gaps than 960 seq since there are no gate buttons */
+/* 8 chords in a 4×2 grid. Each column is LED → root → quality → mode lamp (Phase 92
+   added the lamp; the comment here used to say "no gate buttons"). */
 .chordSeqGrid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 3px 3px;
+}
+
+/* The mode lamp rides .seqGateBtn / .seqGateOn / .seqGateSkip wholesale so the chord
+   sequencer's three step states are the SAME control as the 960's, not a lookalike —
+   one place to restyle, and identical colour semantics across both modules. It only
+   needs a little breathing room under the quality button. */
+.chordSeqStep .seqGateBtn {
+  margin-top: 1px;
 }
 
 /* Root note button — shows note name (C, C#, D …); click cycles through 12 chromatic notes */
@@ -1559,48 +1664,202 @@
   border-color: #4aaa88;
 }
 
+/* SKIPPED step (Phase 89, restyled 89b) — a LIT RED lamp, built on exactly the same
+   radial-gradient + inset-highlight + outer-glow recipe as .seqGateOn so the two read as
+   one control with two colours rather than two different treatments. The three states are
+   then unambiguous at a glance: green lit = playing, dark = rest, red lit = skipped.
+   Red family matches .seqLedActive, the module's established red lamp. */
+.seqGateSkip {
+  background: radial-gradient(ellipse at 50% 30%, #ff7a55 0%, #d43418 55%, #8a2010 100%);
+  border-color: #a8301a;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 180, 150, 0.3),
+    0 0 5px rgba(220, 70, 40, 0.45);
+}
+
+.seqGateSkip:hover {
+  background: radial-gradient(ellipse at 50% 30%, #ff9070 0%, #e8452a 55%, #a02818 100%);
+  border-color: #c04028;
+}
+
 /* ══════════════════════════════════════════════════════
-   QUANTIZER MODULE — 12-LED chromatic note display
+   QUANTIZER MODULE — one-octave scale keyboard + monitors
    ══════════════════════════════════════════════════════ */
 
-.qntLeds {
-  display: flex;
-  gap: 7px;
-  justify-content: center;
-  padding: 4px 0 6px;
-  flex-wrap: wrap;
+/* ── Scale keyboard (Phase 97) ──
+   Was a strip of 12 identical 9×12 rectangles, which showed the scale accurately
+   but did not LOOK like notes — you had to count LEDs to find F#. It is now a real
+   one-octave keyboard built the same way as the 953 (`KeyboardModule.module.css`):
+   white keys in a row, black keys overlapping them at derived offsets. Sizes and
+   `left` come from JS (the geometry constants), so this file styles only surfaces.
+
+   Layering, outermost first:
+     1. `.qntKeyWhite` / `.qntKeyBlack` — the key's material, drawn "switched off"
+     2. `.qntKeyInScale`               — in the scale, so it looks like a real key
+     3. `.qntKeyRoot`                  — the root note's marker dot
+     4. inline background/box-shadow   — the note SOUNDING right now, written by the
+                                         LED callback; `dimActiveLed` clears those
+                                         props so the classes take back over. */
+/* The display itself. Phosphor bed + graticule from the I/O oscilloscope
+   (`Oscilloscope.module.css`), chrome bezel + recessed glass + studio-lamp sheen
+   from the Aura OLED — the rack's two existing screens, so this reads as the same
+   equipment rather than a third idea. Mint phosphor (93,202,165) instead of the
+   scope's green, because the QNT's indicators were always mint. */
+.qntScreen {
+  position: relative;
+  align-self: center;
+  padding: 9px 11px;
+  margin: 2px 0 7px;
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background:
+    /* tube vignette — corners fall off, as on a real curved screen */
+    radial-gradient(ellipse at 50% 45%, transparent 38%, rgba(0, 0, 0, 0.74) 100%),
+    /* graticule, the scope's two repeating gradients at a calmer opacity so it
+       sits behind the keyboard rather than competing with it */
+    repeating-linear-gradient(90deg,
+      transparent 0px, transparent 19px,
+      rgba(93, 202, 165, 0.05) 19px, rgba(93, 202, 165, 0.05) 20px),
+    repeating-linear-gradient(180deg,
+      transparent 0px, transparent 7px,
+      rgba(93, 202, 165, 0.05) 7px, rgba(93, 202, 165, 0.05) 8px),
+    #05110d;
+  box-shadow:
+    inset 0 0 15px rgba(0, 0, 0, 0.95),
+    inset 0 0 3px rgba(93, 202, 165, 0.10),
+    /* chrome mounting bezel — the Aura's ring language */
+    0 0 0 1px #0c1a14,
+    0 0 0 2px #767066,
+    0 0 0 3px #100e0c,
+    /* phosphor bleeding onto the faceplate around the bezel */
+    0 0 15px rgba(93, 202, 165, 0.26),
+    0 2px 7px rgba(0, 0, 0, 0.8);
 }
 
-.qntLedGroup {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
+/* Glass sheen — catches the studio lamp upper-right, like every other screen and
+   jewel lamp in the rack. Above the keys, so the glass is genuinely in front. */
+.qntScreen::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: radial-gradient(
+    ellipse at 70% 18%,
+    rgba(255, 255, 255, 0.085) 0%,
+    rgba(255, 255, 255, 0.025) 28%,
+    transparent 52%
+  );
+  pointer-events: none;
 }
 
-/* Base LED: slightly taller rect to read as a note indicator.
-   background/box-shadow are written directly by the LED callback
-   (DOM mutation, no React state). The initial values here are the
-   inactive state that the cleanup branch restores. */
-.qntLed {
-  width: 9px;
-  height: 12px;
-  border-radius: 1.5px;
-  background: rgba(93, 202, 165, 0.12);
-  box-shadow: none;
+/* Scanlines — the scope's exact recipe (1px dark every 3px). Painted over the
+   keys, which is what makes them read as drawn ON the display rather than as
+   objects sitting in a box. */
+.qntScreen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.16) 0px,
+    rgba(0, 0, 0, 0.16) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  pointer-events: none;
 }
 
-/* Black key (accidental) LEDs — dim slightly more to visually echo a piano keyboard */
-.qntLedBlack {
-  background: rgba(93, 202, 165, 0.07);
+.qntKeyboard {
+  position: relative;
+  flex-shrink: 0;
 }
 
-.qntLedLabel {
+.qntKey {
+  position: absolute;
+  top: 0;
+  box-sizing: border-box;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s, box-shadow 0.1s, border-color 0.1s;
+}
+
+/* Out of scale = an unlit segment: the outline is drawn, the note is not on. */
+.qntKeyWhite {
+  z-index: 1;
+  border-radius: 0 0 2px 2px;
+  border: 1px solid rgba(93, 202, 165, 0.26);
+  background: rgba(93, 202, 165, 0.035);
+}
+
+/* Black keys sit ON TOP — this z-index is what makes them overlap the whites they
+   sit between, and what makes them win the click in the shared hit area. On a
+   monochrome display the "black" key is the one drawn filled-dark. */
+.qntKeyBlack {
+  z-index: 2;
+  border-radius: 0 0 2px 2px;
+  border: 1px solid rgba(93, 202, 165, 0.30);
+  background: #03100b;
+}
+
+/* In the scale = the segment is lit.
+   MUST stay after both material rules: same specificity, so source order decides. */
+.qntKeyInScale.qntKeyWhite {
+  background: rgba(93, 202, 165, 0.30);
+  border-color: rgba(93, 202, 165, 0.72);
+  box-shadow:
+    inset 0 0 7px rgba(93, 202, 165, 0.22),
+    0 0 6px rgba(93, 202, 165, 0.22);
+}
+.qntKeyInScale.qntKeyBlack {
+  background: rgba(93, 202, 165, 0.17);
+  border-color: rgba(93, 202, 165, 0.68);
+  box-shadow:
+    inset 0 0 6px rgba(93, 202, 165, 0.16),
+    0 0 6px rgba(93, 202, 165, 0.20);
+}
+
+/* Root marker — a lit phosphor dot. The scale is stored as offsets FROM the root,
+   so seeing where the root sits is what makes a shifted pattern legible. */
+.qntKeyRoot::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #9df3d6;
+  box-shadow: 0 0 5px rgba(93, 202, 165, 0.95);
+  pointer-events: none;
+}
+.qntKeyRoot.qntKeyWhite::after  { bottom: 16px; }
+.qntKeyRoot.qntKeyBlack::after  { bottom: 5px;  }
+
+.qntKey:hover { border-color: rgba(140, 240, 205, 0.95); }
+
+/* A chord sequencer in TRP is choosing the notes, so the display is a readout
+   rather than a control — drop the click affordance (Phase 96). It still shows the
+   live chord; the SCALE chip glows to say where that is coming from. */
+.qntKeyLocked { cursor: default; }
+.qntKeyLocked:hover { border-color: rgba(93, 202, 165, 0.26); }
+.qntKeyLocked.qntKeyInScale:hover { border-color: rgba(93, 202, 165, 0.72); }
+
+/* White-key note names — screen-printed phosphor, brighter on a lit key. */
+.qntKeyLabel {
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  transform: translateX(-50%);
   font-size: 10px;
-  letter-spacing: 0;
-  color: rgba(255, 255, 255, 0.50);
-  text-align: center;
-  white-space: nowrap;
+  letter-spacing: 0.04em;
+  color: rgba(93, 202, 165, 0.42);
+  pointer-events: none;
+}
+.qntKeyInScale .qntKeyLabel {
+  color: rgba(175, 250, 224, 0.92);
+  text-shadow: 0 0 4px rgba(93, 202, 165, 0.7);
 }
 
 /* IN LED + display row */
@@ -1702,11 +1961,17 @@
   padding: 1px 2px;
 }
 
-/* Phase 54: channels 4-across + legacy jack column — half the height of stacked rows */
+/* Phase 54: channels 4-across + legacy jack column — half the height of stacked rows.
+   Phase 104: EIGHT channels across, in the same plate width. A `sm` MoogKnob
+   reserves 52px for its tick ring; MoogFader reserves 26px — swapping the level
+   control is what bought the room, and the legacy jack became channel 5 rather
+   than a spacer column of its own. The column is now sized by the JACK (29px),
+   not by the level control, which is why this gap can be tight without the
+   faders crowding each other. */
 .ioChGrid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 4px;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 3px;
   justify-items: center;
   align-items: end;
   padding: 2px 0;
@@ -1716,11 +1981,8 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
 }
-
-/* aligns the legacy jack's baseline with the channel jacks */
-.ioChColSpacer { flex: 1; }
 
 /* ══════════════════════════════════════════════════════
    KEYBOARD BARRIER — walnut rail between rack and keys
@@ -1897,9 +2159,10 @@
 /* Sequencer: hide the left control column (tempo knob + BPM readout + jacks) */
 .cabinet[data-lights-out="true"] .seqCtrl { opacity: 0; }
 
-/* Sequencer gate buttons that are OFF: hide; .seqGateOn keeps its mint glow
-   as a live step-state indicator in the darkness. */
-.cabinet[data-lights-out="true"] .seqGateBtn:not(.seqGateOn) { opacity: 0; }
+/* Sequencer gate buttons that are UNLIT (rest) hide; both lamp states keep their glow as
+   live step-state indicators in the darkness — mint .seqGateOn and red .seqGateSkip.
+   Lights-out hides what isn't lit, and as of 89b skip is a lit state. */
+.cabinet[data-lights-out="true"] .seqGateBtn:not(.seqGateOn):not(.seqGateSkip) { opacity: 0; }
 .cabinet[data-lights-out="true"] .seqProbSlider { opacity: 0; }
 
 /* Chord sequencer step root/type buttons: off (.seqLed siblings stay visible) */
@@ -1929,8 +2192,21 @@
    (see the `.module` rule above), so a pan translates ~30 cached module
    textures instead of blending ~130 knob layers per frame. */
 
-/* Quantizer: hide all text; keep .qntLed, .qntInLed, .qntExtLed */
-.cabinet[data-lights-out="true"] .qntLedLabel,
+/* Quantizer scale screen: stays lit, like the scope and the Aura — it is emissive,
+   and its note names are ON the glass rather than printed on the faceplate, so they
+   stay too. Only the bezel changes: chrome has no studio lamp to catch in the dark,
+   so it becomes the dark ring + phosphor halo the other two screens use (Phase 98). */
+.cabinet[data-lights-out="true"] .qntScreen {
+  box-shadow:
+    inset 0 0 15px rgba(0, 0, 0, 0.95),
+    inset 0 0 3px rgba(93, 202, 165, 0.10),
+    0 0 0 1px #0c1a14,
+    0 0 0 2px #1c1a18,
+    0 0 16px rgba(93, 202, 165, 0.32);
+}
+.cabinet[data-lights-out="true"] .qntScreen::before { display: none; }
+
+/* Quantizer faceplate text: hidden. .qntInLed / .qntExtLed stay lit. */
 .cabinet[data-lights-out="true"] .qntMonitorLabel,
 .cabinet[data-lights-out="true"] .qntDisplay,
 .cabinet[data-lights-out="true"] .qntExtLabel,

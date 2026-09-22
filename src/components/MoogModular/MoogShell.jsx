@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import styles from './MoogShell.module.css';
 import MoogKnob from './MoogKnob';
+import MoogFader from './MoogFader';
 import { MoogPatchProvider, useMoogPatch } from './MoogPatchContext';
 import PatchCableOverlay from './PatchCableOverlay';
 import useMoogAudio, { FFB_BANDS, VOC_BANDS, fftBinHz } from './useMoogAudio';
@@ -128,6 +129,78 @@ const WAVE_PATHS = {
   square:   'M 0,2 H 10 V 8 H 22 V 2',
 };
 
+// ── Drag-scrub selector gesture (Phase 92) ────────────────────────────────
+// Hold and drag a value chip vertically to scrub through its list; a plain click with
+// no vertical movement advances one step, so single nudges stay one click. Extracted
+// when the chord sequencer and quantizer adopted the VCO RANGE gesture — nine call
+// sites, and the drag maths (window listeners bound on mousedown, stopPropagation to
+// keep the camera from panning) is not worth transcribing nine times.
+//
+// `wrap` is for genuinely circular lists — pitch class, chord quality — where dragging
+// past the end should come round rather than stick. Ordered ranges (RANGE, CLOCK, OCT)
+// clamp, so their ends are felt.
+const SELECT_DRAG_PX = 16; // cursor travel per step
+function beginDragSelect(e, { values, current, onChange, wrap = false, px = SELECT_DRAG_PX }) {
+  e.preventDefault();
+  e.stopPropagation();
+  const startY   = e.clientY;
+  const startIdx = Math.max(0, values.indexOf(current));
+  const at = (i) => wrap
+    ? values[((i % values.length) + values.length) % values.length]
+    : values[Math.max(0, Math.min(values.length - 1, i))];
+  let dragged = false;
+  const onMove = (ev) => {
+    const steps = Math.round((startY - ev.clientY) / px); // up = forward through the list
+    if (steps !== 0) dragged = true;
+    onChange(at(startIdx + steps));                       // no-op re-render if unchanged
+  };
+  const onUp = () => {
+    if (!dragged) onChange(at(startIdx + 1));             // plain click = advance one
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+  };
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+}
+// Props shared by every drag-scrub chip: `ns-resize` is also what tells the cabinet's
+// camera this is an interactive target (see isInteractive) — the stopPropagation above
+// cannot, since the pan listener is native on .cabinet and React dispatches from #root.
+const dragChipProps = (opts) => ({
+  onMouseDown: (e) => beginDragSelect(e, opts),
+  style: { cursor: 'ns-resize' },
+});
+
+// A chip value box that is ALWAYS the width of its widest possible reading.
+//
+// Real hardware cannot grow its legend plate to fit the word printed on it, but a
+// content-sized chip does exactly that: changing SCALE from MAJOR to CHROMATIC, or
+// LEARN from OFF to PLAY…, resized the box, which re-flowed the whole row and made
+// controls jump to another line and back (Phase 101).
+//
+// Every possible value is rendered into the SAME grid cell and all but the current
+// one is hidden, so the box measures the longest option in the real font. That is
+// exact — no width constants to estimate or to drift when a label is reworded —
+// and it cannot change when the selection does, which is the whole point.
+// `visibility: hidden` (not `display: none`) is load-bearing: the hidden copies
+// must still take part in layout or they contribute no width.
+function ChipValue({ all, value, className = '' }) {
+  const opts = all.includes(value) ? all : [...all, value];
+  return (
+    <span className={`${styles.selectorValue} ${styles.chipValue} ${className}`}>
+      {opts.map(t => (
+        <span
+          key={t}
+          className={styles.chipOption}
+          style={t === value ? undefined : { visibility: 'hidden' }}
+          aria-hidden={t === value ? undefined : true}
+        >
+          {t}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function WaveIcon({ type }) {
   return (
     <svg viewBox="0 0 24 10" width="31" height="13" fill="none"
@@ -208,29 +281,6 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
     onSyncChange?.(syncOn);
   }, [syncOn, onSyncChange]);
 
-  // RANGE selector — hold and drag the cursor vertically to scrub through the
-  // ranges (up → higher pitch / 2', down → lower / 32') instead of click-cycling,
-  // so either direction is one gesture away. Window listeners bound on mousedown
-  // (the knob drag pattern); stopPropagation keeps the drag off the camera pan.
-  const RANGE_DRAG_PX = 16; // cursor travel per range step
-  const handleRangeDragStart = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const startY   = e.clientY;
-    const startIdx = RANGE_STEPS.indexOf(rangeOctave);
-    const onMove = (ev) => {
-      const steps = Math.round((startY - ev.clientY) / RANGE_DRAG_PX); // up = +
-      const idx   = Math.max(0, Math.min(RANGE_STEPS.length - 1, startIdx + steps));
-      setRangeOctave(RANGE_STEPS[idx]); // no-op re-render if unchanged (Object.is)
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  };
-
   const handleSyncToggle = () => setSyncOn(v => !v);
 
   return (
@@ -256,9 +306,8 @@ function VcoModule({ number, onParamUpdate, onSyncChange, getLedValue, quantized
             <div className={styles.selectorRow}>
               <div
                 className={styles.selectorGroup}
-                onMouseDown={handleRangeDragStart}
-                style={{ cursor: 'ns-resize' }}
-                title="Hold and drag up / down to change range"
+                {...dragChipProps({ values: RANGE_STEPS, current: rangeOctave, onChange: setRangeOctave })}
+                title="Drag up / down to change range — or click to step"
               >
                 <span className={styles.selectorLabel}>RANGE</span>
                 <span className={`${styles.selectorValue} ${styles.selectorValueRange}`}>{RANGE_LABELS[String(rangeOctave)]}</span>
@@ -572,10 +621,16 @@ function LfoModule({ onParamUpdate, getLedValue, number = 1 }) {
           <div className={styles.jackRow}>
             <Jack id={`${p}-sync`} label="SYNC" />
             <Jack id={`${p}-fm`}   label="FM" />
-            <Jack id={`${p}-sin`}  label="SIN" />
-            <Jack id={`${p}-tri`}  label="TRI" />
-            <Jack id={`${p}-sqr`}  label="SQR" />
-            <Jack id={`${p}-saw`}  label="SAW" />
+            {/* Waveform taps carry the same SVG glyphs and the same SIN·TRI·SAW·SQR
+                order as the VCO's (Phase 91) — they are the same four shapes, so a
+                different word-vs-symbol treatment and a swapped saw/square order made
+                two identical rows read as unrelated. Jack IDS ARE UNCHANGED: `-sqr`
+                still precedes `-saw` alphabetically in no sense that matters, but a
+                saved rack stores cables by jack id, so only the render order moved. */}
+            <Jack id={`${p}-sin`}  label={<WaveIcon type="sine" />} />
+            <Jack id={`${p}-tri`}  label={<WaveIcon type="triangle" />} />
+            <Jack id={`${p}-saw`}  label={<WaveIcon type="sawtooth" />} />
+            <Jack id={`${p}-sqr`}  label={<WaveIcon type="square" />} />
           </div>
         </div>
       </div>
@@ -1080,6 +1135,39 @@ function useModulePersist(id, values) {
   }, [id, json]);
 }
 
+// ── Master clock tempo: the I/O panel owns it (Phase 87b) ─────────────────
+// Every 960 used to carry its own TEMPO knob, and every one of them wrote the SAME
+// global Tone.Transport.bpm — so with two sequencers the knobs fought, each panel showed
+// its own stale number, and whichever mounted last silently won. There is exactly one
+// clock in the rack, so there is now exactly one knob for it, on the I/O module (which
+// already owns the other rack-wide controls: power and MASTER volume). Per-sequencer
+// speed is the 960's CLOCK DIV instead. Migration order below covers both older layouts:
+// `tempo` was a briefly-lived shared-store id, and before that it lived on seq1.
+const BPM_MIN = 20;
+const BPM_MAX = 300;
+
+// The I/O input channels, in panel order (Phase 104). Channel 5 keeps the legacy
+// jack id `io-in` — saved racks persist cables as `{ from: jackId, to: jackId }`,
+// so renaming it to `io-in5` would orphan every cable ever patched to it. Its
+// panel label is "IN 5" like the rest; only the id is historical.
+const IO_JACK_IDS = ['io-in1', 'io-in2', 'io-in3', 'io-in4',
+                     'io-in',  'io-in6', 'io-in7', 'io-in8'];
+const IO_CH_COUNT = IO_JACK_IDS.length;
+function readSavedTempo() {
+  const raw = readModuleSettings('io').tempo
+           ?? readModuleSettings('tempo').bpm
+           ?? readModuleSettings('seq').tempo;
+  // Validate, don't trust (Phase 102). `?? 120` only caught null/undefined, so a
+  // string, a NaN or an out-of-range number went straight through to
+  // `Transport.bpm.rampTo` — and this value can come from a hand-edited `.moog`
+  // file or from either of the two older storage layouts migrated above, neither
+  // of which was ever clamped. Every OTHER way of setting the tempo (the knob's
+  // 0–1 map, the BPM field's commit) is bounded; this was the one that was not.
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 120;
+  return Math.max(BPM_MIN, Math.min(BPM_MAX, Math.round(n)));
+}
+
 // Restores persisted cables once the dynamic instances are live (Phase 60f),
 // then re-fires the audio bridge on a short retry schedule. The retries are
 // idempotent (connect() dedupes committed keys) and cover two gaps:
@@ -1202,19 +1290,81 @@ function LibraryModal({ open, onClose, hidden, onToggle, dynModules, onAddInstan
 
 // I/O module — oscilloscope, POWER, MASTER VOL, 4-channel mixer input, and legacy io-in.
 // getOscData()    — stable getter for oscilloscope waveform data.
-// getLedValue()   — stable getter for master level meter (PEAK LED).
+// getLedValue()   — stable getter for the PEAK lamp. TRUE sample peak, and
+//                   UNCAPPED: readings > 1 mean clipping and latch the lamp red.
 // getChLevels     — array of 4 stable getters for per-channel activity LEDs.
 // onChannelVolChange(channelIndex, value) — single writer for ioCh1–ioCh4.gain.
-function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue, getChLevels, onChannelVolChange }) {
+function IoModule({ isPowered, onPower, onParamUpdate, onTempoChange, getOscData, getLedValue, getChLevels, onChannelVolChange }) {
   const saved = useSavedSettings('io'); // singleton
   const [masterVol, setMasterVol] = useState(saved.masterVol ?? 0.7);
-  const [chVols, setChVols] = useState(saved.chVols ?? [0.8, 0.8, 0.8, 0.8]);
-  useModulePersist('io', { masterVol, chVols });
+  // Saved racks from before Phase 104 hold a FOUR-entry array. Pad to eight rather
+  // than discarding: the user's existing four fader positions are preserved and the
+  // new channels open at the default. (A bare `?? [...]` would have kept the short
+  // array, leaving channels 5–8 reading `undefined`.)
+  const [chVols, setChVols] = useState(() => {
+    const stored = Array.isArray(saved.chVols) ? saved.chVols : [];
+    return Array.from({ length: IO_CH_COUNT },
+      (_, i) => (typeof stored[i] === 'number' ? stored[i] : 0.8));
+  });
+  // The rack's ONE master clock — see readSavedTempo. Seeded through that helper rather
+  // than `saved.tempo` so racks stored under the two older layouts still restore.
+  const [tempo, setTempo] = useState(readSavedTempo);
+  useModulePersist('io', { masterVol, chVols, tempo });
 
   useEffect(() => {
     if (!onParamUpdate) return;
     onParamUpdate({ volume: masterVol });
   }, [masterVol, onParamUpdate]);
+
+  useEffect(() => { onTempoChange?.(tempo); }, [tempo, onTempoChange]);
+
+  // Knob 0–1 → BPM 20–300 (the range the 960 knob used).
+  const handleTempoKnob = (v) => setTempo(Math.round(BPM_MIN + v * (BPM_MAX - BPM_MIN)));
+
+  // Click-to-type BPM, so an exact tempo (137, 174…) is one keystroke rather than a knob
+  // hunt. The knob writes the same `tempo` state, so the two can never disagree.
+  //
+  // The field is an <input> in BOTH states — it is never swapped for a <span>. The
+  // cabinet auto-scales to its own natural size (fit() + a ResizeObserver), so swapping
+  // in an element whose box differed by even a pixel grew the row and visibly rescaled
+  // the ENTIRE rack on click, then again on commit. One element, one box, nothing to
+  // differ: "editing" is just focus, and the mint border is a plain :focus rule.
+  const bpmInputRef = useRef(null);
+  const [editingBpm, setEditingBpm] = useState(false);
+  const [bpmDraft,   setBpmDraft]   = useState('');
+  const escapeRef = useRef(false);
+  // Inline ref mirrors (the App.js mappingsRef pattern) so commitBpm can stay a stable
+  // [] -dep callback — the click-away effect below binds once per edit, not per keystroke.
+  const editingBpmRef = useRef(false); editingBpmRef.current = editingBpm;
+  const bpmDraftRef   = useRef('');    bpmDraftRef.current   = bpmDraft;
+
+  const commitBpm = useCallback(() => {
+    if (!editingBpmRef.current) return;   // idempotent: click-away blurs, which re-fires this
+    editingBpmRef.current = false;
+    setEditingBpm(false);
+    if (escapeRef.current) { escapeRef.current = false; return; }
+    const raw = bpmDraftRef.current.trim();
+    const n   = Math.round(Number(raw));
+    // Empty / non-numeric silently keeps the old tempo rather than snapping to a floor.
+    if (raw !== '' && Number.isFinite(n))
+      setTempo(Math.max(BPM_MIN, Math.min(BPM_MAX, n)));
+  }, []);
+
+  // Click-away commits. Blur alone is not enough: most rack controls (jacks, knobs, the
+  // RANGE/CLOCK selectors) call preventDefault on mousedown to own the drag, and that
+  // suppresses the browser's focus change — so clicking one of them left the field
+  // focused and mid-edit. CAPTURE phase, so a target that stopPropagations can't hide
+  // the click from us.
+  useEffect(() => {
+    if (!editingBpm) return;
+    const onDown = (e) => {
+      if (bpmInputRef.current?.contains(e.target)) return;
+      commitBpm();
+      bpmInputRef.current?.blur();
+    };
+    window.addEventListener('mousedown', onDown, true);
+    return () => window.removeEventListener('mousedown', onDown, true);
+  }, [editingBpm, commitBpm]);
 
   useEffect(() => {
     if (!onChannelVolChange) return;
@@ -1232,7 +1382,7 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue, 
         <div className={styles.plateHeader}>
           <div className={styles.plateTitles}>
             <span className={styles.plateTitle}>I/O</span>
-            <span className={styles.plateSub}>4-CH MIXER · OUTPUT · POWER</span>
+            <span className={styles.plateSub}>4-CH MIXER · MASTER CLOCK · OUTPUT · POWER</span>
           </div>
         </div>
         <div className={styles.plateBody}>
@@ -1250,27 +1400,86 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue, 
               onChange={setMasterVol}
               defaultValue={0.7}
             />
-            <Led getValue={getLedValue} color="red" label="PEAK" />
+            {/* clipAt 0.99 — a sample that close to full scale is out of headroom.
+                The lamp latches red for ~0.9 s so a single-sample clip is visible
+                at all; without the latch you would essentially never catch one.
+                The limiter downstream stops it reaching the speakers as a crunch,
+                which is exactly why the lamp has to say so (Phase 103). */}
+            <Led getValue={getLedValue} color="red" label="PEAK" clipAt={0.99} />
+            {/* Master clock. Sits with POWER and MASTER because all three are
+                rack-wide, not per-module. Every sequencer runs off this one BPM;
+                each 960 then picks its own subdivision with its CLOCK selector. */}
+            <MoogKnob
+              label="TEMPO"
+              size="lg"
+              value={(tempo - BPM_MIN) / (BPM_MAX - BPM_MIN)}
+              onChange={handleTempoKnob}
+              defaultValue={(120 - BPM_MIN) / (BPM_MAX - BPM_MIN)}
+            />
+            {/* Camera-pan safety is the cabinet's `isInteractive` check, NOT the
+                stopPropagation below: that native listener sits on .cabinet, so it has
+                already fired by the time React dispatches from #root. An <input> is
+                caught by its `closest('input')` clause. */}
+            <div
+              className={styles.selectorGroup}
+              title={`Master clock — every sequencer in the rack runs off this tempo. Click to type a BPM (${BPM_MIN}–${BPM_MAX}).`}
+            >
+              <span className={styles.selectorLabel}>BPM</span>
+              <input
+                ref={bpmInputRef}
+                className={`${styles.selectorValue} ${styles.bpmInput}`}
+                type="text"
+                inputMode="numeric"
+                // Unfocused, the field mirrors the knob; focused, it shows the draft.
+                value={editingBpm ? bpmDraft : String(tempo)}
+                // Both refs are set eagerly, not left to the render-time sync: a focus and
+                // a blur that land before the next render would otherwise make commitBpm
+                // early-return and silently drop the edit.
+                onFocus={e => {
+                  bpmDraftRef.current   = String(tempo);
+                  editingBpmRef.current = true;
+                  setBpmDraft(String(tempo));
+                  setEditingBpm(true);
+                  e.target.select();
+                }}
+                onChange={e => { bpmDraftRef.current = e.target.value; setBpmDraft(e.target.value); }}
+                onBlur={commitBpm}
+                onMouseDown={e => e.stopPropagation()}
+                // The rack plays QWERTY notes off a window keydown listener. That one
+                // already skips events inside an input; this also keeps Escape from
+                // reaching the camera's reset-view handler mid-edit.
+                onKeyDown={e => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter')  { e.preventDefault(); e.currentTarget.blur(); }
+                  if (e.key === 'Escape') { e.preventDefault(); escapeRef.current = true; e.currentTarget.blur(); }
+                }}
+              />
+            </div>
           </div>
           <PlateDivider />
+          {/* Eight input channels in the space the old four occupied (Phase 104).
+              The swap from knob to fader is what bought the room: a `sm` MoogKnob
+              reserves 52px of width for its tick ring, a fader 26px. The plate is
+              not one pixel wider or taller.
+
+              Channel 5 IS the old `io-in` jack — same id, new label and, for the
+              first time, its own fader and meter. The id must not change: cables
+              persist as `{ from: jackId, to: jackId }`, so renaming it would
+              orphan every cable ever patched to it (see IO_JACK_IDS). */}
           <div className={styles.ioChGrid}>
-            {[1, 2, 3, 4].map((ch, i) => (
-              <div key={ch} className={styles.ioChCol}>
+            {IO_JACK_IDS.map((jackId, i) => (
+              <div key={jackId} className={styles.ioChCol}>
                 <Led getValue={getChLevels?.[i] ?? ZERO_GETTER} color="green" />
-                <MoogKnob
-                  label={`CH ${ch}`}
-                  size="sm"
-                  value={chVols[i]}
+                <MoogFader
+                  label={`${i + 1}`}
+                  value={chVols[i] ?? 0.8}
                   onChange={v => handleChVol(i, v)}
                   defaultValue={0.8}
+                  title={`Channel ${i + 1} level — drag up / down, double-click to reset`}
                 />
-                <Jack id={`io-in${ch}`} label={`IN ${ch}`} />
+                <Jack id={jackId} label={`IN ${i + 1}`} />
               </div>
             ))}
-            <div className={styles.ioChCol}>
-              <div className={styles.ioChColSpacer} />
-              <Jack id="io-in" label="IN ✦" />
-            </div>
           </div>
         </div>
       </div>
@@ -1280,29 +1489,265 @@ function IoModule({ isPowered, onPower, onParamUpdate, getOscData, getLedValue, 
 
 // ──────────── Musical CV Quantizer ────────────
 
-const SCALE_KEYS   = ['CHR', 'MAJ', 'MIN', 'PMAJ', 'PMIN'];
-const SCALE_LABELS = { CHR: 'CHROMATIC', MAJ: 'MAJOR', MIN: 'MINOR', PMAJ: 'PENT MAJ', PMIN: 'PENT MIN' };
+// Scale presets, ordered so the drag chip walks through neighbouring sounds:
+// chromatic → the seven-note modes brightest-to-darkest → the gapped scales.
+// Mirrors SCALE_DEFS in useMoogAudio.js — a key here must exist there.
+const SCALE_KEYS   = ['CHR', 'LYD', 'MAJ', 'MIX', 'DOR', 'MIN', 'PHR', 'LOC', 'HMIN',
+                      'PMAJ', 'PMIN', 'BLUES', 'WHOLE'];
+const SCALE_LABELS = {
+  CHR: 'CHROMATIC', LYD: 'LYDIAN',  MAJ: 'MAJOR',    MIX: 'MIXOLYD',
+  DOR: 'DORIAN',    MIN: 'MINOR',   PHR: 'PHRYGIAN', LOC: 'LOCRIAN',
+  HMIN: 'HARM MIN',
+  PMAJ: 'PENT MAJ', PMIN: 'PENT MIN', BLUES: 'BLUES',   WHOLE: 'WHOLE',
+  CUST: 'CUSTOM',   // only for a set no preset can name — see identifyScale
+};
+// Semitone offsets from root. Duplicated from the engine's SCALE_DEFS because the
+// panel needs them to seed the note lights; the engine stays the authority for the
+// audio (it sanitises whatever the panel sends).
+const SCALE_INTERVALS = {
+  CHR:  [0,1,2,3,4,5,6,7,8,9,10,11],
+  LYD:  [0,2,4,6,7,9,11],
+  MAJ:  [0,2,4,5,7,9,11],
+  MIX:  [0,2,4,5,7,9,10],
+  DOR:  [0,2,3,5,7,9,10],
+  MIN:  [0,2,3,5,7,8,10],
+  PHR:  [0,1,3,5,7,8,10],
+  LOC:  [0,1,3,5,6,8,10],
+  HMIN: [0,2,3,5,7,8,11],
+  PMAJ: [0,2,4,7,9],
+  PMIN: [0,3,5,7,10],
+  BLUES:[0,3,5,6,7,10],
+  WHOLE:[0,2,4,6,8,10],
+};
+// mask[offset] = is that semitone (relative to ROOT) in the scale.
+// Offsets, not absolute notes, so dragging ROOT transposes the whole pattern —
+// which is what "my scale, moved" means, and keeps presets and custom sets
+// behaving identically under ROOT.
+const maskFromScale = (key) => {
+  const m = Array(12).fill(false);
+  (SCALE_INTERVALS[key] ?? SCALE_INTERVALS.MAJ).forEach(s => { m[s] = true; });
+  return m;
+};
+const intervalsFromMask = (mask) =>
+  mask.reduce((acc, on, i) => (on ? (acc.push(i), acc) : acc), []);
+
+// Re-express the SAME absolute notes relative to a different root.
+// newMask[o] = mask[o + (newRoot − oldRoot)] — the set on the keyboard does not move,
+// only the offset it is measured from. The audio is therefore untouched: the worklet
+// allows pitch classes (root + interval) mod 12, and this preserves that set exactly.
+const rebaseMask = (mask, oldRoot, newRoot) => {
+  const shift = ((newRoot - oldRoot) % 12 + 12) % 12;
+  return Array.from({ length: 12 }, (_, o) => mask[(o + shift) % 12]);
+};
+
+// Preference order for NAMING a set of notes. Deliberately NOT SCALE_KEYS (which is
+// the chip's drag order, arranged brightest→darkest): here the names a musician
+// reaches for first come first, so an ambiguous set gets the least surprising label.
+const SCALE_ID_ORDER = ['MAJ', 'MIN', 'PMAJ', 'PMIN', 'BLUES', 'HMIN',
+                        'DOR', 'MIX', 'LYD', 'PHR', 'LOC', 'WHOLE', 'CHR'];
+
+const sameIntervals = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+// Name a hand-picked set of notes (Phase 99) → { root, key } | null.
+//
+// The hard part is that a set of notes is genuinely several scales AT ONCE — the
+// white keys are C major *and* D dorian *and* A minor, and G lydian is the very
+// same seven notes as D major. Nothing in the note set alone picks between them.
+//
+// ROOT is what picks. So the note set is tested against the user's CURRENT root
+// first, and only if no preset explains it there do we go looking at other roots —
+// which is what makes "set ROOT to G, light up lydian-from-G, read LYDIAN" work
+// while the identical notes at ROOT D read MAJOR. Both are true; the root says
+// which one is meant.
+//
+// lockRoot: a cable in TRP owns the root, so identification may not move it.
+function identifyScale(mask, root, lockRoot = false) {
+  const iv = intervalsFromMask(mask);
+  for (const key of SCALE_ID_ORDER)
+    if (SCALE_INTERVALS[key] && sameIntervals(iv, SCALE_INTERVALS[key])) return { root, key };
+  if (lockRoot) return null;
+  for (const key of SCALE_ID_ORDER) {
+    const target = SCALE_INTERVALS[key];
+    if (!target || target.length !== iv.length) continue;   // cheap reject
+    for (let r = 0; r < 12; r++) {
+      if (r === root) continue;                             // already tried, above
+      if (sameIntervals(intervalsFromMask(rebaseMask(mask, root, r)), target))
+        return { root: r, key };
+    }
+  }
+  return null;   // genuinely unnameable — the chip says CUSTOM
+}
+
 const ROOT_NAMES   = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const ROOT_CLASSES = ROOT_NAMES.map((_, i) => i);   // 0–11, the drag-chip value list
 // true = chromatic black key (accidental) — used for LED coloring
 const IS_BLACK_KEY = [false,true,false,true,false,false,true,false,true,false,true,false];
 const OCT_STEPS    = [-3, -2, -1, 0, 1, 2, 3];
+const QNT_GLIDE_MAX_SEC = 1.5;   // knob 0..1 → seconds, matching the 960's GLIDE
+// Snap direction (Phase 100). Values are the worklet's SNAP_* codes, so the chip's
+// value IS what gets posted — no lookup table to drift.
+const SNAP_MODES  = [0, 1, 2];
+const SNAP_LABELS = { 0: 'NEAR', 1: 'UP', 2: 'DOWN' };
 
-// onParamUpdate({ scale, root, octShift, bypass }) — sends config to the AudioWorklet.
-// onSetCallback(fn|null)   — registers/deregisters the note-class LED callback.
-// getTransposeData()       — returns Float32Array from the TRANSPOSE CV analyser.
-//                            avgAbsValue > 10 → cable connected; value → note class.
-//                            When active, overrides the ROOT knob in the worklet.
-// chordMapRef              — React ref owned by MoogShell; points to the chord type span
-//                            in the EXT row. The chord callback writes the type label here.
+// Every reading each QNT chip can display, so ChipValue can size its box to the
+// widest one and then never move (Phase 101). Derived from the label tables rather
+// than retyped — rewording a label or adding a preset must not be able to leave a
+// chip too narrow for its own text.
+const octText = (n) => (n > 0 ? `+${n}` : String(n));
+const SCALE_VALUE_TEXTS = [...new Set([...Object.values(SCALE_LABELS), 'CHORD'])];
+const OCT_VALUE_TEXTS   = OCT_STEPS.map(octText);
+const SNAP_VALUE_TEXTS  = SNAP_MODES.map(m => SNAP_LABELS[m]);
+const LEARN_VALUE_TEXTS = ['OFF', 'PLAY…'];
+
+// ── QNT scale keyboard geometry (Phase 97) ──
+// One octave laid out as a real keyboard. Same construction as the 953
+// (`KeyboardModule.jsx`) — black-key lefts are DERIVED as `nextWhiteIdx × WW − BW/2`
+// rather than hand-placed — and the same ~0.6 width / ~0.64 height ratios, so the
+// two keyboards in the rack read as the same instrument at two sizes. Fixed px, like
+// every other module: the camera scales the whole cabinet, panels don't reflow.
+const QNT_WW = 48;   // white key width
+const QNT_BW = 28;   // black key width
+const QNT_WH = 64;   // white key height
+const QNT_BH = 40;   // black key height
+const QNT_BLACK_NEXT_WHITE = [null, 1, null, 2, null, null, 4, null, 5, null, 6, null];
+const QNT_KEYS = ROOT_NAMES.map((name, semi) => {
+  const nextWhite = QNT_BLACK_NEXT_WHITE[semi];
+  const isBlack   = nextWhite !== null;
+  return {
+    semi, name, isBlack,
+    left: isBlack
+      ? nextWhite * QNT_WW - QNT_BW / 2
+      : ROOT_NAMES.slice(0, semi).filter((_, s) => QNT_BLACK_NEXT_WHITE[s] === null).length * QNT_WW,
+  };
+});
+const QNT_KB_W = 7 * QNT_WW;
+
+// onParamUpdate({ scale, root, octShift }) — sends config to the AudioWorklet.
+// onSetCallback(fn|null)      — registers/deregisters the note-class LED callback.
+// onSetChordLabelCb(fn|null)  — registers this instance's EXT chord-name label
+//                               callback. Fired by whichever chord sequencer owns
+//                               this quantizer's TRP; (null, null) means clear.
+// getTransposeData()          — returns Float32Array from the TRANSPOSE CV analyser.
+//                               avgAbsValue > 10 → cable connected; value → note class.
+//                               When active, overrides the ROOT knob in the worklet.
 // LED array is 12 DOM nodes mutated directly (Zero-Re-render Rule).
-function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, getTransposeData, chordMapRef }) {
+function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, onSetChordLabelCb,
+                           onGlideChange, onLearnChange, onSetLearnCb, getTransposeData }) {
   const p = number === 1 ? 'qnt' : `qnt${number}`; // jack prefix = engine instance id
   const saved = useSavedSettings(p);
   const [scale,    setScale]    = useState(saved.scale    ?? 'MAJ');
   const [root,     setRoot]     = useState(saved.root     ?? 0);   // 0 = C
   const [octShift, setOctShift] = useState(saved.octShift ?? 0);   // −3 to +3 octaves
-  const [bypass,   setBypass]   = useState(saved.bypass   ?? false);
-  useModulePersist(p, { scale, root, octShift, bypass });
+  const [glide,    setGlide]    = useState(saved.glide    ?? 0);   // seconds
+  const [snapMode, setSnapMode] = useState(saved.snapMode ?? 0);   // 0 near / 1 up / 2 down
+  // The 12 note lights are the scale (Phase 96): SCALE is a preset that SEEDS this,
+  // and clicking any light edits it and flips the chip to CUSTOM. Saved racks from
+  // before this existed carry only `scale`, so the preset reseeds the mask — which
+  // is also why the seed is a lazy initialiser and not an effect (an effect would
+  // stomp a restored custom mask on first paint).
+  const [mask, setMask] = useState(() =>
+    Array.isArray(saved.mask) && saved.mask.length === 12
+      ? saved.mask.map(Boolean)
+      : maskFromScale(saved.scale ?? 'MAJ'));
+  // BYPASS was removed in Phase 95. It shipped in Phase 22 purely as a patching
+  // aid ("confirm cables without quantizing") and never carried a fix; the two
+  // musical uses it later picked up — a smooth LFO slide, and returning a
+  // qnt-patched FREQ knob to continuous — are both just "don't route through the
+  // quantizer", which is one cable pull. `saved.bypass` may still sit in old
+  // localStorage racks; it is ignored, which is the intended migration.
+  // LEARN is deliberately NOT persisted — it is a momentary gesture, and a rack
+  // restored mid-learn would silently eat the first notes you played.
+  useModulePersist(p, { scale, root, octShift, glide, mask, snapMode });
+
+  // A chord sequencer patched into TRP owns root AND scale while it is connected
+  // ({ root, intervals } | null) — see the chord-label effect below.
+  const [chordOverride, setChordOverride] = useState(null);
+  // ANY cable in TRP owns the root (a 960's pitch out, not just a chord seq).
+  // null = no cable, so the knob's root applies. Written by the TRP rAF below.
+  const [extRoot, setExtRoot] = useState(null);
+
+  // Inline ref mirrors (the App.js mappingsRef pattern). The SCALE LEARN callback
+  // is registered once with the engine, so it cannot close over a render's `mask`
+  // or `root` — it reads them here instead, and they are declared above every
+  // consumer so the read order matches the file order.
+  const maskRef     = useRef(mask); maskRef.current = mask;
+  const rootLiveRef = useRef(root); rootLiveRef.current = root;
+
+  // Preset → lights. Only on a real preset pick; landing on CUST means the lights
+  // are already the truth and must not be overwritten.
+  const pickScale = (key) => {
+    setScale(key);
+    setMask(maskFromScale(key));
+  };
+
+  // Click a key to add/remove that note. Two rules:
+  //   · the last lit note cannot be turned off — an empty scale quantizes to
+  //     nothing (both snap implementations fall through to "nearest chromatic"),
+  //     which looks broken rather than useful. One note left is legitimate and
+  //     musical: every input then snaps to octaves of it.
+  //   · no edits while a chord seq owns the scale — the edit would be overwritten
+  //     within a frame by the engine's override rAF, so accepting it would be a lie.
+  const toggleNote = (offset) => {
+    if (chordOverride) return;
+    if (mask[offset] && mask.filter(Boolean).length === 1) return;
+    const next = [...mask];
+    next[offset] = !next[offset];
+    commitMask(next);
+  };
+
+  // Name what the user just built and show it, instead of giving up with CUSTOM
+  // (Phase 99). Identification runs HERE rather than in an effect watching `mask`:
+  // a successful identification can move ROOT, which rewrites the mask, which would
+  // re-trigger that effect — a loop. One handler, one decision, one render.
+  //
+  // A cable in TRP owns the root, so identification may not move it there; the set
+  // is then either nameable at the current root or it is CUSTOM.
+  const commitMask = (nextMask) => {
+    const r = rootLiveRef.current;
+    const id = identifyScale(nextMask, r, transposeActiveRef.current);
+    if (!id) { setMask(nextMask); setScale('CUST'); return; }
+    setScale(id.key);
+    if (id.root === r) { setMask(nextMask); return; }
+    // Same notes, measured from a root that names them. rebaseMask keeps the
+    // absolute set identical, so this is a relabelling — the audio does not change.
+    setRoot(id.root);
+    setMask(rebaseMask(nextMask, r, id.root));
+  };
+  // The learn callback is registered once, so it cannot close over this render's
+  // commitMask — it reaches the current one through this ref.
+  const commitMaskRef = useRef(commitMask); commitMaskRef.current = commitMask;
+
+  const handleGlideKnob = (v) => setGlide(v * QNT_GLIDE_MAX_SEC);
+  useEffect(() => { onGlideChange?.(glide); }, [glide, onGlideChange]);
+
+  // ── SCALE LEARN (Phase 100) ──
+  // Arm, play notes on the 953 / QWERTY / MIDI, disarm. The FIRST note played
+  // clears the scale and becomes it, so you build the set you played rather than
+  // adding to whatever was there — `learnFreshRef` is that one-shot latch.
+  const [learning, setLearning] = useState(false);
+  const learnFreshRef = useRef(true);
+
+  const toggleLearn = () => {
+    const next = !learning;
+    setLearning(next);
+    if (next) learnFreshRef.current = true;
+    onLearnChange?.(next);
+  };
+  // Disarm on unmount, or the engine keeps feeding a dead panel.
+  useEffect(() => () => onLearnChange?.(false), [onLearnChange]);
+
+  useEffect(() => {
+    if (!onSetLearnCb) return;
+    onSetLearnCb((pitchClass) => {
+      const r = rootLiveRef.current;
+      const offset = ((pitchClass - r) % 12 + 12) % 12;
+      const next = learnFreshRef.current ? Array(12).fill(false) : [...maskRef.current];
+      learnFreshRef.current = false;
+      next[offset] = true;
+      commitMaskRef.current(next);
+    });
+    return () => onSetLearnCb(null);
+  }, [onSetLearnCb]);
 
   const ledRefs    = useRef([]);   // 12 LED DOM elements
   const activeLed  = useRef(-1);   // currently lit LED index
@@ -1316,19 +1761,50 @@ function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, getTranspos
   const extLedRef            = useRef(null);
   const extRootRef           = useRef(null);  // EXT ROOT note name text
   const extRowRef            = useRef(null);  // EXT status row (show/hide)
+  const chordMapRef          = useRef(null);  // EXT chord-quality text (own it, Phase 95)
+  const rootChipRef          = useRef(null);  // ROOT chip — glows while EXT overrides it
 
   // Keep rootRef in sync with knob state (safe for rAF closure reads)
   useEffect(() => { rootRef.current = root; }, [root]);
 
   // Send worklet params. When EXT transpose is active, skip root so the rAF loop owns it.
+  // The intervals go over as an ARRAY, not a preset key (Phase 96) — the lights can
+  // express scales no preset names, and the engine sanitises whatever arrives. `scale`
+  // is not in the deps: it is a label for the mask, and every preset pick sets both,
+  // so sending on `mask` alone covers presets and custom edits with no double-send.
   useEffect(() => {
     if (!onParamUpdate) return;
+    const intervals = intervalsFromMask(mask);
     if (transposeActiveRef.current) {
-      onParamUpdate({ scale, octShift, bypass });
+      onParamUpdate({ scale: intervals, octShift, snapMode });
     } else {
-      onParamUpdate({ scale, root, octShift, bypass });
+      onParamUpdate({ scale: intervals, root, octShift, snapMode });
     }
-  }, [scale, root, octShift, bypass, onParamUpdate]);
+  }, [mask, root, octShift, snapMode, onParamUpdate]);
+
+  // EXT chord takeover (Phase 95, extended Phase 96). Owned by THIS quantizer and
+  // fired by whichever chord sequencer holds its TRP override; (null, null) clears.
+  //
+  // It carries the chord's INTERVALS as well as its name, because since Phase 96
+  // the note lights claim to show the scale — and while a chord seq is patched the
+  // chord owns the scale, so lighting the panel's own mask would be a lie. The
+  // lights render the chord instead, and the SCALE chip glows to say so. This is
+  // React state, not a DOM write: it changes once per chord (a bar or more), which
+  // is nowhere near the rAF path the Zero-Re-render Rule is about.
+  useEffect(() => {
+    if (!onSetChordLabelCb) return;
+    onSetChordLabelCb((rootClass, chordType, intervals) => {
+      if (chordMapRef.current) {
+        chordMapRef.current.textContent =
+          chordType == null ? '' : (CHORD_TYPE_LABELS[chordType] ?? chordType);
+      }
+      setChordOverride(
+        chordType == null || !Array.isArray(intervals)
+          ? null
+          : { root: rootClass, intervals });
+    });
+    return () => onSetChordLabelCb(null);
+  }, [onSetChordLabelCb]);
 
   // rAF loop: reads TRANSPOSE CV analyser, derives note class, overrides worklet root.
   // avgAbsValue of waveform samples = DC level = Hz from the patched chordSeqPitchOut.
@@ -1351,11 +1827,14 @@ function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, getTranspos
         // Cable removed — restore knob root, hide EXT row
         transposeActiveRef.current = false;
         lastExtNoteClassRef.current = -1;
+        setExtRoot(null);           // keyboard goes back to the knob's root
         if (extRowRef.current)  extRowRef.current.style.display  = 'none';
         if (extLedRef.current) {
           extLedRef.current.style.background = 'rgba(93,202,165,0.12)';
           extLedRef.current.style.boxShadow  = 'none';
         }
+        // The ROOT chip is the live control again — stop glowing.
+        rootChipRef.current?.classList.remove(styles.chipOverridden);
         onParamUpdate?.({ root: rootRef.current });
       }
 
@@ -1367,6 +1846,15 @@ function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, getTranspos
           extLedRef.current.style.background = '#5DCAA5';
           extLedRef.current.style.boxShadow  = '0 0 4px #5DCAA5';
         }
+        // A TRP cable outranks the ROOT chip, so the chip's number is no longer
+        // what the quantizer is using. Same mint glow the VCO FREQ knob takes in
+        // knob-stepper mode, same meaning: "this control is being overridden"
+        // (Phase 95). Until now the chip silently lied.
+        rootChipRef.current?.classList.add(styles.chipOverridden);
+        // Blank any chord quality from a previous patch. Only a chord seq that
+        // actually owns this quantizer refills it (engine fires the label cb on
+        // connect), so a 960 patched to TRP shows a root with no chord name.
+        if (chordMapRef.current) chordMapRef.current.textContent = '';
       }
 
       if (isActive) {
@@ -1376,12 +1864,50 @@ function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, getTranspos
           lastExtNoteClassRef.current = noteClass;
           onParamUpdate?.({ root: noteClass });
           if (extRootRef.current) extRootRef.current.textContent = ROOT_NAMES[noteClass];
+          // Keep the on-screen keyboard on the root the quantizer is ACTUALLY
+          // using (Phase 100). This was the bug: a chord seq in TRP set
+          // `chordOverride` and the keyboard followed it, but a 960 in TRP set
+          // only `transposeActiveRef`, so the keyboard kept drawing the scale
+          // from the KNOB's root while the audio used the cable's — the lit notes
+          // and the notes you heard disagreed. Delta-checked, so this is one
+          // setState per note change, not per frame.
+          setExtRoot(noteClass);
         }
       }
     };
     tick();
     return () => cancelAnimationFrame(rafId);
   }, [getTransposeData, onParamUpdate]);
+
+  // Release whichever key is currently shown as sounding. Shared by the "new note"
+  // path and the cable-pulled reset below.
+  //
+  // CLEARS the inline styles rather than writing a resting colour (Phase 96). The
+  // resting look has four cases — white/black × in-scale/out — and it is React that
+  // knows which, via the class list. Writing a hardcoded colour here would repaint
+  // every released key as an out-of-scale white one.
+  const dimActiveLed = () => {
+    const i = activeLed.current;
+    const el = i >= 0 ? ledRefs.current[i] : null;
+    if (!el) return;
+    el.style.background  = '';
+    el.style.boxShadow   = '';
+    el.style.borderColor = '';   // litKeyStyle sets it, so the release must clear it
+  };
+
+  // The note SOUNDING right now — the segment driven to full brightness, with the
+  // bloom a real phosphor display throws past its own edges (Phase 98). One value
+  // serves white and black keys: on a monochrome screen a fully-lit segment looks
+  // the same whichever shape it is. Inline, because this is the LED callback's
+  // DOM-mutation path (Zero-Re-render Rule).
+  const litKeyStyle = (el) => {
+    el.style.background  = 'rgba(151, 240, 211, 0.93)';
+    el.style.borderColor = '#d6fff1';
+    el.style.boxShadow   =
+      'inset 0 0 7px rgba(232,255,248,0.55), '
+      + '0 0 11px rgba(93,202,165,0.9), '
+      + '0 0 22px rgba(93,202,165,0.45)';
+  };
 
   useEffect(() => {
     // Callback signature: (noteClass: 0–11 | null, midiNote: int | null, hasSignal: bool | undefined)
@@ -1394,24 +1920,25 @@ function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, getTranspos
         inLedRef.current.style.boxShadow  = hasSignal
           ? '0 0 4px #5DCAA5' : 'none';
       }
+      // Cable pulled — clear the readout with it (Phase 95). Previously only the
+      // IN LED went dark: the note LED stayed lit and the Hz text kept showing a
+      // note nothing was playing, forever. The worklet resets its own last-note
+      // memory on the same transition, so re-patching the SAME note re-lights it
+      // instead of being swallowed by the delta check.
+      if (hasSignal === false) {
+        dimActiveLed();
+        activeLed.current = -1;
+        if (displayRef.current) displayRef.current.textContent = '--';
+      }
       if (noteClass === null) return; // signal-state-only — nothing else to update
 
-      // Dim the previously active note LED
-      if (activeLed.current >= 0 && ledRefs.current[activeLed.current]) {
-        const prev = ledRefs.current[activeLed.current];
-        prev.style.background = IS_BLACK_KEY[activeLed.current]
-          ? 'rgba(93,202,165,0.07)'
-          : 'rgba(93,202,165,0.12)';
-        prev.style.boxShadow = 'none';
-      }
-      // Light the new note LED
+      dimActiveLed();
+      // Press the key that is now sounding.
       if (noteClass >= 0 && noteClass < 12 && ledRefs.current[noteClass]) {
-        const el = ledRefs.current[noteClass];
-        el.style.background = '#5DCAA5';
-        el.style.boxShadow  = '0 0 5px #5DCAA5, 0 0 2px rgba(93,202,165,0.9)';
+        litKeyStyle(ledRefs.current[noteClass]);
         activeLed.current = noteClass;
       }
-      // Update Hz/note display. In BYPASS mode the display reflects the raw input pitch.
+      // Update Hz/note display.
       if (displayRef.current && midiNote !== undefined) {
         const hz     = (440 * Math.pow(2, (midiNote - 69) / 12)).toFixed(1);
         const octave = Math.floor(midiNote / 12) - 1;
@@ -1420,15 +1947,6 @@ function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, getTranspos
     });
     return () => onSetCallback?.(null);
   }, [onSetCallback]);
-
-  const cycleScale  = () =>
-    setScale(prev => SCALE_KEYS[(SCALE_KEYS.indexOf(prev) + 1) % SCALE_KEYS.length]);
-  const cycleRoot   = () =>
-    setRoot(prev => (prev + 1) % 12);
-  const cycleOct    = () =>
-    setOctShift(prev => OCT_STEPS[(OCT_STEPS.indexOf(prev) + 1) % OCT_STEPS.length]);
-  const toggleBypass = () =>
-    setBypass(prev => !prev);
 
   return (
     <div className={styles.module}>
@@ -1443,17 +1961,72 @@ function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, getTranspos
           </div>
         </div>
         <div className={styles.plateBody}>
-          {/* 12-LED chromatic display — one per semitone, lit on note output */}
-          <div className={styles.qntLeds}>
-            {ROOT_NAMES.map((name, i) => (
-              <div key={i} className={styles.qntLedGroup}>
+          {/* 12 note lights — one per semitone. They do two jobs (Phase 96):
+              they SHOW which note is playing (bright, written inline by the
+              callback) and they ARE the scale (medium = in, dark = out, React
+              class). Click one to add or remove that note.
+
+              The lights are absolute note names but the mask is stored as
+              offsets FROM ROOT, so both directions convert here — that is what
+              makes dragging ROOT transpose the pattern instead of scrambling it. */}
+          {/* Scale display (Phase 98) — a phosphor SCREEN in a bezel, not a set of
+              physical keys. The rack's two existing displays define the language:
+              the I/O oscilloscope (green phosphor bed, graticule, scanlines) and the
+              Aura OLED (chrome bezel, recessed glass, studio-lamp sheen). This is
+              both, drawing a keyboard.
+
+              Geometry is still the 953's (Phase 97): keys absolutely positioned from
+              the derived table, black keys on a higher z-index so they overlap the
+              whites they sit between and win the click. Ordering is by SEMITONE so
+              `ledRefs` indices stay chromatic for the LED callback — stacking is the
+              z-index's job, not the DOM order's.
+
+              What changed is the material. Keys are now drawn ON a display: dim
+              phosphor outlines when out of scale, filled phosphor when in, and the
+              PLAYING note blooms — the inline write from the LED callback. */}
+          <div className={styles.qntScreen}>
+          <div
+            className={styles.qntKeyboard}
+            style={{ width: QNT_KB_W, height: QNT_WH }}
+          >
+            {QNT_KEYS.map(({ semi, name, isBlack, left }) => {
+              // Whatever is driving the quantizer's root drives the display:
+              // a chord seq in TRP (which owns the scale too), then any other TRP
+              // cable, then the knob. Before Phase 100 the middle case was missing
+              // and a 960 in TRP left the keyboard lighting the wrong notes.
+              const litRoot = chordOverride ? chordOverride.root : (extRoot ?? root);
+              const offset  = ((semi - litRoot) % 12 + 12) % 12;
+              const inScale = chordOverride
+                ? chordOverride.intervals.includes(offset)
+                : mask[offset];
+              return (
                 <div
-                  ref={el => { ledRefs.current[i] = el; }}
-                  className={`${styles.qntLed} ${IS_BLACK_KEY[i] ? styles.qntLedBlack : ''}`}
-                />
-                <span className={styles.qntLedLabel}>{name}</span>
-              </div>
-            ))}
+                  key={semi}
+                  ref={el => { ledRefs.current[semi] = el; }}
+                  className={`${styles.qntKey}`
+                    + ` ${isBlack ? styles.qntKeyBlack : styles.qntKeyWhite}`
+                    + `${inScale ? ' ' + styles.qntKeyInScale : ''}`
+                    + `${offset === 0 ? ' ' + styles.qntKeyRoot : ''}`
+                    + `${chordOverride ? ' ' + styles.qntKeyLocked : ''}`}
+                  style={{
+                    left,
+                    width:  isBlack ? QNT_BW : QNT_WW,
+                    height: isBlack ? QNT_BH : QNT_WH,
+                  }}
+                  onMouseDown={e => e.stopPropagation()}
+                  onClick={() => toggleNote(offset)}
+                  title={chordOverride
+                    ? `${name} — the chord sequencer in TRP is choosing the notes`
+                    : `${name} — click to ${inScale ? 'remove from' : 'add to'} the scale`}
+                >
+                  {/* Only white keys are labelled — a black key is too narrow, and
+                      its identity is unambiguous from the two whites it sits between
+                      (the 953 labels even more sparsely: C keys only). */}
+                  {!isBlack && <span className={styles.qntKeyLabel}>{name}</span>}
+                </div>
+              );
+            })}
+          </div>
           </div>
           {/* IN/OUT signal monitor row */}
           <div className={styles.qntMonitorRow}>
@@ -1471,30 +2044,87 @@ function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, getTranspos
             <span ref={extRootRef} className={styles.qntExtDisplay} />
             <span ref={chordMapRef} className={styles.qntExtChordType} />
           </div>
-          <div className={styles.selectorRow}>
-            <div className={styles.selectorGroup} onClick={cycleScale} title="Click to cycle scale">
+          {/* Drag-scrub chips (Phase 92) — ROOT wraps (pitch class is circular, and
+              clamping would make B→C a 12-step crawl back); SCALE and OCT clamp so
+              their ends are felt. The BYPASS row that used to sit below is gone
+              (Phase 95) — see the note on the useModulePersist call above. */}
+          {/* TWO FIXED ROWS (Phase 101). These were one wrapping row, so any control
+              whose text changed width — LEARN going OFF → PLAY…, SCALE going MAJOR →
+              CHROMATIC — re-flowed the line and made the others jump to a second row
+              and back. Both halves of the cure are needed: the rows are now explicit
+              and `nowrap`, and every chip is a fixed box via ChipValue. */}
+          <div className={`${styles.selectorRow} ${styles.qntSelectorRow}`}>
+            {/* Glows while a chord seq in TRP owns the scale — same indicator, same
+                meaning as the ROOT chip beside it (Phase 96). */}
+            <div
+              className={`${styles.selectorGroup}${chordOverride ? ' ' + styles.chipOverridden : ''}`}
+              {...dragChipProps({ values: SCALE_KEYS, current: scale, onChange: pickScale })}
+              title={chordOverride
+                ? 'A chord sequencer in TRP is choosing the scale. Unpatch TRP to use this.'
+                : 'Drag up / down to change scale — or click to step. Picking a preset resets the note lights; clicking a light makes it CUSTOM.'}
+            >
               <span className={styles.selectorLabel}>SCALE</span>
-              <span className={styles.selectorValue}>{SCALE_LABELS[scale]}</span>
+              {/* Sized against every reading it can take — the 13 presets plus
+                  CUSTOM and CHORD — so CHROMATIC sets the width permanently. */}
+              <ChipValue
+                all={SCALE_VALUE_TEXTS}
+                value={chordOverride ? 'CHORD' : (SCALE_LABELS[scale] ?? scale)}
+              />
             </div>
-            <div className={styles.selectorGroup} onClick={cycleRoot} title="Click to cycle root note">
+            <div
+              ref={rootChipRef}
+              className={styles.selectorGroup}
+              {...dragChipProps({ values: ROOT_CLASSES, current: root, onChange: setRoot, wrap: true })}
+              title="Drag up / down to change root note — or click to step. A cable in TRP overrides this (the chip glows)."
+            >
               <span className={styles.selectorLabel}>ROOT</span>
-              <span className={styles.selectorValue}>{ROOT_NAMES[root]}</span>
+              <ChipValue all={ROOT_NAMES} value={ROOT_NAMES[root]} />
             </div>
-            <div className={styles.selectorGroup} onClick={cycleOct} title="Click to shift output by ±1 octave">
-              <span className={styles.selectorLabel}>OCT</span>
-              <span className={styles.selectorValue}>{octShift > 0 ? `+${octShift}` : String(octShift)}</span>
-            </div>
-          </div>
-          <div className={styles.selectorRow}>
             <div
               className={styles.selectorGroup}
-              onClick={toggleBypass}
-              title="BYPASS: passes CV input directly to output — use to confirm cables without quantizing"
+              {...dragChipProps({ values: OCT_STEPS, current: octShift, onChange: setOctShift })}
+              title="Drag up / down to shift the output by octaves — or click to step"
             >
-              <span className={styles.selectorLabel}>BYPASS</span>
-              <span className={styles.selectorValue} style={{ color: bypass ? '#ff9040' : undefined }}>
-                {bypass ? 'ON' : 'OFF'}
-              </span>
+              <span className={styles.selectorLabel}>OCT</span>
+              <ChipValue all={OCT_VALUE_TEXTS} value={octText(octShift)} />
+            </div>
+            {/* GLIDE (Phase 96) — slides between the notes this quantizer picks.
+                Same 0–1.5 s range and knob size as the 960's, because it is the
+                same control in the same units. Sits with the pitch chips (Phase
+                102): a knob is a fixed size already, so it cannot re-flow the row. */}
+            <MoogKnob
+              label="GLIDE"
+              size="sm"
+              value={glide / QNT_GLIDE_MAX_SEC}
+              onChange={handleGlideKnob}
+              defaultValue={0}
+            />
+          </div>
+          <div className={`${styles.selectorRow} ${styles.qntSelectorRow}`}>
+            {/* SNAP direction (Phase 100) — NEAR rounds to the closest note; UP
+                and DOWN always resolve to the note above / below, so a rising
+                sweep climbs cleanly without ever overshooting. */}
+            <div
+              className={styles.selectorGroup}
+              {...dragChipProps({ values: SNAP_MODES, current: snapMode, onChange: setSnapMode })}
+              title="Drag up / down to change how a note is picked — NEAR (closest), UP (next note above), DOWN (next note below)"
+            >
+              <span className={styles.selectorLabel}>SNAP</span>
+              <ChipValue all={SNAP_VALUE_TEXTS} value={SNAP_LABELS[snapMode]} />
+            </div>
+            {/* SCALE LEARN (Phase 100) — arm, play the notes you want on the 953 /
+                QWERTY / MIDI, disarm. The first note clears the scale. */}
+            <div
+              className={`${styles.selectorGroup}${learning ? ' ' + styles.chipOverridden : ''}`}
+              onMouseDown={e => e.stopPropagation()}
+              onClick={toggleLearn}
+              style={{ cursor: 'pointer' }}
+              title={learning
+                ? 'Listening — play the notes you want, then click to finish'
+                : 'LEARN: click, then play the notes you want on the keyboard (or MIDI) to build the scale'}
+            >
+              <span className={styles.selectorLabel}>LEARN</span>
+              <ChipValue all={LEARN_VALUE_TEXTS} value={learning ? 'PLAY…' : 'OFF'} />
             </div>
           </div>
           <PlateDivider />
@@ -1502,6 +2132,9 @@ function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, getTranspos
             <Jack id={`${p}-cv-in`}        label="CV IN" />
             <Jack id={`${p}-cv-out`}       label="OUT" />
             <Jack id={`${p}-transpose-in`} label="TRP" />
+            {/* TRIG↑ (Phase 96) — a pulse on every NEW note, so an ENV can
+                re-articulate per step. Gate-domain, like every other ↑ jack. */}
+            <Jack id={`${p}-trig-out`}     label="TRIG↑" />
           </div>
         </div>
       </div>
@@ -1527,27 +2160,41 @@ const CHORD_TYPE_LABELS = {
 // rootClass cycles through the 12 chromatic notes; chordType selects the chord quality.
 // On step fire: chordseq-cv-out outputs root Hz AND chordSeqChordCallback syncs the quantizer.
 const ROOT_OCT_STEPS  = [-3, -2, -1, 0, 1, 2, 3];
+// Incoming CLK↓ pulses per chord change. 1/2/4/8 are the musically common ones;
+// 3 and 6 are there so a 3-bar or 6-bar phrase is expressible too.
+const CHORD_CLK_DIVS  = [1, 2, 3, 4, 6, 8];
 const ROOT_OCT_LABELS = { '-3': '-3', '-2': '-2', '-1': '-1', '0': '0', '1': '+1', '2': '+2', '3': '+3' };
 
-function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onSetCallback, onRootOctaveChange, onGlideChange }) {
+function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onClockDivChange, onSetCallback, onRootOctaveChange, onGlideChange }) {
   const p = number === 1 ? 'chordseq' : `chordseq${number}`; // jack prefix = engine instance id
   const saved = useSavedSettings(p);
   const [steps, setSteps] = useState(() => saved.steps ??
     Array.from({ length: 8 }, (_, i) => ({
       rootClass: [9, 9, 5, 5, 0, 0, 4, 4][i],
       chordType: ['CMIN','CMIN','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ'][i],
+      gate: true,
+      skip: false,
     }))
   );
   const [division,   setDivision]   = useState(saved.division   ?? '1m');
+  const [clockDiv,   setClockDiv]   = useState(saved.clockDiv   ?? 1);  // incoming CLK↓ pulses per chord
   const [rootOctave, setRootOctave] = useState(saved.rootOctave ?? 0);
   const [glide,      setGlide]      = useState(saved.glide      ?? 0); // glide time in seconds (0–1.5)
-  useModulePersist(p, { steps, division, rootOctave, glide });
+  useModulePersist(p, { steps, division, clockDiv, rootOctave, glide });
 
   const ledRefs     = useRef([]);
   const prevStepRef = useRef(-1);
 
+  // A cable on CLK↓ hands the timing to that pulse and stops the internal clock (the
+  // audio side keys off the same cable in connect()/disconnect()) — surfaced here the
+  // same cable-derived way as the 960's CLOCK chip and the LFO's SYNC chip.
+  const { cables }  = useMoogPatch();
+  const clkInJack   = `${p}-clk-in`;
+  const extClocked  = cables.some(c => c.toJackId === clkInJack || c.fromJackId === clkInJack);
+
   useEffect(() => { onStepsChange?.(steps); },             [steps,       onStepsChange]);
   useEffect(() => { onDivisionChange?.(division); },       [division,    onDivisionChange]);
+  useEffect(() => { onClockDivChange?.(clockDiv); },       [clockDiv,    onClockDivChange]);
   useEffect(() => { onRootOctaveChange?.(rootOctave); },   [rootOctave,  onRootOctaveChange]);
   useEffect(() => { onGlideChange?.(glide); },             [glide,       onGlideChange]);
 
@@ -1576,27 +2223,34 @@ function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onSetCall
     };
   }, [onSetCallback]);
 
-  const cycleDiv     = () =>
-    setDivision(prev => CHORD_DIVS[(CHORD_DIVS.indexOf(prev) + 1) % CHORD_DIVS.length]);
-  const cycleRootOct = () =>
-    setRootOctave(prev => ROOT_OCT_STEPS[(ROOT_OCT_STEPS.indexOf(prev) + 1) % ROOT_OCT_STEPS.length]);
-
-  const cycleRoot = (i) =>
+  // Per-step field writer — the drag chips call this on every mousemove, and an
+  // unchanged value returns the SAME array so React bails out of the re-render.
+  const setStepField = (i, field, value) =>
     setSteps(prev => {
+      if (prev[i][field] === value) return prev;
       const next = [...prev];
-      next[i] = { ...next[i], rootClass: (next[i].rootClass + 1) % 12 };
+      next[i] = { ...next[i], [field]: value };
       return next;
     });
 
-  const cycleType = (i) =>
+  // Step mode cycles PLAY → REST → SKIP, the 960's Phase 89 contract. REST advances the
+  // chord but fires no gate, so a progression can move underneath a sustained note
+  // without re-articulating it; SKIP leaves the cycle entirely, which is what makes a
+  // 3- or 7-chord progression possible.
+  const cycleStepMode = (i) =>
     setSteps(prev => {
       const next = [...prev];
-      next[i] = {
-        ...next[i],
-        chordType: CHORD_TYPES[(CHORD_TYPES.indexOf(next[i].chordType) + 1) % CHORD_TYPES.length],
-      };
+      const st = next[i];
+      if      (st.skip)          next[i] = { ...st, skip: false, gate: true };
+      else if (st.gate !== false) next[i] = { ...st, gate: false };
+      else                        next[i] = { ...st, skip: true };
       return next;
     });
+  const stepModeLabel = (st) =>
+    st.skip ? 'SKIPPED — removed from the progression, takes no time'
+  : st.gate !== false ? 'PLAYING — chord + gate'
+  : 'REST — chord advances, no gate fired';
+  const activeStepCount = steps.reduce((c, st) => c + (st.skip ? 0 : 1), 0);
 
   return (
     <div className={styles.module}>
@@ -1607,7 +2261,10 @@ function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onSetCall
           {number > 1 && <span className={styles.plateNum}>{number}</span>}
           <div className={styles.plateTitles}>
             <span className={styles.plateTitle}>CHORD</span>
-            <span className={styles.plateSub}>CHORD SEQUENCER · 8-STEP EDITOR</span>
+            <span className={styles.plateSub}>
+              CHORD SEQUENCER · {activeStepCount}-CHORD CYCLE
+              {activeStepCount !== steps.length && ` (${steps.length - activeStepCount} SKIPPED)`}
+            </span>
           </div>
         </div>
         <div className={styles.plateBody}>
@@ -1620,27 +2277,63 @@ function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onSetCall
                 />
                 <button
                   className={styles.chordSeqRoot}
-                  onClick={() => cycleRoot(i)}
-                  title="Click to cycle root note"
+                  {...dragChipProps({
+                    values: ROOT_CLASSES, current: step.rootClass, wrap: true,
+                    onChange: v => setStepField(i, 'rootClass', v) })}
+                  title="Drag up / down to change root note — or click to step"
                 >
                   {ROOT_NAMES[step.rootClass]}
                 </button>
                 <button
                   className={styles.chordSeqType}
-                  onClick={() => cycleType(i)}
-                  title="Click to cycle chord type"
+                  {...dragChipProps({
+                    values: CHORD_TYPES, current: step.chordType, wrap: true,
+                    onChange: v => setStepField(i, 'chordType', v) })}
+                  title="Drag up / down to change chord type — or click to step"
                 >
                   {CHORD_TYPE_LABELS[step.chordType]}
                 </button>
+                {/* Mode lamp — same three-state contract and colours as the 960's step
+                    switch: green lit = playing, dark = rest, red lit = skipped. */}
+                <button
+                  className={`${styles.seqGateBtn} ${
+                    step.skip ? styles.seqGateSkip : step.gate !== false ? styles.seqGateOn : ''}`}
+                  onClick={() => cycleStepMode(i)}
+                  title={`Chord ${i + 1}: ${stepModeLabel(step)}\nClick to cycle play → rest → skip`}
+                />
               </div>
             ))}
           </div>
           <div className={styles.selectorRow}>
-            <div className={styles.selectorGroup} onClick={cycleDiv} title="Click to cycle clock division">
+            {/* ONE chip, two meanings — which is the LFO's RATE-in-sync-mode pattern
+                (Phase 65). Unpatched it is a musical division off the master clock;
+                patched, the internal clock is stopped and the same chip divides the
+                INCOMING pulses instead, so with a 960's CYCLE↑ it reads as bars per
+                chord. Each mode keeps its own value, so patching and unpatching never
+                loses the other setting.
+
+                The LABEL does not change (Phase 70: "a real faceplate is silkscreened —
+                it never relabels itself"). The VALUE reports the mode: `1 BAR` free,
+                `÷2` clocked — the `÷` prefix is unmistakable. */}
+            <div
+              className={styles.selectorGroup}
+              {...dragChipProps(extClocked
+                ? { values: CHORD_CLK_DIVS, current: clockDiv, onChange: setClockDiv }
+                : { values: CHORD_DIVS,     current: division, onChange: setDivision })}
+              title={extClocked
+                ? 'Incoming CLK↓ pulses per chord change — with a 960 CYCLE↑ patched in, this is bars per chord. Drag or click.'
+                : 'Chord length off the master clock. Drag or click. (Patch a clock into CLK↓ to divide that instead.)'}
+            >
               <span className={styles.selectorLabel}>CLOCK DIV</span>
-              <span className={styles.selectorValue}>{CHORD_LABELS[division]}</span>
+              <span className={`${styles.selectorValue} ${styles.seqClockValue}`}>
+                {extClocked ? `÷${clockDiv}` : CHORD_LABELS[division]}
+              </span>
             </div>
-            <div className={styles.selectorGroup} onClick={cycleRootOct} title="Root note octave offset">
+            <div
+              className={styles.selectorGroup}
+              {...dragChipProps({ values: ROOT_OCT_STEPS, current: rootOctave, onChange: setRootOctave })}
+              title="Drag up / down to shift the root octave — or click to step"
+            >
               <span className={styles.selectorLabel}>ROOT OCT</span>
               <span className={styles.selectorValue}>{ROOT_OCT_LABELS[String(rootOctave)]}</span>
             </div>
@@ -1659,6 +2352,17 @@ function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onSetCall
             <Jack id={`${p}-root-out`} label="ROOT" />
             <Jack id={`${p}-3rd-out`}  label="3RD" />
             <Jack id={`${p}-5th-out`}  label="5TH" />
+            {/* 4th voice (Phase 91) — the 7th on a 7th chord, the octave on a triad.
+                Its value was always computed; without this jack the three 7th chord
+                types were audibly identical to their plain triads. */}
+            <Jack id={`${p}-7th-out`}  label="7TH" />
+            {/* Gate + clock (Phase 92). GATE↑ fires on every PLAY chord, so a chord
+                change can trigger an envelope directly instead of borrowing a 960's
+                gate. CLK↓ takes over the timing — patch a 960's CLK↑ here and the
+                progression advances in step with the sequencer, odd meters included. */}
+            <Jack id={`${p}-gate-out`} label="GATE" />
+            <Jack id={`${p}-clk-in`}   label="CLK↓" />
+            <Jack id={`${p}-clk-out`}  label="CLK↑" />
           </div>
         </div>
       </div>
@@ -1667,26 +2371,42 @@ function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onSetCall
 }
 
 // ──────────── 960 Sequential Controller ────────────
-// onStepsChange(steps[]) — pushes step data to the audio engine ref (no re-render path).
-// onTempoChange(bpm)     — ramps Tone.Transport.bpm.
-// onSetCallback(fn|null) — registers/deregisters the step-advance LED callback.
+// onStepsChange(steps[])    — pushes step data to the audio engine ref (no re-render path).
+// onDivisionChange(interval)— this instance's own clock division off the rack master clock.
+// onSetCallback(fn|null)    — registers/deregisters the step-advance LED callback.
+// There is deliberately NO tempo prop: the rack has one clock and the I/O panel owns it.
 // LEDs are driven by direct DOM classList mutation from inside Tone.Loop — zero React
 // state writes in the audio hot path, consistent with the Zero-Re-render Rule.
-function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, onGlideChange, number = 1 }) {
+// Ordered SLOWEST → FASTEST so the drag gesture reads the same as the VCO's RANGE
+// selector: up = "more" (a shorter division is more steps per bar), down = slower.
+const SEQ_DIVS   = ['1m', '2n', '4n', '4t', '8n', '8t', '16n'];
+const SEQ_DIV_LABELS = {
+  '16n': '1/16', '8t': '1/8T', '8n': '1/8', '4t': '1/4T',
+  '4n': '1/4', '2n': '1/2', '1m': '1 BAR',
+};
+function SequencerModule({ onStepsChange, onDivisionChange, onSetCallback, onGlideChange, number = 1 }) {
   const p = number === 1 ? 'seq' : `seq${number}`;
   const saved = useSavedSettings(p);
   const [steps, setSteps] = useState(() => saved.steps ??
-    Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true, prob: 1 }))
+    Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true, prob: 1, skip: false }))
   );
-  const [tempo, setTempoState] = useState(saved.tempo ?? 120);
+  const [division, setDivision] = useState(saved.division ?? '8n');
   const [glide, setGlide]       = useState(saved.glide ?? 0);
-  useModulePersist(p, { steps, tempo, glide });
+  useModulePersist(p, { steps, division, glide });
   const ledRefs    = useRef([]);
   const prevStepRef = useRef(-1);
 
-  useEffect(() => { onStepsChange?.(steps); }, [steps,  onStepsChange]);
-  useEffect(() => { onTempoChange?.(tempo);  }, [tempo,  onTempoChange]);
-  useEffect(() => { onGlideChange?.(glide);  }, [glide,  onGlideChange]);
+  // A cable on CLK↓ hands this sequencer's timing to that pulse and stops its internal
+  // clock (the audio side keys off the same cable in connect()/disconnect()). Surface it
+  // on the panel — same cable-derived pattern as the LFO's SYNC chip — or a stopped
+  // sequencer with a knob that no longer does anything reads as a dead module.
+  const { cables } = useMoogPatch();
+  const clkInJack  = `${p}-clk-in`;
+  const extClocked = cables.some(c => c.toJackId === clkInJack || c.fromJackId === clkInJack);
+
+  useEffect(() => { onStepsChange?.(steps); },      [steps,    onStepsChange]);
+  useEffect(() => { onDivisionChange?.(division); },[division, onDivisionChange]);
+  useEffect(() => { onGlideChange?.(glide);  },     [glide,    onGlideChange]);
 
   // Register DOM-mutation callback for LED animation.
   // The callback receives stepIndex (0–15) or -1 to clear all.
@@ -1720,10 +2440,30 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, onGlideC
       return next;
     });
 
-  // Map knob 0–1 to BPM 20–300
-  const handleTempoKnob = (v) => setTempoState(Math.round(20 + v * 280));
   // Map knob 0–1 to 0–1.5 s glide time
   const handleGlideKnob = (v) => setGlide(v * 1.5);
+
+  // Step mode cycles PLAY → REST → SKIP. Three states on the one button rather than a
+  // second per-step control: 16 columns have no room for another affordance, and this is
+  // how hardware step switches behave. REST holds the gate low but still occupies its
+  // slice of the bar; SKIP leaves the cycle entirely, shortening the sequence — skip
+  // 13–16 and the 960 is a 12-step / 3-4 sequencer.
+  const cycleStepMode = (i) =>
+    setSteps(prev => {
+      const next = [...prev];
+      const s = next[i];
+      if      (s.skip) next[i] = { ...s, skip: false, gate: true };  // SKIP → PLAY
+      else if (s.gate) next[i] = { ...s, gate: false };              // PLAY → REST
+      else             next[i] = { ...s, skip: true };               // REST → SKIP
+      return next;
+    });
+  const stepModeLabel = (s) =>
+    s.skip ? 'SKIPPED — removed from the cycle, takes no time (shortens the sequence)'
+  : s.gate ? 'PLAYING'
+           : 'REST — silent, but still occupies its step';
+  // Live count for the header readout: how many steps the cycle actually runs.
+  const activeStepCount = steps.reduce((n, s) => n + (s.skip ? 0 : 1), 0);
+
 
   return (
     <div className={styles.module}>
@@ -1734,32 +2474,44 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, onGlideC
           {number > 1 && <span className={styles.plateNum}>{number}</span>}
           <div className={styles.plateTitles}>
             <span className={styles.plateTitle}>960</span>
-            <span className={styles.plateSub}>SEQUENTIAL CONTROLLER · 8-STEP PROGRAMMABLE SEQUENCER</span>
+            {/* Subtitle carries the LIVE length, not a fixed "16-STEP": with skip, the
+                cycle length is the whole point and counting greyed columns by eye is
+                exactly what the user is trying to avoid. */}
+            <span className={styles.plateSub}>
+              SEQUENTIAL CONTROLLER · {activeStepCount}-STEP CYCLE
+              {activeStepCount !== steps.length && ` (${steps.length - activeStepCount} SKIPPED)`}
+            </span>
           </div>
         </div>
         <div className={styles.plateBody}>
           <div className={styles.seqLayout}>
 
-            {/* Left: tempo + glide knobs, BPM readout, patch jacks */}
+            {/* Left: GLIDE + CLOCK on one row, then the patch jacks. TEMPO used to live
+                here (one knob per 960, all writing the same Transport) — it is now the
+                single master-clock knob on the I/O panel. GLIDE takes the freed space at
+                lg, which also keeps this column's height matched to the step grid. */}
             <div className={styles.seqCtrl}>
               <div className={styles.knobRow}>
                 <MoogKnob
-                  label="TEMPO"
-                  size="lg"
-                  value={(tempo - 20) / 280}
-                  onChange={handleTempoKnob}
-                  defaultValue={(120 - 20) / 280}
-                />
-                <MoogKnob
                   label="GLIDE"
-                  size="sm"
+                  size="lg"
                   value={glide / 1.5}
                   onChange={handleGlideKnob}
                   defaultValue={0}
                 />
-              </div>
-              <div className={styles.seqBpmDisplay}>
-                <span className={styles.selectorValue}>{tempo}</span>
+                <div
+                  className={`${styles.selectorGroup} ${extClocked ? styles.selectorGroupIdle : ''}`}
+                  {...(extClocked ? {} : dragChipProps({
+                    values: SEQ_DIVS, current: division, onChange: setDivision }))}
+                  title={extClocked
+                    ? 'Driven by the cable patched into CLK↓ — the internal clock is stopped'
+                    : 'Drag up / down to change this sequencer’s clock division — or click to step'}
+                >
+                  <span className={styles.selectorLabel}>CLOCK</span>
+                  <span className={`${styles.selectorValue} ${styles.seqClockValue}`}>
+                    {extClocked ? 'EXT' : SEQ_DIV_LABELS[division]}
+                  </span>
+                </div>
               </div>
               <PlateDivider />
               <div className={styles.jackRow}>
@@ -1767,10 +2519,18 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, onGlideC
                 <Jack id={`${p}-gate-out`}  label="GATE" />
                 <Jack id={`${p}-clk-in`}    label="CLK↓" />
                 <Jack id={`${p}-clk-out`}   label="CLK↑" />
+                {/* CYCLE↑ (Phase 93) — one pulse per completed cycle rather than per
+                    step. Patch into a chord seq's CLK↓ to advance the progression once
+                    per bar of whatever meter this 960 is running; it tracks the step
+                    count automatically, so skipping steps changes the bar length and
+                    the chords follow without touching anything else. */}
+                <Jack id={`${p}-cycle-out`} label="CYCLE" />
               </div>
             </div>
 
-            {/* Right: 8 step columns */}
+            {/* Right: 16 step columns. Step state is carried entirely by the button lamp
+                — green lit = playing, dark = rest, red lit = skipped — so the column
+                itself is never dimmed and every step's knob stays fully legible. */}
             <div className={styles.seqSteps}>
               {steps.map((step, i) => (
                 <div key={i} className={styles.seqStep}>
@@ -1787,12 +2547,10 @@ function SequencerModule({ onStepsChange, onTempoChange, onSetCallback, onGlideC
                     defaultValue={0.5}
                   />
                   <button
-                    className={`${styles.seqGateBtn} ${step.gate ? styles.seqGateOn : ''}`}
-                    onClick={() => setSteps(prev => {
-                      const next = [...prev];
-                      next[i] = { ...next[i], gate: !next[i].gate };
-                      return next;
-                    })}
+                    className={`${styles.seqGateBtn} ${
+                      step.skip ? styles.seqGateSkip : step.gate ? styles.seqGateOn : ''}`}
+                    onClick={() => cycleStepMode(i)}
+                    title={`Step ${i + 1}: ${stepModeLabel(step)}\nClick to cycle play → rest → skip`}
                   />
                   <input
                     type="range"
@@ -2931,13 +3689,19 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
     seqSteps:   (steps) => audio.updateSeqStepsById(id, steps),
     seqStepCb:  (fn) => audio.setSeqStepCallbackById(id, fn),
     seqGlide:   (v) => audio.setSeqGlideById(id, v),
+    seqDiv:     (interval) => audio.setSeqDivisionById(id, interval),
     chordSteps:   (steps) => audio.updateChordSeqStepsById(id, steps),
     chordStepCb:  (fn) => audio.setChordSeqStepCallbackById(id, fn),
     chordDiv:     (interval) => audio.setChordSeqDivisionById(id, interval),
+    chordClkDiv:  (nDiv) => audio.setChordSeqClockDivById(id, nDiv),
     chordRootOct: (oct) => audio.setChordSeqRootOctaveById(id, oct),
     chordGlide:   (v) => audio.setChordSeqGlideById(id, v),
     vocData:      () => audio.getVocAnalyserData(id),
     qntCb:        (fn) => audio.setQuantizerCallbackById(id, fn),
+    qntChordLabelCb: (fn) => audio.setQuantizerChordLabelCallbackById(id, fn),
+    qntGlide:     (v) => audio.setQuantizerGlideById(id, v),
+    qntLearn:     (on) => audio.setQuantizerLearnById(id, on),
+    qntLearnCb:   (fn) => audio.setQuantizerLearnCallbackById(id, fn),
     qntTrp:       () => audio.getQntTransposeData(id),
     vowelData:    () => audio.getVowelAnalyserData(id),
     panL:         () => audio.getPanMeterData(id)?.l ?? 0,
@@ -2962,21 +3726,11 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
     });
   }, [onBusReady, audio.getMoogBusNode, audio.resetSequencers, audio.getIsPowered]);
 
-  // Chord map ref — DOM ref to the chord type span inside QuantizerModule's EXT row.
-  // The chord callback writes here directly (no React re-render).
-  const chordMapRef = useRef(null);
-
-  // Chord callback: fires on each chord sequencer step advance.
-  // 1. Syncs quantizer scale to chord intervals (chord-aware melody snapping).
-  // 2. Updates the chord type display in the quantizer's EXT row.
-  useEffect(() => {
-    audio.setChordSeqChordCallback((rootClass, chordType) => {
-      if (chordMapRef.current) {
-        chordMapRef.current.textContent = CHORD_TYPE_LABELS[chordType] ?? chordType;
-      }
-    });
-    return () => audio.setChordSeqChordCallback(null);
-  }, [audio.setChordSeqChordCallback]);
+  // The EXT chord-name label used to be wired from here: one shell-owned ref handed
+  // to quantizer #1, written by a callback bound to chord seq #1. Every QuantizerModule
+  // now owns its own span and registers its own label callback, which the engine fires
+  // through qntChordOverrideRef — the map that already knows which chord seq drives
+  // which quantizer (Phase 95).
 
   // Stable getValue closures — created once (audio.getMeterValue has empty-dep useCallback,
   // so its reference never changes). Passing pre-bound getters prevents Led's useEffect
@@ -3014,11 +3768,15 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
   const getVca1Level   = useCallback(() => audio.getMeterValue('vca'),    [audio.getMeterValue]);
   const getVca2Level   = useCallback(() => audio.getMeterValue('vca2'),   [audio.getMeterValue]);
   const getVca3Level   = useCallback(() => audio.getMeterValue('vca3'),   [audio.getMeterValue]);
-  const getMasterLevel = useCallback(() => audio.getMeterValue('master'), [audio.getMeterValue]);
-  const getIoCh1Level  = useCallback(() => audio.getMeterValue('ioCh1'),  [audio.getMeterValue]);
-  const getIoCh2Level  = useCallback(() => audio.getMeterValue('ioCh2'),  [audio.getMeterValue]);
-  const getIoCh3Level  = useCallback(() => audio.getMeterValue('ioCh3'),  [audio.getMeterValue]);
-  const getIoCh4Level  = useCallback(() => audio.getMeterValue('ioCh4'),  [audio.getMeterValue]);
+  // PEAK lamp reads TRUE sample peak, not the smoothed RMS meter (Phase 103) —
+  // and uncapped, so the Led's `clipAt` can tell "loud" from "clipping".
+  const getMasterLevel = useCallback(() => audio.getMasterPeak(), [audio.getMasterPeak]);
+  // One stable getter per input channel, built once (Phase 104 — was four hand-
+  // written lines). The array identity has to be stable too, or Led's effect
+  // restarts its rAF on every shell re-render.
+  const getIoChLevels = useMemo(
+    () => Array.from({ length: IO_CH_COUNT }, (_, i) => () => audio.getMeterValue(`ioCh${i + 1}`)),
+    [audio.getMeterValue]);
 
   // Toggle: powerOn when off, powerOff when on. Both functions guard internally via
   // isPoweredRef so rapid double-clicks are safe even before the async powerOn resolves.
@@ -3176,7 +3934,10 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
       if (!(t instanceof Element)) return false;
       if (t.closest('button, input, select, [data-jack-id]')) return true;
       const cur = getComputedStyle(t).cursor;
-      return cur === 'pointer' || cur === 'ns-resize' || cur === 'ew-resize' || cur === 'crosshair';
+      // `text` covers click-to-type readouts (the I/O BPM chip) — a text cursor always
+      // means "there is text interaction here", never "grab the rack and pan".
+      return cur === 'pointer' || cur === 'ns-resize' || cur === 'ew-resize'
+          || cur === 'crosshair' || cur === 'text';
     };
 
     let panning = false, lastX = 0, lastY = 0;
@@ -3422,10 +4183,10 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
         : m.type === 'bbd'   ? <ChorusModule number={m.num} onParamUpdate={b.params} isPowered={audio.isPowered} />
         : m.type === 'kick'  ? <KickModule number={m.num} onParamUpdate={b.params} onTrigger={b.kickTrig} onSetTrigCallback={b.kickTrigCb} />
         : m.type === 'ffb'   ? <FFBModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.ffbData} />
-        : m.type === 'seq'   ? <SequencerModule number={m.num} onStepsChange={b.seqSteps} onTempoChange={audio.setTempo} onSetCallback={b.seqStepCb} onGlideChange={b.seqGlide} />
-        : m.type === 'chordseq' ? <ChordSeqModule number={m.num} onStepsChange={b.chordSteps} onDivisionChange={b.chordDiv} onSetCallback={b.chordStepCb} onRootOctaveChange={b.chordRootOct} onGlideChange={b.chordGlide} />
+        : m.type === 'seq'   ? <SequencerModule number={m.num} onStepsChange={b.seqSteps} onDivisionChange={b.seqDiv} onSetCallback={b.seqStepCb} onGlideChange={b.seqGlide} />
+        : m.type === 'chordseq' ? <ChordSeqModule number={m.num} onStepsChange={b.chordSteps} onDivisionChange={b.chordDiv} onClockDivChange={b.chordClkDiv} onSetCallback={b.chordStepCb} onRootOctaveChange={b.chordRootOct} onGlideChange={b.chordGlide} />
         : m.type === 'voc'   ? <VocoderModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vocData} onMicEnable={handleMicEnable} onMicDisable={handleMicDisable} onMicGainChange={audio.updateVocMicGain} getMicLevel={getExtMicLevel} micStatus={micStatus} />
-        : m.type === 'qnt'   ? <QuantizerModule number={m.num} onParamUpdate={b.params} onSetCallback={b.qntCb} getTransposeData={b.qntTrp} />
+        : m.type === 'qnt'   ? <QuantizerModule number={m.num} onParamUpdate={b.params} onSetCallback={b.qntCb} onSetChordLabelCb={b.qntChordLabelCb} onGlideChange={b.qntGlide} onLearnChange={b.qntLearn} onSetLearnCb={b.qntLearnCb} getTransposeData={b.qntTrp} />
         : m.type === 'vowel' ? <VowelModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vowelData} />
         : m.type === 'panner' ? <PanningModule number={m.num} onParamUpdate={b.params} getL={b.panL} getR={b.panR} />
         : m.type === 'chronos' ? <ChronosDelayModule number={m.num} onParamUpdate={b.params} getDisplay={b.chronosDisp} />
@@ -3572,7 +4333,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                     key="seq1"
                     number={1}
                     onStepsChange={audio.updateSequencerSteps}
-                    onTempoChange={audio.setTempo}
+                    onDivisionChange={audio.setSeqDivision}
                     onSetCallback={audio.setSeqStepCallback}
                     onGlideChange={audio.setSeqGlide}
                   />)}
@@ -3580,7 +4341,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                     key="seq2"
                     number={2}
                     onStepsChange={audio.updateSeq2Steps}
-                    onTempoChange={audio.setTempo}
+                    onDivisionChange={audio.setSeq2Division}
                     onSetCallback={audio.setSeq2StepCallback}
                     onGlideChange={audio.setSeq2Glide}
                   />)}
@@ -3588,6 +4349,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                     key="chordseq"
                     onStepsChange={audio.updateChordSeqSteps}
                     onDivisionChange={audio.setChordSeqDivision}
+                    onClockDivChange={audio.setChordSeqClockDiv}
                     onSetCallback={audio.setChordSeqStepCallback}
                     onRootOctaveChange={audio.setChordSeqRootOctave}
                     onGlideChange={audio.setChordSeqGlide}
@@ -3596,16 +4358,20 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                     key="qnt"
                     onParamUpdate={audio.updateQuantizerParams}
                     onSetCallback={audio.setQuantizerCallback}
+                    onSetChordLabelCb={audio.setQuantizerChordLabelCallback}
+                    onGlideChange={audio.setQuantizerGlide}
+                    onLearnChange={audio.setQuantizerLearn}
+                    onSetLearnCb={audio.setQuantizerLearnCallback}
                     getTransposeData={audio.getQntTransposeData}
-                    chordMapRef={chordMapRef}
                   />)}
                   <IoModule
                     isPowered={audio.isPowered}
                     onPower={handlePowerToggle}
                     onParamUpdate={audio.updateIoParams}
+                    onTempoChange={audio.setTempo}
                     getOscData={audio.getOscilloscopeData}
                     getLedValue={getMasterLevel}
-                    getChLevels={[getIoCh1Level, getIoCh2Level, getIoCh3Level, getIoCh4Level]}
+                    getChLevels={getIoChLevels}
                     onChannelVolChange={audio.updateIoChannelVol}
                   />
                 </div>

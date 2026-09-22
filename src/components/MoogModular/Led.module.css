@@ -107,3 +107,19 @@
   background: none;
   box-shadow: none;
 }
+
+/* ── CLIP latch (Phase 103) ──
+   Only the I/O PEAK lamp uses this, via Led's `clipAt` prop. A normal reading
+   fades the lamp by opacity; a CLIP overrides that with a hot, unmissable red and
+   pins it to full brightness for the latch window, because a clip is frequently a
+   single sample and the opacity fade alone would never show it.
+   `!important` on opacity is deliberate and narrow: the rAF writes opacity inline
+   every frame, and the whole point of the latch is to beat that for its duration. */
+.clipping {
+  opacity: 1 !important;
+  background: radial-gradient(circle at 38% 28%, #fff0e0 0%, #ff3a14 45%, #a00800 100%);
+  box-shadow:
+    0 0 8px  rgba(255,  70,  30, 1),
+    0 0 22px rgba(255,  40,  10, 0.85),
+    inset 0 1px 0 rgba(255, 220, 200, 0.75);
+}

@@ -135,10 +135,17 @@ function drawAt(time, fn) {
 // These two module types PASS a pitch CV through, so their output can be walked back to
 // whatever feeds their input. Anything else terminates the walk. Keep this list to real
 // pitch-CV processors: it decides what counts as "the same note travelling onward".
+//
+// ONLY a chord seq's `cv-out` is a pass-through (Phase 90). Its ROOT / 3RD / 5TH outs are
+// generated from that module's OWN step program — `CHORD_BASE_HZ · 2^(rootClass/12)` and
+// the chord intervals, fired every chord step "regardless of cv-in state" — so they carry
+// the chord sequencer's note, not the incoming 960's. Listing them here made a 960's rest
+// step mute VCOs playing the chord voices, which have nothing to do with that step
+// (Dylan-reported). A rest must only silence the note it is a rest FOR.
 function cvPassthroughInput(jackId) {
   const q = jackId.match(/^(qnt\d*)-cv-out$/);
   if (q) return `${q[1]}-cv-in`;
-  const c = jackId.match(/^(chordseq\d*)-(cv|root|3rd|5th)-out$/);
+  const c = jackId.match(/^(chordseq\d*)-cv-out$/);
   if (c) return `${c[1]}-cv-in`;
   return null;
 }
@@ -162,6 +169,60 @@ function resolveCvOrigin(jackId, connections) {
     cur = feeder;
   }
   return cur;
+}
+
+// ── Managed pitch source into a chord sequencer (Phase 88) ──
+// A chord seq's cv-in is an ANALYSER: the snapper rAF polls the incoming audio, snaps it
+// to the current chord, and writes the result. That is the only thing that can work for a
+// genuine audio source (an LFO, a VCO), but it is a poll — it costs an analyser buffer
+// plus up to a frame of latency, and it runs on wall-clock time.
+//
+// A 960's pitch out is not a signal to be measured; it is a value the step loop already
+// knows, at an audio time it already knows. Polling it means the pitch lands TENS OF MS
+// after the gate that the same step scheduled sample-accurately — you hear the previous
+// step's note, then a snap to the right one. So when the source is a 960, the step loop
+// owns the write and the snapper stands down (Single Writer, split by source kind — the
+// same managed/pass-through split `connect()` already applies at a VCO's cv-in).
+//
+// Returns the feeding jack id, or null when the input is unpatched or fed by plain audio.
+function managedPitchSourceFor(csId, connections) {
+  const inJack = `${csId}-cv-in`;
+  for (const key of connections.keys()) {
+    const i = key.indexOf('→');
+    if (i === -1 || key.slice(i + 1) !== inJack) continue;
+    const src = key.slice(0, i);
+    if (/^seq\d*-pitch-out$/.test(src)) return src;
+  }
+  return null;
+}
+
+// ── Chord voice → VCO octave select (Phase 94) ──
+// Patch a chord seq's ROOT / 3RD / 5TH / 7TH into a VCO's cv-in and the chord owns the
+// NOTE, which left that VCO's FREQ knob doing nothing at all — the only octave control
+// was the chord seq's ROOT OCT, and that moves every voice at once. So the knob now
+// chooses the REGISTER: the voice is snapped to whichever octave of ITSELF lands nearest
+// the knob's own frequency. A quantizer that quantizes to octaves of one pitch class
+// rather than to a scale — the 902's knob-stepper idea (Phase 57) with a coarser grid.
+//
+// Rounding in log2 space puts the switch-over a tritone above each octave, so a knob
+// sweep steps cleanly through registers with the widest possible dead zone either side.
+// ONE list, three derived lookups (Phase 94b). These were three hand-written literals,
+// and adding the 7TH in Phase 91 updated two of them: the `chordOutKind` regex in
+// connect() kept the old `(cv|root|3rd|5th)`, so a 7TH → VCO cable failed the
+// "managed source" test and fell into the audio PASS-THROUGH branch instead. That gave
+// the VCO's GlideBus two writers at once — the chord loop's snapped setValueAtTime plus
+// the raw Signal summing in through the cable — so the 7th played sharp and ignored the
+// FREQ knob. Derive them and a future 9th cannot half-land the same way.
+const CHORD_VOICE_KINDS  = ['root', '3rd', '5th', '7th'];
+const CHORD_VOICE_OUT_RE = new RegExp(`^chordseq\\d*-(${CHORD_VOICE_KINDS.join('|')})-out$`);
+// Voice outs PLUS the melody cv-out — every output whose pitch the chord seq writes.
+const CHORD_OUT_RE       = new RegExp(`^(chordseq\\d*)-(cv|${CHORD_VOICE_KINDS.join('|')})-out$`);
+// Jack kind → the node-name suffix it composes to (chordseq2-3rd-out → chordseq2ThirdOut).
+const CHORD_OUT_SUFFIX   = { cv: 'PitchOut', root: 'RootOut', '3rd': 'ThirdOut',
+                             '5th': 'FifthOut', '7th': 'SeventhOut' };
+function snapVoiceToKnobOctave(voiceHz, knobHz) {
+  if (!(voiceHz > 0) || !(knobHz > 0)) return voiceHz;
+  return voiceHz * Math.pow(2, Math.round(Math.log2(knobHz / voiceHz)));
 }
 
 // ── LFO free-run rate range (Phase 70) ──
@@ -260,6 +321,14 @@ const QNT_FM_SEMITONES = 12;
 // RATE knob keeps its smooth FM growl rather than degrading into aliased stepping.
 const QNT_FM_MAX_HZ = 10;
 
+// ── QNT TRIG↑ (Phase 96) ──
+// Gate width for the pulse a quantizer emits when the note it has picked changes.
+// Deliberately a TRIGGER, not a gate: a quantizer knows when a note STARTS but has
+// no idea when it ends (the next note may be seconds away, or never), so holding
+// the gate open would be a guess. 20 ms is long enough for an ENV to see an attack
+// and short enough that the envelope's own D/S/R shapes the sound — which is the
+// point, since this is how a slow CV sweep gets a plucked articulation per step.
+const QNT_TRIG_GATE_SEC = 0.02;
 const LFO_RATE_MIN_HZ = 0.01;
 const LFO_RATE_SPAN   = 10000;   // × from min → 100 Hz at the top of the knob
 const lfoRateHz = (rate) =>
@@ -549,8 +618,20 @@ const SCALE_DEFS = {
   CHR:  [0,1,2,3,4,5,6,7,8,9,10,11],
   MAJ:  [0,2,4,5,7,9,11],
   MIN:  [0,2,3,5,7,8,10],
+  // Phase 96 additions. The five originals covered major/minor/pentatonic and
+  // nothing else, so every modal or bluesy line had to be hand-built by ear on
+  // the 960. Ordered major-ish → minor-ish → gapped in SCALE_KEYS so the drag
+  // chip walks through neighbouring sounds rather than jumping around.
+  HMIN: [0,2,3,5,7,8,11],   // harmonic minor — the raised 7th
+  DOR:  [0,2,3,5,7,9,10],   // dorian — minor with a major 6th
+  PHR:  [0,1,3,5,7,8,10],   // phrygian — minor with a flat 2nd
+  LOC:  [0,1,3,5,6,8,10],   // locrian — the seventh mode; completes the set (Phase 99)
+  LYD:  [0,2,4,6,7,9,11],   // lydian — major with a sharp 4th
+  MIX:  [0,2,4,5,7,9,10],   // mixolydian — major with a flat 7th
   PMAJ: [0,2,4,7,9],
   PMIN: [0,3,5,7,10],
+  BLUES:[0,3,5,6,7,10],     // minor pentatonic + the flat 5 "blue note"
+  WHOLE:[0,2,4,6,8,10],     // whole tone — six equal steps, no root pull
   // Chord intervals — used by chord-aware quantization (ChordSeqModule → Quantizer).
   // When the chord sequencer fires, it sets root AND scale to one of these interval arrays;
   // the quantizer then snaps incoming melody notes to chord tones only.
@@ -580,21 +661,60 @@ const CHORD_VOICE_INTERVALS = {
 // All values > 10 Hz so the qnt-transpose-in analyser threshold correctly detects them.
 const CHORD_BASE_HZ = 130.81;
 
+// Output clamp (Phase 95) — MIDI 0 … 127. Mirrors the same constants in
+// public/quantizer-worklet.js; both paths can otherwise hand a VCO a frequency
+// it cannot render (modulation mode reaches 8 octaves above baseHz, and a high
+// pitch CV plus OCT +3 clears 16 kHz).
+// I/O input channels (Phase 104 — was 4). Channel 5's jack keeps the legacy id
+// `io-in`; see the jackMap note. One constant so the node build, the routing loop
+// and the panel cannot drift apart.
+const IO_CHANNELS = 8;
+
+const QNT_HZ_MIN = 8.1758;
+const QNT_HZ_MAX = 12543.854;
+const clampQntHz = (hz) => (hz <= 0 ? 0 : Math.min(QNT_HZ_MAX, Math.max(QNT_HZ_MIN, hz)));
+
+// Hysteresis margin in semitones — MUST match HYST_SEMI in the worklet.
+const QNT_HYST_SEMI = 0.35;
+
 // JS mirror of the quantizer worklet's snap logic — used by knob-stepper mode
-// (Phase 57), where the VCO FREQ knob itself is quantized without any audio-rate
-// CV passing through the worklet. Snaps hz to the nearest MIDI note whose pitch
-// class (relative to root) is in the scale, then applies the octave shift.
-// bypass passes the input through untouched (knob reverts to continuous).
-function quantizeHzJs(inputHz, { scale, root, octShift, bypass }) {
-  if (bypass) return inputHz;
-  const midi = 69 + 12 * Math.log2(Math.max(0.001, inputHz) / 440);
+// (Phase 57) and quantized FM (Phase 70), where the pitch is decided without any
+// audio-rate CV passing through the worklet. Snaps a fractional MIDI note to the
+// scale, honouring the snap direction (Phase 100: 0 nearest / 1 up / 2 down).
+// Keep in lockstep with the worklet's `_snap` — `qnt-verify100.mjs` asserts they agree.
+function snapMidiJs(midi, { scale, root, snapMode = 0 }) {
   let best = Math.round(midi), bestDist = Infinity;
   for (let m = best - 12; m <= best + 12; m++) {
     if (!scale.includes((((m - root) % 12) + 12) % 12)) continue;
     const d = Math.abs(m - midi);
     if (d < bestDist) { bestDist = d; best = m; }
   }
-  return 440 * Math.pow(2, (best + octShift * 12 - 69) / 12);
+  const inScale = (m) => scale.includes((((m - root) % 12) + 12) % 12);
+  const stepTo  = (m, dir) => {
+    for (let i = 1; i <= 12; i++) if (inScale(m + dir * i)) return m + dir * i;
+    return m;
+  };
+  if (snapMode === 1 && best < midi - 1e-6) best = stepTo(best, +1);
+  if (snapMode === 2 && best > midi + 1e-6) best = stepTo(best, -1);
+  return best;
+}
+
+// Same biased-re-snap hysteresis the worklet uses, but with the held note passed
+// in — these callers are stateless per invocation, so the caller owns the state.
+// `held` may be null/undefined (nothing held yet). Returns the MIDI note to use.
+function snapMidiHeldJs(midi, cfg, held) {
+  const cand = snapMidiJs(midi, cfg);
+  if (held == null) return cand;
+  if (!cfg.scale.includes((((held - cfg.root) % 12) + 12) % 12)) return cand;
+  if (cand === held) return held;
+  const biased = snapMidiJs(midi + (cand > held ? -QNT_HYST_SEMI : QNT_HYST_SEMI), cfg);
+  return biased === held ? held : cand;
+}
+
+function quantizeHzJs(inputHz, { scale, root, octShift, snapMode = 0 }) {
+  const midi = 69 + 12 * Math.log2(Math.max(0.001, inputHz) / 440);
+  const best = snapMidiJs(midi, { scale, root, snapMode });
+  return clampQntHz(440 * Math.pow(2, (best + octShift * 12 - 69) / 12));
 }
 
 // Snap an input Hz to the nearest chord tone across all musical octaves.
@@ -977,19 +1097,34 @@ function buildJackMap(n) {
     // ── Sequencer 1 ──
     'seq-pitch-out': { type: 'out', node: n.seqPitchOut },
     'seq-gate-out':  { type: 'out', node: null, isGate: true },
-    'seq-clk-in':    { type: 'in',  dest: null },
-    'seq-clk-out':   { type: 'out', node: null },
+    // CLK↓ / CLK↑ (Phase 87). Both were `dest: null` / `node: null` with no isGate flag
+    // from Phase 9 to Phase 86 — connect() hit its no-op branches, so the jacks rendered,
+    // accepted cables and did absolutely nothing. Same dead-port class as the 911's TRIG
+    // before Phase 78. They are gate-domain ports, not audio: CLK↑ pulses once per step,
+    // CLK↓ takes over from the internal clock (MOOG_ARCHITECTURE §3).
+    'seq-clk-in':    { type: 'in',  dest: null, isGate: true, isSeqClock: true, seqId: 'seq' },
+    'seq-clk-out':   { type: 'out', node: null, isGate: true },
+    // CYCLE↑ (Phase 93) — one pulse per completed cycle, not per step. Patch it into a
+    // chord seq's CLK↓ and the progression advances once per bar of whatever meter this
+    // 960 is running, tracking its length automatically as steps are skipped.
+    'seq-cycle-out': { type: 'out', node: null, isGate: true },
     // ── Sequencer 2 ──
     'seq2-pitch-out': { type: 'out', node: n.seq2PitchOut },
     'seq2-gate-out':  { type: 'out', node: null, isGate: true },
-    'seq2-clk-in':    { type: 'in',  dest: null },
-    'seq2-clk-out':   { type: 'out', node: null },
+    'seq2-clk-in':    { type: 'in',  dest: null, isGate: true, isSeqClock: true, seqId: 'seq2' },
+    'seq2-clk-out':   { type: 'out', node: null, isGate: true },
+    'seq2-cycle-out': { type: 'out', node: null, isGate: true },
     // ── Chord Sequencer ──
     'chordseq-cv-in':   { type: 'in',  dest: n.chordseqInputAnalyser },
     'chordseq-cv-out':     { type: 'out', node: n.chordseqPitchOut  },
     'chordseq-root-out':   { type: 'out', node: n.chordseqRootOut   },
     'chordseq-3rd-out':    { type: 'out', node: n.chordseqThirdOut },
     'chordseq-5th-out':    { type: 'out', node: n.chordseqFifthOut },
+    'chordseq-7th-out':    { type: 'out', node: n.chordseqSeventhOut },
+    // Gate + clock ports (Phase 92), gate-domain exactly like the 960's.
+    'chordseq-gate-out':   { type: 'out', node: null, isGate: true },
+    'chordseq-clk-in':     { type: 'in',  dest: null, isGate: true, isChordClock: true, csId: 'chordseq' },
+    'chordseq-clk-out':    { type: 'out', node: null, isGate: true },
     // ── Keyboard ──
     'kbd-pitch-out': { type: 'out', node: n.kbdPitchOut },
     'kbd-gate-out':  { type: 'out', node: null, isGate: true },
@@ -1000,14 +1135,26 @@ function buildJackMap(n) {
     'qnt-cv-in':        { type: 'in',  dest: n.qntNodes?.qnt ?? null   },
     'qnt-cv-out':       { type: 'out', node: n.qntOut             },
     'qnt-transpose-in': { type: 'in',  dest: n.qntTransposeAnalyser    },
+    // TRIG↑ (Phase 96) — a pulse on every new quantized note. Logical only, like
+    // every other gate out in the rack: no audio node, `node: null` + isGate is
+    // the whole contract, and dispatchStepActions does the rest.
+    'qnt-trig-out':     { type: 'out', node: null, isGate: true    },
     // ── I/O ── audio signal enters the I/O module here and exits to Destination
-    // io-in routes directly to master (legacy single-input path, kept for patch compat).
-    // io-in1–4 each route through independent channel gain nodes → master.
-    'io-in':  { type: 'in', dest: n.master },
+    // Eight input channels, each through its own fader gain → master (Phase 104).
+    //
+    // `io-in` is CHANNEL 5. Its jack ID stays `io-in` — NOT `io-in5` — because
+    // saved racks persist cables as `{ from: jackId, to: jackId }`, so renaming it
+    // would orphan every cable anyone has ever patched to it. Only the panel LABEL
+    // says "IN 5". It used to run straight into `master` with no fader and no
+    // meter, which is exactly the inconsistency this phase removes.
+    'io-in':  { type: 'in', dest: n.ioCh5  },
     'io-in1': { type: 'in', dest: n.ioCh1  },
     'io-in2': { type: 'in', dest: n.ioCh2  },
     'io-in3': { type: 'in', dest: n.ioCh3  },
     'io-in4': { type: 'in', dest: n.ioCh4  },
+    'io-in6': { type: 'in', dest: n.ioCh6  },
+    'io-in7': { type: 'in', dest: n.ioCh7  },
+    'io-in8': { type: 'in', dest: n.ioCh8  },
   };
 }
 
@@ -1062,7 +1209,7 @@ export default function useMoogAudio() {
   const lfoSyncLastRefs  = useRef({});                 // id → last written synced value (delta gate)
   // Glide time in seconds (0 = off). Written by the UI knob, read by the Tone.Loop.
   const kbdGlideRef   = useRef(0);
-  const chordSeqGlideRefs = useRef({ chordseq: 0 }); // csId → glide (s) for root/3rd/5th CV outs
+  const chordSeqGlideRefs = useRef({ chordseq: 0 }); // csId → glide (s) for the voice CV outs
   // Keyboard vibrato — depth in Hz, rate in Hz. Driven by a rAF loop inside useEffect.
   const kbdVibratoDepthRef = useRef(0);
   const kbdVibratoRateRef  = useRef(5);
@@ -1078,14 +1225,34 @@ export default function useMoogAudio() {
   // id (`${seqId}PitchOut`, `${seqId}GateNode`) and every map is read by the
   // shared loop body at fire time, so a dynamic seq is just four map entries
   // plus a Tone.Loop from buildSeqLoop().
+  // `skip` is additive — a step saved before Phase 89 has no such key, and `undefined`
+  // is falsy, so every existing rack loads as a full 16-step cycle exactly as before.
   const defaultSeqSteps = () =>
-    Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true, prob: 1 }));
+    Array.from({ length: 16 }, () => ({ voltage: 0.5, gate: true, prob: 1, skip: false }));
   const seqLoopsRef        = useRef({});                       // seqId → Tone.Loop
   const seqStepsRefs       = useRef({ seq: defaultSeqSteps(), seq2: defaultSeqSteps() });
   const seqCurrentStepRefs = useRef({ seq: -1, seq2: -1 });
   const seqStepCbRefs      = useRef({});                       // seqId → UI LED callback
   const seqGlideRefs       = useRef({ seq: 0, seq2: 0 });      // seconds (0 = off)
-  const gateActionsRef      = useRef(new Map()); // cable key → { env, fromId, isTrig } | kick action
+  // Per-instance clock division (Phase 87). Was hardcoded '8n' inside buildSeqLoop, so
+  // every 960 in the rack ran at exactly one speed and the only way to change it was the
+  // TEMPO knob — which is the shared Transport, i.e. it moved every sequencer at once.
+  const seqDivisionRefs    = useRef({ seq: '8n', seq2: '8n' });
+  // seqId → true while a cable feeds its CLK↓. External clock replaces the internal
+  // Tone.Loop entirely (the loop is stopped), matching MOOG_ARCHITECTURE §3: "External
+  // clock pulse forces the sequencer forward one step. Overrides internal clock."
+  const seqExtClockRefs    = useRef({});
+  const seqClockDepthRef   = useRef(0);          // clock-chain recursion guard
+  // seqId → the Hz its last step wrote. Read by the chord-seq loop so a chord change can
+  // re-snap the pitch currently being held (see buildChordSeqLoop's managed branch).
+  const seqLastHzRef       = useRef({});
+  const gateActionsRef      = useRef(new Map()); // cable key → { env, fromId, isTrig } | kick | seq-clock action
+
+// A clock chain is a legal patch (seq1 CLK↑ → seq2 CLK↓) and so is a cycle
+// (…→ seq2 CLK↑ → seq1 CLK↓), which would recurse forever. Depth 4 is deeper than any
+// musically useful chain and turns a cycle into a harmless truncation instead of a
+// stack overflow inside the audio callback.
+const SEQ_CLOCK_MAX_DEPTH = 4;
 
 // TRIG vs GATE. A GATE holds the envelope at SUSTAIN for as long as it stays high, so the
 // note's length is the incoming gate's length. A TRIG is a momentary spike: it fires
@@ -1108,20 +1275,33 @@ const triggerEnvOneShot = (env, time) => {
   // chord callback so MoogShell can sync the quantizer scale / chord label.
   // All state is id-keyed (Phase 60e part 2): 'chordseq' = the static module,
   // 'chordseq2'+ are dynamic instances. Node names compose from the id.
+  // `gate` / `skip` are additive (Phase 92) — a step saved before them has neither key,
+  // and the loop reads `gate !== false` / falsy `skip`, so every existing rack loads as a
+  // full 8-chord cycle with every step gating, exactly as before.
   const defaultChordSteps = () =>
     Array.from({ length: 8 }, (_, i) => ({
       rootClass: [9, 9, 5, 5, 0, 0, 4, 4][i], // Am Am F F C C E E
       chordType: ['CMIN','CMIN','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ'][i],
+      gate: true,
+      skip: false,
     }));
   const chordSeqIdsRef          = useRef(['chordseq']);   // registered instances (snap rAF iterates)
   const chordSeqLoopsRef        = useRef({});             // csId → Tone.Loop
   const chordSeqStepsRefs       = useRef({ chordseq: defaultChordSteps() });
   const chordSeqCurrentStepRefs = useRef({ chordseq: -1 });
   const chordSeqStepCbRefs      = useRef({});
-  const chordSeqChordCbRefs     = useRef({});             // fn(rootClass, chordType) per instance
   const chordSeqDivisionRefs    = useRef({ chordseq: '1m' }); // default: advance every 1 bar
   const chordSeqRootOctaveRefs  = useRef({ chordseq: 0 }); // octave offset for `${csId}-root-out` (-3..+3)
   const chordSeqInputActiveRefs = useRef({});              // csId → true when CV patched to its cv-in
+  const chordSeqExtClockRefs    = useRef({});              // csId → true while a cable feeds its CLK↓
+  // CLK↓ divider (Phase 93): advance one chord every N incoming pulses. With a 960's
+  // CYCLE↑ patched in, N is "bars per chord" — ÷1 changes chord every bar, ÷2 every two.
+  const chordSeqClockDivRefs    = useRef({ chordseq: 1 });
+  const chordSeqClockCountRefs  = useRef({});              // csId → pulses seen since the last advance
+  // Voice-out jack id → the un-snapped Hz its last chord step wrote. Read when a VCO's
+  // FREQ knob moves, so turning the knob re-picks the octave immediately instead of
+  // waiting for the next chord (Phase 94).
+  const chordVoiceLastHzRef     = useRef({});
   // Per-quantizer chord override (Phase 60e part 4): qid → the chordseq
   // instance id whose cv-out is patched to that quantizer's transpose-in.
   // Each quantizer has exactly one owner (Single Writer per instance).
@@ -1138,6 +1318,23 @@ const triggerEnvOneShot = (env, time) => {
   const qntIdsRef             = useRef(['qnt']);
   const wireQntRef            = useRef(null);
   const quantizerStepCbRefs   = useRef({});          // qid → UI LED/display callback
+  // qid → fn(rootClass, chordType) for the EXT row's chord-name label. Keyed by
+  // QUANTIZER, not by chord seq (Phase 95): the owning chord seq is looked up
+  // through qntChordOverrideRef at fire time, so the label can never come from a
+  // sequencer that is not actually patched into that quantizer's TRP.
+  const qntChordLabelCbRefs   = useRef({});
+  // Per-quantizer GLIDE (Phase 96), seconds, 0 = off. Slides between the notes the
+  // quantizer picks. Distinct from the SOURCE's glide, which `glideForPitchSource`
+  // resolves: gliding into a quantizer is largely pointless (the staircase eats it),
+  // so this knob wins when set and the source glide stays the fallback.
+  const qntGlideRefs          = useRef({ qnt: 0 });
+  // SCALE LEARN (Phase 100): qid → true while that quantizer is listening, and
+  // qid → fn(pitchClass) for the panel to receive played notes. Fed from
+  // `updateKeyboard`, which is the ONE entry point every keyboard note passes
+  // through — 953 mouse clicks, QWERTY and MIDI alike — so learn works from all
+  // three without touching any of them.
+  const qntLearnRefs          = useRef({});
+  const qntLearnCbRefs        = useRef({});
   const lastQuantizedMidiRefs = useRef({ qnt: 69 }); // A4 default — updated on each note change
   // Inline-synced mirror of applyQuantizerParams (declared later, after the
   // knob-stepper helpers it depends on) so updateDynModuleParams can dispatch
@@ -1150,6 +1347,7 @@ const triggerEnvOneShot = (env, time) => {
   const qntFmEngagedRef = useRef({});
   const qntFmMutedRef   = useRef({});
   const qntFmLastHzRef  = useRef({});
+  const qntFmHeldMidiRef = useRef({});   // per-VCO hysteresis state (Phase 100)
   const recomputeQntFmRef = useRef(null);   // inline-synced below recomputeQntFm's definition
 
   // ── Dynamic module instances (Phase 60b) ──
@@ -1177,7 +1375,7 @@ const triggerEnvOneShot = (env, time) => {
   // when its worklet node is created. baseHz — modulation-mode center for the
   // worklet (Phase 58): the FREQ knob of the qnt-patched VCO. Last-moved knob
   // wins when several VCOs share one quantizer's cv-out.
-  const defaultQntParams   = () => ({ scale: SCALE_DEFS.MAJ, root: 0, octShift: 0, bypass: false, baseHz: 220 });
+  const defaultQntParams   = () => ({ scale: SCALE_DEFS.MAJ, root: 0, octShift: 0, baseHz: 220, snapMode: 0 });
   const quantizerParamsRefs = useRef({ qnt: defaultQntParams() });
 
   // Glide τ for a managed pitch source — used wherever a downstream module
@@ -1190,30 +1388,158 @@ const triggerEnvOneShot = (env, time) => {
     return 0;
   }, []);
 
-  // One 960 loop body for every instance (Phase 60e) — reads all per-seq state
-  // from the id-keyed maps at fire time. Advances the step, writes the pitch
-  // Signal (instant — it feeds quantizer/analyser paths), applies glide at each
-  // connected VCO's glideBus, gates the seq's VCA tap + connected VCO buses,
-  // and fires env/kick gate actions registered from `${seqId}-gate-out`.
+  // One 960 step for every instance (Phase 60e; extracted from the Tone.Loop body in
+  // Phase 87) — reads all per-seq state from the id-keyed maps at fire time. Advances the
+  // step, writes the pitch Signal (instant — it feeds quantizer/analyser paths), applies
+  // glide at each connected VCO's glideBus, gates the seq's VCA tap + connected VCO buses,
+  // and fires env/kick/clock actions registered from `${seqId}-gate-out` / `-clk-out`.
   // seqMasterGate is NOT written — it would silence the other sequencers.
-  const buildSeqLoop = useCallback((seqId) => new Tone.Loop((time) => {
+  //
+  // Called from two places: the instance's internal Tone.Loop (`time` = the scheduled
+  // audio time) and an external clock pulse arriving at its CLK↓ (a chained 960's CLK↑ or
+  // the keyboard gate, where `time` may be undefined → now).
+  // Shared GATE↑ / CLK↑ dispatch for both step loops (Phase 92). Extracted when the chord
+  // sequencer gained its own gate and clock outs and would otherwise have duplicated this
+  // whole body — including the recursion guard, which must be ONE counter across both
+  // module types so a mixed cycle (960 CLK↑ → chord CLK↓ → chord CLK↑ → 960 CLK↓) is
+  // bounded too. Callers pass their own jack names and gate width.
+  //
+  // CLK↑ is a metronome: it pulses on EVERY step regardless of the step switch or the
+  // probability roll. GATE↑ only fires on steps that are on and pass the roll.
+  const dispatchStepActions = useCallback((
+    { n, time, fires, gateSrc, clkSrc, gateDur, cycleSrc = null, isCycleStart = false }
+  ) => {
+    if (gateActionsRef.current.size === 0) return;
+    for (const [, action] of gateActionsRef.current) {
+      const fromClk   = action.fromId === clkSrc;
+      const fromCycle = cycleSrc !== null && action.fromId === cycleSrc;
+      if (!fromClk && !fromCycle && action.fromId !== gateSrc) continue;
+      // CYCLE↑ is a pulse, not a gate: on a step that is not the top of the cycle it
+      // emits nothing at all — it does not release, the way an unfired GATE↑ does.
+      if (fromCycle && !isCycleStart) continue;
+      const hit = fromCycle || fromClk || fires;
+      if (action.isSeqClock || action.isChordClock) {
+        if (!hit || seqClockDepthRef.current >= SEQ_CLOCK_MAX_DEPTH) continue;
+        seqClockDepthRef.current++;
+        try {
+          if (action.isSeqClock) advanceSeqRef.current?.(action.seqId, time);
+          else                   pulseChordSeqClockRef.current?.(action.csId, time);
+        } finally { seqClockDepthRef.current--; }
+      } else if (action.isKick) {
+        const kid = action.kickId ?? 'kick';
+        if (hit && n[`${kid}Synth`]) {
+          const kt  = nextKickTime(kickLastTimeRef.current, kid, time);
+          const kd  = kickDecayRef.current[kid] ?? 0.4;
+          const khz = kickTuneHz(n, kid, connectionsRef.current, kickTuneRef.current[kid] ?? 55);
+          n[`${kid}Synth`].triggerAttackRelease(khz, kd, kt);
+          n[`${kid}ClickSynth`]?.triggerAttackRelease(kd * 0.1, kt);
+          drawAt(kt, () => kickTrigCbRef.current[kid]?.());
+        }
+      } else if (action.isTrig) {
+        // One-shot: a trigger has no "off", so a rest step simply doesn't fire.
+        if (hit) triggerEnvOneShot(action.env, time);
+      } else if (action.env) {
+        if (hit) {
+          action.env.triggerAttack(time);
+          action.env.triggerRelease(time + gateDur);
+        } else {
+          action.env.triggerRelease(time);
+        }
+      }
+    }
+  }, []);
+
+  // QNT TRIG↑ (Phase 96) — fire the pulse for one quantizer. Reuses the same gate
+  // dispatch every sequencer uses, so a TRIG cable reaches ENV gate/trig, KICK and
+  // a 960's CLK↓ with no new plumbing: `${qid}-trig-out` is just another isGate
+  // source. Called from all THREE places a quantized note can change (worklet
+  // port message, knob-stepper, quantized FM), each of which delta-checks first.
+  const fireQntTrigRef = useRef(null);
+  const fireQntTrig = useCallback((qid, time) => {
+    const n = nodesRef.current;
+    if (!n) return;
+    dispatchStepActions({
+      n, time: time ?? Tone.now(), fires: true,
+      gateSrc: `${qid}-trig-out`, clkSrc: null, gateDur: QNT_TRIG_GATE_SEC,
+    });
+  }, [dispatchStepActions]);
+  fireQntTrigRef.current = fireQntTrig;
+
+  const advanceSeqRef = useRef(null);
+  const advanceSeq = useCallback((seqId, timeArg) => {
     const n = nodesRef.current;
     const steps = seqStepsRefs.current[seqId];
-    if (!n || !steps) return;
-    seqCurrentStepRefs.current[seqId] = (seqCurrentStepRefs.current[seqId] + 1) % 16;
-    const idx  = seqCurrentStepRefs.current[seqId];
+    if (!n || !steps || !steps.length) return;
+    const time = timeArg ?? Tone.now();
+    // Advance to the next step that is not SKIPPED. Skip is not "rest": a rest still
+    // occupies its slice of the bar and just holds the gate low, while a skipped step is
+    // removed from the cycle entirely and consumes no time. Skipping 13–16 therefore
+    // makes this a 12-step sequencer — which is how one 16-step 960 plays 3/4, 5/4, or
+    // any other length (Phase 89).
+    //
+    // Length-driven, not a hardcoded 16 — a saved rack from before the 16-step expansion
+    // holds an 8-entry array, and steps[8..15] would be `undefined`. Bounded by
+    // steps.length so an all-skipped sequencer cannot spin inside the audio callback.
+    const len  = steps.length;
+    const from = seqCurrentStepRefs.current[seqId] ?? -1;   // −1 after a reset → lands on 0
+    let idx = -1;
+    for (let i = 1; i <= len; i++) {
+      const cand = (from + i) % len;
+      if (!steps[cand]?.skip) { idx = cand; break; }
+    }
+    if (idx < 0) {
+      // Every step skipped — there is no sequence to play. Consume the tick silently and
+      // clear the position LED (the callback self-diffs, so repeat −1s cost nothing).
+      drawAt(time, () => seqStepCbRefs.current[seqId]?.(-1));
+      return;
+    }
+    seqCurrentStepRefs.current[seqId] = idx;
     const step = steps[idx];
+    if (!step) return;
+    // Top of the cycle? The scan only ever moves forward and wraps, so landing on the
+    // FIRST playing step means we just came round. Derived per step rather than counted,
+    // so it stays correct when skips are edited mid-run — which is the whole point:
+    // CYCLE↑ tracks the 960's real length (3 steps → every 3), not a number the user has
+    // to keep in step by hand (Phase 93).
+    let firstPlaying = -1;
+    for (let i = 0; i < len; i++) if (!steps[i]?.skip) { firstPlaying = i; break; }
+    const isCycleStart = idx === firstPlaying;
     const hz    = SEQ_HZ_MIN * Math.pow(SEQ_HZ_MAX / SEQ_HZ_MIN, step.voltage);
     const glide = seqGlideRefs.current[seqId] ?? 0;
     const pitchSrc = `${seqId}-pitch-out`;
-    n[`${seqId}PitchOut`].setValueAtTime(hz, time);
+    seqLastHzRef.current[seqId] = hz;
+    n[`${seqId}PitchOut`]?.setValueAtTime(hz, time);
     // Glide on every VCO that has this seq's pitch out connected to its cv-in.
     for (const vcoId of allVcoIdsRef.current) {
       if (vcoActiveCvRef.current[vcoId] !== pitchSrc) continue;
       const gb = n[`${vcoId}GlideBus`];
+      if (!gb) continue;
       if (glide < 0.001) gb.setValueAtTime(hz, time);
       else               gb.rampTo(hz, glide, time);
       // (glideBus is connected to the worklet's slaveFreq — no separate write.)
+    }
+    // Same write, one module downstream: a chord sequencer fed by THIS 960 gets its
+    // snapped pitch here, at this step's `time`, rather than whenever the snapper rAF
+    // next happens to look. The gate below is scheduled sample-accurately, so a polled
+    // pitch arrives late and the note attacks on the PREVIOUS step's pitch before
+    // jerking to the right one — two notes per step (see managedPitchSourceFor).
+    for (const csId of chordSeqIdsRef.current) {
+      if (managedPitchSourceFor(csId, connectionsRef.current) !== pitchSrc) continue;
+      const csStep = chordSeqStepsRefs.current[csId]?.[
+        Math.max(0, chordSeqCurrentStepRefs.current[csId] ?? 0)];
+      if (!csStep) continue;
+      const snapped = snapToChordHz(hz, csStep.rootClass, csStep.chordType);
+      n[`${csId}PitchOut`]?.setValueAtTime(snapped, time);
+      const cvOutSrc = `${csId}-cv-out`;
+      for (const vcoId of allVcoIdsRef.current) {
+        if (vcoActiveCvRef.current[vcoId] !== cvOutSrc) continue;
+        const gb = n[`${vcoId}GlideBus`];
+        if (!gb) continue;
+        // The SEQ's glide, not the chord seq's: this pitch originates at the 960, and
+        // it is the value glideForPitchSource resolves for this path today.
+        if (glide < 0.001) gb.setValueAtTime(snapped, time);
+        else               gb.rampTo(snapped, glide, time);
+      }
     }
     const fires = step.gate && Math.random() < step.prob;
     const gateVal = fires ? 1 : 0;
@@ -1237,62 +1563,141 @@ const triggerEnvOneShot = (env, time) => {
       if (src === pitchSrc || resolveCvOrigin(src, connectionsRef.current) === pitchSrc)
         n[`${vcoId}bus`].gain._param.setValueAtTime(gateVal, time);
     }
-    if (gateActionsRef.current.size > 0) {
-      const stepDur  = fires ? Tone.Time('8n').toSeconds() : 0;
-      const gateSrc  = `${seqId}-gate-out`;
-      for (const [, action] of gateActionsRef.current) {
-        if (action.fromId !== gateSrc) continue;
-        if (action.isKick) {
-          const kid = action.kickId ?? 'kick';
-          if (fires && n[`${kid}Synth`]) {
-            const kt = nextKickTime(kickLastTimeRef.current, kid, time);
-            const kd = kickDecayRef.current[kid] ?? 0.4;
-            const khz = kickTuneHz(n, kid, connectionsRef.current, kickTuneRef.current[kid] ?? 55);
-            n[`${kid}Synth`].triggerAttackRelease(khz, kd, kt);
-            n[`${kid}ClickSynth`]?.triggerAttackRelease(kd * 0.1, kt);
-            drawAt(kt, () => kickTrigCbRef.current[kid]?.());
-          }
-        } else if (action.isTrig) {
-          // One-shot: a trigger has no "off", so a rest step simply doesn't fire.
-          if (fires) triggerEnvOneShot(action.env, time);
-        } else {
-          if (fires) {
-            action.env.triggerAttack(time);
-            action.env.triggerRelease(time + stepDur * 0.8);
-          } else {
-            action.env.triggerRelease(time);
-          }
-        }
-      }
-    }
+    // Gate length is 80% of a step and follows THIS instance's own clock division — it
+    // used to be a hardcoded '8n', so a sequencer at any other division held its
+    // envelopes for the wrong slice of the step. Under an external clock the incoming
+    // pulse rate is unknown, so the instance's own division stands in as gate width.
+    dispatchStepActions({
+      n, time, fires, isCycleStart,
+      gateSrc:  `${seqId}-gate-out`,
+      clkSrc:   `${seqId}-clk-out`,
+      cycleSrc: `${seqId}-cycle-out`,
+      gateDur:  Tone.Time(seqDivisionRefs.current[seqId] ?? '8n').toSeconds() * 0.8,
+    });
     // Notify UI for LED animation, scheduled AT the step's audio time — firing it
     // straight from this callback lit the LED ~lookAhead early (see drawAt).
     drawAt(time, () => seqStepCbRefs.current[seqId]?.(idx));
-  }, '8n'), []);
+  }, [dispatchStepActions]);
+  advanceSeqRef.current = advanceSeq;
+
+  // The internal clock. Interval reads the instance's division at construction; later
+  // changes go through setSeqDivisionById, which writes loop.interval directly.
+  const buildSeqLoop = useCallback((seqId) => new Tone.Loop(
+    (time) => advanceSeqRef.current?.(seqId, time),
+    seqDivisionRefs.current[seqId] ?? '8n',
+  ), []);
+
+  // Internal-vs-external clock arbitration for one 960 (Phase 87). A cable on its CLK↓
+  // stops the internal Tone.Loop outright — the external pulse is then the only thing
+  // that advances it. Pulling the last such cable hands the internal clock back.
+  // Counted over live connections rather than a boolean, so two cables into one CLK↓
+  // (legal — cables fan in) don't have the first removal re-arm the internal clock.
+  const applySeqClockSource = useCallback((seqId) => {
+    let external = false;
+    for (const c of connectionsRef.current.values())
+      if (c.isSeqClock && c.seqId === seqId) { external = true; break; }
+    seqExtClockRefs.current[seqId] = external;
+    const loop = seqLoopsRef.current[seqId];
+    if (!loop) return;
+    try {
+      if (external)                    loop.stop();
+      else if (isPoweredRef.current)   loop.start(0);
+    } catch (_) {}
+  }, []);
+
+  // A 960 mutes the VCOs it drives on rest steps by writing `${vcoId}bus`. Pull the cable
+  // while the sequencer is sitting ON a rest and nothing ever writes that gain again — the
+  // VCO stays silent until the next power cycle (powerOff has the same re-open loop for
+  // exactly this reason). Worse through a quantizer / chord seq: pulling the cable that
+  // feeds THAT module leaves the VCO's own cable intact, so the mute is unreachable and
+  // permanent. Called after every disconnect and when a 960 is removed. Idempotent, and it
+  // never touches a VCO a live sequencer still owns — that loop is the single writer.
+  const reopenUngatedVcoBuses = useCallback(() => {
+    const n = nodesRef.current;
+    if (!n) return;
+    for (const vcoId of allVcoIdsRef.current) {
+      const bus = n[`${vcoId}bus`];
+      if (!bus) continue;
+      const src    = vcoActiveCvRef.current[vcoId];
+      const origin = src ? resolveCvOrigin(src, connectionsRef.current) : null;
+      const owner  = origin?.match(/^(seq\d*)-pitch-out$/)?.[1];
+      if (owner && seqLoopsRef.current[owner]) continue;   // still sequencer-owned
+      const p = bus.gain._param ?? bus.gain;
+      const now = Tone.now();
+      try { p.cancelScheduledValues(now); } catch (_) {}
+      p.setValueAtTime(1, now);
+    }
+  }, []);
 
   // One chord-seq loop body for every instance (Phase 60e part 2) — the chord
   // analog of buildSeqLoop. Advances the 8-step chord program, writes the root
   // CV (unless the instance's cv-in snapper owns it), fires the polyphonic
-  // root/3rd/5th voice outs with glide at each connected VCO's glideBus, and
+  // root/3rd/5th/7th voice outs with glide at each connected VCO's glideBus, and
   // pushes root+scale into the quantizer when THIS instance owns the
   // qnt-transpose-in override.
-  const buildChordSeqLoop = useCallback((csId) => new Tone.Loop((time) => {
+  // Extracted from the Tone.Loop body (Phase 92) for the same reason as advanceSeq: an
+  // external clock pulse arriving at this instance's CLK↓ must run the identical step.
+  const advanceChordSeqRef = useRef(null);
+  const advanceChordSeq = useCallback((csId, timeArg) => {
     const n = nodesRef.current;
     const steps = chordSeqStepsRefs.current[csId];
-    if (!n || !steps) return;
-    chordSeqCurrentStepRefs.current[csId] = (chordSeqCurrentStepRefs.current[csId] + 1) % 8;
-    const idx  = chordSeqCurrentStepRefs.current[csId];
+    if (!n || !steps || !steps.length) return;
+    const time = timeArg ?? Tone.now();
+    // Advance to the next non-SKIPPED step — the 960's Phase 89 rule, so a chord seq can
+    // run a 3- or 7-chord progression instead of always eight. Length-driven and bounded:
+    // a hardcoded `% 8` against a shorter array reads `undefined` and the next line
+    // (`step.rootClass`) throws INSIDE the audio callback, killing the Loop for the
+    // session; an unbounded scan with every step skipped would spin there instead.
+    const len  = steps.length;
+    const from = chordSeqCurrentStepRefs.current[csId] ?? -1;
+    let idx = -1;
+    for (let i = 1; i <= len; i++) {
+      const cand = (from + i) % len;
+      if (!steps[cand]?.skip) { idx = cand; break; }
+    }
+    if (idx < 0) {
+      drawAt(time, () => chordSeqStepCbRefs.current[csId]?.(-1));
+      return;
+    }
+    chordSeqCurrentStepRefs.current[csId] = idx;
     const step = steps[idx];
+    if (!step) return;
     // Only write root Hz when no CV source is patched — the rAF snapper owns
     // the PitchOut while an input is active (single-writer rule).
     const chordHz  = CHORD_BASE_HZ * Math.pow(2, step.rootClass / 12);
     const cvOutSrc = `${csId}-cv-out`;
-    if (!chordSeqInputActiveRefs.current[csId]) {
+    const managedSrc = managedPitchSourceFor(csId, connectionsRef.current);
+    if (!chordSeqInputActiveRefs.current[csId] && !managedSrc) {
       n[`${csId}PitchOut`].setValueAtTime(chordHz, time);
       // No glide for the raw cv-out — instant jumps at the chord boundary.
       for (const vcoId of allVcoIdsRef.current) {
         if (vcoActiveCvRef.current[vcoId] === cvOutSrc)
           n[`${vcoId}GlideBus`]?.setValueAtTime(chordHz, time);
+      }
+    } else if (managedSrc) {
+      // A 960 is driving this input, so the pitch it is holding must be re-snapped to
+      // the chord we just moved to — otherwise it stays snapped to the previous chord
+      // until that 960's next step, and the snapper rAF (which used to catch this at
+      // 60 fps) has stood down for managed sources.
+      //
+      // This and the 960's own step write are BOTH setValueAtTime at the same `time`
+      // whenever a chord boundary lands on a step boundary (bar lines always do), and
+      // a same-time setValueAtTime replaces the earlier one — so whichever Loop Tone
+      // runs second wins, and by then BOTH refs it reads are current. The result is
+      // identical in either order; no Loop-ordering assumption is needed.
+      const seqId = managedSrc.replace('-pitch-out', '');
+      const srcHz = seqLastHzRef.current[seqId];
+      if (srcHz !== undefined) {
+        const snapped = snapToChordHz(srcHz, step.rootClass, step.chordType);
+        n[`${csId}PitchOut`].setValueAtTime(snapped, time);
+        const seqGlide = seqGlideRefs.current[seqId] ?? 0;
+        for (const vcoId of allVcoIdsRef.current) {
+          if (vcoActiveCvRef.current[vcoId] !== cvOutSrc) continue;
+          const gb = n[`${vcoId}GlideBus`];
+          if (!gb) continue;
+          if (seqGlide < 0.001) gb.setValueAtTime(snapped, time);
+          else                  gb.rampTo(snapped, seqGlide, time);
+        }
       }
     }
     // Polyphonic voice outputs — always fire regardless of cv-in state.
@@ -1303,6 +1708,11 @@ const triggerEnvOneShot = (env, time) => {
     n[`${csId}RootOut`].setValueAtTime(voiceHz[0], time);
     n[`${csId}ThirdOut`].setValueAtTime(voiceHz[1], time);
     n[`${csId}FifthOut`].setValueAtTime(voiceHz[2], time);
+    // 4th voice (Phase 91). CHORD_VOICE_INTERVALS has always carried four tones and this
+    // one was computed and thrown away, because only three jacks existed — so ROOT/3RD/5TH
+    // emitted [0,4,7] for CMAJ, CDOM *and* CMAJ7 alike. Picking "dom7" or "maj7" changed
+    // the label and the quantizer scale but not one note of the chord you could patch.
+    n[`${csId}SeventhOut`].setValueAtTime(voiceHz[3], time);
     // Glide (portamento) for the voice CV outs — applied at each VCO's glideBus,
     // matching the seq-pitch-out convention (instant signal jump, ramp at the bus).
     const chordGlide = chordSeqGlideRefs.current[csId] ?? 0;
@@ -1310,19 +1720,44 @@ const triggerEnvOneShot = (env, time) => {
       [`${csId}-root-out`]: voiceHz[0],
       [`${csId}-3rd-out`]:  voiceHz[1],
       [`${csId}-5th-out`]:  voiceHz[2],
+      [`${csId}-7th-out`]:  voiceHz[3],
     };
+    // Remember the raw voice pitches so a FREQ-knob turn can re-pick its octave without
+    // waiting for the next chord (see updateVcoParams).
+    for (const jack in VOICE_HZ) chordVoiceLastHzRef.current[jack] = VOICE_HZ[jack];
     for (const vcoId of allVcoIdsRef.current) {
       const src = vcoActiveCvRef.current[vcoId];
       const vhz = VOICE_HZ[src];
       if (vhz === undefined) continue;
       const gb = n[`${vcoId}GlideBus`];
       if (!gb) continue;
-      if (chordGlide < 0.001) gb.setValueAtTime(vhz, time);
-      else                    gb.rampTo(vhz, chordGlide, time);
+      // The chord owns the note; this VCO's FREQ knob owns the octave (Phase 94).
+      const hz = snapVoiceToKnobOctave(vhz, vcoKnobHzRef.current[vcoId]);
+      if (chordGlide < 0.001) gb.setValueAtTime(hz, time);
+      else                    gb.rampTo(hz, chordGlide, time);
     }
 
-    chordSeqStepCbRefs.current[csId]?.(idx);
-    chordSeqChordCbRefs.current[csId]?.(step.rootClass, step.chordType);
+    // UI callbacks (step LED + chord-name label) scheduled AT the step's audio time.
+    // Firing them straight from this callback lit them `lookAhead` early — 0.1 s, or
+    // 0.2 s at reduced performance quality. That is the Phase 79 fix the 960 already
+    // has via drawAt; the chord seq never got it, so its LED and chord label ran ahead
+    // of the chord you could actually hear. Both are pure DOM writes, so draw time is
+    // exactly where they belong. The quantizer postMessage below deliberately stays at
+    // schedule time — it is audio-domain config that must land BEFORE the audio does.
+    drawAt(time, () => {
+      chordSeqStepCbRefs.current[csId]?.(idx);
+      // The EXT chord label belongs to the QUANTIZER, so it is addressed the same
+      // way the audio override is — by qid, through qntChordOverrideRef (Phase 95).
+      // It used to ride a single per-chord-seq callback that the shell wired from
+      // chordseq #1 to qnt #1 unconditionally, so: a second chord seq never lit any
+      // label, a second quantizer had no label span to write to at all, and chord
+      // seq #1 stamped its chord onto QNT #1 even when the two were not patched
+      // together. The audio was always right; only the writing on the panel lied.
+      for (const [qid, owner] of Object.entries(qntChordOverrideRef.current))
+        if (owner === csId)
+          qntChordLabelCbRefs.current[qid]?.(
+            step.rootClass, step.chordType, SCALE_DEFS[step.chordType] ?? SCALE_DEFS.CMAJ);
+    });
     // Push root+scale into every quantizer whose transpose-in THIS instance's
     // cv-out is patched to (override owner per quantizer — Single Writer).
     for (const [qid, owner] of Object.entries(qntChordOverrideRef.current)) {
@@ -1333,7 +1768,55 @@ const triggerEnvOneShot = (env, time) => {
       qp.scale = SCALE_DEFS[step.chordType] ?? SCALE_DEFS.CMAJ;
       n.qntNodes[qid].port.postMessage(qp);
     }
-  }, chordSeqDivisionRefs.current[csId] ?? '1m'), []);
+    // GATE↑ / CLK↑ (Phase 92) — a chord change can now fire an envelope directly, so
+    // chord stabs no longer have to borrow a 960's gate (which fires on ITS rhythm, not
+    // the chord's). Gate width is 80% of this instance's own division, the 960's
+    // convention. A REST step advances the chord but fires no gate, so a chord can move
+    // underneath a sustained note without re-articulating it.
+    dispatchStepActions({
+      n, time,
+      gateSrc: `${csId}-gate-out`,
+      clkSrc:  `${csId}-clk-out`,
+      fires:   step.gate !== false,
+      gateDur: Tone.Time(chordSeqDivisionRefs.current[csId] ?? '1m').toSeconds() * 0.8,
+    });
+  }, [dispatchStepActions]);
+  advanceChordSeqRef.current = advanceChordSeq;
+
+  const buildChordSeqLoop = useCallback((csId) => new Tone.Loop(
+    (time) => advanceChordSeqRef.current?.(csId, time),
+    chordSeqDivisionRefs.current[csId] ?? '1m',
+  ), []);
+
+  // Internal-vs-external clock arbitration, the exact shape applySeqClockSource uses for
+  // the 960: a cable on CLK↓ stops the internal Loop, and pulling the last such cable
+  // hands it back. Counted over live connections rather than a boolean so two cables into
+  // one CLK↓ (cables fan in) don't have the first removal re-arm the internal clock.
+  // One incoming CLK↓ pulse, through the divider. Phase is "advance on the FIRST pulse,
+  // then every Nth": counting the other way round would swallow the downbeat, leaving the
+  // first bar with no chord at all while the counter warmed up.
+  const pulseChordSeqClockRef = useRef(null);
+  const pulseChordSeqClock = useCallback((csId, time) => {
+    const div = Math.max(1, chordSeqClockDivRefs.current[csId] ?? 1);
+    const c   = chordSeqClockCountRefs.current[csId] ?? 0;
+    chordSeqClockCountRefs.current[csId] = (c + 1) % div;
+    if (c !== 0) return;                       // mid-division — swallow this pulse
+    advanceChordSeqRef.current?.(csId, time);
+  }, []);
+  pulseChordSeqClockRef.current = pulseChordSeqClock;
+
+  const applyChordSeqClockSource = useCallback((csId) => {
+    let external = false;
+    for (const c of connectionsRef.current.values())
+      if (c.isChordClock && c.csId === csId) { external = true; break; }
+    chordSeqExtClockRefs.current[csId] = external;
+    const loop = chordSeqLoopsRef.current[csId];
+    if (!loop) return;
+    try {
+      if (external)                  loop.stop();
+      else if (isPoweredRef.current) loop.start(0);
+    } catch (_) {}
+  }, []);
 
   // Node creation runs in a LAYOUT effect (not passive): React fires ALL layout
   // effects before ANY passive effect, so the nodes exist by the time each
@@ -1416,6 +1899,17 @@ const triggerEnvOneShot = (env, time) => {
       lfoSyncSig:  new Tone.Signal(0), lfo2SyncSig:  new Tone.Signal(0),
       lfoSyncGain: new Tone.Gain(0),   lfo2SyncGain: new Tone.Gain(0),
       master:      new Tone.Volume(-14),             // no longer goes direct to Destination
+      // Output brick wall (Phase 103). Four channels summing into `master` can
+      // easily exceed 0 dBFS, and past that the DAC hard-clips — the ugly digital
+      // crunch, not the warm analogue kind. Same hard-knee recipe VOWEL and the
+      // vocoder already use (`threshold −1, ratio 20, knee 0`), and explicitly NOT
+      // `Tone.Limiter`, whose 30 dB soft knee barely compresses (the Phase 64a
+      // finding). Sits AFTER master and BEFORE the gate, so it protects the
+      // speakers while the PEAK lamp and the scope keep tapping `master` itself —
+      // they must show what you are FEEDING the output, or the lamp could never
+      // warn you that you are driving it too hot.
+      masterLimit: new Tone.Compressor({ threshold: -1, ratio: 20, knee: 0,
+                                         attack: 0.003, release: 0.05 }),
       seqMasterGate: new Tone.Gain(1).toDestination(), // sole gateway to speakers — Loop gates here
       analyser:    new Tone.Analyser('waveform', 512),
       seqPitchOut:       new Tone.Signal(SEQ_HZ_MIN), // never init to 0 — exponential ramps from 0 are undefined
@@ -1425,6 +1919,7 @@ const triggerEnvOneShot = (env, time) => {
       chordseqRootOut:       new Tone.Signal(SEQ_HZ_MIN), // independent root-note CV out (octave-shifted)
       chordseqThirdOut:      new Tone.Signal(SEQ_HZ_MIN), // 3rd of chord CV
       chordseqFifthOut:      new Tone.Signal(SEQ_HZ_MIN), // 5th of chord CV
+      chordseqSeventhOut:    new Tone.Signal(SEQ_HZ_MIN), // 4th voice: the 7th on a 7th chord, the octave on a triad
       chordseqInputAnalyser: new Tone.Analyser('waveform', 256), // detects patched pitch CV input
 
       // Studio reverb — Freeverb (proven in this codebase via VoxTool arpReverb).
@@ -1474,14 +1969,25 @@ const triggerEnvOneShot = (env, time) => {
       // I/O 4-channel input gains — each sums independently into n.master.
       // Single writer per node: updateIoChannelVol owns these gain params.
       // Meters tap post-gain so LEDs show each channel's actual contribution.
+      // Eight input channels (Phase 104 — was four). Channel 5 is the old
+      // `io-in` jack, which used to run straight into `master` with no fader and
+      // no meter; it now has both. Channels 6–8 are new.
       ioCh1: new Tone.Gain(0.8),
       ioCh2: new Tone.Gain(0.8),
       ioCh3: new Tone.Gain(0.8),
       ioCh4: new Tone.Gain(0.8),
+      ioCh5: new Tone.Gain(0.8),
+      ioCh6: new Tone.Gain(0.8),
+      ioCh7: new Tone.Gain(0.8),
+      ioCh8: new Tone.Gain(0.8),
       ioCh1Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
       ioCh2Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
       ioCh3Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
       ioCh4Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
+      ioCh5Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
+      ioCh6Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
+      ioCh7Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
+      ioCh8Meter: new Tone.Meter({ normalRange: true, smoothing: 0.2 }),
 
       // Built-in vocoder mic — Tone.UserMedia (opened on enable) → extMicGain (MIC IN level)
       // → vocModRaw (the vocoder modulator pre-chain). extMicMeter taps post-gain for the
@@ -1711,14 +2217,10 @@ const triggerEnvOneShot = (env, time) => {
     // I/O channel gains → master: each channel has its own Gain node so the
     // 4-channel mixer faders are independent. Meters tap from the channel output
     // (post-gain) so LEDs reflect the actual contribution of each channel.
-    n.ioCh1.connect(n.master);
-    n.ioCh2.connect(n.master);
-    n.ioCh3.connect(n.master);
-    n.ioCh4.connect(n.master);
-    n.ioCh1.connect(n.ioCh1Meter);
-    n.ioCh2.connect(n.ioCh2Meter);
-    n.ioCh3.connect(n.ioCh3Meter);
-    n.ioCh4.connect(n.ioCh4Meter);
+    for (let c = 1; c <= IO_CHANNELS; c++) {
+      n[`ioCh${c}`].connect(n.master);
+      n[`ioCh${c}`].connect(n[`ioCh${c}Meter`]);
+    }
     n.extMicGain.connect(n.extMicMeter); // dead-end level tap for the mic LED
     // Built-in mic → vocoder modulator. The mic feeds the same pre-chain front (vocModRaw)
     // as the MOD jack, so enabling the mic + a carrier vocodes instantly (no patching), and
@@ -1731,7 +2233,8 @@ const triggerEnvOneShot = (env, time) => {
     // or any io-inN channel flows through master, then seqMasterGate. No step loop
     // writes seqMasterGate (that would silence the other sequencers) — powerOff is
     // its only writer, so it is a unity pass-through in practice.
-    n.master.connect(n.seqMasterGate);
+    n.master.connect(n.masterLimit);
+    n.masterLimit.connect(n.seqMasterGate);
 
     // moogBus: side tap after the master gate, feeds the Workstation's Tone.Recorder.
     // Does not connect to Destination — purely a recording tap.
@@ -1901,6 +2404,17 @@ const triggerEnvOneShot = (env, time) => {
     const chordSnapTick = () => {
       chordSnapRafId = requestAnimationFrame(chordSnapTick);
       for (const csId of chordSeqIdsRef.current) {
+        // Managed source (a 960): the step loop owns this instance's PitchOut and its
+        // downstream glideBuses, writing them at the step's exact audio time. Stand
+        // down — polling the same value here would land a second, late write and undo
+        // the sample accuracy. The input is active by definition, so flag it as such
+        // rather than inferring it from the analyser (no warm-up dependency), and clear
+        // the delta gate so resuming after a cable pull always writes fresh.
+        if (managedPitchSourceFor(csId, connectionsRef.current)) {
+          chordSeqInputActiveRefs.current[csId] = true;
+          prevChordSnaps[csId] = undefined;
+          continue;
+        }
         const analyser = n[`${csId}InputAnalyser`];
         const data = analyser?.getValue();
         if (!data || !data.length) continue;
@@ -1911,7 +2425,11 @@ const triggerEnvOneShot = (env, time) => {
         chordSeqInputActiveRefs.current[csId] = isActive;
         if (isActive && Tone.context.state === 'running') {
           const stepIdx = chordSeqCurrentStepRefs.current[csId];
-          const step    = chordSeqStepsRefs.current[csId][Math.max(0, stepIdx)];
+          // Guarded like the loop body: an instance removed between the ids snapshot and
+          // this read, or a steps array shorter than the index, would otherwise throw and
+          // kill the whole snapper rAF for every chord seq in the rack, not just this one.
+          const step    = chordSeqStepsRefs.current[csId]?.[Math.max(0, stepIdx)];
+          if (!step) continue;
           const snapped = snapToChordHz(avgHz, step.rootClass, step.chordType);
           // Use value setter (immediate) — setValueAtTime with a future-scheduled
           // chord loop tick would otherwise fight this write in the same block.
@@ -2120,6 +2638,7 @@ const triggerEnvOneShot = (env, time) => {
           if (qntFmMutedRef.current[vcoId]) {
             qntFmMutedRef.current[vcoId] = false;
             qntFmLastHzRef.current[vcoId] = undefined;
+            qntFmHeldMidiRef.current[vcoId] = undefined;
             if (gain) safeRamp(gain.gain, 500, 0.03);
           }
           continue;
@@ -2140,17 +2659,28 @@ const triggerEnvOneShot = (env, time) => {
         // ±1 → ±QNT_FM_SEMITONES around the FREQ knob, exponential (equal intervals),
         // matching the quantizer worklet's own modulation mode.
         const target = kHz * Math.pow(2, level * (QNT_FM_SEMITONES / 12));
-        const hz = q.bypass ? target : quantizeHzJs(target, q);
+        // Hysteresis (Phase 100) — an LFO parked near a note boundary otherwise
+        // flips the output every frame, and since Phase 96 each flip fires TRIG^.
+        // Held per VCO, because each one has its own modulator position.
+        const targetMidi = 69 + 12 * Math.log2(Math.max(0.001, target) / 440);
+        const snapped = quantizerParamsRefs.current[engaged]
+          ? snapMidiHeldJs(targetMidi, q, qntFmHeldMidiRef.current[vcoId])
+          : Math.round(targetMidi);
+        qntFmHeldMidiRef.current[vcoId] = snapped;
+        const hz = clampQntHz(440 * Math.pow(2, (snapped + (q.octShift ?? 0) * 12 - 69) / 12));
         const last = qntFmLastHzRef.current[vcoId];
         if (last !== undefined && Math.abs(hz - last) < 0.01) continue;
         qntFmLastHzRef.current[vcoId] = hz;
         gb.setTargetAtTime(hz, now, 0.005);   // tiny smoothing kills the step edge click
-        // Mirror the stepped note onto the owning QNT's display + LEDs.
-        if (!q.bypass && quantizerStepCbRefs.current[engaged]) {
+        // Mirror the stepped note onto the owning QNT's display + LEDs, and fire
+        // its TRIG↑ on the note change (Phase 96) — the delta check that guards the
+        // display is exactly the "new note" test the trigger wants.
+        {
           const midi = Math.round(69 + 12 * Math.log2(hz / 440));
           if (midi !== lastQuantizedMidiRefs.current[engaged]) {
             lastQuantizedMidiRefs.current[engaged] = midi;
-            quantizerStepCbRefs.current[engaged](((midi % 12) + 12) % 12, midi, undefined);
+            quantizerStepCbRefs.current[engaged]?.(((midi % 12) + 12) % 12, midi, undefined);
+            fireQntTrigRef.current?.(engaged);
           }
         }
       }
@@ -2279,10 +2809,17 @@ const triggerEnvOneShot = (env, time) => {
           // two in-scale notes.
           if (data.midiNote !== undefined && nodesRef.current) {
             const hz = 440 * Math.pow(2, (data.midiNote - 69) / 12);
-            // Determine glide τ by tracing what drives this instance's cv-in.
+            // TRIG↑ — a new quantized note is an event, so it can fire an envelope
+            // (Phase 96). Fired here rather than in the worklet because this is the
+            // one place a note CHANGE is already established (the worklet's delta
+            // check is what makes this message arrive at all).
+            fireQntTrigRef.current?.(qid);
+            // GLIDE: this quantizer's own knob wins; the source's glide (a 960's
+            // GLIDE reaching us through the cable) stays the fallback for racks
+            // built before the knob existed.
             const qntSource = [...connectionsRef.current.keys()]
               .find(k => k.endsWith(`→${qid}-cv-in`))?.split('→')[0];
-            const rawGlide = glideForPitchSource(qntSource);
+            const rawGlide = qntGlideRefs.current[qid] || glideForPitchSource(qntSource);
             const cvOutSrc = `${qid}-cv-out`;
             for (const vcoId of allVcoIdsRef.current) {
               if (vcoActiveCvRef.current[vcoId] !== cvOutSrc) continue;
@@ -2506,6 +3043,7 @@ const triggerEnvOneShot = (env, time) => {
       qntFmEngagedRef.current       = {};
       qntFmMutedRef.current         = {};
       qntFmLastHzRef.current        = {};
+      qntFmHeldMidiRef.current      = {};
       lfoOffsetRefs.current         = {};
       lfoDepthRefs.current          = {};
       lfoWaveRefs.current           = {};
@@ -2519,6 +3057,10 @@ const triggerEnvOneShot = (env, time) => {
       quantizerParamsRefs.current   = { qnt: defaultQntParams() };
       lastQuantizedMidiRefs.current = { qnt: 69 };
       quantizerStepCbRefs.current   = {};
+      qntChordLabelCbRefs.current   = {};
+      qntGlideRefs.current          = { qnt: 0 };
+      qntLearnRefs.current          = {};
+      qntLearnCbRefs.current        = {};
       qntChordOverrideRef.current   = {};
       isPoweredRef.current = false;
     };
@@ -2538,6 +3080,11 @@ const triggerEnvOneShot = (env, time) => {
     dynInstancesRef.current.forEach(inst =>
       inst.sourceNames.forEach(sn => { try { n[sn]?.start(); } catch (_) {} }));
 
+    // Open the master gate — the counterpart to powerOff closing it (Phase 102).
+    // Ramped for the same click-free reason, and done BEFORE the sources start so
+    // the gate is already open by the time anything reaches it.
+    safeRamp(n.seqMasterGate.gain, 1, 0.03);
+
     // Open every VCO's power gate (coreGate) — the worklet core runs continuously
     // and is silenced while unpowered by coreGate=0 (Phase 68b). HARD SYNC state
     // lives on the worklet's syncEnabled param (set by the sync setters / wire()),
@@ -2549,10 +3096,21 @@ const triggerEnvOneShot = (env, time) => {
 
     // Start sequencer clocks — reset steps so first tick lands on step 0
     for (const id of Object.keys(seqLoopsRef.current)) seqCurrentStepRefs.current[id] = -1;
-    for (const id of Object.keys(chordSeqLoopsRef.current)) chordSeqCurrentStepRefs.current[id] = -1;
+    for (const id of Object.keys(chordSeqLoopsRef.current)) {
+      chordSeqCurrentStepRefs.current[id]  = -1;
+      chordSeqClockCountRefs.current[id]   = 0;   // divider re-phases on power-up
+    }
     Tone.Transport.start();
-    Object.values(seqLoopsRef.current).forEach(loop => { try { loop.start(0); } catch (_) {} });
-    Object.values(chordSeqLoopsRef.current).forEach(loop => { try { loop.start(0); } catch (_) {} });
+    // A 960 with a cable on its CLK↓ is driven by that pulse, not by its own clock —
+    // starting its Loop here would run it at both rates at once.
+    Object.entries(seqLoopsRef.current).forEach(([id, loop]) => {
+      if (seqExtClockRefs.current[id]) return;
+      try { loop.start(0); } catch (_) {}
+    });
+    Object.entries(chordSeqLoopsRef.current).forEach(([id, loop]) => {
+      if (chordSeqExtClockRefs.current[id]) return;   // driven by its CLK↓ cable instead
+      try { loop.start(0); } catch (_) {}
+    });
 
     setIsPowered(true);
   }, []);
@@ -2609,10 +3167,24 @@ const triggerEnvOneShot = (env, time) => {
       if (n[`${vcoId}bus`]) n[`${vcoId}bus`].gain.value = 1;
     }
 
-    // Re-open the master gate so keyboard / manual playing is audible after the
-    // sequencer stops. (The per-seq GateNodes are gone as of Phase 71; the loop
-    // below is a guarded no-op, kept for a future per-seq output gate.)
-    n.seqMasterGate.gain.value = 1;
+    // CLOSE the master gate — POWER OFF must actually silence the rack (Phase 102).
+    //
+    // This line used to re-OPEN it (`= 1`), on the Phase-71 reasoning that a
+    // sequencer stopping should not leave the gate shut. But the per-seq GateNodes
+    // that could shut it are gone, powerOff is this node's only writer, and
+    // `seqMasterGate` is the sole gateway to the speakers — so re-opening it on
+    // power-down meant POWER OFF relied on every SOURCE stopping instead of on the
+    // output being cut.
+    //
+    // Most sources do stop. The microphone does not: it is a `Tone.UserMedia` with
+    // its own enable/disable lifecycle that powerOff never touches. So mic on +
+    // vocoder CLARITY up (a direct voice blend that needs no carrier, and the
+    // carriers are the part that does stop) + `voc-out → io-in` kept playing
+    // straight through a power-down. Gating the OUTPUT fixes that and every future
+    // source like it, rather than chasing each one into powerOff's stop list.
+    //
+    // Ramped, not stepped: a hard gain jump on a live signal clicks.
+    safeRamp(n.seqMasterGate.gain, 0, 0.03);
     for (const id of Object.keys(seqLoopsRef.current)) {
       const gn = n[`${id}GateNode`];
       if (gn) gn.gain.value = 1;
@@ -3304,6 +3876,8 @@ const triggerEnvOneShot = (env, time) => {
       seqStepsRefs.current[id]       = defaultSeqSteps();
       seqCurrentStepRefs.current[id] = -1;
       seqGlideRefs.current[id]       = 0;
+      seqDivisionRefs.current[id]    = '8n';
+      seqExtClockRefs.current[id]    = false;
       const loop = buildSeqLoop(id);
       seqLoopsRef.current[id] = loop;
       // Transport is already running while powered — join it immediately.
@@ -3311,8 +3885,9 @@ const triggerEnvOneShot = (env, time) => {
       const jackEntries = {
         [`${id}-pitch-out`]: { type: 'out', node: n[`${id}PitchOut`] },
         [`${id}-gate-out`]:  { type: 'out', node: null, isGate: true },
-        [`${id}-clk-in`]:    { type: 'in',  dest: null },  // no-op, parity with statics
-        [`${id}-clk-out`]:   { type: 'out', node: null },
+        [`${id}-clk-in`]:    { type: 'in',  dest: null, isGate: true, isSeqClock: true, seqId: id },
+        [`${id}-clk-out`]:   { type: 'out', node: null, isGate: true },
+        [`${id}-cycle-out`]: { type: 'out', node: null, isGate: true },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, { type, num,
@@ -3326,6 +3901,7 @@ const triggerEnvOneShot = (env, time) => {
       n[`${id}RootOut`]       = new Tone.Signal(SEQ_HZ_MIN);
       n[`${id}ThirdOut`]      = new Tone.Signal(SEQ_HZ_MIN);
       n[`${id}FifthOut`]      = new Tone.Signal(SEQ_HZ_MIN);
+      n[`${id}SeventhOut`]    = new Tone.Signal(SEQ_HZ_MIN);
       n[`${id}InputAnalyser`] = new Tone.Analyser('waveform', 256);
       chordSeqStepsRefs.current[id]       = defaultChordSteps();
       chordSeqCurrentStepRefs.current[id] = -1;
@@ -3333,6 +3909,9 @@ const triggerEnvOneShot = (env, time) => {
       chordSeqRootOctaveRefs.current[id]  = 0;
       chordSeqGlideRefs.current[id]       = 0;
       chordSeqInputActiveRefs.current[id] = false;
+      chordSeqExtClockRefs.current[id]    = false;
+      chordSeqClockDivRefs.current[id]    = 1;
+      chordSeqClockCountRefs.current[id]  = 0;
       chordSeqIdsRef.current = [...chordSeqIdsRef.current, id];
       const loop = buildChordSeqLoop(id);
       chordSeqLoopsRef.current[id] = loop;
@@ -3344,10 +3923,14 @@ const triggerEnvOneShot = (env, time) => {
         [`${id}-root-out`]: { type: 'out', node: n[`${id}RootOut`]  },
         [`${id}-3rd-out`]:  { type: 'out', node: n[`${id}ThirdOut`] },
         [`${id}-5th-out`]:  { type: 'out', node: n[`${id}FifthOut`] },
+        [`${id}-7th-out`]:  { type: 'out', node: n[`${id}SeventhOut`] },
+        [`${id}-gate-out`]: { type: 'out', node: null, isGate: true },
+        [`${id}-clk-in`]:   { type: 'in',  dest: null, isGate: true, isChordClock: true, csId: id },
+        [`${id}-clk-out`]:  { type: 'out', node: null, isGate: true },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, { type, num,
-        nodeNames: [`${id}PitchOut`, `${id}RootOut`, `${id}ThirdOut`, `${id}FifthOut`, `${id}InputAnalyser`],
+        nodeNames: [`${id}PitchOut`, `${id}RootOut`, `${id}ThirdOut`, `${id}FifthOut`, `${id}SeventhOut`, `${id}InputAnalyser`],
         sourceNames: [], jackIds: Object.keys(jackEntries) });
       return { id, num };
     }
@@ -3466,11 +4049,13 @@ const triggerEnvOneShot = (env, time) => {
       n[`${id}KeepAlive`].connect(Tone.Destination);
       quantizerParamsRefs.current[id]   = defaultQntParams();
       lastQuantizedMidiRefs.current[id] = 69;
+      qntGlideRefs.current[id]          = 0;
       qntIdsRef.current = [...qntIdsRef.current, id];
       const jackEntries = {
         [`${id}-cv-in`]:        { type: 'in',  dest: n.qntNodes?.[id] ?? null }, // live after wire()
         [`${id}-cv-out`]:       { type: 'out', node: n[`${id}Out`] },
         [`${id}-transpose-in`]: { type: 'in',  dest: n[`${id}TransposeAnalyser`] },
+        [`${id}-trig-out`]:     { type: 'out', node: null, isGate: true },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
       dynInstancesRef.current.set(id, { type, num,
@@ -3793,6 +4378,7 @@ const triggerEnvOneShot = (env, time) => {
       delete qntFmEngagedRef.current[id];   // Phase 70 — quantized-FM bookkeeping
       delete qntFmMutedRef.current[id];
       delete qntFmLastHzRef.current[id];
+      delete qntFmHeldMidiRef.current[id];
       delete dynVcoSyncRef.current[id];
     }
     if (inst.type === 'kick') {
@@ -3811,6 +4397,11 @@ const triggerEnvOneShot = (env, time) => {
       delete seqCurrentStepRefs.current[id];
       delete seqStepCbRefs.current[id];
       delete seqGlideRefs.current[id];
+      delete seqDivisionRefs.current[id];
+      delete seqExtClockRefs.current[id];
+      delete seqLastHzRef.current[id];
+      // Removing the module cannot leave a VCO parked on this sequencer's rest-step mute.
+      reopenUngatedVcoBuses();
     }
     if (inst.type === 'voc') {
       delete vocShiftBaseRefs.current[id];
@@ -3846,25 +4437,37 @@ const triggerEnvOneShot = (env, time) => {
       delete chordSeqStepsRefs.current[id];
       delete chordSeqCurrentStepRefs.current[id];
       delete chordSeqStepCbRefs.current[id];
-      delete chordSeqChordCbRefs.current[id];
       delete chordSeqDivisionRefs.current[id];
       delete chordSeqRootOctaveRefs.current[id];
       delete chordSeqGlideRefs.current[id];
       delete chordSeqInputActiveRefs.current[id];
+      delete chordSeqExtClockRefs.current[id];
+      delete chordSeqClockDivRefs.current[id];
+      delete chordSeqClockCountRefs.current[id];
+      for (const v of ['root', '3rd', '5th', '7th']) delete chordVoiceLastHzRef.current[`${id}-${v}-out`];
       chordSeqIdsRef.current = chordSeqIdsRef.current.filter(c => c !== id);
       // Any quantizer this chord seq was overriding reverts to manual control.
-      for (const [qid, owner] of Object.entries(qntChordOverrideRef.current))
-        if (owner === id) delete qntChordOverrideRef.current[qid];
+      for (const [qid, owner] of Object.entries(qntChordOverrideRef.current)) {
+        if (owner !== id) continue;
+        delete qntChordOverrideRef.current[qid];
+        // …and wipe the chord name it left on that quantizer's panel, or the
+        // label outlives the sequencer that wrote it (Phase 95).
+        qntChordLabelCbRefs.current[qid]?.(null, null);
+      }
     }
     if (inst.type === 'qnt') {
       delete quantizerParamsRefs.current[id];
       delete lastQuantizedMidiRefs.current[id];
       delete quantizerStepCbRefs.current[id];
+      delete qntChordLabelCbRefs.current[id];
+      delete qntGlideRefs.current[id];
+      delete qntLearnRefs.current[id];
+      delete qntLearnCbRefs.current[id];
       delete qntChordOverrideRef.current[id];
       qntIdsRef.current = qntIdsRef.current.filter(q => q !== id);
     }
     dynInstancesRef.current.delete(id);
-  }, []);
+  }, [reopenUngatedVcoBuses]);
 
   // ── VCO knob-stepper mode (Phase 57, id-keyed since 60e part 4) ──
   // Active for a VCO when some quantizer's cv-out → vcoN-cv is patched AND
@@ -3880,11 +4483,15 @@ const triggerEnvOneShot = (env, time) => {
   const qntIdForVco = useCallback((vcoId) =>
     vcoActiveCvRef.current[vcoId]?.match(/^(qnt\d*)-cv-out$/)?.[1] ?? null, []);
 
-  // VCOs currently snapping their FREQ knob (bypass counts as mode-off for the UI glow).
+  // VCOs currently snapping their FREQ knob.
   const knobQuantizedVcoIds = useCallback(() =>
     allVcoIdsRef.current.filter(id => {
+      // A chord voice out also puts this VCO's knob in snapping mode — it selects the
+      // octave rather than the frequency (Phase 94). Same glow, same meaning: "this
+      // knob is stepping, so its position is not literally the pitch."
+      if (CHORD_VOICE_OUT_RE.test(vcoActiveCvRef.current[id])) return true;
       const qid = qntIdForVco(id);
-      return qid && !qntHasCvInput(qid) && !quantizerParamsRefs.current[qid]?.bypass;
+      return !!qid && !qntHasCvInput(qid);
     }), [qntHasCvInput, qntIdForVco]);
 
   const notifyKnobQuantize = useCallback(() => {
@@ -3933,8 +4540,8 @@ const triggerEnvOneShot = (env, time) => {
   }, []);
   recomputeFfbSweepRef.current = recomputeFfbSweep;
 
-  // Write the FREQ knob's Hz — snapped, or raw when bypassed — to a qnt-patched
-  // VCO's glideBus, and mirror the snapped note onto that QNT's display/LEDs.
+  // Write the FREQ knob's snapped Hz to a qnt-patched VCO's glideBus, and mirror
+  // the snapped note onto that QNT's display/LEDs.
   const applyVcoKnobQuantize = useCallback((vcoId) => {
     const n = nodesRef.current;
     if (!n) return;
@@ -3949,13 +4556,20 @@ const triggerEnvOneShot = (env, time) => {
     const hz = quantizeHzJs(kHz, q);
     const gb = n[`${vcoId}GlideBus`];
     if (!gb) return;
-    if (Tone.context.state === 'running') gb.rampTo(hz, 0.02);
+    // GLIDE (Phase 96) slides between the notes the knob steps through. The 0.02 s
+    // floor is the original de-click ramp, so GLIDE at 0 behaves exactly as before.
+    const glide = Math.max(0.02, qntGlideRefs.current[qid] ?? 0);
+    if (Tone.context.state === 'running') gb.rampTo(hz, glide);
     else                                  gb.value = hz;
     // (glideBus → worklet slaveFreq is connected — no separate write.)
-    if (!q.bypass && quantizerStepCbRefs.current[qid]) {
-      const midi = Math.round(69 + 12 * Math.log2(hz / 440));
+    // Delta-checked (Phase 96): this used to write the display unconditionally, which
+    // was harmless for a self-diffing callback but would make TRIG↑ fire on every
+    // pixel of knob travel instead of once per new note.
+    const midi = Math.round(69 + 12 * Math.log2(hz / 440));
+    if (midi !== lastQuantizedMidiRefs.current[qid]) {
       lastQuantizedMidiRefs.current[qid] = midi;
-      quantizerStepCbRefs.current[qid](((midi % 12) + 12) % 12, midi, undefined);
+      quantizerStepCbRefs.current[qid]?.(((midi % 12) + 12) % 12, midi, undefined);
+      fireQntTrigRef.current?.(qid);
     }
   }, [qntIdForVco]);
 
@@ -3984,6 +4598,24 @@ const triggerEnvOneShot = (env, time) => {
     // Keyed by full cable key so kbd-gate and seq-gate can both connect to the
     // same env jack independently without overwriting each other.
     if (from.isGate && to.isGate) {
+      // 960 CLK↓ — the pulse advances that sequencer's step and takes over from its
+      // internal clock. Any gate-domain source works: another 960's CLK↑ or GATE↑, or
+      // the keyboard's GATE↑ (step-per-keypress).
+      if (to.isSeqClock) {
+        gateActionsRef.current.set(key, { isSeqClock: true, seqId: to.seqId, fromId: effFrom });
+        connectionsRef.current.set(key, { isGate: true, toId: effTo, isSeqClock: true, seqId: to.seqId });
+        applySeqClockSource(to.seqId);
+        return;
+      }
+      // Chord seq CLK↓ (Phase 92) — same contract as the 960's: the pulse advances one
+      // chord and takes over from that instance's internal clock. Any gate-domain source
+      // works, so "advance the chord once per 960 cycle" is a CLK↑ → CLK↓ cable.
+      if (to.isChordClock) {
+        gateActionsRef.current.set(key, { isChordClock: true, csId: to.csId, fromId: effFrom });
+        connectionsRef.current.set(key, { isGate: true, toId: effTo, isChordClock: true, csId: to.csId });
+        applyChordSeqClockSource(to.csId);
+        return;
+      }
       if (to.isKick) {
         // Kick gate — store without an env ref; loop handlers detect isKick and
         // resolve the target instance via kickId ('kick' = the static module).
@@ -4030,9 +4662,8 @@ const triggerEnvOneShot = (env, time) => {
       // managed — instance ids are open-ended (Phase 60e). Node names compose
       // from the jack id: chordseq2-3rd-out → n.chordseq2ThirdOut.
       const isSeqPitch   = /^seq\d*-pitch-out$/.test(effFrom);
-      const chordOutKind = effFrom.match(/^(chordseq\d*)-(cv|root|3rd|5th)-out$/);
+      const chordOutKind = effFrom.match(CHORD_OUT_RE);
       const qntOutMatch  = effFrom.match(/^(qnt\d*)-cv-out$/);
-      const CHORD_OUT_SUFFIX = { cv: 'PitchOut', root: 'RootOut', '3rd': 'ThirdOut', '5th': 'FifthOut' };
       if (MANAGED.has(effFrom) || isSeqPitch || chordOutKind || qntOutMatch) {
         // No audio cable — step loops/quantizer callback write to glideBus on each event.
         // Seed the glideBus with the source's current value so there's no jump on connect.
@@ -4041,7 +4672,14 @@ const triggerEnvOneShot = (env, time) => {
                      : qntOutMatch   ? 440 * Math.pow(2, ((lastQuantizedMidiRefs.current[qntOutMatch[1]] ?? 69) - 69) / 12)
                      : effFrom === 'kbd-pitch-out'     ? (n.kbdPitchOut.value       ?? SEQ_HZ_MIN)
                      : SEQ_HZ_MIN;
-        glideBus.setValueAtTime(seedHz, Tone.now());
+        // A chord voice out lands on the octave this VCO's FREQ knob selects, so the
+        // seed must be snapped too — otherwise patching parks it on the chord's own
+        // octave until the next chord step moves it (Phase 94).
+        glideBus.setValueAtTime(
+          CHORD_VOICE_OUT_RE.test(effFrom)
+            ? snapVoiceToKnobOctave(seedHz, vcoKnobHzRef.current[vcoId])
+            : seedHz,
+          Tone.now());
       } else {
         // Pass-through: audio-connect so the source flows to the glideBus offset-addition.
         // Zero the offset so only the source drives the bus (no double-counting).
@@ -4055,6 +4693,7 @@ const triggerEnvOneShot = (env, time) => {
       // Knob-stepper mode: quantizer idle (no CV input) — snap the knob's value
       // immediately (overrides the generic seed) and light the FREQ knob glow.
       // Either way, seed the worklet's modulation-mode base from this knob.
+      if (CHORD_VOICE_OUT_RE.test(effFrom)) notifyKnobQuantize(); // glow on for this VCO
       if (qntOutMatch) {
         const qid = qntOutMatch[1];
         const kHz = vcoKnobHzRef.current[vcoId];
@@ -4096,6 +4735,9 @@ const triggerEnvOneShot = (env, time) => {
         qp.root  = step.rootClass;
         qp.scale = SCALE_DEFS[step.chordType] ?? SCALE_DEFS.CMAJ;
         n.qntNodes?.[qid]?.port.postMessage(qp);
+        // Label lands with the cable, for the same reason the scale does — waiting
+        // for the next bar boundary would show an empty chord slot until then.
+        qntChordLabelCbRefs.current[qid]?.(step.rootClass, step.chordType, qp.scale);
       }
     }
 
@@ -4113,7 +4755,8 @@ const triggerEnvOneShot = (env, time) => {
     // qnt-cv-in patch handing pitch to the worklet), so recompute unconditionally.
     recomputeQntFmRef.current?.();
     recomputeFfbSweepRef.current?.();
-  }, [qntHasCvInput, applyVcoKnobQuantize, notifyKnobQuantize, applyLfoMode]);
+  }, [qntHasCvInput, applyVcoKnobQuantize, notifyKnobQuantize, applyLfoMode,
+      applySeqClockSource, applyChordSeqClockSource]);
 
   const disconnect = useCallback((fromId, toId) => {
     // Mirror the same direction normalization as connect() so the key matches.
@@ -4149,6 +4792,9 @@ const triggerEnvOneShot = (env, time) => {
     if (conn.isGate) {
       gateActionsRef.current.delete(key); // keyed by cable key, not toId
       connectionsRef.current.delete(key);
+      // Deleted BEFORE the re-check so this cable doesn't count itself as still present.
+      if (conn.isSeqClock)   applySeqClockSource(conn.seqId);
+      if (conn.isChordClock) applyChordSeqClockSource(conn.csId);
       return;
     }
 
@@ -4169,7 +4815,10 @@ const triggerEnvOneShot = (env, time) => {
         n[`${vcoId}GlideBus`].setValueAtTime(kHz, Tone.now());
         // (glideBus → worklet slaveFreq is connected — no separate write.)
       }
-      if (/^qnt\d*-cv-out$/.test(conn.sourceId)) notifyKnobQuantize(); recomputeQntFmRef.current?.(); // glow off for this VCO
+      if (/^qnt\d*-cv-out$/.test(conn.sourceId) || CHORD_VOICE_OUT_RE.test(conn.sourceId))
+        notifyKnobQuantize();                       // glow off for this VCO
+      recomputeQntFmRef.current?.();
+      reopenUngatedVcoBuses();  // this VCO may have been parked on a rest-step mute
       return;
     }
 
@@ -4187,6 +4836,10 @@ const triggerEnvOneShot = (env, time) => {
     if (trpOff &&
         qntChordOverrideRef.current[trpOff[1]] === effFrom.replace('-cv-out', '')) {
       delete qntChordOverrideRef.current[trpOff[1]];
+      // Clear the chord name with the cable (Phase 95). Nothing used to erase it,
+      // so re-patching a 960 into TRP showed a live root beside a dead chord
+      // quality left over from whichever chord seq last ran.
+      qntChordLabelCbRefs.current[trpOff[1]]?.(null, null);
     }
 
     // A quantizer's CV input removed — pitch ownership of ITS qnt-patched VCOs
@@ -4202,7 +4855,12 @@ const triggerEnvOneShot = (env, time) => {
     // disengage and hand the direct ×500 path back.
     recomputeQntFmRef.current?.();
     recomputeFfbSweepRef.current?.();
-  }, [applyVcoKnobQuantize, notifyKnobQuantize, applyLfoMode]);
+    // Also unconditional: this cable may have been the one feeding a quantizer / chord
+    // seq that a 960 was gating THROUGH, so the VCO's own cable is untouched but its
+    // rest-step mute just became unreachable.
+    reopenUngatedVcoBuses();
+  }, [applyVcoKnobQuantize, notifyKnobQuantize, applyLfoMode, applySeqClockSource,
+      applyChordSeqClockSource, reopenUngatedVcoBuses]);
 
   // Update VCO audio parameters — single writer per node.
   // vcoId: 'vco1' | 'vco2' | 'vco3'
@@ -4230,6 +4888,19 @@ const triggerEnvOneShot = (env, time) => {
         if (Tone.context.state === 'running') gb.rampTo(safeHz, 0.02);
         else                                  gb.value = safeHz;
       } else {
+        const src = vcoActiveCvRef.current[vcoId];
+        // A chord voice drives this VCO: the chord owns the note, the knob owns the
+        // octave (Phase 94). Re-snap now off the last chord rather than waiting for the
+        // next one, so the knob responds while a chord is being held.
+        if (CHORD_VOICE_OUT_RE.test(src)) {
+          const vhz = chordVoiceLastHzRef.current[src];
+          const gb  = n[`${vcoId}GlideBus`];
+          if (vhz !== undefined && gb) {
+            const hz = snapVoiceToKnobOctave(vhz, safeHz);
+            if (Tone.context.state === 'running') gb.rampTo(hz, 0.02);
+            else                                  gb.value = hz;
+          }
+        }
         const qid = qntIdForVco(vcoId);
         if (qid && quantizerParamsRefs.current[qid]) {
           // The knob is that quantizer's center (Phase 58): post as its worklet's
@@ -4350,9 +5021,9 @@ const triggerEnvOneShot = (env, time) => {
   }, []);
 
 
-  // Update per-channel mixer volume for the 4-channel I/O input stage.
-  // channelIndex: 1–4  value: 0–1 linear gain (0 = muted, 1 = unity gain).
-  // Single writer per node — this is the only function that touches ioCh1–ioCh4.gain.
+  // Update per-channel fader level for the 8-channel I/O input stage (Phase 104).
+  // channelIndex: 1–8  value: 0–1 linear gain (0 = muted, 1 = unity gain).
+  // Single writer per node — this is the only function that touches ioCh*.gain.
   const updateIoChannelVol = useCallback((channelIndex, value) => {
     const n = nodesRef.current;
     if (!n) return;
@@ -4362,11 +5033,41 @@ const triggerEnvOneShot = (env, time) => {
   }, []);
 
   // Update master output volume — single writer on n.master.volume.
-  // volume (0–1) → -60 dB to +6 dB  (linear dB scale; 0.75 ≈ -13.5 dB, matching init)
+  // volume (0–1) → -60 dB to +6 dB  (linear dB scale; 0.7 ≈ -13.8 dB, matching init)
+  //
+  // The very bottom of the travel is TRUE silence, not -60 dB (Phase 103). -60 dB
+  // is 0.1% amplitude — quiet, but a knob turned fully down on real hardware is
+  // off, and on a loud patch you could still hear it. `volume` is a decibel Param,
+  // so -Infinity converts to a gain of exactly 0 and the ramp is linear-in-gain
+  // down to it; the small threshold keeps the last sliver of knob travel from
+  // being a dead zone that reads as "broken" instead of "off".
   const updateIoParams = useCallback(({ volume } = {}) => {
     const n = nodesRef.current;
     if (!n) return;
-    if (volume !== undefined) safeRamp(n.master.volume, -60 + volume * 66);
+    if (volume === undefined) return;
+    safeRamp(n.master.volume, volume <= 0.005 ? -Infinity : -60 + volume * 66);
+  }, []);
+
+  // True SAMPLE peak of what is being fed to the output, for the PEAK lamp
+  // (Phase 103). Reads the waveform analyser already tapping `master` — the same
+  // buffer the scope draws — and takes max|sample| over it.
+  //
+  // Deliberately NOT `masterMeter`: that is a SMOOTHED RMS reading clamped to 1 by
+  // getMeterValue, so a short transient was averaged away and anything above full
+  // scale looked identical to merely loud. A lamp labelled PEAK has exactly one
+  // job — tell you when you are running out of headroom — and the clamped RMS
+  // could not do it. This returns the raw value UNCAPPED, so > 1 means clipping.
+  const getMasterPeak = useCallback(() => {
+    const n = nodesRef.current;
+    if (!n || !isPoweredRef.current) return 0;
+    const data = n.analyser.getValue();
+    if (!data || !data.length) return 0;
+    let peak = 0;
+    for (let i = 0; i < data.length; i++) {
+      const a = data[i] < 0 ? -data[i] : data[i];
+      if (a > peak) peak = a;
+    }
+    return peak;
   }, []);
 
   // Returns the Moog recording bus node (Tone.Gain) for the Workstation's Tone.Recorder.
@@ -4462,34 +5163,63 @@ const triggerEnvOneShot = (env, time) => {
     seqGlideRefs.current[seqId] = v;
   }, []);
 
+  // Per-instance clock division (Phase 87) — the same shape as setChordSeqDivisionById.
+  // Writing loop.interval retimes the running Loop without rebuilding it.
+  const setSeqDivisionById = useCallback((seqId, interval) => {
+    seqDivisionRefs.current[seqId] = interval;
+    const loop = seqLoopsRef.current[seqId];
+    if (loop) loop.interval = interval;
+  }, []);
+
   // Legacy static-module wrappers — the shell's seq1/seq2 call sites use these.
   const updateSequencerSteps = useCallback((steps) => updateSeqStepsById('seq', steps),  [updateSeqStepsById]);
   const setSeqStepCallback   = useCallback((fn)    => setSeqStepCallbackById('seq', fn), [setSeqStepCallbackById]);
   const updateSeq2Steps      = useCallback((steps) => updateSeqStepsById('seq2', steps), [updateSeqStepsById]);
   const setSeq2StepCallback  = useCallback((fn)    => setSeqStepCallbackById('seq2', fn), [setSeqStepCallbackById]);
+  const setSeqDivision       = useCallback((i)     => setSeqDivisionById('seq', i),  [setSeqDivisionById]);
+  const setSeq2Division      = useCallback((i)     => setSeqDivisionById('seq2', i), [setSeqDivisionById]);
 
   // Update a quantizer's scale and/or root note (id-keyed, Phase 60e part 4).
   // scale (string key: 'CHR' | 'MAJ' | 'MIN' | 'PMAJ' | 'PMIN')
   // root  (0–11: 0=C, 1=C#, …, 11=B)
   // Params are buffered per instance so they are sent correctly even if
   // called before its AudioWorkletNode exists.
-  const applyQuantizerParams = useCallback((qid, { scale, root, octShift, bypass } = {}) => {
+  const applyQuantizerParams = useCallback((qid, { scale, root, octShift, snapMode } = {}) => {
     const qp = quantizerParamsRefs.current[qid];
     if (!qp) return;
-    if (scale    !== undefined) qp.scale    = SCALE_DEFS[scale] ?? SCALE_DEFS.MAJ;
+    // `scale` is either a SCALE_DEFS key or, since Phase 96, a raw interval array
+    // — that is how the panel's per-note lights send a scale the presets cannot
+    // name. Sanitised here rather than trusted: unique whole semitones 0–11, and
+    // an empty result falls back to MAJ (the panel already refuses to let the
+    // last light go out, so an empty array means something upstream is wrong).
+    if (scale !== undefined) {
+      if (Array.isArray(scale)) {
+        const clean = [...new Set(scale.map(Number).filter(Number.isInteger))]
+          .filter(s => s >= 0 && s < 12).sort((a, b) => a - b);
+        qp.scale = clean.length ? clean : SCALE_DEFS.MAJ;
+      } else {
+        qp.scale = SCALE_DEFS[scale] ?? SCALE_DEFS.MAJ;
+      }
+    }
     if (root     !== undefined) qp.root     = root;
     if (octShift !== undefined) qp.octShift = octShift;
-    if (bypass   !== undefined) qp.bypass   = bypass;
+    // 0 nearest / 1 up / 2 down (Phase 100). Clamped: the worklet indexes on it.
+    if (snapMode !== undefined) qp.snapMode = [0, 1, 2].includes(snapMode) ? snapMode : 0;
     // Knob-stepper mode (Phase 57): config changes re-snap the VCO knobs THIS
-    // quantizer drives (bypass ON writes the raw knob Hz — reverts to continuous).
+    // quantizer drives.
     if (!qntHasCvInput(qid)) {
       const cvOutSrc = `${qid}-cv-out`;
       for (const id of allVcoIdsRef.current)
         if (vcoActiveCvRef.current[id] === cvOutSrc) applyVcoKnobQuantize(id);
     }
-    if (bypass !== undefined) notifyKnobQuantize(); recomputeQntFmRef.current?.(); // glow follows bypass state
+    // Both calls are unconditional. Until Phase 95 this line read
+    //   `if (bypass !== undefined) notifyKnobQuantize(); recomputeQntFmRef.current?.();`
+    // — one statement guarded, the next only LOOKING guarded because it shared the
+    // line. Harmless (both are idempotent), but it is the same invisible drift that
+    // cost us the 7TH in Phase 94b, so it does not get to stay.
+    recomputeQntFmRef.current?.();
     nodesRef.current?.qntNodes?.[qid]?.port.postMessage(qp);
-  }, [qntHasCvInput, applyVcoKnobQuantize, notifyKnobQuantize]);
+  }, [qntHasCvInput, applyVcoKnobQuantize]);
   // Inline ref sync (the App.js mappingsRef pattern): updateDynModuleParams is
   // declared before the knob-stepper helpers this depends on, so it dispatches
   // dynamic 'qnt' params through this ref instead of a direct dependency.
@@ -4509,10 +5239,12 @@ const triggerEnvOneShot = (env, time) => {
     chordSeqStepCbRefs.current[csId] = fn;
   }, []);
 
-  // Register a callback fired on each chord step advance: fn(rootClass: 0-11, chordType: string).
-  // MoogShell uses the static instance's to update the QNT chord-type label.
-  const setChordSeqChordCallbackById = useCallback((csId, fn) => {
-    chordSeqChordCbRefs.current[csId] = fn;
+  // Register a QUANTIZER's EXT chord-name label callback: fn(rootClass: 0-11,
+  // chordType: string) | null. Fired at draw time by whichever chord sequencer
+  // currently owns this quantizer's TRP override (Phase 95 — replaces the old
+  // per-chord-seq callback, which could not express that pairing).
+  const setQuantizerChordLabelCallbackById = useCallback((qid, fn) => {
+    qntChordLabelCbRefs.current[qid] = fn;
   }, []);
 
   // Set the octave offset for an instance's independent chord root output.
@@ -4523,6 +5255,12 @@ const triggerEnvOneShot = (env, time) => {
 
   // Change a chord sequencer's clock division — takes effect immediately.
   // interval: Tone.js time string ('2n' | '1m' | '2m' | '4m')
+  // CLK↓ divider — bars per chord when a 960's CYCLE↑ drives this instance.
+  const setChordSeqClockDivById = useCallback((csId, n) => {
+    chordSeqClockDivRefs.current[csId] = Math.max(1, n | 0);
+    chordSeqClockCountRefs.current[csId] = 0;   // re-phase, so the next pulse advances
+  }, []);
+
   const setChordSeqDivisionById = useCallback((csId, interval) => {
     chordSeqDivisionRefs.current[csId] = interval;
     const loop = chordSeqLoopsRef.current[csId];
@@ -4536,9 +5274,9 @@ const triggerEnvOneShot = (env, time) => {
   // Legacy static-module wrappers — the shell's static ChordSeqModule call sites.
   const updateChordSeqSteps      = useCallback((steps)  => updateChordSeqStepsById('chordseq', steps),   [updateChordSeqStepsById]);
   const setChordSeqStepCallback  = useCallback((fn)     => setChordSeqStepCallbackById('chordseq', fn),  [setChordSeqStepCallbackById]);
-  const setChordSeqChordCallback = useCallback((fn)     => setChordSeqChordCallbackById('chordseq', fn), [setChordSeqChordCallbackById]);
   const setChordSeqRootOctave    = useCallback((octave) => setChordSeqRootOctaveById('chordseq', octave), [setChordSeqRootOctaveById]);
   const setChordSeqDivision      = useCallback((interval) => setChordSeqDivisionById('chordseq', interval), [setChordSeqDivisionById]);
+  const setChordSeqClockDiv      = useCallback((nDiv)     => setChordSeqClockDivById('chordseq', nDiv),     [setChordSeqClockDivById]);
 
   // Register the quantizer LED callback (called from quantizer port.onmessage, main thread).
   // The callback receives: (noteClass: 0–11, midiNote: int) when the quantized note changes.
@@ -4546,6 +5284,31 @@ const triggerEnvOneShot = (env, time) => {
     quantizerStepCbRefs.current[qid] = fn;
   }, []);
   const setQuantizerCallback = useCallback((fn) => setQuantizerCallbackById('qnt', fn), [setQuantizerCallbackById]);
+  // Per-quantizer GLIDE, seconds (Phase 96). Read by the worklet port handler and
+  // by applyVcoKnobQuantize; deliberately NOT by qntFmTick, whose entire purpose is
+  // a crisp stepped modulation — a glide there would smear the steps back into the
+  // smooth sweep quantized FM exists to replace.
+  const setQuantizerGlideById = useCallback((qid, v) => {
+    qntGlideRefs.current[qid] = Math.max(0, v || 0);
+  }, []);
+
+  // SCALE LEARN (Phase 100) — arm/disarm, and register the panel's note sink.
+  const setQuantizerLearnById = useCallback((qid, on) => {
+    qntLearnRefs.current[qid] = !!on;
+  }, []);
+  const setQuantizerLearnCallbackById = useCallback((qid, fn) => {
+    qntLearnCbRefs.current[qid] = fn;
+  }, []);
+
+  // Legacy static-module wrappers — the shell's static QuantizerModule call site.
+  const setQuantizerChordLabelCallback = useCallback(
+    (fn) => setQuantizerChordLabelCallbackById('qnt', fn), [setQuantizerChordLabelCallbackById]);
+  const setQuantizerGlide = useCallback(
+    (v) => setQuantizerGlideById('qnt', v), [setQuantizerGlideById]);
+  const setQuantizerLearn = useCallback(
+    (on) => setQuantizerLearnById('qnt', on), [setQuantizerLearnById]);
+  const setQuantizerLearnCallback = useCallback(
+    (fn) => setQuantizerLearnCallbackById('qnt', fn), [setQuantizerLearnCallbackById]);
 
   // Register the knob-stepper UI callback: fn(vcoIds[]) — the VCOs whose FREQ
   // knob is currently quantized (MoogShell lights those knobs' glow).
@@ -4770,11 +5533,45 @@ const triggerEnvOneShot = (env, time) => {
     kbdBaseHzRef.current = hz;
     if (isGateDown) kbdVibratoResetRef.current = true; // rAF will stamp its own `now` as onset
     n.kbdPitchOut.setValueAtTime(hz, Tone.now());
-    for (const [, { env, fromId, isTrig }] of gateActionsRef.current) {
-      if (fromId !== 'kbd-gate-out') continue;
-      if (isTrig) { if (isGateDown) triggerEnvOneShot(env); continue; } // key-up does nothing
-      if (isGateDown) env.triggerAttack();
-      else            env.triggerRelease();
+    // SCALE LEARN (Phase 100) — note-ON only; a key release is not a new note.
+    // No cable required: learn is a panel gesture, not a patch.
+    if (isGateDown && hz > 0) {
+      const pc = ((Math.round(69 + 12 * Math.log2(hz / 440)) % 12) + 12) % 12;
+      for (const qid in qntLearnRefs.current)
+        if (qntLearnRefs.current[qid]) qntLearnCbRefs.current[qid]?.(pc);
+    }
+    for (const [, action] of gateActionsRef.current) {
+      if (action.fromId !== 'kbd-gate-out') continue;
+      // Keyboard → 960 / chord seq CLK↓: one step per keypress (key-up is not an edge).
+      if (action.isSeqClock || action.isChordClock) {
+        if (isGateDown && seqClockDepthRef.current < SEQ_CLOCK_MAX_DEPTH) {
+          seqClockDepthRef.current++;
+          try {
+            if (action.isSeqClock) advanceSeqRef.current?.(action.seqId);
+            else                   pulseChordSeqClockRef.current?.(action.csId);
+          } finally { seqClockDepthRef.current--; }
+        }
+        continue;
+      }
+      // Keyboard → KICK GATE IN. This loop used to destructure `env` unconditionally and
+      // call env.triggerAttack() — a kick action carries no env, so the patch threw a
+      // TypeError on every keypress instead of playing the drum.
+      if (action.isKick) {
+        const kid = action.kickId ?? 'kick';
+        if (isGateDown && n[`${kid}Synth`]) {
+          const kt  = nextKickTime(kickLastTimeRef.current, kid, Tone.now());
+          const kd  = kickDecayRef.current[kid] ?? 0.4;
+          const khz = kickTuneHz(n, kid, connectionsRef.current, kickTuneRef.current[kid] ?? 55);
+          n[`${kid}Synth`].triggerAttackRelease(khz, kd, kt);
+          n[`${kid}ClickSynth`]?.triggerAttackRelease(kd * 0.1, kt);
+          drawAt(kt, () => kickTrigCbRef.current[kid]?.());
+        }
+        continue;
+      }
+      if (!action.env) continue;
+      if (action.isTrig) { if (isGateDown) triggerEnvOneShot(action.env); continue; } // key-up does nothing
+      if (isGateDown) action.env.triggerAttack();
+      else            action.env.triggerRelease();
     }
   }, []);
 
@@ -4783,7 +5580,10 @@ const triggerEnvOneShot = (env, time) => {
   // take begins at the top of the sequence (Phase 66). Same reset powerOn does.
   const resetSequencers = useCallback(() => {
     for (const id of Object.keys(seqLoopsRef.current))      seqCurrentStepRefs.current[id]      = -1;
-    for (const id of Object.keys(chordSeqLoopsRef.current)) chordSeqCurrentStepRefs.current[id] = -1;
+    for (const id of Object.keys(chordSeqLoopsRef.current)) {
+      chordSeqCurrentStepRefs.current[id]   = -1;
+      chordSeqClockCountRefs.current[id]    = 0;   // divider re-phases with the take
+    }
   }, []);
 
   // Live power state for cross-page callers (the boolean in the return is a
@@ -4796,14 +5596,21 @@ const triggerEnvOneShot = (env, time) => {
     updateVcaParams, updateVca2Params, updateVca3Params,
     updateLfoParams, updateLfo2Params, updateIoParams, updateIoChannelVol,
     updateReverbParams, updateReverb2Params, getReverbAuraData, updateChorusParams, getMoogBusNode,
-    getOscilloscopeData, getQntTransposeData, getMeterValue, getLfoInstant, getLfo2Instant,
+    getOscilloscopeData, getQntTransposeData, getMeterValue, getMasterPeak,
+    getLfoInstant, getLfo2Instant,
     setTempo, updateSequencerSteps, setSeqStepCallback,
     updateSeq2Steps, setSeq2StepCallback, updateKeyboard,
-    updateSeqStepsById, setSeqStepCallbackById, setSeqGlideById,
-    updateChordSeqSteps, setChordSeqStepCallback, setChordSeqDivision,
-    setChordSeqChordCallback, setChordSeqRootOctave, setChordSeqGlide,
+    updateSeqStepsById, setSeqStepCallbackById, setSeqGlideById, setSeqDivisionById,
+    setSeqDivision, setSeq2Division,
+    updateChordSeqSteps, setChordSeqStepCallback, setChordSeqDivision, setChordSeqClockDiv,
+    setChordSeqRootOctave, setChordSeqGlide,
     updateChordSeqStepsById, setChordSeqStepCallbackById, setChordSeqDivisionById,
+    setChordSeqClockDivById,
     setChordSeqRootOctaveById, setChordSeqGlideById,
+    setQuantizerChordLabelCallbackById, setQuantizerChordLabelCallback,
+    setQuantizerGlideById, setQuantizerGlide,
+    setQuantizerLearnById, setQuantizerLearn,
+    setQuantizerLearnCallbackById, setQuantizerLearnCallback,
     setVco1SyncEnabled, setVco2SyncEnabled, setVco3SyncEnabled, setVco4SyncEnabled, setVco5SyncEnabled,
     setSeqGlide, setSeq2Glide, setKbdGlide, setKbdVibrato, updateNoiseParams,
     updateFFBParams, getFFBAnalyserData,
