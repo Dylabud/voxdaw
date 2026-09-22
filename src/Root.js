@@ -1,9 +1,12 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { THEME_ORDER, nextTheme } from './utils/theme';
 import HomePage from './components/HomePage/HomePage';
 import App from './App';
 import WorkstationShell from './components/Workstation/WorkstationShell';
 import MoogModular from './components/MoogModular/MoogShell';
 import AIInstrumentGenerator from './components/AIGen/AIInstrumentGenerator';
+
+const THEME_KEY = 'voxdaw.theme';
 
 export default function Root() {
   // A page may request to be re-landed after a full reload (the Moog's
@@ -16,7 +19,19 @@ export default function Root() {
     } catch (_) {}
     return 'home';
   });
-  const [isDarkMode, setIsDarkMode] = useState(true);
+  // Three-way theme ('dark' | 'slate' | 'light'), persisted across reloads.
+  // Lazy initializer is a pure read (StrictMode double-invokes it — safe).
+  const [theme, setTheme] = useState(() => {
+    try {
+      const saved = localStorage.getItem(THEME_KEY);
+      if (THEME_ORDER.includes(saved)) return saved;
+    } catch (_) {}
+    return 'dark';
+  });
+  // Persist post-commit, never inside the setState updater (updater purity).
+  useEffect(() => {
+    try { localStorage.setItem(THEME_KEY, theme); } catch (_) {}
+  }, [theme]);
 
   // Pages mount on first visit and stay alive for audio continuity.
   // Inactive pages are hidden via display:none so their audio engines keep running.
@@ -58,7 +73,7 @@ export default function Root() {
     navigate('workstation');
   }, [navigate]);
 
-  const onThemeToggle = useCallback(() => setIsDarkMode(v => !v), []);
+  const onThemeToggle = useCallback(() => setTheme(prev => nextTheme(prev)), []);
 
   // Stable handlers handed to the Workstation — call through to whatever the Moog
   // registered. useCallback [] means their references never change across renders.
@@ -72,7 +87,7 @@ export default function Root() {
 
   return (
     <div
-      data-theme={isDarkMode ? undefined : 'light'}
+      data-theme={theme === 'dark' ? undefined : theme}
       style={{ width: '100vw', height: '100vh', overflow: 'hidden', position: 'relative' }}
     >
       {/* Home — always mounted, no audio engine, cheap to keep alive */}
@@ -80,8 +95,9 @@ export default function Root() {
         <HomePage
           onNavigate={navigate}
           onOpenProject={openProject}
-          isDarkMode={isDarkMode}
+          theme={theme}
           onThemeToggle={onThemeToggle}
+          onThemeSelect={setTheme}
           active={page === 'home'}
         />
       </div>
@@ -91,7 +107,7 @@ export default function Root() {
         <div style={hide('voxtool')}>
           <App
             onNavigateHome={() => navigate('home')}
-            isDarkMode={isDarkMode}
+            theme={theme}
             onThemeToggle={onThemeToggle}
           />
         </div>
@@ -102,7 +118,7 @@ export default function Root() {
         <div style={hide('workstation')}>
           <WorkstationShell
             onNavigateHome={() => navigate('home')}
-            isDarkMode={isDarkMode}
+            theme={theme}
             onThemeToggle={onThemeToggle}
             getMoogBusNode={getMoogBusNode}
             resetMoogSequencers={resetMoogSequencers}
@@ -129,7 +145,7 @@ export default function Root() {
         <div style={hide('aigen')}>
           <AIInstrumentGenerator
             onNavigateHome={() => navigate('home')}
-            isDarkMode={isDarkMode}
+            theme={theme}
             onThemeToggle={onThemeToggle}
           />
         </div>

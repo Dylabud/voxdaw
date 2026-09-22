@@ -21,7 +21,7 @@
 
 import { useCallback, useEffect, useRef } from 'react';
 import * as Tone from 'tone';
-import { buildLayerChain } from '../components/Workstation/customInstrumentSynth';
+import { buildLayerChain, FILTER_NEUTRAL } from '../components/Workstation/customInstrumentSynth';
 import { applyEnvelope } from '../components/Workstation/synthFactory';
 import { makePatchSynth } from '../components/AIGen/patchSynth';
 import { layersOf, layerDetuneCents } from '../components/AIGen/patchSchema';
@@ -85,6 +85,40 @@ export default function useAIInstrument() {
     master.volume.value = patch.volume;
   }, []);
 
+  // Param-only restore (undo/redo fast path) — re-drives every parameter the
+  // chassis can edit against the LIVE graph, no dispose/rebuild (so no audible
+  // tail-cut on ⌘Z). Only valid when the target patch has the same structure
+  // as the built graph (samePatchStructure: layer count, voice engine,
+  // oscillator type, effect-type sequence) — the caller checks that.
+  // KEEP IN SYNC with patchVoiceSpec's fields: any new voice/layer param the
+  // UI can edit must be re-driven here, or undo will silently not restore it.
+  const applyPatchParams = useCallback((patch) => {
+    const master = volumeRef.current;
+    if (!master) return;
+    master.volume.value = patch.volume;
+    layersOf(patch).forEach((layer, i) => {
+      const l = layersRef.current[i];
+      if (!l) return;
+      l.vol.volume.value = layer.volume ?? 0;
+      const v = layer.voice ?? {};
+      const setObj = { detune: layerDetuneCents(layer), envelope: { ...layer.envelope } };
+      if (v.portamento != null) setObj.portamento = v.portamento;
+      if (v.harmonicity != null) setObj.harmonicity = v.harmonicity;
+      if (v.modulationIndex != null) setObj.modulationIndex = v.modulationIndex;
+      if (v.modulationOscillator) setObj.modulation = { type: v.modulationOscillator };
+      const osc = {};
+      if (v.count != null) osc.count = v.count;
+      if (v.spread != null) osc.spread = v.spread;
+      if (Object.keys(osc).length) setObj.oscillator = osc;
+      l.synth.set(setObj);
+      const f = layer.filter ?? FILTER_NEUTRAL;
+      l.filter.type = f.type;
+      l.filter.frequency.value = f.frequency;
+      l.filter.Q.value = f.q;
+      (layer.effects ?? []).forEach((e, j) => l.fx[j]?.apply(e.params, 0.02));
+    });
+  }, []);
+
   // Tone.start() resolves immediately once the context is running; gating the
   // attack on it satisfies the user-gesture requirement on the first press.
   const noteOn = useCallback((note, velocity) => {
@@ -138,7 +172,7 @@ export default function useAIInstrument() {
   }, []);
 
   return {
-    applyPatch,
+    applyPatch, applyPatchParams,
     noteOn, noteOff, releaseAll,
     setVolume, setLayerVolume, setLayerMute, setEnvelope, setVoiceParam, setLayerPitch, setFilter, setEffectParam,
   };

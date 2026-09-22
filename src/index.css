@@ -85,6 +85,50 @@ input, textarea, select {
   --loop-tint:            rgba(0, 0, 0, 0.08);
 }
 
+/* Slate — a lighter dark mode for bright rooms. Still Deep Space & Mint (accent
+   unchanged). Surface ordering mirrors DARK (base < panel < elevated < surface;
+   light mode inverts it — slate must not). White-alpha borders scaled up ~1.6×
+   and text ink brightened: a white overlay's relative delta shrinks as the
+   background lightens, and the borders also feed the canvas grid lines. */
+[data-theme="slate"] {
+  --bg-base:        #2c2f34;
+  --bg-panel:       #31343a;
+  --bg-elevated:    #383c42;
+  --bg-surface:     #3c3f45;
+  --bg-frosted:     rgba(44, 47, 52, 0.85);
+  --border-subtle:  rgba(255, 255, 255, 0.10);
+  --border-faint:   rgba(255, 255, 255, 0.07);
+  --border-mid:     rgba(255, 255, 255, 0.16);
+  --border-strong:  rgba(255, 255, 255, 0.26);
+  --text-primary:   rgba(222, 224, 228, 0.92);
+  --text-muted:     rgba(222, 224, 228, 0.62);
+  --text-dimmer:    rgba(222, 224, 228, 0.42);
+  --text-dimmest:   rgba(222, 224, 228, 0.30);
+  --overlay-bg:     rgba(22, 24, 27, 0.72);
+  --input-bg:       #383c42;
+  --row-bg:         rgba(255, 255, 255, 0.04);
+  --row-border:     rgba(255, 255, 255, 0.08);
+  /* accent & form-element text — mint kept (~6.7:1 on the grey base); alphas
+     bumped one notch since alpha text blends toward the lighter background */
+  --accent-color:   #5DCAA5;
+  --form-text:      rgba(93, 202, 165, 0.85);
+  --form-text-mid:  rgba(93, 202, 165, 0.75);
+  --form-text-dim:  rgba(93, 202, 165, 0.55);
+  --warning-color:  rgba(238, 210, 2, 0.85);
+  /* viewport & piano roll — slate is a dark mode: raw camera feed, dark-style
+     key mapping (white key = surface tone, black key pushed below base) */
+  --bg-camera:            transparent;
+  --piano-key-white:      #3c3f45;
+  --piano-key-white-bdr:  #545962;
+  --piano-key-black:      #202227;
+  --piano-key-black-bdr:  #33363d;
+  /* piano-roll row shading — dark-style direction: brighten naturals */
+  --pr-shade-natural:     rgba(255, 255, 255, 0.05);
+  --pr-shade-accidental:  transparent;
+  /* black scrim reads stronger on lighter grey — slightly less alpha */
+  --loop-tint:            rgba(0, 0, 0, 0.20);
+}
+
 html, body, #root {
   height: 100%;
   overflow: hidden;

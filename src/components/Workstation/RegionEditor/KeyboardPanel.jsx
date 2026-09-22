@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import styles from './InstrumentPanel.module.css';
 
 /**
@@ -45,7 +45,7 @@ const buildKeyboard = (octaveBase) => {
   return { whites, blacks };
 };
 
-export default function KeyboardPanel({ octaveBase, onNoteOn, onNoteOff, hotkeys = {} }) {
+function KeyboardPanel({ octaveBase, onNoteOn, onNoteOff, hotkeys = {} }) {
   const mouseNoteRef = useRef(null);
   const KEYBOARD = useMemo(() => buildKeyboard(octaveBase), [octaveBase]);
 
@@ -106,3 +106,7 @@ export default function KeyboardPanel({ octaveBase, onNoteOn, onNoteOff, hotkeys
     </div>
   );
 }
+
+// Memoized (shallow): the keyboard is the biggest DOM subtree on its pages —
+// with stable onNoteOn/onNoteOff/hotkeys it goes fully inert during knob drags.
+export default React.memo(KeyboardPanel);

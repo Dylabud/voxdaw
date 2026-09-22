@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import styles from './Controls.module.css';
 import { SCALE_LABELS, OSC_TYPES } from '../../utils/scales';
+import { THEME_GLYPHS, THEME_LABELS, nextTheme } from '../../utils/theme';
 
 const INSTRUMENTS = [
   { key: 'analog',  label: 'Analog'  },
@@ -20,7 +21,7 @@ export default function Controls({
   isArpTerminalOpen, onArpTerminalToggle,
   onOpenRecordModal, isRecording,
   onGestureSettingsOpen,
-  isDarkMode, onThemeToggle,
+  theme, onThemeToggle,
   onCollapseToggle,
   onNavigateHome,
 }) {
@@ -66,9 +67,9 @@ export default function Controls({
         <button
           className={styles.themeBtn}
           onClick={onThemeToggle}
-          title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+          title={`Switch to ${THEME_LABELS[nextTheme(theme)]} mode`}
         >
-          {isDarkMode ? '◑' : '○'}
+          {THEME_GLYPHS[theme]}
         </button>
         ·· voxdaw
         <button

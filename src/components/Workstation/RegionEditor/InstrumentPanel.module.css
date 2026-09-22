@@ -216,6 +216,35 @@
   color: var(--track-color, var(--accent-color));
 }
 
+/* Sampled-mode (engine) text buttons — octaveBtn chrome, label-sized. */
+.engineBtn {
+  height: 26px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  color: var(--form-text, var(--text-primary));
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--bg-surface, var(--bg-elevated)), #fff 8%),
+    var(--bg-surface, var(--bg-elevated)));
+  border: 1px solid var(--border-mid);
+  border-radius: 5px;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: transform 0.05s, filter 0.1s;
+}
+.engineBtn:hover {
+  border-color: var(--track-color, var(--accent-color));
+  filter: brightness(1.1);
+}
+.engineBtn:active {
+  transform: translateY(1px);
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.35);
+}
+
 /* ── Melodic keyboard — hardware keybed ───────────────────────────────── */
 
 .kbd {

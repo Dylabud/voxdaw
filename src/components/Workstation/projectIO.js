@@ -62,6 +62,11 @@ export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, n
         : [],
       // ADSR override (optional) — omitted when the track uses the instrument default.
       ...(t.envelope && typeof t.envelope === 'object' ? { envelope: { ...t.envelope } } : {}),
+      // Sampled (CPU friendly) custom-instrument mode (optional, additive —
+      // SCHEMA_VERSION intentionally NOT bumped). The rendered WAVs live in
+      // this machine's IndexedDB, never in the file: an import elsewhere
+      // falls back to the live composite until re-rendered there.
+      ...(t.useSampled ? { useSampled: true } : {}),
       // Group membership (optional, additive) — the groups array is top-level.
       ...(t.groupId ? { groupId: t.groupId } : {}),
       // Automation lanes (optional, additive — SCHEMA_VERSION intentionally NOT bumped).
@@ -98,6 +103,22 @@ export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, n
       };
     }),
   };
+}
+
+// Content hash of a serializeProject payload, EXCLUDING `name` — the dashboard
+// renameProject patches data.name in place, and a rename must never invalidate
+// the audio preview. serializeProject builds its keys in a fixed order, so
+// JSON.stringify is deterministic for identical session state. FNV-1a 32-bit.
+// Stamped on the project record at save time and on the preview record at
+// export time; the dashboard compares the two for preview freshness.
+export function hashProjectData(payload) {
+  const json = JSON.stringify({ ...payload, name: undefined }); // undefined drops the key
+  let h = 0x811c9dc5;
+  for (let i = 0; i < json.length; i++) {
+    h ^= json.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
 }
 
 export function deserializeProject(raw) {
@@ -188,6 +209,7 @@ export function deserializeProject(raw) {
       envelope: deserializeEnvelope(t.envelope),
       automations: deserializeAutomations(t.automations, effects),
       ...(groupId ? { groupId } : {}),
+      ...(t.useSampled ? { useSampled: true } : {}),
     };
   });
   const memberCounts = new Map();

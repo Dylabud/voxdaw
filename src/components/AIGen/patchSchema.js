@@ -67,7 +67,10 @@ export const VOL_META = { min: -30, max: 6, step: 0.5, label: 'vol', unit: 'db' 
 export const LAYER_VOL_META = { min: -30, max: 6, step: 0.5, label: 'level', unit: 'db' }; // per-layer mix
 export const ENV_META = {
   attack:  { min: 0.001, max: 2, scale: 'log', label: 'atk' },
-  decay:   { min: 0.001, max: 2, scale: 'log', label: 'dcy' },
+  // decay reaches 20 s so a sustain-0 layer can fade out naturally while held
+  // (piano/bell/pluck) — the AI decides per layer. sustain > 0 still holds
+  // forever. Log scale keeps the sub-second region usable on the knob.
+  decay:   { min: 0.001, max: 20, scale: 'log', label: 'dcy' },
   sustain: { min: 0,     max: 1,               label: 'sus' },
   release: { min: 0.001, max: 3, scale: 'log', label: 'rel' },
 };
@@ -110,6 +113,26 @@ export const DEFAULT_PATCH = {
 // Effective per-layer pitch offset in cents (single source — poly + glide paths).
 export function layerDetuneCents(layer) {
   return (layer?.octave ?? 0) * 1200 + (layer?.semitone ?? 0) * 100;
+}
+
+// True when two patches share the same audio-graph STRUCTURE (layer count,
+// per-layer voice engine + oscillator type, effect-type sequence) — i.e. the
+// live graph built for `a` can be re-driven to sound like `b` with parameter
+// setters alone, no dispose/rebuild. Oscillator type is deliberately treated
+// as structural: fat↔non-fat transitions change the Tone option shape.
+export function samePatchStructure(a, b) {
+  const la = layersOf(a);
+  const lb = layersOf(b);
+  if (la.length !== lb.length) return false;
+  return la.every((x, i) => {
+    const y = lb[i];
+    const fxA = x.effects ?? [];
+    const fxB = y.effects ?? [];
+    return x.voice?.engine === y.voice?.engine
+      && x.voice?.oscillator === y.voice?.oscillator
+      && fxA.length === fxB.length
+      && fxA.every((e, j) => e.type === fxB[j].type);
+  });
 }
 
 // ── Sanitizer — the trust boundary ────────────────────────────────────────

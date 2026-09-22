@@ -82,7 +82,10 @@ export function exportMP3(audioBuffer) {
   return new Blob(mp3Data, { type: 'audio/mp3' });
 }
 
-export function exportWAV(audioBuffer) {
+// RIFF/WAVE 16-bit PCM encoder returning a raw ArrayBuffer — shared by the
+// exportWAV Blob download and the custom-instrument sample store (IndexedDB
+// wants ArrayBuffers, and decodeAudioData consumes them directly).
+export function encodeWavArrayBuffer(audioBuffer) {
   const numChannels = audioBuffer.numberOfChannels;
   const sampleRate  = audioBuffer.sampleRate;
   const numSamples  = audioBuffer.length;
@@ -120,5 +123,38 @@ export function exportWAV(audioBuffer) {
     }
   }
 
-  return new Blob([buffer], { type: 'audio/wav' });
+  return buffer;
+}
+
+export function exportWAV(audioBuffer) {
+  return new Blob([encodeWavArrayBuffer(audioBuffer)], { type: 'audio/wav' });
+}
+
+// Waveform peaks for the dashboard preview: max-abs across all channels per
+// bucket, returned as a plain number[] (structured-clone- and JSON-friendly).
+// Duck-typed (numberOfChannels/length/getChannelData) rather than requiring a
+// real AudioBuffer, so it's testable under jsdom.
+export function computePeaks(audioBuffer, buckets = 200) {
+  const { numberOfChannels, length } = audioBuffer;
+  const channels = [];
+  for (let ch = 0; ch < numberOfChannels; ch++) {
+    channels.push(audioBuffer.getChannelData(ch));
+  }
+  const n = Math.min(buckets, Math.max(1, length));
+  const peaks = new Array(n).fill(0);
+  const samplesPerBucket = length / n;
+  for (let b = 0; b < n; b++) {
+    const start = Math.floor(b * samplesPerBucket);
+    const end   = Math.min(Math.floor((b + 1) * samplesPerBucket), length);
+    let max = 0;
+    for (let ch = 0; ch < channels.length; ch++) {
+      const data = channels[ch];
+      for (let i = start; i < end; i++) {
+        const a = data[i] < 0 ? -data[i] : data[i];
+        if (a > max) max = a;
+      }
+    }
+    peaks[b] = max;
+  }
+  return peaks;
 }
