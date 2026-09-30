@@ -89,9 +89,14 @@
   cursor: pointer;
   transition: border-color 0.18s, color 0.18s;
 }
-.wsBtn:hover {
+.wsBtn:hover:not(:disabled) {
   border-color: #c8a86a;
   color: #c8a86a;
+}
+/* Undo / redo with nothing to step to (Phase 107) — present but inert. */
+.wsBtn:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 /* ── Module library button — same chrome as home/lights-out buttons.

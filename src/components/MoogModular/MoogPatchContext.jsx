@@ -123,6 +123,25 @@ export function MoogPatchProvider({ children, onCableAdded, onCableRemoved, onCa
     return valid.length;
   }, [setCables]);
 
+  // Undo/redo (Phase 107): remove every cable NOT in `stored` (a persisted cable
+  // list), firing the audio bridge per cable but — like restoreCables — never
+  // onCablesChanged: the undo engine writes the store itself. restoreCables then
+  // adds the missing ones once the target modules' jacks exist.
+  const removeCablesNotIn = useCallback((stored = []) => {
+    const keep = new Set();
+    for (const c of stored) {
+      const a = c.fromJackId ?? c.from, b = c.toJackId ?? c.to;
+      if (a && b) { keep.add(`${a}→${b}`); keep.add(`${b}→${a}`); }
+    }
+    const gone = cablesRef.current.filter(c => !keep.has(`${c.fromJackId}→${c.toJackId}`));
+    if (!gone.length) return;
+    for (const c of gone) cableSetRef.current.delete(`${c.fromJackId}→${c.toJackId}`);
+    const next = cablesRef.current.filter(c => keep.has(`${c.fromJackId}→${c.toJackId}`));
+    cablesRef.current = next;
+    setCables(next);
+    gone.forEach(c => onRemovedRef.current?.(c.fromJackId, c.toJackId));
+  }, [setCables]);
+
   return (
     <MoogPatchContext.Provider value={{
       cables,
@@ -135,6 +154,7 @@ export function MoogPatchProvider({ children, onCableAdded, onCableRemoved, onCa
       completeDrag,
       removeCable,
       restoreCables,
+      removeCablesNotIn,
     }}>
       {children}
     </MoogPatchContext.Provider>

@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. `ARCHITECTURE.md` (Technical stack and data flow)
 3. `PLAN.md` (Current project state and immediate next steps)
 
-**For Moog Modular work** (`src/components/MoogModular/`), the sub-project has its own single sources of truth — read these too and log Moog work ONLY there (root `PLAN.md` gets pointer entries at most):
+**For Moog Modular work** (`src/components/MoogModular/` — shown to users as **Vox Modular** since Moog Phase 108; internal names, files and storage keys still say Moog on purpose), the sub-project has its own single sources of truth — read these too and log Moog work ONLY there (root `PLAN.md` gets pointer entries at most):
 - `src/components/MoogModular/MOOG_ARCHITECTURE.md` (module specs, signal flow, Dynamic Rack as-built)
 - `src/components/MoogModular/MOOG_PLAN.md` (phase log — update at the end of every Moog session)
 

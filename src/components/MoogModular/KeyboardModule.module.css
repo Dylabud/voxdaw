@@ -20,6 +20,15 @@
     linear-gradient(to bottom, #2a1208 0%, #381a0c 30%, #3e1e10 50%, #301408 70%, #1e0c06 100%);
   border-radius: 0 0 8px 8px;
   overflow: hidden;
+  /* Phase 109 — the Phase 61d recipe, applied to the one panel it missed. `.module`
+     carries will-change:transform so a camera pan slides ~30 cached module textures
+     instead of re-rastering them; the 953 is not a `.module`, so it was being
+     RE-PAINTED on every pan frame (61d measured raster-on-pan as the catastrophic
+     case, ~9× the promoted cost). Harmless at 61 keys; at 88 bigger keys + the
+     keybed's drop-shadow filter + 5 knobs + new controls it made the whole rack
+     choppy on Dylan's Retina display, even unpowered. One cached layer; nothing
+     visual changes. (MoogKnob still transiently re-promotes the knob being dragged.) */
+  will-change: transform;
 }
 
 /* ── Walnut control strip ── */
@@ -241,7 +250,7 @@
 /* ── White keys ── */
 .whiteKey {
   flex-shrink: 0;
-  width: 30px; /* must equal WW in KeyboardModule.jsx — black-key lefts derive from it */
+  width: 40px; /* must equal WW in KeyboardModule.jsx — black-key lefts derive from it */
   box-sizing: border-box;
   border-left: 1px solid #8c8070;
   border-right: none;
@@ -259,13 +268,13 @@
   transition: background 0.04s, transform 0.04s, box-shadow 0.04s;
 }
 
-/* Last white key gets a right border */
-.whiteKey:last-of-type {
+/* Last white key gets a right border (a class, not :last-of-type — the black keys
+   are later <div> siblings, so :last-of-type never matched a white key) */
+.whiteKey.whiteKeyLast {
   border-right: 1px solid #8c8070;
 }
 
-.whiteKey.keyPressed,
-.whiteKey:active {
+.whiteKey.keyPressed {
   background: linear-gradient(175deg, #e0dcd4 0%, #d8d4cc 60%, #d0ccc4 100%);
   transform: translateY(2px) scaleY(0.985);
   transform-origin: top center;
@@ -280,7 +289,7 @@
   bottom: 6px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.08em;
   color: #9a9080;
   user-select: none;
@@ -290,10 +299,10 @@
 /* Computer keyboard shortcut hint */
 .keyShortcut {
   position: absolute;
-  bottom: 18px;
+  bottom: 22px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 8px;
+  font-size: 10px;
   letter-spacing: 0.06em;
   color: #b0a898;
   font-weight: 600;
@@ -333,8 +342,7 @@
   pointer-events: none;
 }
 
-.blackKey.keyPressed,
-.blackKey:active {
+.blackKey.keyPressed {
   background: linear-gradient(to bottom, #1e1c18 0%, #141210 50%, #0a0806 100%);
   transform: translateY(2px);
   box-shadow:
@@ -381,4 +389,124 @@
 .vibratoDelayOn:hover {
   border-color: #4aaa88;
   color: #7adbb8;
+}
+
+/* POLY / MONO read-only mode lamp — same recipe as the LFO's FREE/SYNC
+   ModeIndicator (MoogShell.module.css .modeWord / .modeWordOn): both words stay
+   printed, the live one burns red. Driven by GLIDE: 0 = POLY. */
+.modeIndicator {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  user-select: none;
+}
+.modeLit,
+.modeDark {
+  font-size: 14px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  transition: color 0.12s, text-shadow 0.12s;
+}
+.modeDark {
+  color: #2a2521;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+.modeLit {
+  color: #ff5a44;
+  text-shadow:
+    0 0 4px  rgba(226, 42, 26, 0.90),
+    0 0 10px rgba(210, 30, 16, 0.55),
+    0 0 20px rgba(190, 20, 10, 0.28);
+}
+
+/* ── HOLD latch button (Phase 106) — a lamp-button: dark cap, red jewel when latched ── */
+.holdGroup {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.holdBtn {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: linear-gradient(to bottom, #1c1916, #121010);
+  border: 1px solid #38342c;
+  border-radius: 3px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  color: rgba(234, 229, 217, 0.78);
+  font-family: inherit;
+  font-size: 14px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 7px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.holdBtn:hover { border-color: #58503c; }
+.holdBtn:active { transform: translateY(1px); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.7); }
+.holdLamp {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #2a1210;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.8);
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.holdOn .holdLamp {
+  background: #ff5a44;
+  box-shadow:
+    0 0 4px  rgba(226, 42, 26, 0.90),
+    0 0 10px rgba(210, 30, 16, 0.55);
+}
+
+/* ── Computer-keys octave (Phase 106) — Z / X or the two buttons ── */
+.octGroup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.octRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.octBtn {
+  appearance: none;
+  background: linear-gradient(to bottom, #1c1916, #121010);
+  border: 1px solid #38342c;
+  border-radius: 3px;
+  color: rgba(234, 229, 217, 0.70);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  padding: 4px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.octBtn:hover:not(:disabled) { border-color: #58503c; color: rgba(234, 229, 217, 0.95); }
+.octBtn:disabled { opacity: 0.35; cursor: default; }
+/* Fixed width so the readout never resizes the strip (the Phase 101 chip lesson). */
+.octValue {
+  width: 5.6em;
+  text-align: center;
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  color: #5DCAA5;
+  background: #070707;
+  border: 1px solid #2a2622;
+  border-radius: 2px;
+  padding: 3px 0;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+.octLabel {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: rgba(234, 229, 217, 0.66);
+  text-transform: uppercase;
+  white-space: nowrap;
 }

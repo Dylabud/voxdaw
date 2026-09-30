@@ -4,92 +4,168 @@ import MoogKnob from './MoogKnob';
 import styles from './KeyboardModule.module.css';
 
 // ──────────── Key geometry ────────────
-const WW = 30;  // white key width (px, box-sizing: border-box) — widened in Phase 54 to fill the strip
-const BW = 18;  // black key width (px)
-const WH = 116; // white key height (px)
-const BH = 74;  // black key height (px)
+// Full 88-key piano, A0 (MIDI 21) – C8 (MIDI 108): 52 white + 36 black (Phase 105).
+// Widths/heights keep the ~0.6 / ~0.64 black:white ratios the QNT keyboard mirrors.
+const WW = 40;  // white key width (px, box-sizing: border-box) — must equal .whiteKey width
+const BW = 24;  // black key width (px)
+const WH = 130; // white key height (px)
+const BH = 83;  // black key height (px)
+const MIDI_LOW  = 21;  // A0
+const MIDI_HIGH = 108; // C8
 
 const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const IS_BLACK   = [false, true, false, true, false, false, true, false, true, false, true, false];
+const noteName   = (m) => NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1);
 
-// Semitone (0–11) → black key left px from octave start (null if white)
-// Derived from the geometry (was hardcoded): nextWhiteIdx × WW − BW/2
-const BLACK_NEXT_WHITE = [null, 1, null, 2, null, null, 4, null, 5, null, 6, null];
-const SEMI_BLACK = BLACK_NEXT_WHITE.map(n => (n === null ? null : n * WW - BW / 2));
-
-// Computer keyboard shortcut → note name (C4 octave + partial C5)
+// Computer keyboard shortcut → semitone offset from the QWERTY octave's C (C4 at
+// octave 0). Several keys may be held at once, so A + D + G plays a C-major chord.
+// Z / X shift the whole map down / up an octave (Phase 106), C1–C7 range.
 const KB_MAP = {
-  a: 'C4', w: 'C#4', s: 'D4', e: 'D#4', d: 'E4',
-  f: 'F4', t: 'F#4', g: 'G4', y: 'G#4', h: 'A4',
-  u: 'A#4', j: 'B4', k: 'C5',
+  a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6,
+  g: 7, y: 8, h: 9, u: 10, j: 11, k: 12,
 };
+const KB_CHARS  = Object.keys(KB_MAP);
+const QWERTY_BASE = 60;           // C4 at octave 0
+const QWERTY_OCT_MIN = -3;        // C1
+const QWERTY_OCT_MAX = 3;         // C7 (its k = C8, the top key)
+const PEDAL_SRC = 'sus';          // held-map source for sustain pedal / HOLD
 
-// Build key descriptors for C2–C7 (5 octaves + top C = 61 keys: 36 white + 25 black)
+// Black-key lefts are DERIVED: a black key sits centred on the boundary before the
+// next white key, i.e. nextWhiteIdx × WW − BW/2 (the same rule the QNT keyboard uses).
 function buildKeys() {
   const keys = [];
-  let wCount = 0;
-  for (let oct = 0; oct < 5; oct++) {
-    const octNum = 2 + oct; // C2 → B6
-    for (let semi = 0; semi < 12; semi++) {
-      const name    = NOTE_NAMES[semi] + octNum;
-      const midi    = (octNum + 1) * 12 + semi;
-      const hz      = 440 * Math.pow(2, (midi - 69) / 12);
-      const isBlack = SEMI_BLACK[semi] !== null;
-      const left    = isBlack ? oct * 7 * WW + SEMI_BLACK[semi] : wCount * WW;
-      if (!isBlack) wCount++;
-      const shortcut = Object.entries(KB_MAP).find(([, n]) => n === name)?.[0] ?? null;
-      keys.push({ name, hz, isBlack, left, shortcut });
-    }
+  let whiteIdx = 0;
+  for (let m = MIDI_LOW; m <= MIDI_HIGH; m++) {
+    const isBlack = IS_BLACK[m % 12];
+    keys.push({
+      midi: m, name: noteName(m), isBlack,
+      left: isBlack ? whiteIdx * WW - BW / 2 : whiteIdx * WW,
+    });
+    if (!isBlack) whiteIdx++;
   }
-  // 61st key — top C7
-  const topMidi = 8 * 12; // C7 = MIDI 96
-  const topHz   = 440 * Math.pow(2, (topMidi - 69) / 12);
-  keys.push({ name: 'C7', hz: topHz, isBlack: false, left: wCount * WW, shortcut: null });
-  wCount++;
-  return { keys, totalWhiteWidth: wCount * WW };
+  return { keys, totalWhiteWidth: whiteIdx * WW };
 }
 
 const { keys: KEYS, totalWhiteWidth: TOTAL_W } = buildKeys();
 const WHITE_KEYS = KEYS.filter(k => !k.isBlack);
 const BLACK_KEYS = KEYS.filter(k => k.isBlack);
-
-const KB_NOTE_MAP = Object.fromEntries(
-  Object.entries(KB_MAP)
-    .map(([char, name]) => [char, KEYS.find(k => k.name === name)])
-    .filter(([, k]) => k)
-);
+const LAST_WHITE = WHITE_KEYS[WHITE_KEYS.length - 1].midi;
 
 // ──────────── Component ────────────
 
-export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChange, externalActiveRef }) {
+export default function KeyboardModule({
+  onNoteOn, onNoteOff, onGlideChange, onVibratoChange, onBend, onMod, onKeyPanChange,
+  externalActiveRef, saved = {}, usePersist,
+}) {
   const { registerJack, unregisterJack, startDrag } = useMoogPatch();
 
-  const [pressedNote, setPressedNote] = useState(null);
-  const [glide,       setGlide]       = useState(0);
-  const [vibrato,      setVibrato]      = useState(0);
-  const [vibratoRate,  setVibratoRate]  = useState(0.57); // 0–1 → 0.5–10 Hz; default ≈ 5 Hz
-  const [vibratoDelay, setVibratoDelay] = useState(0); // 0–1 → 0–4 s ramp time
-  const rootRef           = useRef(null);   // page-visibility guard for the window key listeners
-  const pressedNoteRef    = useRef(null);
-  const pressedHzRef      = useRef(null);
-  // Tracks whether the currently active note was triggered by pointer (vs MIDI),
-  // so pointerup doesn't accidentally cancel a held MIDI note.
-  const pressedByMouseRef = useRef(false);
+  const [glide,        setGlide]        = useState(saved.glide ?? 0);
+  const [vibrato,      setVibrato]      = useState(saved.vibrato ?? 0);
+  const [vibratoRate,  setVibratoRate]  = useState(saved.vibratoRate ?? 0.57); // 0–1 → 0.5–10 Hz; default ≈ 5 Hz
+  const [vibratoDelay, setVibratoDelay] = useState(saved.vibratoDelay ?? 0);   // 0–1 → 0–4 s ramp time
+  const [keyPan,       setKeyPan]       = useState(saved.keyPan ?? 0);         // 0 = centred (pre-106 sound)
+  const [qwertyOct,    setQwertyOct]    = useState(saved.qwertyOct ?? 0);      // Z / X octave shift
+  const [hold,         setHold]         = useState(false);                     // HOLD latch — runtime, never persisted
+  // Knob positions survive a reload / SAVE SETUP like every other module's (Phase 63
+  // store, id 'kbd'). The hook is passed in from MoogShell, which owns the store.
+  usePersist?.('kbd', { glide, vibrato, vibratoRate, vibratoDelay, keyPan, qwertyOct });
+  const qwertyOctRef = useRef(qwertyOct);
+  qwertyOctRef.current = qwertyOct;
+  const rootRef = useRef(null);   // page-visibility guard + pressed-key DOM lookups
 
-  // ── MIDI state ──
-  const [midiConnected, setMidiConnected] = useState(false);
-  const midiConnectedRef = useRef(false);   // mirror for timeout callbacks (stale-closure safe)
-  const midiLedRef       = useRef(null);    // DOM ref for direct LED mutation
-  const midiFlashRef     = useRef(null);    // timeout ID for flash decay
-  // Mono-legato stack: holds MIDI note numbers currently pressed on the physical keyboard.
-  // Last element = currently sounding note; on note-off the previous note is restored.
-  const heldMidiNotesRef = useRef([]);
+  // ── Held-note bookkeeping ──
+  // midi → Set of sources holding it ('p<pointerId>' | 'k<key>' | 'midi'). A note
+  // sounds while ANY source holds it, so the mouse, QWERTY and MIDI can overlap on
+  // one key without one of them cutting the others off. The engine sees exactly one
+  // note-on and one note-off per key.
+  const heldRef       = useRef(new Map());
+  const pointerNoteRef = useRef(new Map());   // pointerId → midi
+  const qwertyNoteRef  = useRef(new Map());   // key char → midi it pressed (octave may shift while held)
+  // Sustain (Phase 106): the MIDI pedal (CC64) and the HOLD toggle. A note whose last
+  // real source lets go while either is engaged is kept by the PEDAL_SRC source instead;
+  // with HOLD on, pressing such a note again turns it off.
+  const pedalRef = useRef(false);
+  const holdRef  = useRef(false);
 
-  // Stable ref so MIDI listener never needs to be re-attached when onUpdate identity changes.
-  const onUpdateRef = useRef(onUpdate);
-  useEffect(() => { onUpdateRef.current = onUpdate; }, [onUpdate]);
+  const onNoteOnRef  = useRef(onNoteOn);
+  const onNoteOffRef = useRef(onNoteOff);
+  onNoteOnRef.current  = onNoteOn;
+  onNoteOffRef.current = onNoteOff;
 
-  // Propagate glide to audio engine (0-1 knob → 0-1.5s, matching sequencer mapping)
+  // Pressed-key visuals are direct DOM class toggles — a chord is up to 88 keys
+  // changing state, and none of it needs a React render.
+  const setKeyVisual = useCallback((midi, down) => {
+    rootRef.current?.querySelector(`[data-midi="${midi}"]`)?.classList.toggle(styles.keyPressed, down);
+  }, []);
+
+  const dropNote = useCallback((midi) => {
+    heldRef.current.delete(midi);
+    setKeyVisual(midi, false);
+    onNoteOffRef.current?.(midi);
+  }, [setKeyVisual]);
+
+  // Let go of every note only the pedal/HOLD is keeping.
+  const releaseSustained = useCallback(() => {
+    for (const [midi, srcs] of [...heldRef.current]) {
+      if (!srcs.delete(PEDAL_SRC)) continue;
+      if (srcs.size === 0) dropNote(midi);
+    }
+  }, [dropNote]);
+
+  const press = useCallback((midi, src, velocity = 1) => {
+    let srcs = heldRef.current.get(midi);
+    const latchedOnly = !!srcs && srcs.size === 1 && srcs.has(PEDAL_SRC);
+    // HOLD is a per-key TOGGLE (Dylan, Phase 106b): pressing a key that HOLD is keeping
+    // turns it off. The press is consumed — its source is never added, so the matching
+    // release finds nothing to do.
+    if (holdRef.current && latchedOnly) { dropNote(midi); return; }
+    if (!srcs) { srcs = new Set(); heldRef.current.set(midi, srcs); }
+    if (srcs.has(src)) return;
+    // Re-striking a note that only the PEDAL is holding re-articulates it, like a piano.
+    if (latchedOnly) {
+      srcs.clear();
+      onNoteOffRef.current?.(midi);
+    }
+    srcs.add(src);
+    if (srcs.size === 1) {
+      setKeyVisual(midi, true);
+      onNoteOnRef.current?.(midi, velocity);
+    }
+  }, [setKeyVisual, dropNote]);
+
+  const release = useCallback((midi, src) => {
+    const srcs = heldRef.current.get(midi);
+    if (!srcs || !srcs.delete(src)) return;
+    if (srcs.size > 0) return;
+    if (pedalRef.current || holdRef.current) { srcs.add(PEDAL_SRC); return; } // sustained
+    dropNote(midi);
+  }, [dropNote]);
+
+  const setPedal = useCallback((down) => {
+    if (pedalRef.current === down) return;
+    pedalRef.current = down;
+    if (!down && !holdRef.current) releaseSustained();
+  }, [releaseSustained]);
+
+  const toggleHold = useCallback(() => {
+    const on = !holdRef.current;
+    holdRef.current = on;
+    setHold(on);
+    if (!on && !pedalRef.current) releaseSustained();
+  }, [releaseSustained]);
+
+  // Release every note held by sources matching `test` (e.g. all QWERTY keys).
+  const releaseWhere = useCallback((test) => {
+    for (const [midi, srcs] of [...heldRef.current]) {
+      for (const src of [...srcs]) if (test(src)) release(midi, src);
+    }
+  }, [release]);
+
+  // Propagate glide to audio engine (0-1 knob → 0-1.5s, matching sequencer mapping).
+  // GLIDE 0 = chords (poly); any glide = one note at a time (the engine switches).
   useEffect(() => { onGlideChange?.(glide * 1.5); }, [glide, onGlideChange]);
+
+  useEffect(() => { onKeyPanChange?.(keyPan); }, [keyPan, onKeyPanChange]);
 
   // Propagate vibrato params: depth 0–20 Hz, rate 0.5–10 Hz, delay 0–4 s
   useEffect(() => {
@@ -98,16 +174,25 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
 
   const pitchJackRef = useRef(null);
   const gateJackRef  = useRef(null);
+  const velJackRef   = useRef(null);
 
   // Register keyboard jacks in the patch context
   useEffect(() => {
     registerJack('kbd-pitch-out', pitchJackRef.current);
     registerJack('kbd-gate-out',  gateJackRef.current);
+    registerJack('kbd-vel-out',   velJackRef.current);
     return () => {
       unregisterJack('kbd-pitch-out');
       unregisterJack('kbd-gate-out');
+      unregisterJack('kbd-vel-out');
     };
   }, [registerJack, unregisterJack]);
+
+  // ── MIDI state ──
+  const [midiConnected, setMidiConnected] = useState(false);
+  const midiConnectedRef = useRef(false);   // mirror for timeout callbacks (stale-closure safe)
+  const midiLedRef       = useRef(null);    // DOM ref for direct LED mutation
+  const midiFlashRef     = useRef(null);    // timeout ID for flash decay
 
   // ── MIDI LED: sync base appearance when connection state changes ──
   useEffect(() => {
@@ -138,50 +223,32 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
     }, 80);
   }, []);
 
-  // ── MIDI message handler (mono legato) ──
+  // ── MIDI message handler ── notes of any MIDI number play, even off the 88 drawn keys.
+  // Not gated on page visibility: a real MIDI keyboard always reaches the Moog.
+  // Phase 106: velocity (→ GATE + VEL jack), sustain pedal CC64, mod wheel CC1,
+  // pitch bend (±2 semitones), All Notes Off CC123 / All Sound Off CC120.
+  const onBendRef = useRef(onBend);  onBendRef.current = onBend;
+  const onModRef  = useRef(onMod);   onModRef.current  = onMod;
   const handleMidiMessage = useCallback((event) => {
-    const [status, note, velocity] = event.data;
+    const [status, d1, d2] = event.data;
     const type = status & 0xF0; // strip channel nibble
-
-    if (type === 0x90 && velocity > 0) {
-      // Note On
-      const hz   = 440 * Math.pow(2, (note - 69) / 12);
-      const name = NOTE_NAMES[note % 12] + (Math.floor(note / 12) - 1);
-      heldMidiNotesRef.current = [...heldMidiNotesRef.current.filter(n => n !== note), note];
-      pressedByMouseRef.current = false;
-      pressedNoteRef.current = name;
-      pressedHzRef.current   = hz;
-      setPressedNote(name);
-      onUpdateRef.current?.(hz, true);
+    if (type === 0x90 && d2 > 0) {
+      press(d1, 'midi', d2 / 127);
       flashMidiLed();
-
-    } else if (type === 0x80 || (type === 0x90 && velocity === 0)) {
-      // Note Off
-      heldMidiNotesRef.current = heldMidiNotesRef.current.filter(n => n !== note);
-      const name = NOTE_NAMES[note % 12] + (Math.floor(note / 12) - 1);
-
-      // Only act if this note was actually sounding
-      if (pressedNoteRef.current === name) {
-        if (heldMidiNotesRef.current.length > 0) {
-          // Legato: restore the most recently pressed remaining note
-          const last     = heldMidiNotesRef.current[heldMidiNotesRef.current.length - 1];
-          const lastHz   = 440 * Math.pow(2, (last - 69) / 12);
-          const lastName = NOTE_NAMES[last % 12] + (Math.floor(last / 12) - 1);
-          pressedNoteRef.current = lastName;
-          pressedHzRef.current   = lastHz;
-          setPressedNote(lastName);
-          onUpdateRef.current?.(lastHz, true);
-        } else {
-          // All notes released
-          const relHz = pressedHzRef.current ?? 220;
-          pressedNoteRef.current = null;
-          pressedHzRef.current   = null;
-          setPressedNote(null);
-          onUpdateRef.current?.(relHz, false);
-        }
+    } else if (type === 0x80 || (type === 0x90 && d2 === 0)) {
+      release(d1, 'midi');
+    } else if (type === 0xB0) {
+      if (d1 === 64) setPedal(d2 >= 64);
+      else if (d1 === 1) onModRef.current?.(d2 / 127);
+      else if (d1 === 123 || d1 === 120) {
+        setPedal(false);                            // pedal off first, so nothing re-latches
+        releaseWhere(src => src === 'midi');        // (HOLD still latches — it is a panel choice)
       }
+    } else if (type === 0xE0) {
+      const v = ((d2 << 7) | d1) - 8192;           // 14-bit, centre 8192
+      onBendRef.current?.((v / 8192) * 2);         // ±2 semitones
     }
-  }, [flashMidiLed]);
+  }, [press, release, releaseWhere, setPedal, flashMidiLed]);
 
   // ── Web MIDI API setup ──
   useEffect(() => {
@@ -221,36 +288,48 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
     };
   }, [handleMidiMessage]);
 
-  // ── Mouse / touch note control ──
-
+  // ── Mouse / touch ── one note per pointer, so several fingers can hold a chord.
   const handlePointerDown = useCallback((e) => {
+    if (e.button !== 0) return;              // right-click / middle-click never play
     e.preventDefault();
-    const name = e.currentTarget.dataset.noteName;
-    const hz   = parseFloat(e.currentTarget.dataset.noteHz);
-    pressedByMouseRef.current = true;
-    pressedNoteRef.current = name;
-    pressedHzRef.current   = hz;
-    setPressedNote(name);
-    onUpdate?.(hz, true);
-  }, [onUpdate]);
+    // Touch pointers are implicitly captured by the key they land on, which would
+    // stop pointerenter reaching the neighbours — release it so a finger can slide.
+    if (e.currentTarget.hasPointerCapture?.(e.pointerId))
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    const midi = +e.currentTarget.dataset.midi;
+    const prev = pointerNoteRef.current.get(e.pointerId);
+    if (prev !== undefined) release(prev, `p${e.pointerId}`);
+    pointerNoteRef.current.set(e.pointerId, midi);
+    press(midi, `p${e.pointerId}`);
+  }, [press, release]);
 
-  // Window-level pointer-up — guarded so it won't cancel a MIDI-held note
+  // Glissando (Phase 106): a held pointer sliding onto another key moves its note there.
+  const handlePointerEnter = useCallback((e) => {
+    const prev = pointerNoteRef.current.get(e.pointerId);
+    if (prev === undefined) return;          // not pressed — just hovering
+    const midi = +e.currentTarget.dataset.midi;
+    if (midi === prev) return;
+    release(prev, `p${e.pointerId}`);
+    pointerNoteRef.current.set(e.pointerId, midi);
+    press(midi, `p${e.pointerId}`);
+  }, [press, release]);
+
   useEffect(() => {
-    const release = () => {
-      if (!pressedNoteRef.current || !pressedByMouseRef.current) return;
-      pressedByMouseRef.current = false;
-      const hz = pressedHzRef.current ?? 220;
-      pressedNoteRef.current = null;
-      pressedHzRef.current   = null;
-      setPressedNote(null);
-      onUpdate?.(hz, false);
+    const up = (e) => {
+      const midi = pointerNoteRef.current.get(e.pointerId);
+      if (midi === undefined) return;
+      pointerNoteRef.current.delete(e.pointerId);
+      release(midi, `p${e.pointerId}`);
     };
-    window.addEventListener('pointerup', release);
-    return () => window.removeEventListener('pointerup', release);
-  }, [onUpdate]);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    return () => {
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+  }, [release]);
 
-  // ── Computer keyboard note control ──
-
+  // ── Computer keyboard ──
   useEffect(() => {
     const down = (e) => {
       // Root keeps visited pages mounted under display:none — don't play the
@@ -260,32 +339,63 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
       // allowed through so the user can play the Moog live into the take (Phase 66).
       if (rootRef.current?.offsetParent === null && !externalActiveRef?.current) return;
       if (e.repeat) return;
-      if (e.target.closest('input,textarea,select')) return;
-      const noteData = KB_NOTE_MAP[e.key.toLowerCase()];
-      if (!noteData || pressedNoteRef.current === noteData.name) return;
-      pressedByMouseRef.current = true;
-      pressedNoteRef.current = noteData.name;
-      pressedHzRef.current   = noteData.hz;
-      setPressedNote(noteData.name);
-      onUpdate?.(noteData.hz, true);
+      if (e.metaKey || e.ctrlKey || e.altKey) return;   // shortcuts (⌘S, ⌘A…) never play notes
+      if (e.target.closest?.('input,textarea,select,[contenteditable="true"]')) return;
+      const key  = e.key.toLowerCase();
+      if (key === 'z' || key === 'x') {
+        setQwertyOct(o => Math.max(QWERTY_OCT_MIN, Math.min(QWERTY_OCT_MAX, o + (key === 'x' ? 1 : -1))));
+        return;
+      }
+      const off = KB_MAP[key];
+      if (off === undefined || qwertyNoteRef.current.has(key)) return;
+      const midi = QWERTY_BASE + 12 * qwertyOctRef.current + off;
+      qwertyNoteRef.current.set(key, midi);    // release the note it PRESSED, even after Z/X
+      press(midi, `k${key}`);
     };
+    // Releases are NOT page-gated: a key held while leaving the Moog must still let go.
     const up = (e) => {
-      if (rootRef.current?.offsetParent === null && !externalActiveRef?.current) return;
-      const noteData = KB_NOTE_MAP[e.key.toLowerCase()];
-      if (!noteData || pressedNoteRef.current !== noteData.name) return;
-      pressedByMouseRef.current = false;
-      pressedNoteRef.current = null;
-      pressedHzRef.current   = null;
-      setPressedNote(null);
-      onUpdate?.(noteData.hz, false);
+      // macOS swallows the keyup of any key released while ⌘ is down, so a note
+      // pressed before ⌘ would stick forever — let go of every QWERTY note instead.
+      if (e.key === 'Meta') {
+        qwertyNoteRef.current.clear();
+        releaseWhere(src => src[0] === 'k');
+        return;
+      }
+      const key = e.key.toLowerCase();
+      const midi = qwertyNoteRef.current.get(key);
+      if (midi === undefined) return;
+      qwertyNoteRef.current.delete(key);
+      release(midi, `k${key}`);
     };
+    // Focus leaving the window (tab switch, ⌘-Tab, a dialog) eats pending keyups and
+    // pointerups — release everything the computer is holding. MIDI keeps its notes:
+    // a hardware keyboard still sends its note-offs.
+    const dropAll = () => {
+      pointerNoteRef.current.clear();
+      qwertyNoteRef.current.clear();
+      releaseWhere(src => src !== 'midi' && src !== PEDAL_SRC);
+    };
+    const onVis = () => { if (document.hidden) dropAll(); };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup',   up);
+    window.addEventListener('blur',    dropAll);
+    document.addEventListener('visibilitychange', onVis);
     return () => {
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup',   up);
+      window.removeEventListener('blur',    dropAll);
+      document.removeEventListener('visibilitychange', onVis);
     };
-  }, [onUpdate]);
+  }, [press, release, releaseWhere, externalActiveRef]);
+
+  const poly = glide < 0.001;
+  // Which key carries which QWERTY letter follows the Z/X octave.
+  const qwertyBase = QWERTY_BASE + 12 * qwertyOct;
+  const shortcutFor = (midi) => {
+    const off = midi - qwertyBase;
+    return off >= 0 && off <= 12 ? KB_CHARS[off] : null;
+  };
+  const octName = (o) => `C${4 + o}–C${5 + o}`;
 
   return (
     <div ref={rootRef} className={styles.keyboard}>
@@ -296,7 +406,7 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
           <span className={styles.kbdModel}>953</span>
           <div className={styles.titleLines}>
             <span className={styles.kbdTitle}>KEYBOARD CONTROLLER</span>
-            <span className={styles.kbdSub}>PITCH CV · GATE · 5 OCTAVES · 61 KEYS</span>
+            <span className={styles.kbdSub}>PITCH · GATE · VEL · 88 KEYS · 8-NOTE CHORDS</span>
           </div>
         </div>
 
@@ -327,6 +437,17 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
             />
             <span className={styles.jackLabel}>GATE</span>
           </div>
+          <div className={styles.jackGroup}>
+            <div
+              ref={velJackRef}
+              className={styles.jack}
+              data-jack-id="kbd-vel-out"
+              style={{ cursor: 'crosshair' }}
+              title="VELOCITY — how hard the last MIDI key was hit (0–1, held until the next note)"
+              onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); startDrag('kbd-vel-out'); }}
+            />
+            <span className={styles.jackLabel}>VEL</span>
+          </div>
         </div>
 
         <MoogKnob
@@ -336,6 +457,13 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
           onChange={setGlide}
           defaultValue={0}
         />
+
+        {/* Read-only mode lamp (the LFO FREE/SYNC ModeIndicator idea): GLIDE at 0
+            plays chords, any glide plays one note at a time. */}
+        <div className={styles.modeIndicator} title="GLIDE at 0 = chords · any GLIDE = one note at a time">
+          <span className={poly ? styles.modeLit : styles.modeDark}>POLY</span>
+          <span className={poly ? styles.modeDark : styles.modeLit}>MONO</span>
+        </div>
 
         <MoogKnob
           label="VIBRATO"
@@ -361,8 +489,43 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
           defaultValue={0}
         />
 
+        <MoogKnob
+          label="KEY PAN"
+          size="sm"
+          value={keyPan}
+          onChange={setKeyPan}
+          defaultValue={0}
+        />
+
+        {/* HOLD — every key pressed stays on until it is pressed again (or HOLD is switched off) */}
+        <div className={styles.holdGroup}>
+          <button
+            type="button"
+            className={`${styles.holdBtn}${hold ? ` ${styles.holdOn}` : ''}`}
+            onClick={toggleHold}
+            title="HOLD — keys you press stay on; press a key again to turn it off"
+          >
+            <span className={styles.holdLamp} />
+            HOLD
+          </button>
+        </div>
+
+        {/* QWERTY octave — Z / X, or the buttons */}
+        <div className={styles.octGroup}>
+          <div className={styles.octRow}>
+            <button type="button" className={styles.octBtn}
+              onClick={() => setQwertyOct(o => Math.max(QWERTY_OCT_MIN, o - 1))}
+              disabled={qwertyOct <= QWERTY_OCT_MIN} title="Computer keys down an octave (Z)">Z ◀</button>
+            <span className={styles.octValue}>{octName(qwertyOct)}</span>
+            <button type="button" className={styles.octBtn}
+              onClick={() => setQwertyOct(o => Math.min(QWERTY_OCT_MAX, o + 1))}
+              disabled={qwertyOct >= QWERTY_OCT_MAX} title="Computer keys up an octave (X)">▶ X</button>
+          </div>
+          <span className={styles.octLabel}>COMPUTER KEYS</span>
+        </div>
+
         <div className={styles.kbdHint}>
-          <span className={styles.kbdHintText}>A–K · W E T Y U · computer keys play C4–C5</span>
+          <span className={styles.kbdHintText}>A–K · W E T Y U play notes · Z / X octave · hold several for chords</span>
         </div>
       </div>
 
@@ -374,14 +537,14 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
         >
           {WHITE_KEYS.map(k => (
             <div
-              key={k.name}
-              className={`${styles.whiteKey}${pressedNote === k.name ? ` ${styles.keyPressed}` : ''}`}
-              data-note-name={k.name}
-              data-note-hz={k.hz}
+              key={k.midi}
+              className={`${styles.whiteKey}${k.midi === LAST_WHITE ? ` ${styles.whiteKeyLast}` : ''}`}
+              data-midi={k.midi}
               onPointerDown={handlePointerDown}
+              onPointerEnter={handlePointerEnter}
             >
-              {k.shortcut && (
-                <span className={styles.keyShortcut}>{k.shortcut.toUpperCase()}</span>
+              {shortcutFor(k.midi) && (
+                <span className={styles.keyShortcut}>{shortcutFor(k.midi).toUpperCase()}</span>
               )}
               {k.name.startsWith('C') && (
                 <span className={styles.keyNote}>{k.name}</span>
@@ -391,12 +554,12 @@ export default function KeyboardModule({ onUpdate, onGlideChange, onVibratoChang
 
           {BLACK_KEYS.map(k => (
             <div
-              key={k.name}
-              className={`${styles.blackKey}${pressedNote === k.name ? ` ${styles.keyPressed}` : ''}`}
+              key={k.midi}
+              className={styles.blackKey}
               style={{ left: k.left, width: BW, height: BH }}
-              data-note-name={k.name}
-              data-note-hz={k.hz}
+              data-midi={k.midi}
               onPointerDown={handlePointerDown}
+              onPointerEnter={handlePointerEnter}
             />
           ))}
         </div>

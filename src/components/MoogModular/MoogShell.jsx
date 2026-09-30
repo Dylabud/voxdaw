@@ -1038,7 +1038,7 @@ function BlankPanel() {
       <Screw pos="screwBL" /><Screw pos="screwBR" />
       <div className={styles.plate}>
         <div className={styles.blankContent}>
-          <span className={styles.blankLabel}>MOOG</span>
+          <span className={styles.blankLabel}>VOX</span>
           <span className={styles.blankSub}>BLANK PANEL</span>
         </div>
       </div>
@@ -1097,10 +1097,50 @@ function readRackStore() {
   } catch (_) {}
   return { modules: [], cables: [], settings: {} };
 }
+// Undo/redo (Phase 107): EVERY rack write — knob/switch settings, cables, the
+// module list — funnels through updateRackStore, so the history recorder hooks
+// here once instead of at ~20 module call sites. MoogShell installs the observer.
+let rackStoreObserver = null;
 function updateRackStore(patch) {
   try {
-    localStorage.setItem(RACK_STORE_KEY, JSON.stringify({ ...readRackStore(), ...patch }));
+    const prev = readRackStore();
+    const next = { ...prev, ...patch };
+    localStorage.setItem(RACK_STORE_KEY, JSON.stringify(next));
+    rackStoreObserver?.(prev, next);
   } catch (_) {}
+}
+
+// What a store write changed, as a stable key: 'modules', 'cables', 's:<id>' per
+// module whose settings moved. Empty = nothing (or only the keyboard) changed.
+// The 953's own knobs ('kbd') are deliberately outside undo — see UndoBridge.
+const UNDO_EXCLUDED_SETTINGS = new Set(['kbd']);
+const HISTORY_MAX = 100;
+const HISTORY_COALESCE_MS = 700;   // repeated writes to ONE module's settings = one step
+function rackDiffKey(a, b) {
+  const parts = [];
+  if (JSON.stringify(a.modules ?? []) !== JSON.stringify(b.modules ?? [])) parts.push('modules');
+  if (JSON.stringify(a.cables ?? [])  !== JSON.stringify(b.cables ?? []))  parts.push('cables');
+  const sa = a.settings ?? {}, sb = b.settings ?? {};
+  for (const id of new Set([...Object.keys(sa), ...Object.keys(sb)])) {
+    if (UNDO_EXCLUDED_SETTINGS.has(id)) continue;
+    if (JSON.stringify(sa[id]) !== JSON.stringify(sb[id])) parts.push(`s:${id}`);
+  }
+  return parts.join('|');
+}
+
+// Runs the cable half of an undo/redo INSIDE the patch provider. Rendered as the
+// provider's LAST child: its effect fires after the remounted / re-added modules'
+// Jack registration effects in the same commit, so restoreCables can validate
+// against live jacks (the CableRestorer ordering trick, Phase 60f).
+function UndoBridge({ apiRef, pending, onSynced }) {
+  const { removeCablesNotIn, restoreCables } = useMoogPatch();
+  apiRef.current = { removeCablesNotIn };
+  useEffect(() => {
+    if (!pending) return;
+    restoreCables(pending.cables);   // adds only what's missing; never persists
+    onSynced();
+  }, [pending, restoreCables, onSynced]);
+  return null;
 }
 
 // ── Per-module settings persistence (Phase 63) ────────────────────────────
@@ -3520,6 +3560,8 @@ function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable
 // while recording the Moog; KeyboardModule reads it to let QWERTY through the
 // hidden-page guard so the user can play the Moog live into the take.
 export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveRef }) {
+  // 953 keyboard knob positions (Phase 105) — read once, like every module's.
+  const kbdSaved = useSavedSettings('kbd');
   const audio      = useMoogAudio();
   const cabinetRef = useRef(null);
   // Phase 61: the camera closure's live view object (mutated in place) and the
@@ -3606,6 +3648,153 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
     updateRackStore({ cables: cables.map(c => ({ from: c.fromJackId, to: c.toJackId, color: c.color })) });
   }, []);
 
+  // ── Undo / redo (Phase 107) ──
+  // History = snapshots of the whole rack store (modules + cables + every module's
+  // settings), recorded by the updateRackStore observer. Restoring one:
+  //   1. writes it straight to the store (the observer is muted meanwhile),
+  //   2. pulls cables it doesn't have (audio disconnect, no persistence write),
+  //   3. removes / re-adds library modules to match (persisted nums keep jack ids),
+  //   4. REMOUNTS each module whose settings differ — modules seed their knobs from
+  //      the store at mount (useSavedSettings) and push them to the engine from their
+  //      mount effects, the same proven path a page load uses — and
+  //   5. adds the missing cables once those modules' jacks exist (UndoBridge).
+  // Not undoable by design: POWER, lights, library hide/show (session-only), the
+  // vocoder mic, and the 953 keyboard's knobs (remounting it mid-performance would
+  // strand held notes).
+  const histRef = useRef({ stack: [], index: -1, lastKey: '', lastTime: 0, quietUntil: 0 });
+  const restoringRef = useRef(false);
+  const [histState, setHistState] = useState({ canUndo: false, canRedo: false });
+  const [remountEpochs, setRemountEpochs] = useState({});
+  const [pendingCableSync, setPendingCableSync] = useState(null);
+  const undoApiRef = useRef(null);
+  // Module key that changes when an undo/redo needs that module rebuilt.
+  const rk = (id) => `${id}#${remountEpochs[id] ?? 0}`;
+
+  const publishHist = useCallback(() => {
+    const h = histRef.current;
+    setHistState(prev => {
+      const next = { canUndo: h.index > 0, canRedo: h.index < h.stack.length - 1 };
+      return prev.canUndo === next.canUndo && prev.canRedo === next.canRedo ? prev : next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const h = histRef.current;
+    // Writes in the first moments after mount are restores / migrations, not user
+    // edits — they fold into the baseline instead of becoming undo steps.
+    h.quietUntil = Date.now() + 1500;
+    rackStoreObserver = (prev, next) => {
+      if (restoringRef.current) return;
+      const nextStr = JSON.stringify(next);
+      if (h.stack.length === 0) { h.stack = [JSON.stringify(prev)]; h.index = 0; }
+      if (Date.now() < h.quietUntil) { h.stack[h.index] = nextStr; return; }
+      const key = rackDiffKey(prev, next);
+      if (!key) { h.stack[h.index] = nextStr; return; }   // keyboard-only / no-op write
+      const now = Date.now();
+      h.stack.length = h.index + 1;                        // a new edit drops the redo branch
+      const coalesce = h.index > 0 && key === h.lastKey && key.startsWith('s:') &&
+                       !key.includes('|') && now - h.lastTime < HISTORY_COALESCE_MS;
+      if (coalesce) h.stack[h.index] = nextStr;
+      else {
+        h.stack.push(nextStr);
+        if (h.stack.length > HISTORY_MAX) h.stack.shift();
+        h.index = h.stack.length - 1;
+      }
+      h.lastKey = key; h.lastTime = now;
+      publishHist();
+    };
+    return () => { rackStoreObserver = null; };
+  }, [publishHist]);
+
+  const { addModule: engineAddModule, removeModule: engineRemoveModule } = audio;
+  const applyHistory = useCallback((targetStr) => {
+    const api = undoApiRef.current;
+    if (!api) return;
+    const cur    = readRackStore();
+    const target = JSON.parse(targetStr);
+    // The keyboard's knobs are outside undo: keep whatever they are now.
+    target.settings = { ...(target.settings ?? {}) };
+    for (const id of UNDO_EXCLUDED_SETTINGS) {
+      if (cur.settings?.[id] !== undefined) target.settings[id] = cur.settings[id];
+      else delete target.settings[id];
+    }
+    restoringRef.current = true;
+    try { localStorage.setItem(RACK_STORE_KEY, JSON.stringify(target)); } catch (_) {}
+
+    // Cables first — a module about to be removed must lose its cables (audio side)
+    // while its nodes still exist.
+    api.removeCablesNotIn(target.cables ?? []);
+
+    // Library modules.
+    const want = target.modules ?? [];
+    const wantIds = new Set(want.map(m => m.id));
+    for (const m of dynModulesRef.current) if (!wantIds.has(m.id)) engineRemoveModule(m.id);
+    const nextMods = [];
+    for (const m of want) {
+      const have = dynModulesRef.current.find(d => d.id === m.id);
+      if (have) { nextMods.push(have); continue; }
+      const res = engineAddModule(m.type, m.num);
+      if (res) nextMods.push({ id: res.id, type: m.type, num: res.num });
+    }
+    dynModulesRef.current = nextMods;
+    setDynModules(nextMods);
+
+    // Remount every module whose settings changed.
+    const sa = cur.settings ?? {}, sb = target.settings;
+    const changed = [...new Set([...Object.keys(sa), ...Object.keys(sb)])]
+      .filter(id => !UNDO_EXCLUDED_SETTINGS.has(id) && JSON.stringify(sa[id]) !== JSON.stringify(sb[id]));
+    if (changed.length) setRemountEpochs(prev => {
+      const next = { ...prev };
+      for (const id of changed) next[id] = (next[id] ?? 0) + 1;
+      return next;
+    });
+
+    setPendingCableSync({ cables: target.cables ?? [] });
+  }, [engineAddModule, engineRemoveModule]);
+
+  // Cable half done (UndoBridge). Keep the recorder folding writes into the restored
+  // snapshot for a moment: remounted modules' debounced persist effects may settle.
+  const handleUndoSynced = useCallback(() => {
+    const h = histRef.current;
+    h.quietUntil = Date.now() + 400;
+    h.lastKey = '';                          // the next edit never merges into a restore
+    restoringRef.current = false;
+    // Modules may have moved (added/removed/remounted) — re-aim committed cables.
+    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+  }, []);
+
+  const undo = useCallback(() => {
+    const h = histRef.current;
+    if (restoringRef.current || h.index <= 0) return;
+    h.index--;
+    applyHistory(h.stack[h.index]);
+    publishHist();
+  }, [applyHistory, publishHist]);
+
+  const redo = useCallback(() => {
+    const h = histRef.current;
+    if (restoringRef.current || h.index >= h.stack.length - 1) return;
+    h.index++;
+    applyHistory(h.stack[h.index]);
+    publishHist();
+  }, [applyHistory, publishHist]);
+
+  // ⌘Z / Ctrl+Z = undo · ⇧⌘Z / Ctrl+Shift+Z / Ctrl+Y = redo. Only while the Moog page is
+  // showing (Root keeps pages mounted display:none) and never inside a text field, where
+  // the browser's own text undo belongs (e.g. the I/O BPM field).
+  useEffect(() => {
+    const onKey = (e) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      if (cabinetRef.current?.offsetParent === null) return;
+      if (e.target.closest?.('input,textarea,select,[contenteditable="true"]')) return;
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey)                  { e.preventDefault(); undo(); }
+      else if ((k === 'z' && e.shiftKey) || (k === 'y' && e.ctrlKey && !e.metaKey)) { e.preventDefault(); redo(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [undo, redo]);
+
   // ── Workspace persistence (Phase 63): .moog file export/import + reset ──
   // SAVE/LOAD/RESET all reuse the Phase 60f restore path: the store already
   // holds the entire setup (modules + cables + per-module settings), so SAVE
@@ -3620,7 +3809,9 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href = url;
-    a.download = `moog-setup-${new Date().toISOString().slice(0, 10)}.moog`;
+    // Vox Modular rebrand (Phase 108): new saves are .voxmod; LOAD still accepts the
+    // older .moog files (same JSON inside — only the extension changed).
+    a.download = `vox-modular-setup-${new Date().toISOString().slice(0, 10)}.voxmod`;
     a.click();
     URL.revokeObjectURL(url);
   }, []);
@@ -3632,7 +3823,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
     reader.onload = () => {
       try {
         const parsed = JSON.parse(reader.result);
-        if (!parsed || !Array.isArray(parsed.modules)) throw new Error('not a valid .moog setup file');
+        if (!parsed || !Array.isArray(parsed.modules)) throw new Error('not a valid Vox Modular setup file');
         localStorage.setItem(RACK_STORE_KEY, JSON.stringify({
           modules:  parsed.modules  ?? [],
           cables:   parsed.cables   ?? [],
@@ -4194,7 +4385,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
         : null;
         return (
           <div
-            key={m.id}
+            key={rk(m.id)}
             className={styles.dynSlot}
             style={{ flex: `0 0 ${DYN_WIDTH[m.type]}px` }}
             onDragOver={(e) => {
@@ -4242,10 +4433,12 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
         {/* Workspace toolbar (Phase 63) — save / load the whole rack as a .moog
             file, or reset to the default startup rack. */}
         <div className={styles.workspaceBar}>
+          <button className={styles.wsBtn} onClick={undo} disabled={!histState.canUndo} title="Undo the last change (⌘Z)">↶ undo</button>
+          <button className={styles.wsBtn} onClick={redo} disabled={!histState.canRedo} title="Redo (⇧⌘Z)">↷ redo</button>
           <button className={styles.wsBtn} onClick={resetWorkspace} title="Clear all modules, cables and knob positions; return to the default rack">⟲ reset</button>
-          <button className={styles.wsBtn} onClick={saveSetup} title="Download the entire rack (modules, cables, all knob positions) as a .moog file">▼ save setup</button>
-          <button className={styles.wsBtn} onClick={() => fileInputRef.current?.click()} title="Load a .moog setup file, replacing the current rack">▲ load setup</button>
-          <input ref={fileInputRef} type="file" accept=".moog,application/json" onChange={loadSetup} style={{ display: 'none' }} />
+          <button className={styles.wsBtn} onClick={saveSetup} title="Download the entire rack (modules, cables, all knob positions) as a .voxmod file">▼ save setup</button>
+          <button className={styles.wsBtn} onClick={() => fileInputRef.current?.click()} title="Load a .voxmod (or older .moog) setup file, replacing the current rack">▲ load setup</button>
+          <input ref={fileInputRef} type="file" accept=".voxmod,.moog,application/json" onChange={loadSetup} style={{ display: 'none' }} />
         </div>
         <LibraryModal
           open={libraryOpen}
@@ -4266,8 +4459,8 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
           <div className={styles.lightOverlay} />
 
           <div className={styles.nameplate}>
-            <span className={styles.nameplateModel}>MODEL 55</span>
-            <span className={styles.nameplateBrand}>MOOG MODULAR SYNTHESIZER</span>
+            <span className={styles.nameplateModel}>MODEL V-1</span>
+            <span className={styles.nameplateBrand}>VOX MODULAR SYNTHESIZER</span>
             <span className={styles.nameplateSerial}>SER. No. 0001-A</span>
           </div>
 
@@ -4276,24 +4469,24 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
             <section className={styles.case}>
               <div className={styles.caseInterior}>
                 <div className={`${styles.tier} ${styles.tierRow1}`}>
-                  {mod('vco1', <VcoModule key="vco1" number={1} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco1SyncEnabled} getLedValue={getVco1Level} quantized={quantizedVcos.includes('vco1')} />)}
-                  {mod('vco2', <VcoModule key="vco2" number={2} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco2SyncEnabled} getLedValue={getVco2Level} quantized={quantizedVcos.includes('vco2')} />)}
-                  {mod('vco3', <VcoModule key="vco3" number={3} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco3SyncEnabled} getLedValue={getVco3Level} quantized={quantizedVcos.includes('vco3')} />)}
-                  {mod('vco4', <VcoModule key="vco4" number={4} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco4SyncEnabled} getLedValue={getVco4Level} quantized={quantizedVcos.includes('vco4')} />)}
-                  {mod('vco5', <VcoModule key="vco5" number={5} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco5SyncEnabled} getLedValue={getVco5Level} quantized={quantizedVcos.includes('vco5')} />)}
-                  {mod('noise1', <NoiseModule key="noise1" number={1} onParamUpdate={audio.updateNoiseParams} />)}
-                  {mod('noise2', <NoiseModule key="noise2" number={2} onParamUpdate={audio.updateNoiseParams} />)}
-                  {mod('noise3', <NoiseModule key="noise3" number={3} onParamUpdate={audio.updateNoiseParams} />)}
+                  {mod('vco1', <VcoModule key={rk('vco1')} number={1} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco1SyncEnabled} getLedValue={getVco1Level} quantized={quantizedVcos.includes('vco1')} />)}
+                  {mod('vco2', <VcoModule key={rk('vco2')} number={2} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco2SyncEnabled} getLedValue={getVco2Level} quantized={quantizedVcos.includes('vco2')} />)}
+                  {mod('vco3', <VcoModule key={rk('vco3')} number={3} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco3SyncEnabled} getLedValue={getVco3Level} quantized={quantizedVcos.includes('vco3')} />)}
+                  {mod('vco4', <VcoModule key={rk('vco4')} number={4} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco4SyncEnabled} getLedValue={getVco4Level} quantized={quantizedVcos.includes('vco4')} />)}
+                  {mod('vco5', <VcoModule key={rk('vco5')} number={5} onParamUpdate={audio.updateVcoParams} onSyncChange={audio.setVco5SyncEnabled} getLedValue={getVco5Level} quantized={quantizedVcos.includes('vco5')} />)}
+                  {mod('noise1', <NoiseModule key={rk('noise')} number={1} onParamUpdate={audio.updateNoiseParams} />)}
+                  {mod('noise2', <NoiseModule key={rk('noise2')} number={2} onParamUpdate={audio.updateNoiseParams} />)}
+                  {mod('noise3', <NoiseModule key={rk('noise3')} number={3} onParamUpdate={audio.updateNoiseParams} />)}
                 </div>
                 <div className={`${styles.tier} ${styles.tierRow2}`}>
-                  {mod('vcf1', <VcfModule key="vcf1" number={1} onParamUpdate={audio.updateVcfParams} />)}
-                  {mod('vcf2', <VcfModule key="vcf2" number={2} onParamUpdate={audio.updateVcf2Params} />)}
-                  {mod('lfo1', <LfoModule key="lfo1" number={1} onParamUpdate={audio.updateLfoParams}  getLedValue={getLfoInstant} />)}
-                  {mod('lfo2', <LfoModule key="lfo2" number={2} onParamUpdate={audio.updateLfo2Params} getLedValue={getLfo2Instant} />)}
-                  {mod('rev1', <ReverbModule key="rev1" number={1} onParamUpdate={audio.updateReverbParams}  getAuraData={getRev1Aura} />)}
-                  {mod('rev2', <ReverbModule key="rev2" number={2} onParamUpdate={audio.updateReverb2Params} getAuraData={getRev2Aura} />)}
-                  {mod('bbd', <ChorusModule key="bbd" onParamUpdate={audio.updateChorusParams} isPowered={audio.isPowered} />)}
-                  {mod('ffb', <FFBModule key="ffb" onParamUpdate={audio.updateFFBParams} getAnalyserData={getFFBData} />)}
+                  {mod('vcf1', <VcfModule key={rk('vcf')} number={1} onParamUpdate={audio.updateVcfParams} />)}
+                  {mod('vcf2', <VcfModule key={rk('vcf2')} number={2} onParamUpdate={audio.updateVcf2Params} />)}
+                  {mod('lfo1', <LfoModule key={rk('lfo')} number={1} onParamUpdate={audio.updateLfoParams}  getLedValue={getLfoInstant} />)}
+                  {mod('lfo2', <LfoModule key={rk('lfo2')} number={2} onParamUpdate={audio.updateLfo2Params} getLedValue={getLfo2Instant} />)}
+                  {mod('rev1', <ReverbModule key={rk('reverb')} number={1} onParamUpdate={audio.updateReverbParams}  getAuraData={getRev1Aura} />)}
+                  {mod('rev2', <ReverbModule key={rk('reverb2')} number={2} onParamUpdate={audio.updateReverb2Params} getAuraData={getRev2Aura} />)}
+                  {mod('bbd', <ChorusModule key={rk('chorus')} onParamUpdate={audio.updateChorusParams} isPowered={audio.isPowered} />)}
+                  {mod('ffb', <FFBModule key={rk('ffb')} onParamUpdate={audio.updateFFBParams} getAnalyserData={getFFBData} />)}
                 </div>
               </div>
             </section>
@@ -4302,15 +4495,15 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
             <section className={styles.case}>
               <div className={styles.caseInterior}>
                 <div className={`${styles.tier} ${styles.tierRow3}`}>
-                  {mod('vca1', <VcaModule key="vca1" number={1} onParamUpdate={audio.updateVcaParams} getLedValue={getVca1Level} />)}
-                  {mod('vca2', <VcaModule key="vca2" number={2} onParamUpdate={audio.updateVca2Params} getLedValue={getVca2Level} />)}
-                  {mod('vca3', <VcaModule key="vca3" number={3} onParamUpdate={audio.updateVca3Params} getLedValue={getVca3Level} />)}
-                  {mod('env1', <EnvelopeModule key="env1" label="ENV 1" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv1Level} />)}
-                  {mod('env2', <EnvelopeModule key="env2" label="ENV 2" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv2Level} />)}
-                  {mod('env3', <EnvelopeModule key="env3" label="ENV 3" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv3Level} />)}
-                  {mod('kick', <KickModule key="kick" onParamUpdate={audio.updateKickParams} onTrigger={audio.triggerKick} onSetTrigCallback={audio.setKickTrigCallback} />)}
+                  {mod('vca1', <VcaModule key={rk('vca')} number={1} onParamUpdate={audio.updateVcaParams} getLedValue={getVca1Level} />)}
+                  {mod('vca2', <VcaModule key={rk('vca2')} number={2} onParamUpdate={audio.updateVca2Params} getLedValue={getVca2Level} />)}
+                  {mod('vca3', <VcaModule key={rk('vca3')} number={3} onParamUpdate={audio.updateVca3Params} getLedValue={getVca3Level} />)}
+                  {mod('env1', <EnvelopeModule key={rk('env1')} label="ENV 1" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv1Level} />)}
+                  {mod('env2', <EnvelopeModule key={rk('env2')} label="ENV 2" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv2Level} />)}
+                  {mod('env3', <EnvelopeModule key={rk('env3')} label="ENV 3" onParamUpdate={audio.updateEnvParams} onGate={audio.triggerGate} getLedValue={getEnv3Level} />)}
+                  {mod('kick', <KickModule key={rk('kick')} onParamUpdate={audio.updateKickParams} onTrigger={audio.triggerKick} onSetTrigCallback={audio.setKickTrigCallback} />)}
                   {mod('vocoder', <VocoderModule
-                    key="vocoder"
+                    key={rk('voc')}
                     onParamUpdate={audio.updateVocoderParams}
                     getAnalyserData={getVocData}
                     onMicEnable={handleMicEnable}
@@ -4330,7 +4523,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
               <div className={styles.caseInterior}>
                 <div className={`${styles.tier} ${styles.tierRow4}`}>
                   {mod('seq1', <SequencerModule
-                    key="seq1"
+                    key={rk('seq')}
                     number={1}
                     onStepsChange={audio.updateSequencerSteps}
                     onDivisionChange={audio.setSeqDivision}
@@ -4338,7 +4531,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                     onGlideChange={audio.setSeqGlide}
                   />)}
                   {mod('seq2', <SequencerModule
-                    key="seq2"
+                    key={rk('seq2')}
                     number={2}
                     onStepsChange={audio.updateSeq2Steps}
                     onDivisionChange={audio.setSeq2Division}
@@ -4346,7 +4539,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                     onGlideChange={audio.setSeq2Glide}
                   />)}
                   {mod('chordseq', <ChordSeqModule
-                    key="chordseq"
+                    key={rk('chordseq')}
                     onStepsChange={audio.updateChordSeqSteps}
                     onDivisionChange={audio.setChordSeqDivision}
                     onClockDivChange={audio.setChordSeqClockDiv}
@@ -4355,7 +4548,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                     onGlideChange={audio.setChordSeqGlide}
                   />)}
                   {mod('qnt', <QuantizerModule
-                    key="qnt"
+                    key={rk('qnt')}
                     onParamUpdate={audio.updateQuantizerParams}
                     onSetCallback={audio.setQuantizerCallback}
                     onSetChordLabelCb={audio.setQuantizerChordLabelCallback}
@@ -4365,6 +4558,7 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
                     getTransposeData={audio.getQntTransposeData}
                   />)}
                   <IoModule
+                    key={rk('io')}
                     isPowered={audio.isPowered}
                     onPower={handlePowerToggle}
                     onParamUpdate={audio.updateIoParams}
@@ -4386,13 +4580,25 @@ export default function MoogShell({ onNavigateHome, onBusReady, recordingActiveR
           <div className={styles.kbdBarrier} />
 
           {/* 953 Keyboard Controller — sits below the rack, spans full cabinet width */}
-          <KeyboardModule onUpdate={audio.updateKeyboard} onGlideChange={audio.setKbdGlide} onVibratoChange={audio.setKbdVibrato} externalActiveRef={recordingActiveRef} />
+          <KeyboardModule
+            onNoteOn={audio.keyboardNoteOn}
+            onNoteOff={audio.keyboardNoteOff}
+            onGlideChange={audio.setKbdGlide}
+            onVibratoChange={audio.setKbdVibrato}
+            onBend={audio.setKbdBend}
+            onMod={audio.setKbdMod}
+            onKeyPanChange={audio.setKbdKeyPan}
+            externalActiveRef={recordingActiveRef}
+            saved={kbdSaved}
+            usePersist={useModulePersist}
+          />
         </div>
       </div>
       {/* LAST child on purpose: sibling effects run in tree order, so the
           restorer's effect fires AFTER the (just-restored) dynamic modules'
           Jack registration effects in the same commit (Phase 60f). */}
       <CableRestorer ready={dynRestored} audioConnect={audio.connect} />
+      <UndoBridge apiRef={undoApiRef} pending={pendingCableSync} onSynced={handleUndoSynced} />
     </MoogPatchProvider>
   );
 }

@@ -2768,11 +2768,11 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
           const count = transcribed.length;
           setToastMessage(
             count > 0
-              ? `Moog recording placed — ${count} note${count !== 1 ? 's' : ''} transcribed. Click [ edit ] to view in piano roll.`
-              : 'Moog recording placed. No pitched notes detected — check signal level or try drier settings.'
+              ? `Modular recording placed — ${count} note${count !== 1 ? 's' : ''} transcribed. Click [ edit ] to view in piano roll.`
+              : 'Modular recording placed. No pitched notes detected — check signal level or try drier settings.'
           );
         } catch (err) {
-          setToastMessage(`Could not decode Moog recording: ${err.message}`);
+          setToastMessage(`Could not decode modular recording: ${err.message}`);
         }
       }
       return;
@@ -2781,11 +2781,11 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     // ── Start (validate → count-in → record) ──
     const busNode = getMoogBusNode?.();
     if (!busNode) {
-      setToastMessage('Open the Moog Modular page first to initialise the audio connection.');
+      setToastMessage('Open the Vox Modular page first to initialise the audio connection.');
       return;
     }
     if (isMoogPowered && !isMoogPowered()) {
-      setToastMessage('Power on the Moog Modular first (its POWER switch) so it makes sound.');
+      setToastMessage('Power on the Vox Modular first (its POWER switch) so it makes sound.');
       return;
     }
     // The recording is placed in the selected region and playback starts at its bar.
@@ -2830,7 +2830,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
         setMoogCountingIn(false);
 
         const bus = getMoogBusNode?.();
-        if (!bus) { setToastMessage('Moog audio not available.'); return; }
+        if (!bus) { setToastMessage('Vox Modular audio not available.'); return; }
         // Restart the Moog sequence from the top + arm QWERTY into the Moog keyboard.
         resetMoogSequencers?.();
         setMoogRecordingActive?.(true);
@@ -2855,7 +2855,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     } catch (err) {
       moogCountingInRef.current = false;
       setMoogCountingIn(false);
-      setToastMessage(`Moog recording error: ${err.message}`);
+      setToastMessage(`Modular recording error: ${err.message}`);
     }
   }, [getMoogBusNode, isMoogPowered, resetMoogSequencers, setMoogRecordingActive, bpm, silenceAll, recomputeFades, updatePlayhead]);
 
@@ -4450,12 +4450,12 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
           onClick={handleMoogRecord}
           title={
             moogCountingIn ? 'Count-in… (click to cancel)'
-            : moogRecording ? 'Stop Moog recording'
-            : 'Record from Moog Modular — 1-bar count-in, then plays from the selected region'
+            : moogRecording ? 'Stop Vox Modular recording'
+            : 'Record from Vox Modular — 1-bar count-in, then plays from the selected region'
           }
           style={(moogRecording || moogCountingIn) ? { color: '#e04848' } : undefined}
         >
-          {moogCountingIn ? '● count-in…' : moogRecording ? `■ ${moogRecordSec}s` : '● MOOG'}
+          {moogCountingIn ? '● count-in…' : moogRecording ? `■ ${moogRecordSec}s` : '● MODULAR'}
         </button>
       </div>
       <ContextMenu menu={contextMenu} onClose={closeContextMenu} onCommand={handleContextCommand} tracks={tracks} />

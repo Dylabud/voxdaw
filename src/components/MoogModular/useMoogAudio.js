@@ -3,6 +3,24 @@ import { useRef, useState, useCallback, useEffect, useLayoutEffect } from 'react
 
 // Sequencer pitch range — same as VCO FREQ knob (C1–C6)
 const SEQ_HZ_MIN  = 32.703;
+// Paraphonic keyboard (Phase 105): max simultaneous notes per kbd-driven VCO, and
+// the worklet voice list meaning "one voice at ratio 1" (the pre-105 mono core).
+const KBD_MAX_VOICES  = 8;
+const KBD_MONO_VOICES = [{ id: 'm', ratio: 1 }];
+const midiToHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+// VCO waveform taps, in the worklet's channel-pair order (Phase 106).
+const VCO_TAP_SUFFIXES = ['Sin', 'Tri', 'Saw', 'Pulse'];
+// KEY PAN (Phase 106): a VCO's four taps pass the worklet's stereo pairs through only
+// while it is keyboard-driven with KEY PAN up. Otherwise they downmix to mono, which
+// is bit-identical to the pre-106 mono core (L === R) — so nothing downstream (e.g.
+// the PANNER module's mono-vs-stereo pan law) changes unless the feature is used.
+const setVcoStereo = (n, vcoId, stereo) => {
+  for (const suf of VCO_TAP_SUFFIXES) {
+    const g = n?.[`${vcoId}${suf}`]?.input;
+    if (!g) continue;
+    try { g.channelCountMode = 'explicit'; g.channelCount = stereo ? 2 : 1; } catch (_) {}
+  }
+};
 const SEQ_HZ_MAX  = 1046.502;
 const VCO_IDS     = ['vco1', 'vco2', 'vco3', 'vco4', 'vco5'];
 // Dynamic instance-id prefixes that differ from their type name (jack-prefix
@@ -1128,6 +1146,7 @@ function buildJackMap(n) {
     // ── Keyboard ──
     'kbd-pitch-out': { type: 'out', node: n.kbdPitchOut },
     'kbd-gate-out':  { type: 'out', node: null, isGate: true },
+    'kbd-vel-out':   { type: 'out', node: n.kbdVelOut },
     // ── Quantizer ──
     // qnt-cv-in        → AudioWorkletNode audio input (null until worklet loads)
     // qnt-cv-out       → Tone.Gain wrapper (always live)
@@ -1220,6 +1239,25 @@ export default function useMoogAudio() {
   const kbdCurrentHzRef    = useRef(220);   // smoothly-interpolated Hz (glide state, base only)
   const kbdLastOutputHzRef = useRef(220);   // actual last-written Hz including swing — glide seeds from here
   const kbdPrevRafTimeRef  = useRef(null);  // last rAF AudioContext time for delta-time glide
+  // ── Paraphonic keyboard (Moog Phase 105) ── every VCO patched from kbd-pitch-out
+  // sounds EVERY held key (up to KBD_MAX_VOICES) via the worklet's voice slots; GLIDE
+  // above 0 drops back to the classic mono last-note behaviour. The GlideBus carries
+  // the chord's FIRST note (ratio 1, and the vibrato/glide centre as before); the other
+  // notes ride as ratios posted to each worklet — so a chord change is a message, never
+  // a second GlideBus writer. See keyboardNoteOn/Off.
+  const kbdHeldRef       = useRef([]);          // held MIDI notes, press order (last = newest)
+  const kbdVoiceIdsRef   = useRef(new Map());   // MIDI note → worklet voice id (poly session)
+  const kbdVoiceSerialRef = useRef(0);          // monotonic voice-id mint
+  const kbdRefHzRef      = useRef(220);         // poly session reference = first note's Hz
+  const kbdVoicesRef     = useRef(KBD_MONO_VOICES); // what every kbd-driven worklet should hold
+  const kbdPolyRef       = useRef(true);        // true while GLIDE is 0 (poly mode)
+  // Phase 106 performance controls. Bend is a pitch RATIO (MIDI wheel, ±2 st) applied
+  // on top of the glide/vibrato pitch; mod wheel adds vibrato depth (0..1 → 0..20 Hz,
+  // not subject to VIB DLY); KEY PAN is the worklets' per-voice stereo spread (0..1).
+  const kbdBendRef       = useRef(1);
+  const kbdModRef        = useRef(0);
+  const kbdKeyPanRef     = useRef(0);
+  const kbdPitchHzRef    = useRef(SEQ_HZ_MIN);  // unbent Hz on the PITCH jack (newest note)
   // 960 sequencer state — id-keyed maps (Phase 60e). 'seq' / 'seq2' are the
   // static modules; dynamic instances are 'seq3'+. Node names compose from the
   // id (`${seqId}PitchOut`, `${seqId}GateNode`) and every map is read by the
@@ -1260,12 +1298,12 @@ const SEQ_CLOCK_MAX_DEPTH = 4;
 // knobs, so a clock pulse or a one-step sequencer gate plays a percussive hit regardless
 // of how long the source is held. That distinction is the whole reason MOOG_ARCHITECTURE
 // §5 lists the two as separate ports on the 911.
-const triggerEnvOneShot = (env, time) => {
+const triggerEnvOneShot = (env, time, velocity = 1) => {
   // A+D reaches the sustain point and releases from there, so the knobs still shape it.
   // Floored so an all-zero envelope still produces an audible click rather than nothing.
+  // `velocity` scales the peak (keyboard velocity, Phase 106); 1 = unchanged.
   const dur = Math.max(0.002, env.toSeconds(env.attack) + env.toSeconds(env.decay));
-  if (time === undefined) env.triggerAttackRelease(dur);
-  else                    env.triggerAttackRelease(dur, time);
+  env.triggerAttackRelease(dur, time, velocity);
 };
 
 
@@ -1915,6 +1953,7 @@ const triggerEnvOneShot = (env, time) => {
       seqPitchOut:       new Tone.Signal(SEQ_HZ_MIN), // never init to 0 — exponential ramps from 0 are undefined
       seq2PitchOut:      new Tone.Signal(SEQ_HZ_MIN), // second sequencer pitch CV — same non-zero init rule
       kbdPitchOut:       new Tone.Signal(SEQ_HZ_MIN), // keyboard pitch CV out — same non-zero init rule
+      kbdVelOut:         new Tone.Signal(0),          // keyboard VELOCITY CV out, 0..1, held per note (Phase 106)
       chordseqPitchOut:      new Tone.Signal(SEQ_HZ_MIN), // chord sequencer root CV out — same rule
       chordseqRootOut:       new Tone.Signal(SEQ_HZ_MIN), // independent root-note CV out (octave-shifted)
       chordseqThirdOut:      new Tone.Signal(SEQ_HZ_MIN), // 3rd of chord CV
@@ -2524,9 +2563,11 @@ const triggerEnvOneShot = (env, time) => {
       const depth     = kbdVibratoDepthRef.current;
       const delayTime = kbdVibratoDelayRef.current;
       const elapsed   = kbdNoteOnsetRef.current === null ? 0 : now - kbdNoteOnsetRef.current;
-      const effectiveDepth = depth < 0.001 ? 0 : delayTime < 0.01
+      // Mod wheel (Phase 106) adds depth on top of the knob, immediately — VIB DLY
+      // shapes only the knob's auto-vibrato, never a hand on the wheel.
+      const effectiveDepth = (depth < 0.001 ? 0 : delayTime < 0.01
         ? depth
-        : depth * Math.min(1, Math.max(0, elapsed / delayTime));
+        : depth * Math.min(1, Math.max(0, elapsed / delayTime))) + kbdModRef.current * 20;
       const swing = effectiveDepth < 0.001
         ? 0
         : effectiveDepth * Math.sin(2 * Math.PI * kbdVibratoRateRef.current * now);
@@ -2538,10 +2579,15 @@ const triggerEnvOneShot = (env, time) => {
       // giving a pure continuous glide (and smoother vibrato on held notes). Glide-off
       // keeps the instant setValueAtTime so note attacks stay snappy (no 32 ms slur).
       // This rAF is the sole writer of these glideBuses, so the ramps chain cleanly.
-      const hz = Math.max(1, kbdCurrentHzRef.current + swing);
-      kbdLastOutputHzRef.current = hz;
+      // Pitch bend multiplies AFTER the glide state, so kbdLastOutputHzRef (the glide
+      // seed) stays in unbent note space. Anything moving — glide, vibrato, a bend —
+      // takes the audio-rate ramp (no staircase); a still note keeps the hard set.
+      const unbent = Math.max(1, kbdCurrentHzRef.current + swing);
+      kbdLastOutputHzRef.current = unbent;
+      const bend = kbdBendRef.current;
+      const hz = unbent * bend;
       const rampAhead = Math.max(dt * 2, 1 / 30); // stay ahead of the next frame so the param never holds flat
-      const gliding = glide >= 0.001;
+      const gliding = glide >= 0.001 || swing !== 0 || bend !== 1;
       for (const vcoId of allVcoIdsRef.current) {
         if (vcoActiveCvRef.current[vcoId] !== 'kbd-pitch-out') continue;
         const p = n[`${vcoId}GlideBus`]?._param;
@@ -2782,7 +2828,10 @@ const triggerEnvOneShot = (env, time) => {
         // InvalidAccessError when connecting TO any node created outside its own registry
         // (i.e. native AudioWorkletNode). Tone.context.createAudioWorkletNode() creates a
         // SAC-wrapped node that is accepted by every SAC connect() call in the graph.
-        const node = Tone.context.createAudioWorkletNode('quantizer-processor');
+        // Mono input: a KEY-PANNED VCO patched here would otherwise be read left-only.
+        const node = Tone.context.createAudioWorkletNode('quantizer-processor', {
+          channelCount: 1, channelCountMode: 'explicit',
+        });
         qntNodes[qid] = node;
 
         // Connect worklet output to the Tone.Gain wrapper via its native GainNode.
@@ -2928,18 +2977,27 @@ const triggerEnvOneShot = (env, time) => {
       // restored from refs since the worklet can load after powerOn / a saved setup.
       const wire = (vcoId) => {
         if (hardSyncNodes[vcoId] || !n[`${vcoId}syncIn`]) return;
+        // 8 output channels = a stereo pair per waveform (Phase 106 KEY PAN). The
+        // input is downmixed to mono so a key-panned master still syncs off both sides.
         const node = Tone.context.createAudioWorkletNode('hard-sync-processor', {
-          numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [4],
+          numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [8],
+          channelCount: 1, channelCountMode: 'explicit',
         });
         n[`${vcoId}syncIn`].output.connect(node);          // master → worklet input
-        node.connect(n[`${vcoId}coreGate`].input);         // 4ch core → power gate
-        const split = rawCtx.createChannelSplitter(4);
-        n[`${vcoId}bus`].connect(split);                   // seq-gated 4ch → splitter
-        split.connect(n[`${vcoId}Sin`].input,   0);
-        split.connect(n[`${vcoId}Tri`].input,   1);
-        split.connect(n[`${vcoId}Saw`].input,   2);
-        split.connect(n[`${vcoId}Pulse`].input, 3);
+        node.connect(n[`${vcoId}coreGate`].input);         // 8ch core → power gate
+        const split = rawCtx.createChannelSplitter(8);
+        n[`${vcoId}bus`].connect(split);                   // seq-gated 8ch → splitter
+        // Re-pair L/R into each waveform's tap. The taps run MONO (downmix = (L+R)/2 =
+        // the pre-106 value, bit-exact) until KEY PAN engages — see setVcoStereo.
+        VCO_TAP_SUFFIXES.forEach((suf, w) => {
+          const merge = rawCtx.createChannelMerger(2);
+          split.connect(merge, 2 * w,     0);
+          split.connect(merge, 2 * w + 1, 1);
+          merge.connect(n[`${vcoId}${suf}`].input);
+          n[`${vcoId}Merge${suf}`] = merge;
+        });
         n[`${vcoId}Split`] = split;
+        setVcoStereo(n, vcoId, false);
         try { n[`${vcoId}GlideBus`].connect(node.parameters.get('slaveFreq')); }   catch (_) {}
         try { n[`${vcoId}fm`].connect(node.parameters.get('slaveFreq')); }         catch (_) {}
         try { n[`${vcoId}DetuneSig`].connect(node.parameters.get('slaveDetune')); } catch (_) {}
@@ -2950,6 +3008,12 @@ const triggerEnvOneShot = (env, time) => {
         const se = seRef ? seRef.current : !!dynVcoSyncRef.current[vcoId];
         node.parameters.get('syncEnabled').setValueAtTime(se ? 1 : 0, Tone.now());
         n[`${vcoId}coreGate`].gain.value = isPoweredRef.current ? 1 : 0;
+        // A keyboard cable restored before the worklet loaded: hand it the chord (and
+        // the KEY PAN spread) now.
+        if (vcoActiveCvRef.current[vcoId] === 'kbd-pitch-out') {
+          node.port.postMessage({ voices: kbdVoicesRef.current, panSpread: kbdKeyPanRef.current });
+          setVcoStereo(n, vcoId, kbdKeyPanRef.current > 0);
+        }
         hardSyncNodes[vcoId] = node;
       };
 
@@ -3399,7 +3463,8 @@ const triggerEnvOneShot = (env, time) => {
         nodeNames:   [`${id}GlideBus`, `${id}DetuneSig`, `${id}WidthSig`, `${id}coreGate`,
                       `${id}bus`, `${id}Sin`, `${id}Tri`, `${id}Saw`, `${id}Pulse`,
                       `${id}fm`, `${id}fmIn`, `${id}fmAnalyser`, `${id}pw`,
-                      `${id}Meter`, `${id}syncIn`, `${id}Split`],
+                      `${id}Meter`, `${id}syncIn`, `${id}Split`,
+                      ...VCO_TAP_SUFFIXES.map(suf => `${id}Merge${suf}`)],
         sourceNames: [],
         jackIds:     Object.keys(jackEntries),
       });
@@ -4656,6 +4721,14 @@ const triggerEnvOneShot = (env, time) => {
       const glideBus  = n[`${vcoId}GlideBus`];
       if (!glideBus) return;
       vcoActiveCvRef.current[vcoId] = effFrom;
+      // Paraphonic keyboard (Phase 105): a kbd-driven VCO takes the keyboard's current
+      // voice list; any other source gets the single mono voice back.
+      // KEY PAN (Phase 106) follows the same rule: only a kbd-driven VCO is spread.
+      const kbdDriven = effFrom === 'kbd-pitch-out';
+      n.hardSyncNodes?.[vcoId]?.port.postMessage({
+        voices: kbdDriven ? kbdVoicesRef.current : KBD_MONO_VOICES,
+        panSpread: kbdDriven ? kbdKeyPanRef.current : 0 });
+      setVcoStereo(n, vcoId, kbdDriven && kbdKeyPanRef.current > 0);
       // Managed sources: no audio cable — step loops / rAF / port.onmessage write to glideBus.
       const MANAGED = new Set(['kbd-pitch-out']);
       // Any 960's pitch out / chord seq's CV outs / quantizer's cv-out are
@@ -4809,6 +4882,8 @@ const triggerEnvOneShot = (env, time) => {
       }
       vcoActiveCvRef.current[vcoId] = null;
       connectionsRef.current.delete(key);
+      n.hardSyncNodes?.[vcoId]?.port.postMessage({ voices: KBD_MONO_VOICES, panSpread: 0 }); // one centred voice
+      setVcoStereo(n, vcoId, false);
       // Restore knob Hz to the glideBus (instant — no glide on cable-remove).
       const kHz = vcoKnobHzRef.current[vcoId];
       if (kHz != null) {
@@ -5368,7 +5443,6 @@ const triggerEnvOneShot = (env, time) => {
   const setSeqGlide  = useCallback((v) => setSeqGlideById('seq', v),  [setSeqGlideById]);
   const setChordSeqGlide = useCallback((v) => setChordSeqGlideById('chordseq', v), [setChordSeqGlideById]);
   const setSeq2Glide = useCallback((v) => setSeqGlideById('seq2', v), [setSeqGlideById]);
-  const setKbdGlide  = useCallback((v) => { kbdGlideRef.current  = v; }, []);
 
   // 914 FFB — single writer per band gain node; master owns ffbMaster.gain.
   const updateFFBParams = useCallback(({ bands, master } = {}) => {
@@ -5521,25 +5595,58 @@ const triggerEnvOneShot = (env, time) => {
     n.hardSyncNodes?.[vcoId]?.parameters.get('syncEnabled').setValueAtTime(enabled ? 1 : 0, Tone.now());
   }, []);
 
-  // Keyboard pitch + gate control.
-  // hz: the note frequency in Hz (e.g. Tone.Frequency("C4").toFrequency()).
-  // isGateDown: true = note on (triggerAttack), false = note off (triggerRelease).
-  // Only envelopes connected via kbd-gate-out are triggered; seq-gate-out is unaffected.
-  const updateKeyboard = useCallback((hz, isGateDown) => {
+  // ── 953 keyboard note engine (Moog Phase 105) ──
+  // The keyboard component de-duplicates its three input sources (mouse/touch,
+  // QWERTY, MIDI) and calls keyboardNoteOn/Off exactly once per key edge. Every
+  // keyboard note passes through here — SCALE LEARN (Phase 100) hooks it.
+
+  // Post the current voice list to one VCO's worklet (no-op before it has loaded;
+  // wire() re-posts on load).
+  const postVcoVoices = useCallback((vcoId, voices) => {
+    nodesRef.current?.hardSyncNodes?.[vcoId]?.port.postMessage({ voices });
+  }, []);
+  const broadcastKbdVoices = useCallback(() => {
+    for (const vcoId of allVcoIdsRef.current)
+      if (vcoActiveCvRef.current[vcoId] === 'kbd-pitch-out') postVcoVoices(vcoId, kbdVoicesRef.current);
+  }, [postVcoVoices]);
+
+  // The GlideBus note (poly: the chord's reference; mono: the sounding note). With
+  // glide off it is also written straight to the buses NOW — waiting for the next
+  // vibratoTick frame let the gate attack on the previous pitch for up to ~16 ms.
+  // Same value the rAF (still the steady-state writer) writes a frame later.
+  const setKbdBaseHz = useCallback((hz) => {
+    kbdBaseHzRef.current = hz;
+    if (kbdGlideRef.current >= 0.001) return;
+    kbdCurrentHzRef.current = hz;
+    const n = nodesRef.current;
+    const now = Tone.context.rawContext.currentTime;
+    for (const vcoId of allVcoIdsRef.current) {
+      if (vcoActiveCvRef.current[vcoId] !== 'kbd-pitch-out') continue;
+      const p = n?.[`${vcoId}GlideBus`]?._param;
+      if (!p) continue;
+      try { p.cancelScheduledValues(now); } catch (_) {}
+      p.setValueAtTime(hz * kbdBendRef.current, now);
+    }
+  }, []);
+
+  // PITCH jack writer — the newest note, bent (Phase 106), so a bend reaches QNT/KICK too.
+  const writeKbdPitch = useCallback((hz) => {
+    kbdPitchHzRef.current = hz;
+    nodesRef.current?.kbdPitchOut.setValueAtTime(hz * kbdBendRef.current, Tone.now());
+  }, []);
+
+  // Poly voice list from the held notes (newest KBD_MAX_VOICES win).
+  const kbdPolyVoices = useCallback(() =>
+    kbdHeldRef.current.slice(-KBD_MAX_VOICES).map(m => ({
+      id: kbdVoiceIdsRef.current.get(m), ratio: midiToHz(m) / kbdRefHzRef.current,
+    })), []);
+
+  // Gate-domain side of a key edge: envelopes, kicks, sequencer clocks patched from
+  // kbd-gate-out. Called on EVERY note-on (each new key re-articulates, as before) and
+  // only on the LAST note-off — releasing one key of a held chord is not a gate edge.
+  const fireKbdGates = useCallback((isGateDown, vel = 1) => {
     const n = nodesRef.current;
     if (!n) return;
-    // Update refs — the vibratoTick rAF owns all glideBus writes for kbd-connected VCOs.
-    // kbdPitchOut drives quantizer and other non-VCO destinations (instant, no glide needed).
-    kbdBaseHzRef.current = hz;
-    if (isGateDown) kbdVibratoResetRef.current = true; // rAF will stamp its own `now` as onset
-    n.kbdPitchOut.setValueAtTime(hz, Tone.now());
-    // SCALE LEARN (Phase 100) — note-ON only; a key release is not a new note.
-    // No cable required: learn is a panel gesture, not a patch.
-    if (isGateDown && hz > 0) {
-      const pc = ((Math.round(69 + 12 * Math.log2(hz / 440)) % 12) + 12) % 12;
-      for (const qid in qntLearnRefs.current)
-        if (qntLearnRefs.current[qid]) qntLearnCbRefs.current[qid]?.(pc);
-    }
     for (const [, action] of gateActionsRef.current) {
       if (action.fromId !== 'kbd-gate-out') continue;
       // Keyboard → 960 / chord seq CLK↓: one step per keypress (key-up is not an edge).
@@ -5562,18 +5669,125 @@ const triggerEnvOneShot = (env, time) => {
           const kt  = nextKickTime(kickLastTimeRef.current, kid, Tone.now());
           const kd  = kickDecayRef.current[kid] ?? 0.4;
           const khz = kickTuneHz(n, kid, connectionsRef.current, kickTuneRef.current[kid] ?? 55);
-          n[`${kid}Synth`].triggerAttackRelease(khz, kd, kt);
-          n[`${kid}ClickSynth`]?.triggerAttackRelease(kd * 0.1, kt);
+          n[`${kid}Synth`].triggerAttackRelease(khz, kd, kt, vel);
+          n[`${kid}ClickSynth`]?.triggerAttackRelease(kd * 0.1, kt, vel);
           drawAt(kt, () => kickTrigCbRef.current[kid]?.());
         }
         continue;
       }
       if (!action.env) continue;
-      if (action.isTrig) { if (isGateDown) triggerEnvOneShot(action.env); continue; } // key-up does nothing
-      if (isGateDown) action.env.triggerAttack();
+      // VELOCITY rides the gate (Phase 106): an envelope fired from the keyboard peaks
+      // at the key's velocity, so a soft MIDI hit is a quieter note through any
+      // ENV → VCA patch. Mouse / QWERTY always send 1 = the pre-106 behaviour.
+      if (action.isTrig) { if (isGateDown) triggerEnvOneShot(action.env, undefined, vel); continue; } // key-up does nothing
+      if (isGateDown) action.env.triggerAttack(undefined, vel);
       else            action.env.triggerRelease();
     }
   }, []);
+
+  const keyboardNoteOn = useCallback((midi, velocity = 1) => {
+    const n = nodesRef.current;
+    if (!n || kbdHeldRef.current.includes(midi)) return;
+    kbdHeldRef.current.push(midi);
+    const hz = midiToHz(midi);
+    const vel = Math.max(0, Math.min(1, velocity));
+    // PITCH jack = newest note (last-note priority) for every non-VCO reader
+    // (QNT, KICK TUNE, chord-seq cv-in) — those stay one note by nature.
+    writeKbdPitch(hz);
+    n.kbdVelOut.setValueAtTime(vel, Tone.now());   // VEL jack: held until the next note
+    kbdVibratoResetRef.current = true; // rAF will stamp its own `now` as onset
+    if (kbdPolyRef.current) {
+      const id = ++kbdVoiceSerialRef.current;
+      if (kbdHeldRef.current.length === 1) {
+        // New chord: fresh ids, so every voice still ringing from the last release
+        // fades out and this note starts clean at ratio 1.
+        kbdVoiceIdsRef.current.clear();
+        kbdRefHzRef.current = hz;
+        setKbdBaseHz(hz);
+      }
+      kbdVoiceIdsRef.current.set(midi, id);
+      kbdVoicesRef.current = kbdPolyVoices();
+      broadcastKbdVoices();
+    } else {
+      setKbdBaseHz(hz);
+    }
+    // SCALE LEARN (Phase 100) — note-ON only; a key release is not a new note.
+    // No cable required: learn is a panel gesture, not a patch.
+    const pc = ((midi % 12) + 12) % 12;
+    for (const qid in qntLearnRefs.current)
+      if (qntLearnRefs.current[qid]) qntLearnCbRefs.current[qid]?.(pc);
+    fireKbdGates(true, vel);
+  }, [setKbdBaseHz, writeKbdPitch, kbdPolyVoices, broadcastKbdVoices, fireKbdGates]);
+
+  const keyboardNoteOff = useCallback((midi) => {
+    const n = nodesRef.current;
+    const held = kbdHeldRef.current;
+    const idx = held.indexOf(midi);
+    if (!n || idx < 0) return;
+    held.splice(idx, 1);
+    kbdVoiceIdsRef.current.delete(midi);
+    if (held.length === 0) {
+      // Last key up: close the gate but leave the voices ringing — the envelope's
+      // release tail needs something to fade (a VCO never stops; the VCA does).
+      fireKbdGates(false);
+      return;
+    }
+    // Keys still held — no gate edge (legato). Newest remaining note owns PITCH.
+    const lastHz = midiToHz(held[held.length - 1]);
+    writeKbdPitch(lastHz);
+    if (kbdPolyRef.current) {
+      kbdVoicesRef.current = kbdPolyVoices();   // the released note fades out alone
+      broadcastKbdVoices();
+    } else {
+      setKbdBaseHz(lastHz);                      // mono legato: back to the previous key
+    }
+  }, [setKbdBaseHz, writeKbdPitch, kbdPolyVoices, broadcastKbdVoices, fireKbdGates]);
+
+  // ── Performance controls (Phase 106) ──
+  // Pitch bend in semitones (MIDI wheel → ±2). vibratoTick applies it to the kbd VCOs'
+  // GlideBuses (the whole chord bends — voices are ratios of the bus); the PITCH jack
+  // is re-written here so bends reach its other readers too.
+  const setKbdBend = useCallback((semis) => {
+    const r = Math.pow(2, (semis || 0) / 12);
+    if (r === kbdBendRef.current) return;
+    kbdBendRef.current = r;
+    nodesRef.current?.kbdPitchOut.setValueAtTime(kbdPitchHzRef.current * r, Tone.now());
+  }, []);
+  const setKbdMod = useCallback((v) => { kbdModRef.current = Math.max(0, Math.min(1, v || 0)); }, []);
+  // KEY PAN spread 0..1 → every kbd-driven VCO's worklet, and flips its taps to stereo.
+  const setKbdKeyPan = useCallback((v) => {
+    const spread = Math.max(0, Math.min(1, v || 0));
+    kbdKeyPanRef.current = spread;
+    const n = nodesRef.current;
+    if (!n) return;
+    for (const vcoId of allVcoIdsRef.current) {
+      if (vcoActiveCvRef.current[vcoId] !== 'kbd-pitch-out') continue;
+      n.hardSyncNodes?.[vcoId]?.port.postMessage({ panSpread: spread });
+      setVcoStereo(n, vcoId, spread > 0);
+    }
+  }, []);
+
+  // GLIDE 0 = poly, above 0 = mono (a glide between chords has no single path).
+  // Crossing the boundary re-voices the kbd VCOs at once, even mid-chord.
+  const setKbdGlide  = useCallback((v) => {
+    kbdGlideRef.current = v;
+    const poly = v < 0.001;
+    if (poly === kbdPolyRef.current) return;
+    kbdPolyRef.current = poly;
+    const held = kbdHeldRef.current;
+    if (poly) {
+      if (held.length === 0) return;             // next key starts a chord
+      kbdVoiceIdsRef.current.clear();
+      for (const m of held) kbdVoiceIdsRef.current.set(m, ++kbdVoiceSerialRef.current);
+      kbdRefHzRef.current = kbdBaseHzRef.current; // the note mono was sounding
+      kbdVoicesRef.current = kbdPolyVoices();
+    } else {
+      kbdVoiceIdsRef.current.clear();
+      if (held.length) kbdBaseHzRef.current = midiToHz(held[held.length - 1]);
+      kbdVoicesRef.current = KBD_MONO_VOICES;
+    }
+    broadcastKbdVoices();
+  }, [kbdPolyVoices, broadcastKbdVoices]);
 
   // Restart every sequencer (960 + chord) from step 0 — the next Transport tick
   // lands on the first step. Used by the Workstation's Moog-record count-in so a
@@ -5599,7 +5813,7 @@ const triggerEnvOneShot = (env, time) => {
     getOscilloscopeData, getQntTransposeData, getMeterValue, getMasterPeak,
     getLfoInstant, getLfo2Instant,
     setTempo, updateSequencerSteps, setSeqStepCallback,
-    updateSeq2Steps, setSeq2StepCallback, updateKeyboard,
+    updateSeq2Steps, setSeq2StepCallback, keyboardNoteOn, keyboardNoteOff,
     updateSeqStepsById, setSeqStepCallbackById, setSeqGlideById, setSeqDivisionById,
     setSeqDivision, setSeq2Division,
     updateChordSeqSteps, setChordSeqStepCallback, setChordSeqDivision, setChordSeqClockDiv,
@@ -5612,7 +5826,7 @@ const triggerEnvOneShot = (env, time) => {
     setQuantizerLearnById, setQuantizerLearn,
     setQuantizerLearnCallbackById, setQuantizerLearnCallback,
     setVco1SyncEnabled, setVco2SyncEnabled, setVco3SyncEnabled, setVco4SyncEnabled, setVco5SyncEnabled,
-    setSeqGlide, setSeq2Glide, setKbdGlide, setKbdVibrato, updateNoiseParams,
+    setSeqGlide, setSeq2Glide, setKbdGlide, setKbdVibrato, setKbdBend, setKbdMod, setKbdKeyPan, updateNoiseParams,
     updateFFBParams, getFFBAnalyserData,
     updateVocoderParams, getVocAnalyserData,
     getVowelAnalyserData,

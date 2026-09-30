@@ -1,4 +1,6 @@
-# MOOG_PLAN.md — Moog Modular Synthesizer (VoxDAW)
+# MOOG_PLAN.md — Vox Modular Synthesizer (VoxDAW)
+
+> **Rebranded to *Vox Modular* (Phase 108, 2026-09-28).** Every user-facing name now says Vox Modular (nameplate `VOX MODULAR SYNTHESIZER · MODEL V-1`, blank panels, home-page button, Workstation `● MODULAR` record button + its messages, save files `.voxmod`). **Internal names deliberately keep "Moog"** — file names (`MoogShell.jsx`, `useMoogAudio.js`, this file), code identifiers, CSS classes, the Root page id `'moogmodular'`, the localStorage key `moog-rack-v2` (renaming it would make every saved rack look wiped), and the `Moog Phase N` log prefix (one continuous history). Module model numbers (901/904/911/914/921/953/960…) are kept as vintage flavour; only `MODEL 55` (a real Moog product name) became `MODEL V-1`.
 
 ## How to Use This File
 
@@ -36,6 +38,77 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 ---
 
 ## Completed Phases Log
+
+### [2026-09-30] Moog Phase 109 — Scroll lag returns: the keyboard missed the 61d layer promotion
+
+Dylan: scrolling became choppy right after the Phase 105–106 keyboard work — fresh default rack, no patches, **even powered off** (so compositing, not animation). Gemini's "Phase 109" directive (will-change on the cabinet, `overflow-y` scrolling on the shell, `contain: strict` on modules, shadow audit) was **rejected point by point**: cabinet-level will-change is the Phase 53 black-tile bug; shell scrolling breaks `fit()`; `contain: strict` includes size containment (every module would collapse to 0×0); scroll handlers already write no React state and cables only recompute on resize; the shadow audit was Phase 61's, and shadows weren't the cost. Dylan's constraint: no visual trade-offs.
+
+**Root cause.** Phase 61d's fix — `will-change: transform` on every `.module`, so a pan slides ~30 cached textures — never covered the **953 keyboard**, which is not a `.module`. It was re-rastered on every pan frame, the case 61d measured as catastrophic (~3781 ms vs ~400 ms GPU-busy). Tolerable at 61 × 30 px keys; Phases 105–106 grew it to 88 × 40 px keys (+14 px taller), under a keybed-wide `filter: drop-shadow`, plus a 5th knob, the POLY/MONO lamp, HOLD and octave controls — enough to tip the whole rack into choppiness.
+
+**Fix:** `will-change: transform` on `.keyboard` (KeyboardModule.module.css) — one cached layer, zero visual change. `MoogKnob` already transiently re-promotes a dragged knob, so the keyboard's knobs rotate crisply. **Rule going forward:** any panel added to the cabinet outside a `.module` needs the same promotion.
+
+*Verified: compiles; **Dylan confirmed on his Retina Mac (2026-09-30): smooth again.**
+
+### [2026-09-28] Moog Phase 108 — Rebrand: "Moog Modular" → "Vox Modular"
+
+Gemini directive, trimmed after review. **Done (user-facing only):** nameplate `MOOG MODULAR SYNTHESIZER` → `VOX MODULAR SYNTHESIZER`, `MODEL 55` → `MODEL V-1` (the one real Moog product name on the panel), blank panels `MOOG` → `VOX`, home-page `[ Moog Modular ]` → `[ Vox Modular ]`, Workstation record button `● MOOG` → `● MODULAR` plus its tooltip and six toasts (Gemini's plan missed both the home page and the Workstation), SAVE SETUP now downloads `vox-modular-setup-YYYY-MM-DD.voxmod` and LOAD accepts `.voxmod` **and** `.moog` (identical JSON — only the extension changed).
+
+**Rejected from the directive:** renaming localStorage "save slots" (`moog-rack-v2` — a new key would present every existing rack as wiped, for zero visible gain); renaming CSS classes, variables, file names or comments (invisible to users, thousands of lines of churn, and it would orphan every doc/CLAUDE.md reference); "undo/redo snapshot labels" (none exist — Phase 107 history is unlabelled snapshots). Dylan chose to keep the module model numbers (953, 960, 914…) as vintage flavour.
+
+*Verified: dev build compiles; no user-visible "Moog" string remains in the Moog shell, home page, or Workstation (grep of quoted/JSX text).*
+
+### [2026-09-28] Moog Phase 107 — Undo / Redo
+
+Dylan: *"undo and redo buttons… press a back button or CMD Z to undo something, and a forward button… so that they can get something back."*
+
+**Design: undo = step through snapshots of the rack store.** The Phase 63 store already captures the whole setup (library modules, cables, every module's knob/switch/step settings) and every user change already writes through `updateRackStore` — so one observer there records history with zero changes to the ~20 modules. Restore reuses the page-load path: write the snapshot, pull extra cables, remove/re-add library modules, **remount only the modules whose settings changed** (keyed epochs — they re-seed from the store and push to the engine in their mount effects, exactly as on reload), then add missing cables from a provider-last `UndoBridge` once jacks exist. The alternative — teaching every module an external "set my knobs" API — would have touched ~20 components and duplicated each one's seeding logic.
+
+Details: 700 ms coalescing for repeated writes to one module's settings (one knob drag = one step); cables/modules never coalesce; 100-step cap; mount-time writes fold into the baseline; a 400 ms fold-in after each restore so remounted modules' debounced persists don't create phantom steps (which would silently wipe the redo branch). Shortcuts ⌘Z / Ctrl+Z, ⇧⌘Z / Ctrl+Shift+Z / Ctrl+Y, gated on the Moog page being visible and focus not in a text field. New `removeCablesNotIn` in `MoogPatchProvider` (no persistence write, like `restoreCables`).
+
+**Not undoable (by design, logged in MOOG_ARCHITECTURE):** power, lights-out, library hide/show (session-only), vocoder mic, and the 953 keyboard's own knobs (excluded — remounting the keyboard mid-performance would strand held notes).
+
+*Verified: dev build compiles; MoogShell lint count unchanged vs HEAD (37 pre-existing). Dylan's hand test: knob drag → ⌘Z → knob + sound return; patch/unpatch a cable → undo/redo; add/remove a library module → undo brings it back with its cables and knob positions; ⇧⌘Z redo; typing in the BPM field keeps its own text undo.*
+
+### [2026-09-24] Moog Phase 106b — HOLD becomes a per-key toggle
+
+Dylan, after testing 106: *"when it's on, it should hold and keep any note that is pressed on… until i press the note again then it will turn it off."* The 106 HOLD replaced the latched chord on the first key after all fingers lifted (arpeggiator-style latch). Now: with HOLD on every key pressed stays on, and pressing a held key again turns that note off — build up any set of notes and remove them one by one. `press()` checks "held only by the sustain source + HOLD on" → `dropNote` and consumes the press (its source is never added, so the pointer/QWERTY/MIDI release is a no-op). The replacement scan is gone. Pedal behaviour unchanged (accumulate; re-strike re-articulates). Switching HOLD off still releases everything it kept.
+
+### [2026-09-24] Moog Phase 106 — 953 performance controls + KEY PAN
+
+Dylan approved all six Phase 105 suggestions and added one: *"panning based on how high or low the note is… if multiple notes are being played at once, then it will pan across the speakers according to the location of where the note is."*
+
+**Shipped:** QWERTY octave (Z / X + ◀ ▶ buttons, C1–C7, persisted) · MIDI sustain pedal (CC64) + on-panel **HOLD** latch (latched chord is replaced by the next chord played after all fingers lift; the pedal accumulates) · **glissando** (mouse and touch slide across keys) · MIDI **pitch bend** (±2 st, whole chord bends, PITCH jack bends too) + **mod wheel** (adds vibrato depth, not delayed by VIB DLY) · **velocity** on the GATE (envelopes/kick peak at key velocity — mouse/QWERTY = 1 = old behaviour) + a **VEL** CV jack · CC123/CC120 all-notes-off · **KEY PAN** knob.
+
+**Velocity design call.** The suggestion was "VEL into a VCA → harder is louder", but a VCA's CV inputs **sum** with the envelope: a held velocity level would leave the VCA open after the note (a drone). Loudness therefore rides the gate (Tone's `triggerAttack(time, velocity)` scales the envelope peak), and the VEL jack is for everything else (filter brightness etc.). Caveat documented in §21.
+
+**KEY PAN mechanism.** Per-voice pan has to exist *before* the shared VCF/VCA, so it lives in the VCO worklet: output grew from 4 to **8 channels (L/R per waveform)**, re-paired by `ChannelMerger(2)`s into the existing taps. Position = voice's current frequency on A0…C8 (log scale, ≈E4 centre) × spread, smoothed 20 ms per block, **balance law** (centre = unity both sides). **Nothing changes unless the knob is up:** at 0 the worklet writes L === R and the taps are forced `channelCount 1 / explicit` (downmix (L+R)/2 = identical). Keeping taps stereo permanently was rejected — `StereoPannerNode` uses a different pan law for stereo input, which would have altered every existing PANNER patch (+3 dB at centre). Mono-only worklet inputs (VCO sync, quantizer) were made `explicit` mono so a panned source isn't read left-only.
+
+*Verified: dev build compiles, no new lint warnings. Worklet: spread-0 output downmixed is bit-identical to the Phase 105 core (0 max diff across FM sweep/detune/SHAPE/hard sync, 400 blocks); at spread 1 an A1/A6 pair settles at exactly the formula's −0.724 / +0.655. Tone velocity argument positions checked against the installed Tone source. Dylan's hand/ear tests: KEY PAN on a chord across the range, bend/mod/pedal on a MIDI keyboard, HOLD + changing chords, Z/X, sliding across keys, soft vs hard MIDI hits.*
+
+### [2026-09-23] Moog Phase 105 — 953 keyboard: 88 keys, paraphonic chords, input audit
+
+Dylan: *"make it full 88 keys like a full piano… make it where more than one note can be played at a time but whenever the glide is activated, then it will only play one note at a time."* Then, on the design: *"can we just make it where the keyboard has the ability to play multiple notes with just one vco connected to it?"*
+
+**Design decision — paraphonic, inside the VCO.** Two options were weighed first (spread held notes across several patched VCOs, or PITCH/GATE 1–4 voice jacks); Dylan's own idea beat both: **one VCO plays the whole chord**. The VCO worklet grew from one phase accumulator to 12 **voice slots** that all read the same params, so every note is that VCO's exact sound at another pitch. Gemini then proposed full per-voice polyphony (poly cables; every VCF/ENV/VCA instancing per-voice copies). **Rejected for now, Dylan + Gemini agreed:** it is a rewrite of most of `useMoogAudio.js`'s single-value assumptions (glideBus writers, gate actions, rest-muting, quantizer, analysers) and would reopen every module just audited; it stays a possible future project built on this one. Gemini's phase number ("63") also collided — renumbered to 105.
+
+**Engine (`hard-sync-worklet.js`).** Slot freq = `slaveFreq × ratio`; the keyboard writes the chord's first note to the GlideBus and posts the rest as ratios (`{ voices: [{ id, ratio }] }`) — a chord change is a message, never a second GlideBus writer. 4 ms fade-in / 12 ms fade-out per slot, 1/√N smoothed level compensation, sync resets all slots. **Default (`'m'`, ratio 1) is bit-identical to the pre-105 core** — measured 0 max diff vs the old processor over 400 blocks of FM sweep + detune 13 c + SHAPE 0.37 + hard sync toggling. Every non-kbd source gets the mono voice back (`connect`/`disconnect`/late `wire()`).
+
+**Note engine (`useMoogAudio.js`).** `updateKeyboard(hz, gate)` → `keyboardNoteOn(midi)` / `keyboardNoteOff(midi)` + shared `fireKbdGates`. Poly while GLIDE = 0, mono above (`setKbdGlide` re-voices on the boundary, mid-chord too). First key of a chord mints fresh voice ids; releasing one key of a chord fades that note alone; the last key up releases the gate but leaves the voices ringing for the envelope's tail. PITCH jack = newest held note (QNT / KICK / chord seq stay single-note by nature — documented limit). Mono legato no longer re-fires the gate or steps a CLK↓ on key release.
+
+**Bugs found and fixed:**
+1. **Stuck notes:** holding a QWERTY key through a tab switch / ⌘-Tab (keyup never arrives), through leaving the Moog page (keyups were page-gated too), or pressing ⌘ while holding one (macOS swallows those keyups). Fix: blur/visibility release, keyups ungated, `Meta` keyup releases all QWERTY notes.
+2. **Shortcuts played notes** — ⌘S = D4, ⌘A = C4 (no modifier guard; the Workstation listener has had one for ages).
+3. **Any mouse click released a QWERTY-held note** (QWERTY set `pressedByMouseRef = true`).
+4. **QWERTY had no legato stack** — hold A, tap S, the sound stopped with A still down. Replaced wholesale by the one de-duplicated held map (`midi → Set<source>`), which also makes QWERTY and multi-touch chords work.
+5. **Right/middle click played notes.**
+6. **Knob settings never persisted** — GLIDE/VIBRATO/VIB RATE/VIB DLY reset on reload and were absent from SAVE SETUP files. Now under settings id `kbd`.
+7. **`:active` pressed visual stuck to the mousedown key through a drag** — removed (DOM `.keyPressed` only, the Workstation rule).
+8. **Last white key never got its right border** — `.whiteKey:last-of-type` can't match: the black keys are later `<div>` siblings. Now an explicit class.
+9. **Glide-off pitch lag** — the GlideBus waited for the next rAF frame after the gate had already attacked (up to ~16 ms on the old pitch). Written immediately now.
+
+**UI.** 88 keys at `WW 40 / BW 24 / WH 130 / BH 83` (was 61 at 30/18/116/74; same ratios, so the QNT-mirror claim holds). Keybed 2080 px, inside the ~3009 px rack width — no width change to the cabinet; +14 px height. POLY/MONO read-only lamp (the LFO ModeIndicator recipe, red live word) next to GLIDE. Key labels 8 → 10 px. Subtitle `88 KEYS · 8-NOTE CHORDS`.
+
+*Verified: build clean (no new warnings). Worklet: mono bit-identical to the old core (above); 3-voice chord and release-to-one exercised in node with the real processor (slots allocate, the released voices free after their fade). Dylan's ear/hand tests: chords on one VCO, C-E-G on A-D-G keys, release one key of a chord, GLIDE up → MONO lamp + single notes, ⌘S no longer plays, a note held through a tab switch lets go. Hard-refresh once so the browser picks up the new worklet file.*
 
 ### [2026-09-21] Moog Phase 104 — I/O: knobs → faders, and 4 input channels become 8
 
