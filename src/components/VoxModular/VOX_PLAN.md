@@ -51,7 +51,7 @@ Dylan (2026-09-30): Phase 108 rebranded only what users see; the code should mat
 - **Rack store** `moog-rack-v2` → `vox-rack-v2`. `readRackStore` reads the new key and falls back to the old one, so a pre-110 rack appears untouched; the first store write lands under the new key carrying the whole record and wins from then on. The old record stays as a backup — **no write on read** (a mount-time write is the Phase 60c StrictMode hazard). **RESET now clears both legacy keys too**: without that, the fallback would bring the pre-rename rack straight back after a reset. `moog-rack-dyn-v1` (the 60c format) still migrates.
 - **Page id** `'moogmodular'` → `'voxmodular'`. Root maps an old `sessionStorage['voxdaw-return-page']` value, so a reload requested by a tab running older code still lands on the modular page.
 
-**Git branch:** the working branch `moog-vocoder` was renamed **`vox-modular`** (locally and pushed to GitHub) and this phase was fast-forwarded onto `main`. The old remote `moog-vocoder` branch still exists on GitHub — deleting it is Dylan's call (`git push origin --delete moog-vocoder`).
+**Git branch:** the working branch `moog-vocoder` was renamed **`vox-modular`** (locally and pushed to GitHub) and this phase was fast-forwarded onto `main`. The old remote `moog-vocoder` branch was then deleted by Dylan.
 
 **Caught along the way:** the Workstation's recorded-region badge still read **`♪ MOOG`** — the one user-visible "Moog" Phase 108 missed. Now `♪ MODULAR`.
 
