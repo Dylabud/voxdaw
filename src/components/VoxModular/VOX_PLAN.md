@@ -1,13 +1,13 @@
-# MOOG_PLAN.md — Vox Modular Synthesizer (VoxDAW)
+# VOX_PLAN.md — Vox Modular Synthesizer (VoxDAW)
 
-> **Rebranded to *Vox Modular* (Phase 108, 2026-09-28).** Every user-facing name now says Vox Modular (nameplate `VOX MODULAR SYNTHESIZER · MODEL V-1`, blank panels, home-page button, Workstation `● MODULAR` record button + its messages, save files `.voxmod`). **Internal names deliberately keep "Moog"** — file names (`MoogShell.jsx`, `useMoogAudio.js`, this file), code identifiers, CSS classes, the Root page id `'moogmodular'`, the localStorage key `moog-rack-v2` (renaming it would make every saved rack look wiped), and the `Moog Phase N` log prefix (one continuous history). Module model numbers (901/904/911/914/921/953/960…) are kept as vintage flavour; only `MODEL 55` (a real Moog product name) became `MODEL V-1`.
+> **Vox Modular — user-facing since Phase 108 (2026-09-28), internal since Vox Phase 110 (2026-10-04).** Every user-facing name says Vox Modular (nameplate `VOX MODULAR SYNTHESIZER · MODEL V-1`, blank panels, home-page button, Workstation `● MODULAR` record button + `♪ MODULAR` region badge, save files `.voxmod`). Since Phase 110 the code says Vox too: folder `src/components/VoxModular/`, `VoxShell.jsx`, `useVoxAudio.js`, `VoxKnob`, `VoxFader`, `VoxPatchContext` (`useVoxPatch`/`VoxPatchProvider`), Root page id `'voxmodular'`, localStorage key `vox-rack-v2`. **Still "Moog" on purpose:** the legacy storage keys `moog-rack-v2`/`moog-rack-dyn-v1` (read-only fallbacks so pre-rename racks load), legacy `.moog` setup files (still load), log entries `Moog Phase 1–109` (history is not rewritten — new phases are `Vox Phase 110+`), and every mention of the **real** Moog company/hardware (Moog 904A/914, Minimoog, "Moog-style"). Module model numbers (901/904/911/914/921/953/960…) are kept as vintage flavour; only `MODEL 55` (a real Moog product name) became `MODEL V-1`.
 
 ## How to Use This File
 
-**This is the single source of truth for the Moog Modular sub-project.**
+**This is the single source of truth for the Vox Modular sub-project** (called the Moog Modular before Phase 108).
 - Do NOT edit root `PLAN.md`, `CLAUDE.md`, or `ARCHITECTURE.md` for Moog work.
 - When a Moog phase is completed, move it from **Future Phases** to **Completed Phases Log** with the date and a brief technical summary.
-- Prefix all phases with `Moog Phase N` so they are unambiguous from Workstation/VoxTool phases.
+- Prefix all new phases with `Vox Phase N` (110 onward) so they are unambiguous from Workstation/VoxTool phases. Phases 1–109 keep their historical `Moog Phase N` names.
 - Add new future phases under the appropriate section header below.
 - For Claude: update this file at the end of each session — do not leave it stale.
 
@@ -21,20 +21,13 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 - Patch cable simulation (dynamic connect/disconnect between modules)
 - CV routing (LFO, sequencer, envelope modulation)
 
-**Strict directory rule:** 99% of work stays inside `src/components/MoogModular/`. The only exception is `src/Root.js` routing (done once in Moog Phase 1).
+**Strict directory rule:** 99% of work stays inside `src/components/VoxModular/`. The only exception is `src/Root.js` routing (done once in Moog Phase 1).
 
 ---
 
 ## Future Phases
 
 **Roadmap clear (2026-07-12).** Every planned phase is either shipped or resolved with a logged decision — see the Completed Phases Log. New phases go here.
-
-- **▶ NEXT SESSION, FIRST TASK — Vox Phase 110: full internal rename Moog → Vox (Dylan, 2026-09-30).** Phase 108 rebranded only user-facing text; Dylan now wants the code consistent too. Scope and guardrails agreed:
-  - **Rename:** folder `src/components/MoogModular` → `VoxModular` (use `git mv` to keep history); files `MoogShell` → `VoxShell`, `useMoogAudio` → `useVoxAudio`, `MoogKnob`, `MoogFader`, `MoogPatchContext` (+ their `.module.css`); identifiers (`useMoogPatch`, `MoogPatchProvider`, `moogApiRef`, `getMoogBusNode`, `handleMoogRecord`, `moogRecording…` in Root/Workstation, `moogBtn` on HomePage…); docs `MOOG_PLAN.md` → `VOX_PLAN.md`, `MOOG_ARCHITECTURE.md` → `VOX_ARCHITECTURE.md`; every path reference in CLAUDE.md, ARCHITECTURE.md, PLAN.md and the memory files.
-  - **Migrate, never just rename, persisted keys:** localStorage `moog-rack-v2` (and legacy `moog-rack-dyn-v1`) → a new vox key via a one-time read-old-if-new-missing copy, so no saved rack looks wiped; Root page id `'moogmodular'` → `'voxmodular'` including the `sessionStorage['voxdaw-return-page']` value (accept the old value). `.moog` files keep loading.
-  - **Do NOT blind find-replace:** many "Moog" mentions refer to the REAL Moog company/hardware ("the real Moog 911…", "a Minimoog feature", "1960s Moog-style") — those stay. Rename only our own code names.
-  - **Phase naming:** new phases are "Vox Phase 110" onward; past log entries stay "Moog Phase 1–109" as written.
-  - **Verify:** production build + lint count unchanged; grep for leftover `Moog` identifiers/paths; saved rack survives the reload (migration); Workstation modular recording still finds the bus. Then remind Dylan to give Gemini the new file names.
 
 - **912 sub-octave (deferred from Phase 74):** the directive's "Synth Up / Synth Down" modes — a square sub-octave under the dry signal. A proper one is a flip-flop dividing the input's zero crossings by two, which is inherently sample-serial state, so unlike the envelope follower this genuinely *does* need an AudioWorklet (`sub-octave-worklet.js`, plus the loader + deferred-wiring pattern from `hard-sync-worklet.js`). Monophonic and glitchy on chords — true of the real pedal too.
 
@@ -46,13 +39,29 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-10-04] Vox Phase 110 — Internal rename: Moog → Vox
+
+Dylan (2026-09-30): Phase 108 rebranded only what users see; the code should match. Done as one mechanical pass plus a hand review, with the two persisted names migrated rather than renamed.
+
+**Renamed (via `git mv`, history kept):** folder `MoogModular/` → `VoxModular/`; `MoogShell` → `VoxShell`, `useMoogAudio` → `useVoxAudio`, `MoogKnob` → `VoxKnob`, `MoogFader` → `VoxFader`, `MoogPatchContext` → `VoxPatchContext` (+ each `.module.css`); `MOOG_PLAN.md` → `VOX_PLAN.md`, `MOOG_ARCHITECTURE.md` → `VOX_ARCHITECTURE.md`. Every **compound** code name with Moog in it (`useMoogPatch`, `MoogPatchProvider`, `moogApiRef`, `getMoogBusNode`, `moogBus`, `handleMoogRecord`, the Workstation's `moogRecording…` refs/state, HomePage `.moogBtn`, the cable SVG filter ids, `[MoogAudio]` console tags…) across Root, HomePage, Workstation and the worklet header. Plain-word comments about *our* synth ("the Moog page", "the Moog bus") now say Vox Modular.
+
+**Deliberately NOT renamed:** every reference to the **real** Moog (904A, 914, Minimoog, "the standard Moog knob+CV split", "vintage Moog knob", "Moog-style"); historical `Moog Phase N` labels in comments and this log; the `.moog` file extension (old saves still load).
+
+**Persisted names — migrated, never just renamed:**
+- **Rack store** `moog-rack-v2` → `vox-rack-v2`. `readRackStore` reads the new key and falls back to the old one, so a pre-110 rack appears untouched; the first store write lands under the new key carrying the whole record and wins from then on. The old record stays as a backup — **no write on read** (a mount-time write is the Phase 60c StrictMode hazard). **RESET now clears both legacy keys too**: without that, the fallback would bring the pre-rename rack straight back after a reset. `moog-rack-dyn-v1` (the 60c format) still migrates.
+- **Page id** `'moogmodular'` → `'voxmodular'`. Root maps an old `sessionStorage['voxdaw-return-page']` value, so a reload requested by a tab running older code still lands on the modular page.
+
+**Caught along the way:** the Workstation's recorded-region badge still read **`♪ MOOG`** — the one user-visible "Moog" Phase 108 missed. Now `♪ MODULAR`.
+
+*Verified: production build compiles; warning list identical to the pre-rename build apart from line numbers (59 → 59). Zero leftover compound Moog names in code (`grep`); every remaining plain "Moog" reviewed by hand and is real-hardware, historical, or a legacy key/extension. A scratch node test runs the real `readRackStore` / `updateRackStore` / reset source against a fake localStorage — 7/7: an old-key rack loads intact, the first edit copies modules + cables + settings to the new key, the old copy is untouched, the new key wins over a stale old one, RESET leaves no rack to resurrect, a 60c-format rack still migrates, a fresh browser starts empty. Dylan's check: open the Vox Modular page — your last rack, cables and knobs should be exactly as you left them; record a take into the Workstation with ● MODULAR to confirm the bridge still finds the bus. **Gemini needs the new file names** (VoxShell.jsx, useVoxAudio.js, VOX_PLAN.md, VOX_ARCHITECTURE.md).*
+
 ### [2026-09-30] Moog Phase 109 — Scroll lag returns: the keyboard missed the 61d layer promotion
 
 Dylan: scrolling became choppy right after the Phase 105–106 keyboard work — fresh default rack, no patches, **even powered off** (so compositing, not animation). Gemini's "Phase 109" directive (will-change on the cabinet, `overflow-y` scrolling on the shell, `contain: strict` on modules, shadow audit) was **rejected point by point**: cabinet-level will-change is the Phase 53 black-tile bug; shell scrolling breaks `fit()`; `contain: strict` includes size containment (every module would collapse to 0×0); scroll handlers already write no React state and cables only recompute on resize; the shadow audit was Phase 61's, and shadows weren't the cost. Dylan's constraint: no visual trade-offs.
 
 **Root cause.** Phase 61d's fix — `will-change: transform` on every `.module`, so a pan slides ~30 cached textures — never covered the **953 keyboard**, which is not a `.module`. It was re-rastered on every pan frame, the case 61d measured as catastrophic (~3781 ms vs ~400 ms GPU-busy). Tolerable at 61 × 30 px keys; Phases 105–106 grew it to 88 × 40 px keys (+14 px taller), under a keybed-wide `filter: drop-shadow`, plus a 5th knob, the POLY/MONO lamp, HOLD and octave controls — enough to tip the whole rack into choppiness.
 
-**Fix:** `will-change: transform` on `.keyboard` (KeyboardModule.module.css) — one cached layer, zero visual change. `MoogKnob` already transiently re-promotes a dragged knob, so the keyboard's knobs rotate crisply. **Rule going forward:** any panel added to the cabinet outside a `.module` needs the same promotion.
+**Fix:** `will-change: transform` on `.keyboard` (KeyboardModule.module.css) — one cached layer, zero visual change. `VoxKnob` already transiently re-promotes a dragged knob, so the keyboard's knobs rotate crisply. **Rule going forward:** any panel added to the cabinet outside a `.module` needs the same promotion.
 
 *Verified: compiles; **Dylan confirmed on his Retina Mac (2026-09-30): smooth again.**
 
@@ -70,11 +79,11 @@ Dylan: *"undo and redo buttons… press a back button or CMD Z to undo something
 
 **Design: undo = step through snapshots of the rack store.** The Phase 63 store already captures the whole setup (library modules, cables, every module's knob/switch/step settings) and every user change already writes through `updateRackStore` — so one observer there records history with zero changes to the ~20 modules. Restore reuses the page-load path: write the snapshot, pull extra cables, remove/re-add library modules, **remount only the modules whose settings changed** (keyed epochs — they re-seed from the store and push to the engine in their mount effects, exactly as on reload), then add missing cables from a provider-last `UndoBridge` once jacks exist. The alternative — teaching every module an external "set my knobs" API — would have touched ~20 components and duplicated each one's seeding logic.
 
-Details: 700 ms coalescing for repeated writes to one module's settings (one knob drag = one step); cables/modules never coalesce; 100-step cap; mount-time writes fold into the baseline; a 400 ms fold-in after each restore so remounted modules' debounced persists don't create phantom steps (which would silently wipe the redo branch). Shortcuts ⌘Z / Ctrl+Z, ⇧⌘Z / Ctrl+Shift+Z / Ctrl+Y, gated on the Moog page being visible and focus not in a text field. New `removeCablesNotIn` in `MoogPatchProvider` (no persistence write, like `restoreCables`).
+Details: 700 ms coalescing for repeated writes to one module's settings (one knob drag = one step); cables/modules never coalesce; 100-step cap; mount-time writes fold into the baseline; a 400 ms fold-in after each restore so remounted modules' debounced persists don't create phantom steps (which would silently wipe the redo branch). Shortcuts ⌘Z / Ctrl+Z, ⇧⌘Z / Ctrl+Shift+Z / Ctrl+Y, gated on the Moog page being visible and focus not in a text field. New `removeCablesNotIn` in `VoxPatchProvider` (no persistence write, like `restoreCables`).
 
-**Not undoable (by design, logged in MOOG_ARCHITECTURE):** power, lights-out, library hide/show (session-only), vocoder mic, and the 953 keyboard's own knobs (excluded — remounting the keyboard mid-performance would strand held notes).
+**Not undoable (by design, logged in VOX_ARCHITECTURE):** power, lights-out, library hide/show (session-only), vocoder mic, and the 953 keyboard's own knobs (excluded — remounting the keyboard mid-performance would strand held notes).
 
-*Verified: dev build compiles; MoogShell lint count unchanged vs HEAD (37 pre-existing). Dylan's hand test: knob drag → ⌘Z → knob + sound return; patch/unpatch a cable → undo/redo; add/remove a library module → undo brings it back with its cables and knob positions; ⇧⌘Z redo; typing in the BPM field keeps its own text undo.*
+*Verified: dev build compiles; VoxShell lint count unchanged vs HEAD (37 pre-existing). Dylan's hand test: knob drag → ⌘Z → knob + sound return; patch/unpatch a cable → undo/redo; add/remove a library module → undo brings it back with its cables and knob positions; ⇧⌘Z redo; typing in the BPM field keeps its own text undo.*
 
 ### [2026-09-24] Moog Phase 106b — HOLD becomes a per-key toggle
 
@@ -96,11 +105,11 @@ Dylan approved all six Phase 105 suggestions and added one: *"panning based on h
 
 Dylan: *"make it full 88 keys like a full piano… make it where more than one note can be played at a time but whenever the glide is activated, then it will only play one note at a time."* Then, on the design: *"can we just make it where the keyboard has the ability to play multiple notes with just one vco connected to it?"*
 
-**Design decision — paraphonic, inside the VCO.** Two options were weighed first (spread held notes across several patched VCOs, or PITCH/GATE 1–4 voice jacks); Dylan's own idea beat both: **one VCO plays the whole chord**. The VCO worklet grew from one phase accumulator to 12 **voice slots** that all read the same params, so every note is that VCO's exact sound at another pitch. Gemini then proposed full per-voice polyphony (poly cables; every VCF/ENV/VCA instancing per-voice copies). **Rejected for now, Dylan + Gemini agreed:** it is a rewrite of most of `useMoogAudio.js`'s single-value assumptions (glideBus writers, gate actions, rest-muting, quantizer, analysers) and would reopen every module just audited; it stays a possible future project built on this one. Gemini's phase number ("63") also collided — renumbered to 105.
+**Design decision — paraphonic, inside the VCO.** Two options were weighed first (spread held notes across several patched VCOs, or PITCH/GATE 1–4 voice jacks); Dylan's own idea beat both: **one VCO plays the whole chord**. The VCO worklet grew from one phase accumulator to 12 **voice slots** that all read the same params, so every note is that VCO's exact sound at another pitch. Gemini then proposed full per-voice polyphony (poly cables; every VCF/ENV/VCA instancing per-voice copies). **Rejected for now, Dylan + Gemini agreed:** it is a rewrite of most of `useVoxAudio.js`'s single-value assumptions (glideBus writers, gate actions, rest-muting, quantizer, analysers) and would reopen every module just audited; it stays a possible future project built on this one. Gemini's phase number ("63") also collided — renumbered to 105.
 
 **Engine (`hard-sync-worklet.js`).** Slot freq = `slaveFreq × ratio`; the keyboard writes the chord's first note to the GlideBus and posts the rest as ratios (`{ voices: [{ id, ratio }] }`) — a chord change is a message, never a second GlideBus writer. 4 ms fade-in / 12 ms fade-out per slot, 1/√N smoothed level compensation, sync resets all slots. **Default (`'m'`, ratio 1) is bit-identical to the pre-105 core** — measured 0 max diff vs the old processor over 400 blocks of FM sweep + detune 13 c + SHAPE 0.37 + hard sync toggling. Every non-kbd source gets the mono voice back (`connect`/`disconnect`/late `wire()`).
 
-**Note engine (`useMoogAudio.js`).** `updateKeyboard(hz, gate)` → `keyboardNoteOn(midi)` / `keyboardNoteOff(midi)` + shared `fireKbdGates`. Poly while GLIDE = 0, mono above (`setKbdGlide` re-voices on the boundary, mid-chord too). First key of a chord mints fresh voice ids; releasing one key of a chord fades that note alone; the last key up releases the gate but leaves the voices ringing for the envelope's tail. PITCH jack = newest held note (QNT / KICK / chord seq stay single-note by nature — documented limit). Mono legato no longer re-fires the gate or steps a CLK↓ on key release.
+**Note engine (`useVoxAudio.js`).** `updateKeyboard(hz, gate)` → `keyboardNoteOn(midi)` / `keyboardNoteOff(midi)` + shared `fireKbdGates`. Poly while GLIDE = 0, mono above (`setKbdGlide` re-voices on the boundary, mid-chord too). First key of a chord mints fresh voice ids; releasing one key of a chord fades that note alone; the last key up releases the gate but leaves the voices ringing for the envelope's tail. PITCH jack = newest held note (QNT / KICK / chord seq stay single-note by nature — documented limit). Mono legato no longer re-fires the gate or steps a CLK↓ on key release.
 
 **Bugs found and fixed:**
 1. **Stuck notes:** holding a QWERTY key through a tab switch / ⌘-Tab (keyup never arrives), through leaving the Moog page (keyups were page-gated too), or pressing ⌘ while holding one (macOS swallows those keyups). Fix: blur/visibility release, keyups ungated, `Meta` keyup releases all QWERTY notes.
@@ -121,9 +130,9 @@ Dylan: *"make it full 88 keys like a full piano… make it where more than one n
 
 Dylan: *"give the IN jack in the i/o a volume knob like all the other ones… make it IN 5… we need more in jacks… using up the space that is already given in the module not making it any wider or longer… change the volume aspect from a knob to a fader."*
 
-**The fader is the whole mechanism, not a style choice.** A `sm` `MoogKnob` reserves **52 px** of width for its tick ring; the new `MoogFader` reserves **26 px**. That halving is what let the channel count double inside an unchanged plate: the column is now sized by the **jack** (29 px), not by the level control. Measured from the real constants — eight fader channels come to **253 px** against the old five knob channels' **276 px**, so the module actually got *narrower* per channel while gaining three.
+**The fader is the whole mechanism, not a style choice.** A `sm` `VoxKnob` reserves **52 px** of width for its tick ring; the new `VoxFader` reserves **26 px**. That halving is what let the channel count double inside an unchanged plate: the column is now sized by the **jack** (29 px), not by the level control. Measured from the real constants — eight fader channels come to **253 px** against the old five knob channels' **276 px**, so the module actually got *narrower* per channel while gaining three.
 
-**`MoogFader`** is a late-60s console fader: a slot milled into the faceplate (deep inset shadow, machined lip catching the lamp upper-right), a knurled aluminium cap riding in it with a pointer line, and etched travel ticks flanking the slot. Materials follow the rack's existing lamp-at-upper-right convention, same as `MoogKnob`, `.jack` and the screws. Whole body is the grab target, not just the cap — that is how a real fader behaves and makes a 26 px control easy to hit. Double-click resets, matching `MoogKnob`'s gesture. **`cursor: ns-resize` is load-bearing**, not decoration: it is what tells the cabinet's `isInteractive` check this is a control rather than faceplate to grab and pan the rack with.
+**`VoxFader`** is a late-60s console fader: a slot milled into the faceplate (deep inset shadow, machined lip catching the lamp upper-right), a knurled aluminium cap riding in it with a pointer line, and etched travel ticks flanking the slot. Materials follow the rack's existing lamp-at-upper-right convention, same as `VoxKnob`, `.jack` and the screws. Whole body is the grab target, not just the cap — that is how a real fader behaves and makes a 26 px control easy to hit. Double-click resets, matching `VoxKnob`'s gesture. **`cursor: ns-resize` is load-bearing**, not decoration: it is what tells the cabinet's `isInteractive` check this is a control rather than faceplate to grab and pan the rack with.
 
 **The one real hazard was the jack id.** `io-in` — the old unmixed "IN ✦" — becomes channel 5, but **its id stays `io-in`, not `io-in5`**. Saved racks persist cables as `{ from: jackId, to: jackId }`, so renaming it would silently orphan every cable anyone has ever patched to it. Only the panel *label* says "IN 5". `IO_JACK_IDS` carries the historical id in position 5 with a comment, and the test asserts both that `io-in` survives and that `io-in5` was never introduced.
 
@@ -133,7 +142,7 @@ Channel 5 also **gains what it never had**: it used to run straight into `master
 
 Routing and meters moved to one `for` loop over `IO_CHANNELS`, and the four hand-written level getters became one memoised array — the memo matters, because an unstable array identity restarts every `Led`'s rAF on each shell re-render.
 
-**Lights-out, corrected after Dylan spotted it.** The first version hid only `.faderLabel`, on the reasoning that the cap and slot are real objects that should persist in the dark — which had the rule backwards, and left the faders plainly visible with the lights off. **Being a physical control is exactly why it disappears**: with the room dark there is no light for its aluminium cap to catch. `MoogKnob` has always hidden its whole `.knobGroup`; `.faderGroup` now does the same. Only emissive things — LEDs, the QNT screen, the scope — stay lit.
+**Lights-out, corrected after Dylan spotted it.** The first version hid only `.faderLabel`, on the reasoning that the cap and slot are real objects that should persist in the dark — which had the rule backwards, and left the faders plainly visible with the lights off. **Being a physical control is exactly why it disappears**: with the room dark there is no light for its aluminium cap to catch. `VoxKnob` has always hidden its whole `.knobGroup`; `.faderGroup` now does the same. Only emissive things — LEDs, the QNT screen, the scope — stay lit.
 
 *Verified: build clean (2 pre-existing warnings, unchanged). `io-verify104.mjs` (53 checks): the jack-id compatibility case from both directions, all eight gain nodes + meters + jacks present and loop-routed, the migration driven through five stored shapes (4-entry preserved, empty, non-array, hole, absent), the width arithmetic computed from the real constants, JS travel vs CSS slot height in lockstep, the `ns-resize` camera contract, and a regression pass on Phases 102–103. Look and feel is Dylan's eye test.*
 
@@ -243,7 +252,7 @@ Dylan: *"instead of the scale display saying custom when i manually select the n
 
 `CUST` survives for sets that genuinely have no name (two notes, `C D E`, and so on). That is honest rather than a failure.
 
-*Verified: build clean (2 pre-existing warnings, unchanged). Phase 98's 38 checks still pass. New `qnt-verify99.mjs` (38 checks) drives the **real** `identifyScale`/`rebaseMask` sliced out of `MoogShell.jsx`: **both of Dylan's examples verbatim**, all seven modal readings of the white keys, the G-lydian/D-major collision proven to be one note set read two ways, root-moves-when-it-must with the absolute set proven unchanged, `rebaseMask` exhaustive over 12×12×13, every preset nameable at every root (156/156 keep their own name at their own root), unnameable sets still CUSTOM, the TRP lock in both directions, and the panel↔engine table identity that Phase 96 flagged as the standing drift risk. Feel on the panel is Dylan's test.*
+*Verified: build clean (2 pre-existing warnings, unchanged). Phase 98's 38 checks still pass. New `qnt-verify99.mjs` (38 checks) drives the **real** `identifyScale`/`rebaseMask` sliced out of `VoxShell.jsx`: **both of Dylan's examples verbatim**, all seven modal readings of the white keys, the G-lydian/D-major collision proven to be one note set read two ways, root-moves-when-it-must with the absolute set proven unchanged, `rebaseMask` exhaustive over 12×12×13, every preset nameable at every root (156/156 keep their own name at their own root), unnameable sets still CUSTOM, the TRP lock in both directions, and the panel↔engine table identity that Phase 96 flagged as the standing drift risk. Feel on the panel is Dylan's test.*
 
 ---
 
@@ -283,7 +292,7 @@ Phase 96 made the 12 lights clickable and called them a scale editor, but they w
 
 Black keys keep `z-index: 2`, which is doing two jobs at once: it is what makes them overlap the whites they sit between, and what makes them win the click in the shared hit area.
 
-*Verified: build clean (2 pre-existing warnings, unchanged). Phases 95 (24) and 96 (113) still pass. New `qnt-verify97.mjs` (55 checks) evaluates the **real** geometry block sliced out of `MoogShell.jsx` and cross-checks it against the **real** 953 constants: 7 white + 5 black with the right note names, white keys tiling edge-to-edge with no gap or overlap, **every black key centred exactly on its white/white seam**, the two-then-three grouping (no black key at E|F or B|C — the thing that makes it read as a piano at a glance), nothing escaping the bounds or colliding, both keyboards proven to share one derivation rather than one set of copied numbers, size-vs-the-old-strip, click-target minimums, and a sweep asserting the LED-callback wiring survived the rewrite. How it actually looks is Dylan's eye test.*
+*Verified: build clean (2 pre-existing warnings, unchanged). Phases 95 (24) and 96 (113) still pass. New `qnt-verify97.mjs` (55 checks) evaluates the **real** geometry block sliced out of `VoxShell.jsx` and cross-checks it against the **real** 953 constants: 7 white + 5 black with the right note names, white keys tiling edge-to-edge with no gap or overlap, **every black key centred exactly on its white/white seam**, the two-then-three grouping (no black key at E|F or B|C — the thing that makes it read as a piano at a glance), nothing escaping the bounds or colliding, both keyboards proven to share one derivation rather than one set of copied numbers, size-vs-the-old-strip, click-target minimums, and a sweep asserting the LED-callback wiring survived the rewrite. How it actually looks is Dylan's eye test.*
 
 ---
 
@@ -329,7 +338,7 @@ Removing it also **dissolved a design wart rather than forcing a decision on it*
 
 **ROOT chip glows while TRP overrides it.** A TRP cable outranks the chip, but the chip kept showing and scrubbing its stale number with no indication — while the analogous case on the VCO FREQ knob has had a mint glow since Phase 57. New `.chipOverridden` (same 1.6 s mint pulse, `box-shadow` rather than `filter` so it sits clear of the chip's inset shading) keeps **one indicator with one meaning**: *this control is being driven from somewhere else.*
 
-*Verified: build clean (2 pre-existing warnings, unchanged). Node script (scratchpad `qnt-verify95.mjs`) drives the **real** `QuantizerProcessor` — loaded from `public/` with the AudioWorklet globals stubbed — and the **real** `quantizeHzJs` sliced out of `useMoogAudio.js`, so it tests shipped code rather than a transcription: 24/24 pass covering a snapping regression guard, OCT at ±2, both clamp ends, 0-stays-0, worklet↔mirror agreement, and a three-block connect/pull/reconnect sequence proving the same note re-posts. Panel behaviour (glow, label clearing, multi-instance labels) is Dylan's ear-and-eye test.*
+*Verified: build clean (2 pre-existing warnings, unchanged). Node script (scratchpad `qnt-verify95.mjs`) drives the **real** `QuantizerProcessor` — loaded from `public/` with the AudioWorklet globals stubbed — and the **real** `quantizeHzJs` sliced out of `useVoxAudio.js`, so it tests shipped code rather than a transcription: 24/24 pass covering a snapping regression guard, OCT at ±2, both clamp ends, 0-stays-0, worklet↔mirror agreement, and a three-block connect/pull/reconnect sequence proving the same note re-posts. Panel behaviour (glow, label clearing, multi-instance labels) is Dylan's ear-and-eye test.*
 
 ---
 
@@ -546,7 +555,7 @@ Trying to match the two boxes pixel-for-pixel would be a guess against browser f
 
 - That moved the mint editing cue into CSS, where it promptly lost: `.selectorGroup:hover .selectorValue` is (0,3,0) and a bare `.bpmInput:focus` is (0,2,0), so the border reverted to the hover colour whenever the cursor sat on the field being edited. Rescoped to `.selectorGroup .bpmInput:focus` and placed after the hover/active rules so it wins the tie on source order.
 
-**2. Click-away didn't commit, and blur is the wrong tool for it.** `onBlur` was already wired. It never fired, because most rack controls — jacks, `MoogKnob`, the RANGE and CLOCK selectors — call `preventDefault()` on mousedown to own their drag, and preventDefault on mousedown suppresses the browser's focus change. Click a knob mid-edit and the BPM field simply kept focus. Fixed with a **capture-phase `window` mousedown listener** bound only while editing: capture so a target that `stopPropagation`s can't hide the click, and `contains(e.target)` so clicking inside the field is not a click-away. It calls `commitBpm()` then `blur()`; `commitBpm` is idempotent behind an `editingBpmRef` guard because that `blur()` re-fires it.
+**2. Click-away didn't commit, and blur is the wrong tool for it.** `onBlur` was already wired. It never fired, because most rack controls — jacks, `VoxKnob`, the RANGE and CLOCK selectors — call `preventDefault()` on mousedown to own their drag, and preventDefault on mousedown suppresses the browser's focus change. Click a knob mid-edit and the BPM field simply kept focus. Fixed with a **capture-phase `window` mousedown listener** bound only while editing: capture so a target that `stopPropagation`s can't hide the click, and `contains(e.target)` so clicking inside the field is not a click-away. It calls `commitBpm()` then `blur()`; `commitBpm` is idempotent behind an `editingBpmRef` guard because that `blur()` re-fires it.
 
 **Note for the next control like this:** `editingBpmRef` / `bpmDraftRef` are written **eagerly in the handlers**, not only by the render-time inline sync. A focus and a blur that both land before the next render would otherwise leave the ref stale, `commitBpm` would early-return, and the edit would vanish silently.
 
@@ -578,7 +587,7 @@ Dylan, on the Phase 87 shared-tempo store: *"since the tempo for the whole rack 
 
 ### [2026-08-07] Moog Phase 87 — 960 audit: dead CLK ports, stuck rest-mute, one shared TEMPO
 
-Module-perfection pass moves from the vocoder to the 960. Five defects, all found by reading the module against MOOG_ARCHITECTURE §3 rather than by report.
+Module-perfection pass moves from the vocoder to the 960. Five defects, all found by reading the module against VOX_ARCHITECTURE §3 rather than by report.
 
 **1. CLK↓ / CLK↑ were dead jacks — since Phase 9.** Both were registered as `{ dest: null }` / `{ node: null }` with no `isGate` flag, so `connect()` hit its `if (to.dest === null) return` / `if (from.node === null) return` no-ops. The jacks rendered, accepted cables, drew the cable, and did **nothing** — exactly the 911 TRIG class of bug fixed in Phase 78, and the same silent-no-op signature. §3 has listed both as functional ports since day one.
 
@@ -605,7 +614,7 @@ Fixed by putting them in the **gate domain**, not the audio domain (a clock is a
 
 ### [2026-08-07] Moog Phase 86 — Vocoder: kill the pitch-rate ripple (the "static")
 
-**Files modified:** `useMoogAudio.js`
+**Files modified:** `useVoxAudio.js`
 
 Dylan: "the sound still seems kind of loose and it almost seems like when I speak there's like a static sound of the wave sound."
 
@@ -628,7 +637,7 @@ Implemented by giving each band its own cutoff on the existing `ModEnv` filters 
 
 ### [2026-08-07] Moog Phase 85 — Vocoder: sharpen the ANALYSIS bank (the other half of Phase 83)
 
-**Files modified:** `useMoogAudio.js`
+**Files modified:** `useVoxAudio.js`
 
 Dylan after Phase 84: "I can hear the decay difference but it really didn't cause much of a difference. Still looking for cleaner and clearer. The VOWEL module still sounds better and is the kind of sound I'm going for."
 
@@ -652,7 +661,7 @@ So every formant was being reproduced as a **smeared cloud of five carrier peaks
 
 ### [2026-08-07] Moog Phase 84 — Vocoder: asymmetric envelope followers (AudioWorklet)
 
-**Files added:** `public/env-follower-worklet.js`. **Modified:** `useMoogAudio.js`
+**Files added:** `public/env-follower-worklet.js`. **Modified:** `useVoxAudio.js`
 
 Dylan on Phase 83: "sounds better and clearer with the RES up and in TALKBOX mode, but still not as clear and clean as I'd like — we are stepping in the right direction." Greenlit the asymmetric-tracking idea held back from 82/83.
 
@@ -681,7 +690,7 @@ Asymmetric wins on **both** axes simultaneously — 2× the consonant definition
 
 ### [2026-08-04] Moog Phase 83 — Vocoder: reach VOWEL's resonance (RES range + limiter)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 **Dylan's reference, and it was the useful one:** "I like how the vowel module sounds — very clean and really morphs the sound wave to sound like a certain vowel. I want the vocoder to sound pretty much the same, but morphing to the word being spoken." Plus: more like a talk box / DigiTech Talker.
 
@@ -708,7 +717,7 @@ This also finally delivers the **output compression** flagged as a "next lever" 
 
 ### [2026-08-04] Moog Phase 82 — Vocoder: DRIVE exposed (the "loose synth sound")
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`
 
 **Dylan:** "the vocoder gives off a more loose synth sound and the vocals aren't very clear" — wanting a clean Daft-Punk robot.
 
@@ -744,7 +753,7 @@ Production build clean. **Not browser-verified** — and this time that is the p
 
 ### [2026-08-04] Moog Phase 81 — Vocoder audit: shared-mic single-writer + status desync
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 Bug sweep of the vocoder (tone was explicitly out of scope — Dylan set that aside after Phase 73). Two real defects, both in the same place: the mic is a **singleton** but its controls are drawn **per instance**, and both were wired straight through.
 
@@ -752,7 +761,7 @@ Bug sweep of the vocoder (tone was explicitly out of scope — Dylan set that as
 `updateExtMicParams` was the sole writer of the shared `extMicGain.gain`, and BOTH the static and dynamic vocoders bound their MIC knob to it. With two instances (the cap), turning voc2's MIC silently moved voc1's and the two knob positions disagreed with the actual level — a straight single-writer violation of the kind the last several phases have been clearing out. Each instance now owns `${id}MicGain` (`extMicGain → ${id}MicGain → ${id}ModRaw`), written by the new id-scoped `updateVocMicGain(vid, { gain })`. `extMicGain` is no longer written at all: it stays at unity as the shared tap point for the mic and its SIG meter. `removeModule` severs the shared edge at the new node, and `${id}MicGain` joins the dispose sweep.
 
 #### Mic STATUS — two buttons, one mic
-`micStatus` was per-instance `useState`, so enabling the mic on one vocoder left the other's button reading "○ MIC" for a mic that was live, and clicking it would have re-run `enableMic` (idempotent, but the UI was simply lying). Lifted to `MoogShell`, which now owns the async enable/disable and passes `micStatus` to every instance. `toggleMic` drops its local state writes and its `async` (it no longer awaits anything).
+`micStatus` was per-instance `useState`, so enabling the mic on one vocoder left the other's button reading "○ MIC" for a mic that was live, and clicking it would have re-run `enableMic` (idempotent, but the UI was simply lying). Lifted to `VoxShell`, which now owns the async enable/disable and passes `micStatus` to every instance. `toggleMic` drops its local state writes and its `async` (it no longer awaits anything).
 
 #### Checked and found correct — not changed
 - **All 14 knobs are live.** The UI's param object and `applyVocoderParams`'s destructure match exactly — no dead controls, which is worth stating given how many the last few modules had.
@@ -766,7 +775,7 @@ Production build clean, no new lint warnings. **Not browser-verified** (no Playw
 
 ### [2026-08-03] Moog Phase 80 — KICK: CLICK TONE + TUNE CV
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 The two additions flagged at the end of the Phase 79 audit, both taken.
 
@@ -774,7 +783,7 @@ The two additions flagged at the end of the Phase 79 audit, both taken.
 `kickClickFilter` (highpass on the beater transient) was hardcoded at 2 kHz. The node already existed; only a knob was missing. Range is built **around** the old value so knob CENTRE is exactly 2000 Hz and saved racks are unchanged until touched: ratio 36 → √36 = 6 → min = 2000/6 ≈ 333 Hz, max = 2000×6 = 12 kHz. Soft mallet thud through to sharp beater tick. Written with `setTargetAtTime`, matching every other frequency-type param on the rack (`rampTo` dispatches an exponential ramp, unsafe near 0). Zero new nodes.
 
 #### TUNE CV — Hz-domain, because that is this rack's pitch convention
-Worth stating explicitly since MOOG_ARCHITECTURE's header describes 1V/oct: **the implementation is Hz-domain.** Every pitch out here — `seq-pitch-out`, `qnt-cv-out`, `chordseq-*-out`, `kbd-pitch-out` — emits the frequency itself, which is what the VCOs' glideBus consumes. A ±1-volt-style TUNE CV would therefore have been incompatible with every pitch source on the rack and only drivable by an LFO. So the jack takes the signal's **value as the fundamental**, which is what actually delivers sequenced tom fills and melodic drums.
+Worth stating explicitly since VOX_ARCHITECTURE's header describes 1V/oct: **the implementation is Hz-domain.** Every pitch out here — `seq-pitch-out`, `qnt-cv-out`, `chordseq-*-out`, `kbd-pitch-out` — emits the frequency itself, which is what the VCOs' glideBus consumes. A ±1-volt-style TUNE CV would therefore have been incompatible with every pitch source on the rack and only drivable by an LFO. So the jack takes the signal's **value as the fundamental**, which is what actually delivers sequenced tom fills and melodic drums.
 
 - **The TUNE knob stays live** — with a cable present it becomes a **transpose** around the incoming pitch rather than an absolute frequency, exactly as a VCO's FREQ knob behaves against its CV. Knob centre (40·√5 ≈ 89.4 Hz) is unity; the span works out to **±13.9 semitones**. Avoiding a knob that goes dead when you patch something is the whole lesson of Phases 70–71.
 - **Engagement is CABLE-driven, not level-driven** — a patched-but-idle pitch source reads 0, indistinguishable from no cable (the `isLfoSync` / FFB-sweep reasoning). Resolved at trigger time by scanning `connectionsRef` for `→${kid}-tune-cv` rather than cached: a kick fires a few times a second, so the scan is free next to a connect/disconnect invalidation surface. Same trade as Phase 76's `resolveCvOrigin`.
@@ -787,12 +796,12 @@ Worth stating explicitly since MOOG_ARCHITECTURE's header describes 1V/oct: **th
 
 ### [2026-08-03] Moog Phase 79 — Module-perfection pass: KICK
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 Next module in the pass. Two real bugs — one of them a crash that was already logged as a rare race and turns out to be trivially reachable — plus a timing defect shared with the sequencer.
 
 #### The trigger-time crash is NOT a rare race (retires the Phase 62 candidate)
-`MOOG_PLAN` logged this as "surfaced once in ~18 heavy-rack stress runs … reachable whenever the main thread stalls past the Transport lookAhead". Reading the two trigger sites shows a far more direct path:
+`VOX_PLAN` logged this as "surfaced once in ~18 heavy-rack stress runs … reachable whenever the main thread stalls past the Transport lookAhead". Reading the two trigger sites shows a far more direct path:
 - the **sequencer** schedules its hits `lookAhead` (~0.1 s) **into the future**;
 - the **manual TRIG button** fires at `Tone.now()` — i.e. **in the past relative to an already-pending step**.
 
@@ -819,7 +828,7 @@ New `drawAt(time, fn)` wraps `getDraw().schedule`, with a fallback to calling im
 
 ### [2026-08-03] Moog Phase 78 — Module-perfection pass: ENV
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 Next module in the one-by-one pass (68/69 VCO+Noise, 70 VCF/LFO/REV/BBD/914, 71+77 VCA). Three real bugs, all fixed; the module is otherwise sound.
 
@@ -848,7 +857,7 @@ An envelope is not a source, so nothing stops it. Holding the manual GATE (or a 
 
 ### [2026-08-03] Moog Phase 77 — VCA: second control input
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 Dylan asked what the VCA was still missing after the Phase 71 pass. The honest answer was "very little" — one modest gap and one deliberate omission (soft saturation, flagged but not built, because it retunes every existing patch and I cannot hear the result). He picked the gap.
 
@@ -863,11 +872,11 @@ Dylan asked what the VCA was still missing after the Phase 71 pass. The honest a
 
 **Verified numerically:** unpatched CV 2 contributes 0 across the curve; the tremolo/envelope balance case above; sum-before-curve vs shape-separately in LOG. Production build clean, no new lint warnings. **Not browser-verified** (no Playwright) — Dylan's ear.
 
-**Still deliberately unbuilt:** soft saturation on the VCA output. `MOOG_ARCHITECTURE` describes the module as able to "drive into soft clipping at extreme settings", and with GAIN at its default plus a full envelope the VCA genuinely does exceed unity — so it is being driven. Not added unprompted: it changes the tone of every existing patch, and two blind character changes this week (the vocoder rounds) failed to land.
+**Still deliberately unbuilt:** soft saturation on the VCA output. `VOX_ARCHITECTURE` describes the module as able to "drive into soft clipping at extreme settings", and with GAIN at its default plus a full envelope the VCA genuinely does exceed unity — so it is being driven. Not added unprompted: it changes the tone of every existing patch, and two blind character changes this week (the vocoder rounds) failed to land.
 
 ### [2026-08-03] Moog Phase 76 — Rest steps mute through the quantizer / chord sequencer
 
-**Files modified:** `useMoogAudio.js`
+**Files modified:** `useVoxAudio.js`
 
 **Dylan-reported:** turning a step off on a 960 silences the VCO when the pitch is patched **directly** to `vco-cv`, but the same rest plays right through if the pitch is routed via the chord sequencer or the quantizer first.
 
@@ -888,7 +897,7 @@ Dylan asked what the VCA was still missing after the Phase 71 pass. The honest a
 
 ### [2026-08-03] Moog Phase 75 — VOWEL: DIRECT morph mode; 912 removed
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`
 
 **Dylan found the sound he was after using existing modules, and asked to scratch the 912.** What he wanted instead was per-note control of *which* vowel goes to *which* — "start at U and go to A, or I to O — and go there directly rather than passing through the other vowels to get there."
 
@@ -913,7 +922,7 @@ Dylan chose driving it from the **existing ENV modules** (`kbd-gate-out → env1
 
 ### [2026-08-03] Moog Phase 74a — 912 VOW mode (Gemini "critical fix" directive, partly acted on)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 **The directive:** the 912 "sounds too generic and acts like a simple low-pass filter"; replace it with parallel formant filters, raise Q, add a diode-style snappy/decaying envelope, and put soft clipping inside the filter feedback loop.
 
@@ -937,7 +946,7 @@ Dylan chose driving it from the **existing ENV modules** (`kbd-gate-out → env1
 
 ### [2026-08-02] Moog Phase 74 — 912 Envelope Follower (Gemini "Phase 62 X-Series Synth Wah" directive, redesigned)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 **A genuinely new module** — unlike the last directive, nothing in the rack could turn a signal's own dynamics into control voltage. The ENV modules are gate-triggered ADSRs; the vocoder's followers are internal. Real gap, correctly identified.
 
@@ -963,7 +972,7 @@ Dylan chose driving it from the **existing ENV modules** (`kbd-gate-out → env1
 
 ### [2026-08-02] Moog Phase 73 — Vocoder sound quality: the constant-carrier bug, rectifier contrast, analysis pre-emphasis
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 **Dylan's report after getting Phase 72 working:** "a constant low buzz from the saw wave, the vocals aren't very clear, and it's not much of a Daft Punk robotic sound." Three symptoms; the first two turned out to share the analysis rectifier as their cause.
 
@@ -972,7 +981,7 @@ Dylan chose driving it from the **existing ENV modules** (`kbd-gate-out → env1
 
 That is a permanent 0.0078 gain on all 16 carrier VCAs, whether or not anyone is talking. Summed across 16 bands and through the ×3 output makeup it is **raw carrier at about −8.5 dB, constantly** — and loudest wherever the carrier has the most energy, i.e. a sawtooth's fundamental. Exactly "a constant low buzz from the saw wave". It also explains why the Phase-72 gate didn't cure it: the gate stops the *modulator*, but this DC was manufactured by the shaper itself regardless of its input. Fixed by making `VOC_RECT_POINTS` **odd** (2049) so x = 0 lands exactly on a sample. **Verified: `curve(0)` is now exactly 0.**
 
-**Third time this class has appeared** — the VCA LOG/LIN curve (71) and the mic gate (72) were both built to pass through the origin for precisely this reason; this one predates them and was found by looking for it. Written into MOOG_ARCHITECTURE §11 as a rule: *any WaveShaper feeding an AudioParam must pass exactly through the origin, because a shaper fed silence still emits `curve(0)`.*
+**Third time this class has appeared** — the VCA LOG/LIN curve (71) and the mic gate (72) were both built to pass through the origin for precisely this reason; this one predates them and was found by looking for it. Written into VOX_ARCHITECTURE §11 as a rule: *any WaveShaper feeding an AudioParam must pass exactly through the origin, because a shaper fed silence still emits `curve(0)`.*
 
 #### "Vocals aren't clear", part 1 — the hard clip was destroying formant contrast
 `Math.min(1, …)` pinned **every band at or above 1/8 scale to exactly 1.0**. Vowel identity *is* the relative height of the formant peaks, so flattening the tops smears one vowel into the next. Replaced with a soft knee — linear below `VOC_RECT_KNEE` (0.6), asymptotic to 1 above — so contrast survives where it matters, nothing pins, nothing exceeds unity. Measured on a 4× input change at the 1 kHz band: old **0.16 → 0.64 with both ends clipping**; new **0.25 → 0.85**.
@@ -995,7 +1004,7 @@ No output glue compressor. Daft Punk's vocoder is heavily compressed, and it is 
 
 ### [2026-08-02] Moog Phase 72 — Vocoder: PROGRAM presets + modulator noise gate (Gemini "Phase 61 Formant Talker" directive, largely rejected)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`
 
 **The directive:** build a new "Formant Talker" module (DigiTech Talker emulation) — dual carrier/modulator inputs, an 8–16 band filter bank spanning 100 Hz–8 kHz, envelope followers driving matching carrier bands, a high-pass sibilance booster for consonants, NuVo/Talk Box/Alien program modes, MIC GAIN with a tracking gate, EFFECT MIX, and the whole filter bank moved into an AudioWorklet.
 
@@ -1025,7 +1034,7 @@ Both controls went in the **plate header**, in the dead space beside the title, 
 
 ### [2026-08-02] Moog Phase 71 — Module-perfection pass: VCA
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`, `VoxKnob.jsx`
 
 Next module in the one-by-one pass (68/69 = VCO + Noise, 70 = VCF/LFO/REV/BBD/914). The VCA turned out to be the least-finished module on the rack: of its four faceplate controls, **two were wired to nothing**, and its only OUT jack was secretly gated by a sequencer. Same two Phase-70 themes — kill dead affordances, fix things that were quietly wrong.
 
@@ -1042,7 +1051,7 @@ This also settles the Phase-70 attenuator debate in the VCA's favour. CV 1/CV 2 
 - Curve writes are **delta-checked against a `vcaLinRefs` map, not against `node.curve`** — the param effect re-sends the whole object on every knob move, and Web Audio copies the array on set so read-back is not a reliable identity check. Cleared on `removeModule` and on unmount (a remount rebuilds every shaper at LIN, so a stale cache would swallow a saved LOG rack).
 
 #### VCA 1's OUT was hardwired to sequencer 1 — real bug
-`vca-out` tapped `seqGateNode`, a gain node written per step by seq 1's `Tone.Loop`. **With no cable patched anywhere near the sequencer, VCA 1's output was chopped to seq 1's rhythm.** MOOG_ARCHITECTURE has forbidden hardwired audio paths since Phase 10. Worse, its twin `vca-out2` (`seq2GateNode`) existed in the jack map but was never rendered by `VcaModule` — an unreachable orphan jack. Both nodes deleted; `-out` now taps the `Tone.Gain` on every instance, so vca1 finally matches vca2/vca3/dynamics. `buildSeqLoop`'s `n[`${seqId}GateNode`]?.gain` write is optional-chained and is now a no-op for statics exactly as it always was for dynamic seqs — whose gate paths (env/kick gate cables + per-VCO bus gating) are untouched, so normal sequenced patches sound identical.
+`vca-out` tapped `seqGateNode`, a gain node written per step by seq 1's `Tone.Loop`. **With no cable patched anywhere near the sequencer, VCA 1's output was chopped to seq 1's rhythm.** VOX_ARCHITECTURE has forbidden hardwired audio paths since Phase 10. Worse, its twin `vca-out2` (`seq2GateNode`) existed in the jack map but was never rendered by `VcaModule` — an unreachable orphan jack. Both nodes deleted; `-out` now taps the `Tone.Gain` on every instance, so vca1 finally matches vca2/vca3/dynamics. `buildSeqLoop`'s `n[`${seqId}GateNode`]?.gain` write is optional-chained and is now a no-op for statics exactly as it always was for dynamic seqs — whose gate paths (env/kick gate cables + per-VCO bus gating) are untouched, so normal sequenced patches sound identical.
 
 #### I/O PEAK lamp was metering the wrong node
 `masterMeter` was fed from `seqGateNode` — i.e. VCA 1's seq-gated output — so the master PEAK lamp was **blind to the MASTER knob and to every patch that didn't run through VCA 1**. The adjacent comment claimed it tapped `n.master`, which it hadn't since Phase 15 (when the VCA tap was chosen because `n.master`'s −14 dB read too low for the LED — a rationale that stopped applying once MASTER became a knob). Retapped to `n.master`, so it now reads what actually leaves the rack. Expect it to sit dimmer at low MASTER settings — that is correct for a peak indicator; flag if it reads too dim in practice.
@@ -1052,7 +1061,7 @@ This also settles the Phase-70 attenuator debate in the VCA's favour. CV 1/CV 2 
 - **Placed in the JACK row, beside OUT — deliberately.** `.knobRow` and `.jackRow` both `flex-wrap`, so each row's min-content is its widest single child; adding a 17 px lamp to the narrower row (jacks ≈ 134 px vs knobs ≈ 210 px) changes neither the module's min-content nor its line count, so the `0.85fr` grid column, `natH` and `fit()` are all untouched (Phase 55 oscillation trap). The header would NOT have been safe — `.plateHeader` doesn't wrap, so a lamp there adds ~25 px of min-content. `.vcaOutLed { align-self: center }` because `.jackRow` is `align-items: flex-end` (for the jack captions), which would otherwise drop a captionless lamp to the baseline.
 
 #### Small
-- `MoogKnob` gained an optional `hint` prop appended to the Phase-12 native tooltip, for controls whose job isn't obvious from a 3-letter label. Used on GAIN ("initial gain — the level that passes with no CV patched") and ENV AMT.
+- `VoxKnob` gained an optional `hint` prop appended to the Phase-12 native tooltip, for controls whose job isn't obvious from a 3-letter label. Used on GAIN ("initial gain — the level that passes with no CV patched") and ENV AMT.
 - `applyVcaParams(id, params)` replaces three near-identical static updaters (the `applyLfoParams`/`applyChorusParams` pattern); `updateVcaParams`/`2`/`3` are now id-bound one-liners and `updateDynModuleParams` case `'vca'` delegates to the same body, so no instance can drift again. Declared above `updateDynModuleParams` so it can sit in that callback's dep array.
 - Stale comments corrected: the `seqMasterGate` block claimed the step loops gate it (they deliberately don't — that would silence the other sequencers; `powerOff` is its only writer), and the `masterMeter` line claimed a tap it didn't have.
 
@@ -1060,7 +1069,7 @@ This also settles the Phase-70 attenuator debate in the VCA's favour. CV 1/CV 2 
 
 ### [2026-08-01] Moog Phase 70 — Module-perfection pass: VCF · LFO · Reverb · BBD · 914
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`
 
 A module-by-module "perfect them" session (VCO + Noise were done in 68/69), Dylan driving the calls. Two themes ran through it: **removing dead affordances** (controls that looked interactive but weren't) and **fixing meters/params that were quietly wrong**.
 
@@ -1075,9 +1084,9 @@ A module-by-module "perfect them" session (VCO + Noise were done in 68/69), Dyla
 - **Knob labels FIXED at RATE / DEPTH / MOD** — they used to swap to DIV/OFFSET while synced; a silkscreened faceplate never relabels itself.
 - **FREE/SYNC `ToggleSwitch` → read-only `ModeIndicator`.** The old one drew a full bat-handle lever with **no click handler** — mode is cable-driven, so it was a dead affordance. Now two fixed words, the live one burning **red** (`.modeWordOn`, the POWER jewel-lamp language rather than the app's mint), the other near-black like an unpowered segment.
 - **Division chip → permanent `.lfoDivScreen`** — was a `.selectorValue` box that looked pressable. Now always-mounted hardware (auraScreen glass + chrome bezel), **dark until a clock is patched**, then lit with green phosphor.
-- **WAVE selector REMOVED** — waveform is chosen by **which output jack you patch**, like the real module. Safe because `connect()` sets the oscillator type *and* keeps `lfoWaveRefs` in step (`useMoogAudio.js:2903`), so free AND sync follow the cable; cable restore re-fires `connect()` so shape survives reload. Removed a second writer of the same state. `waveType` no longer persists; an LFO with no output cable sits at its constructor default (sine).
+- **WAVE selector REMOVED** — waveform is chosen by **which output jack you patch**, like the real module. Safe because `connect()` sets the oscillator type *and* keeps `lfoWaveRefs` in step (`useVoxAudio.js:2903`), so free AND sync follow the cable; cable restore re-fires `connect()` so shape survives reload. Removed a second writer of the same state. `waveType` no longer persists; an LFO with no output cable sits at its constructor default (sine).
 - **Lights-out**: sync screen + lit mode word stay visible. The exemption **must** live on the row (`.selectorRowEmissive`) — `opacity` on a parent creates a stacking context a child can never opt out of, so `opacity: 1` on the screen is a no-op under `.selectorRow { opacity: 0 }`. Equal specificity → must also sit AFTER that rule.
-- **RATE range widened** to **0.01 Hz – 100 Hz** (was 0.1–30). `LFO_RATE_MIN_HZ` × `LFO_RATE_SPAN` (10000) lands on a **decade per quarter-turn** (0.01/0.1/1/10/100), which keeps a knob this wide readable. The low end finally meets MOOG_ARCHITECTURE §2's stated 0.01 Hz floor; the top crosses into audio-rate FM. SYNC is unaffected (it stores the raw 0..1 knob in `lfoRateRefs`, never Hz). **Saved racks shift**: rate persists as knob position, so an LFO parked at 1.7 Hz now runs at 1 Hz.
+- **RATE range widened** to **0.01 Hz – 100 Hz** (was 0.1–30). `LFO_RATE_MIN_HZ` × `LFO_RATE_SPAN` (10000) lands on a **decade per quarter-turn** (0.01/0.1/1/10/100), which keeps a knob this wide readable. The low end finally meets VOX_ARCHITECTURE §2's stated 0.01 Hz floor; the top crosses into audio-rate FM. SYNC is unaffected (it stores the raw 0..1 knob in `lfoRateRefs`, never Hz). **Saved racks shift**: rate persists as knob position, so an LFO parked at 1.7 Hz now runs at 1 Hz.
 
 #### Quantized FM (VCO ← LFO through the quantizer)
 Dylan: an LFO into VCO **FM** slid pitch straight through the scale, ignoring a quantizer on the VCO's CV. First report of this class was a patching fix (LFO → `qnt-cv-in` uses the worklet's Phase-58 modulation mode); he then asked for the **FM jack itself** to respect the quantizer.
@@ -1105,7 +1114,7 @@ Dylan: an LFO into VCO **FM** slid pitch straight through the scale, ignoring a 
 
 #### 914 Fixed Filter Bank
 - **Analyser tapped the INPUT, not the output** — so the per-band LEDs showed the raw incoming signal and were blind to the band knobs and master entirely. Retapped to `ffbMaster` (the Phase 56 post-effect rule the reverb already followed).
-- **Bin math was wrong twice.** `Tone.Analyser('fft', N)` sets `fftSize = N*2` and returns N bins, so a bin spans `sampleRate/(N*2)` — the code used `44100/512`, i.e. **double the true width AND a hardcoded rate**. Every band LED read roughly **an octave low** (the "1k" LED metered 345–732 Hz; 375–797 Hz at 48 kHz). Now `fftBinHz(512)` from the shared `moogSampleRate()`. **The identical bug was in the vocoder's 16-LED meter** and is fixed by the same helper.
+- **Bin math was wrong twice.** `Tone.Analyser('fft', N)` sets `fftSize = N*2` and returns N bins, so a bin spans `sampleRate/(N*2)` — the code used `44100/512`, i.e. **double the true width AND a hardcoded rate**. Every band LED read roughly **an octave low** (the "1k" LED metered 345–732 Hz; 375–797 Hz at 48 kHz). Now `fftBinHz(512)` from the shared `voxSampleRate()`. **The identical bug was in the vocoder's 16-LED meter** and is fixed by the same helper.
 - **FLAT button** — 14 knobs is a lot to reset by hand; returns every band to unity.
 - **MSTR CV jack** → sums onto `ffbMaster.gain`.
 - **SWEEP CV jack** — moves a resonant gain hump across the 14 bands (filter-bank formant sweep). Needed **its own gain stage per band** (`filter → Sweep → Gain → sum`) so single-writer holds: the `ffbSweepTick` rAF owns Sweep, the knobs own Gain. Engagement is **cable-driven** (`recomputeFfbSweep`, the `isLfoSync` pattern) — a patched-but-silent CV reads 0 V, indistinguishable from no cable, so without the flag an unpatched bank would sit permanently humped at its centre band. `FFB_SWEEP_FLOOR` 0.10 / `FFB_SWEEP_SIGMA` 2.2.
@@ -1116,21 +1125,21 @@ A real 4-pole Huovilainen nonlinear ladder worklet (`public/moog-ladder-worklet.
 **Keep for reference:** the biquad's shortcomings are real and unchanged — Q fans into BOTH cascaded biquads (resonance effectively squared → spiky rather than throaty), no self-oscillation, no passband thinning, no drive. Dylan prefers that character. If the ladder is ever wanted again, ship it as a **separate library module** so this VCF is left alone, not as a core swap.
 
 #### Known dead control, NOT addressed → **RESOLVED in Phase 71**
-`VcaModule`'s `<ToggleSwitch labels={['LOG','LIN']} />` (`MoogShell.jsx`) has no click handler **and** no `active` prop, so the lever sits between positions and neither word lights — worse than the LFO switch, which at least reported real state. LOG vs LIN is a real feature (ear-matched vs mathematically linear VCA response). Wire or strip during the VCA pass. **→ Wired in Phase 71** as a dB-linear CV response curve, along with the module's other dead control (ENV AMT).
+`VcaModule`'s `<ToggleSwitch labels={['LOG','LIN']} />` (`VoxShell.jsx`) has no click handler **and** no `active` prop, so the lever sits between positions and neither word lights — worse than the LFO switch, which at least reported real state. LOG vs LIN is a real feature (ear-matched vs mathematically linear VCA response). Wire or strip during the VCA pass. **→ Wired in Phase 71** as a dB-linear CV response curve, along with the module's other dead control (ENV AMT).
 
 ### [2026-07-29] Moog Phase 69 — Noise module: six colours, retro scope, LEVEL CV
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`
 
 Expanded the Noise module from white/pink to **six colours per instance**, each with its own output jack (3×2 grid, full-word labels WHITE / PINK / RED / BLUE / VIOLET / GREY):
 - **RED** = native `Tone.Noise('brown')` (−6 dB/oct); **BLUE** (+3 dB/oct) = the PINK source through a first-difference IIR differentiator (`createIIRFilter([1,-1],[1])`); **VIOLET** (+6 dB/oct) = the WHITE source through the same differentiator; **GREY** = white through an inverse-equal-loudness voicing (+lowshelf 500 Hz, −9 dB peaking @3.5 kHz, +highshelf 9 kHz). A biquad shelf can't make a constant broadband slope — the first shelf attempt sounded like white, which is why the differentiators were needed (Dylan feedback: "actually produce that type of noise").
 - Shared `buildNoiseColors(n, id)` builds/wires all colours for the 3 statics **and** the `addModule` factory; blue derives from pink, violet/grey from white, so only ONE extra running source (brown) is added. Per-colour makeup (`NOISE_LEVEL_GAINS`, `[suffix, makeup]`) balances loudness at the shared LEVEL; `updateNoiseParams` iterates it and stays the single writer of all six gains. Jack ids `-wht/-pnk/-brn/-blu/-vio/-gry` (kept `-brn` internally though the label reads RED). Backward compatible — `-wht/-pnk` ids unchanged; only `level` persists.
-- **Retro CRT scope** (`NoiseScope`) — a procedural noise trace (noise is random, so no analyser tap is needed) tinted to whichever colour is patched (reads `useMoogPatch().cables`, most-recently-patched wins); trace character varies per colour (RED smooth → VIOLET spiky), amplitude tracks LEVEL. Own `.noiseScope` CRT bezel + scanlines + phosphor persistence; Phase-61 visibility gates (offsetParent / checkVisibility). Lights-out keeps it emissive-bright with an I/O-oscilloscope-style dark ring + green glow — the **same lights-out treatment was extended to `.auraScreen`** (reverb / vowel / chronos / fold displays).
+- **Retro CRT scope** (`NoiseScope`) — a procedural noise trace (noise is random, so no analyser tap is needed) tinted to whichever colour is patched (reads `useVoxPatch().cables`, most-recently-patched wins); trace character varies per colour (RED smooth → VIOLET spiky), amplitude tracks LEVEL. Own `.noiseScope` CRT bezel + scanlines + phosphor persistence; Phase-61 visibility gates (offsetParent / checkVisibility). Lights-out keeps it emissive-bright with an I/O-oscilloscope-style dark ring + green glow — the **same lights-out treatment was extended to `.auraScreen`** (reverb / vowel / chronos / fold displays).
 - **LEVEL CV jack** (69b, to the right of the LEVEL knob): an LFO/CV fans through per-colour makeup scalers into each colour gain's AudioParam, so it scales level makeup-balanced exactly like the knob (knob owns intrinsic `.value`, CV sums — the Moog knob+CV pattern).
 
 ### [2026-07-22] Moog Phase 67 / 68 — VCO worklet core + new FX/util modules; VCO UI polish; layout de-wooding
 
-**Files modified:** `public/hard-sync-worklet.js`, `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.jsx`, `MoogKnob.module.css`
+**Files modified:** `public/hard-sync-worklet.js`, `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`, `VoxKnob.jsx`, `VoxKnob.module.css`
 
 - **VCO worklet CORE (Phase 68b):** rewrote `hard-sync-worklet.js` from a sync-only slave into the full oscillator core — one phase accumulator → **4 simultaneous waveforms** (sine/tri/saw/pulse) on a 4-channel output → `coreGate` (power) → `bus` (seq gate) → `ChannelSplitter` → four tap gains → the sin/tri/saw/sqr jacks (all live at once, like a real 921/901 core). Replaced `Tone.Oscillator` for every VCO; per-VCO `GlideBus`/`DetuneSig`/`WidthSig` Signals sum into a-rate worklet params (`slaveFreq`/`slaveDetune`/`pulseWidth`), FM + PW-CV sum on top. HARD SYNC is now the worklet's `syncEnabled` param (resets the shared phase → all 4 outs sync together); `coreGate` silences the ever-running worklet while unpowered. New **SHAPE** knob + **SH/PW** jack phase-warp all four waveforms (pulse duty). **Known limitation → see Future Phases:** the core is naive (non-band-limited) → aliasing on high notes, a regression vs the native `OscillatorNode` it replaced; PolyBLEP is the fix.
 - **VCO UI polish:** RANGE selector changed from click-cycle to **hold-and-drag vertical scrub** (up = higher range); RANGE value box fixed-width (`selectorValueRange`, em-based) so single/double-digit ranges never reflow neighbours; jack-row alignment fix (`.jackLabel` = fixed-height centred box so text labels line up with the wave-icon labels). A `.vcoBig` ~1.25× enlargement was added then **reverted** to the original size on request (SHAPE knob + RANGE changes kept; `sm` SHAPE knob).
@@ -1139,18 +1148,18 @@ Expanded the Noise module from white/pink to **six colours per instance**, each 
   - **CHRONOS (Phase 68)** — mono→stereo multi-zone delay: hand-built stereo feedback loop (native `Tone.Delay` L/R + in-loop highpass/lowpass + two allpass diffusers + tanh soft-clip; self + cross feedback for width), **MICRO/MINI/MACRO** zones (`CHRONOS_RANGES`, log-mapped TIME), TIME/REP CV, echo-ring display (`getChronosDisplay`). Jacks in / time-cv / rep-cv / out.
   - **WAVEFOLDER (Phase 68c)** — West-Coast sine folder: FOLD drive into a fixed multi-fold `Tone.WaveShaper` (`sin(x·π·4)`), SYMMETRY DC bias for even harmonics, FOLD-CV, folded-wave scope (`getFolderScope`). Output-domain (works on any audio in), unlike the VCO's phase-domain SHAPE. Jacks in / fold-cv / out.
   - Registered in `DYN_TYPES` (PAN / DELAY / FOLD) + `nextInstNumRef` + `bindingsFor` + expansion-row render; all dynamic-only (num starts at 1).
-- **Layout (2026-07-22):** cases de-wooded/flattened to one continuous dark field (labels removed, `gap: 0`); the dynamic expansion row relocated from Case 1 to the bottom of Case 3. `MoogKnob` gained an `xxl` size tier (added for the VCO enlargement; now unused after the revert).
+- **Layout (2026-07-22):** cases de-wooded/flattened to one continuous dark field (labels removed, `gap: 0`); the dynamic expansion row relocated from Case 1 to the bottom of Case 3. `VoxKnob` gained an `xxl` size tier (added for the VCO enlargement; now unused after the revert).
 
 ### [2026-07-13] Moog Phase 66 — Cross-page hooks for Workstation Moog-record (pointer; full log in root PLAN.md Phase 155)
 
 Moog-side additions so the Workstation can drive a count-in Moog recording (see root PLAN.md Phase 155 for the full feature):
-- **`useMoogAudio`**: `resetSequencers()` (restart every 960 + chord seq from step 0 — same reset `powerOn` does; used by the Workstation count-in so a take begins at the top) and `getIsPowered()` (live power via `isPoweredRef`, since the `isPowered` boolean in the return is a render snapshot). Both added to the return.
-- **`MoogShell`**: `onBusReady` widened from a bare bus getter to a control surface `{ getBusNode, resetSequencers, isPowered }`; new `recordingActiveRef` prop threaded to `KeyboardModule`.
+- **`useVoxAudio`**: `resetSequencers()` (restart every 960 + chord seq from step 0 — same reset `powerOn` does; used by the Workstation count-in so a take begins at the top) and `getIsPowered()` (live power via `isPoweredRef`, since the `isPowered` boolean in the return is a render snapshot). Both added to the return.
+- **`VoxShell`**: `onBusReady` widened from a bare bus getter to a control surface `{ getBusNode, resetSequencers, isPowered }`; new `recordingActiveRef` prop threaded to `KeyboardModule`.
 - **`KeyboardModule`**: the QWERTY window listener's hidden-page guard (`offsetParent === null`) now also passes when `externalActiveRef.current` is true — so while the Workstation records the Moog, computer keys play it. **MIDI already worked** (its handler never had the guard). Nothing else in the Moog changed.
 
 ### [2026-07-13] Moog Phase 65 — LFO tempo-sync (patchable, phase-locked to the sequencer)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`
 
 **Goal (Dylan):** an LFO shuffling the VOWEL module never lined up with the sequencer because it free-ran at an unrelated rate. Wanted the LFO cycle locked to Transport tempo, with control over *where* the cycle starts (which vowel is on the downbeat) and how wide it sweeps — a "quantize the LFO to the sequencer" idea. Gemini's directive (Phase 56) was mostly right but I corrected two things after reading the code:
 - **It said "add a SYNC jack"** — the jack (`lfo-sync`) and a FREE/SYNC toggle already existed as dead placeholders. Wiring job, not new UI.
@@ -1158,7 +1167,7 @@ Moog-side additions so the Workstation can drive a count-in Moog recording (see 
 
 **Decisions (asked Dylan):** RATE → division · DEPTH → spread · **MOD knob doubles as OFFSET** in sync mode (rate-mod is meaningless when tempo-locked — no new knob) · cable-driven engagement · smooth sync now, **Sample & Hold deferred** to a follow-up.
 
-**Key finding — `Tone.LFO.sync()` is unusable here.** Probed empirically (v15.1.22): it does NOT phase-lock repeatably — **0.28** mean phase error at equal Transport position across runs (a deterministic value scored 0.000). So sync is computed deterministically from `Transport.seconds` in a new **`lfoSyncTick` rAF** (the `vocShiftTick`/`vowelTick` pattern): `phase = frac(t/periodSec + offset)`, written to a per-LFO `${id}SyncSig` `Tone.Signal` (delta-gated, sole writer). Because the LFO output must stay an audio signal (it can also patch VCF/VCO), the output now routes through `${id}Out` with `osc→${id}OscGain` and `syncSig→${id}SyncGain` crossfaded click-free by `applyLfoMode` (free keeps the smooth oscillator for fast rates; sync mutes it, divisions ≤ 1/8). Engagement keys off an `isLfoSync` jack flag in `connect()`/`disconnect()` (multi-cable-safe); the UI `synced` flag derives from `useMoogPatch().cables` (matched on `toJackId`/`fromJackId` — the cable objects use those, NOT `from`/`to`, which was a real bug I hit). Shared `applyLfoParams(id, …)` now backs both static updaters + the dynamic case (note the static `lfo` mod-gain is legacy-named `lfo1modGain`). `ToggleSwitch` gained an `active` prop (lever position + mint active-label); persistence/removeModule/stopAudio all extended.
+**Key finding — `Tone.LFO.sync()` is unusable here.** Probed empirically (v15.1.22): it does NOT phase-lock repeatably — **0.28** mean phase error at equal Transport position across runs (a deterministic value scored 0.000). So sync is computed deterministically from `Transport.seconds` in a new **`lfoSyncTick` rAF** (the `vocShiftTick`/`vowelTick` pattern): `phase = frac(t/periodSec + offset)`, written to a per-LFO `${id}SyncSig` `Tone.Signal` (delta-gated, sole writer). Because the LFO output must stay an audio signal (it can also patch VCF/VCO), the output now routes through `${id}Out` with `osc→${id}OscGain` and `syncSig→${id}SyncGain` crossfaded click-free by `applyLfoMode` (free keeps the smooth oscillator for fast rates; sync mutes it, divisions ≤ 1/8). Engagement keys off an `isLfoSync` jack flag in `connect()`/`disconnect()` (multi-cable-safe); the UI `synced` flag derives from `useVoxPatch().cables` (matched on `toJackId`/`fromJackId` — the cable objects use those, NOT `from`/`to`, which was a real bug I hit). Shared `applyLfoParams(id, …)` now backs both static updaters + the dynamic case (note the static `lfo` mod-gain is legacy-named `lfo1modGain`). `ToggleSwitch` gained an `active` prop (lever position + mint active-label); persistence/removeModule/stopAudio all extended.
 
 **Verified (Playwright, headless, powered):** sync engages on cable (oscGain 0 / syncGain 1) + UI swaps to **DIV / DEPTH / OFFSET** knobs + **SYNC** division chip + toggle throws to SYNC · **phase-lock determinism 0.001** (vs Tone.sync 0.28) · OFFSET knob shifts the start phase · free mode unregressed (oscillator-driven, moves over time) · unpatch reverts click-free (oscGain→1, RATE label, 0 cables) · **end-to-end: a synced LFO morphing the VOWEL module locks its F1 formant to the grid within ~2 Hz across loops** — the vowels line up with the beat every cycle (Dylan's exact goal). Zero console errors.
 
@@ -1166,22 +1175,22 @@ Moog-side additions so the Workstation can drive a count-in Moog recording (see 
 
 ### [2026-07-13] Moog Phase 64 — VOWEL / Formant filter-bank module (new, library-addable)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 **A new module** that colours a raw signal into human vowel sounds via a 3-formant resonant filter bank. Genuinely new (unlike the recent Gemini directives, which were mostly already-shipped). **Critical-review notes:** Gemini's "Phase 55" collides (typography pass shipped as 55) → this is **Phase 64**; and Gemini underspecified the FORMANT CV — you can't morph vowel *presets* by wiring a CV to a filter AudioParam (it's a nonlinear mapping to 3 freqs), so it's implemented as a single-writer rAF (the vocoder-shift/quantizer pattern).
 
 **As built (dynamic-only type `vowel`):**
-- **Engine (`useMoogAudio.js`):** factory branch builds `In → fan to 3 bandpass formant filters (F1/F2/F3) → per-formant gains → Out`, plus an FFT tap (`${id}Analyser`) and a CV analyser (`${id}CvAnalyser`). `VOWEL_FORMANTS` = classic male-voice table for A/E/I/O/U; `vowelFreqsAt(pos)` interpolates between adjacent columns. **`vowelTick` rAF is the SOLE writer of the 3 filter frequencies** — it combines the morph ref (VOWEL knob), the shape ref (SHAPE knob, a 0.7–1.3 tract-length scale), and the sampled FORMANT-CV level, with a per-instance delta gate so an idle module costs zero writes. `updateDynModuleParams` case `'vowel'` writes the refs ONLY. Per-instance refs (`vowelIdsRef`/`vowelMorphRefs`/`vowelShapeRefs`/`vowelLastFreqRefs`), reset on cleanup; `removeModule` drops the id from the rAF list.
-- **UI (`MoogShell.jsx`):** `VowelModule` (VOWEL selector knob showing the live letter `VOWEL · A…U`, SHAPE knob, IN/FORM-CV/OUT jacks) + `FormantDisplay` (Aura-style OLED canvas showing the log-frequency output spectrum — the bandpass resonances literally draw the vowel's formant peaks). Persistence is automatic via the Phase 63 hooks.
+- **Engine (`useVoxAudio.js`):** factory branch builds `In → fan to 3 bandpass formant filters (F1/F2/F3) → per-formant gains → Out`, plus an FFT tap (`${id}Analyser`) and a CV analyser (`${id}CvAnalyser`). `VOWEL_FORMANTS` = classic male-voice table for A/E/I/O/U; `vowelFreqsAt(pos)` interpolates between adjacent columns. **`vowelTick` rAF is the SOLE writer of the 3 filter frequencies** — it combines the morph ref (VOWEL knob), the shape ref (SHAPE knob, a 0.7–1.3 tract-length scale), and the sampled FORMANT-CV level, with a per-instance delta gate so an idle module costs zero writes. `updateDynModuleParams` case `'vowel'` writes the refs ONLY. Per-instance refs (`vowelIdsRef`/`vowelMorphRefs`/`vowelShapeRefs`/`vowelLastFreqRefs`), reset on cleanup; `removeModule` drops the id from the rAF list.
+- **UI (`VoxShell.jsx`):** `VowelModule` (VOWEL selector knob showing the live letter `VOWEL · A…U`, SHAPE knob, IN/FORM-CV/OUT jacks) + `FormantDisplay` (Aura-style OLED canvas showing the log-frequency output spectrum — the bandpass resonances literally draw the vowel's formant peaks). Persistence is automatic via the Phase 63 hooks.
 - **First dynamic-ONLY type** (no static instance) → `nextInstNumRef.vowel = 1`, and `addModule`'s desiredNum guard relaxed `>= 2` → `>= 1` (the rack store only holds real dynamics, so num 1 is safe; this also stops a StrictMode remount drifting `vowel1 → vowel2`). DYN_TYPES `+ VOWEL` (max 4, width 360).
 
 **Verified (Playwright):** added from the store → renders with all 3 jacks; default formants = **[270, 2290, 3010]** (exactly vowel 'I' = knob default 0.5); audio passes through to the I/O; dragging VOWEL to 'A' → formants become **[730, 1090, 2440]** (exact 'A' table); an LFO patched to FORM CV sweeps F1 across **[278, 730] Hz** (full A↔U); module + settings restore across reload; zero errors. Screenshot confirms the Moog-styled plate + display.
 
-**Follow-up 64a — output too quiet (Dylan-reported):** the raw bank output measured RMS **0.069** vs a raw VCO's 0.484 (~7× down — parallel bandpasses throw away most of the source energy). Naïve fix (one big makeup gain) clips, because the vowels are wildly unequal: at ×7.5, open **A** peaked **1.77** (hard clip) while closed **I/U** sat at ~0.85. First limiter attempt (`Tone.Limiter(−1)`) barely moved it (1.65 → 1.64) — Tone.Limiter carries a **30 dB soft knee**, so peaks pass almost untouched. **Fix:** `${id}Mix` = ×7 makeup → `${id}Out` = `Tone.Compressor({ threshold:−1, ratio:20, knee:0 })` (hard-knee = a real brick-wall limiter). Result: all vowels land at **RMS ~0.43–0.48** (matching a raw VCO — ~6–7× louder than before, well-balanced), A/O brick-walled just above unity (peak ~1.1, which the master attenuates to ~0.18 in practice). MOOG_ARCHITECTURE §13 signal chain updated. Node restructure re-validated (render/audio/morph/persistence all green).
+**Follow-up 64a — output too quiet (Dylan-reported):** the raw bank output measured RMS **0.069** vs a raw VCO's 0.484 (~7× down — parallel bandpasses throw away most of the source energy). Naïve fix (one big makeup gain) clips, because the vowels are wildly unequal: at ×7.5, open **A** peaked **1.77** (hard clip) while closed **I/U** sat at ~0.85. First limiter attempt (`Tone.Limiter(−1)`) barely moved it (1.65 → 1.64) — Tone.Limiter carries a **30 dB soft knee**, so peaks pass almost untouched. **Fix:** `${id}Mix` = ×7 makeup → `${id}Out` = `Tone.Compressor({ threshold:−1, ratio:20, knee:0 })` (hard-knee = a real brick-wall limiter). Result: all vowels land at **RMS ~0.43–0.48** (matching a raw VCO — ~6–7× louder than before, well-balanced), A/O brick-walled just above unity (peak ~1.1, which the master attenuates to ~0.18 in practice). VOX_ARCHITECTURE §13 signal chain updated. Node restructure re-validated (render/audio/morph/persistence all green).
 
 ### [2026-07-12] Moog Phase 63 — Full project persistence: per-module settings + `.moog` save/load + reset
 
-**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `Root.js`
+**Files modified:** `VoxShell.jsx`, `VoxShell.module.css`, `Root.js`
 
 **What shipped:** the whole rack — modules, cables, AND every knob/switch position — now survives reload and is portable as a `.moog` file, with a reset-to-default. Completes what Phase 60f started (60f persisted modules + cables but NOT control positions, which reset to defaults on reload).
 
@@ -1197,12 +1206,12 @@ Moog-side additions so the Workstation can drive a count-in Moog recording (see 
 - **Two tiny hooks** (next to `readRackStore`): `useSavedSettings(id)` reads a module's saved values ONCE at mount (lazy `useState`) to seed defaults; `useModulePersist(id, values)` debounces (200 ms, coalesces a knob drag) and writes the module's full snapshot — but ONLY when it differs from what's stored, so mount-time seeding and StrictMode's double-effect never write (honors the 60c "user events only" rule; merge-only so it can never wipe modules/cables). JSON-string dep covers nested arrays (seq/chord steps, FFB bands).
 - **All 15 module types wired** (VCO/VCF/LFO/VCA/ENV/Reverb/Chorus/Kick/FFB/Noise/960/CHORD/Vocoder/QNT/IO): id computed before `useState`, each `useState` seeded `saved.x ?? default`, one `useModulePersist` call. The uniform `p = number===1 ? base : base+number` id derivation made this mechanical. Vocoder `micStatus` excluded (runtime, not a setting).
 - **SAVE/LOAD/RESET reuse the Phase 60f restore path** — the store holds the entire setup, so SAVE serializes it to a `.moog` download, LOAD writes it + `window.location.reload()`, RESET clears it + reload. Reload is deliberate: it reuses the proven, StrictMode-safe mount-time restore instead of an error-prone in-place teardown, and gives the "fresh instrument" a reset wants.
-- **Return-to-Moog after reload** — a reload lands on Root's default home page, so reset/load set a one-shot `sessionStorage['voxdaw-return-page'] = 'moogmodular'` that `Root.js` honors on next mount (minimal routing change — the documented Phase 1 exception).
+- **Return-to-Moog after reload** — a reload lands on Root's default home page, so reset/load set a one-shot `sessionStorage['voxdaw-return-page'] = 'voxmodular'` that `Root.js` honors on next mount (minimal routing change — the documented Phase 1 exception).
 - **Toolbar** — centered `[⟲ RESET] [▼ SAVE SETUP] [▲ LOAD SETUP]` in the top bar (same chrome as home/library/lights-out), + a hidden file input. Reset confirms via `window.confirm`; load validates `Array.isArray(parsed.modules)` and alerts on a bad file.
 
 **Verified (Playwright):** drag VCO1 FREQ → reload → knob restored (135° preserved, not reset to 0°); SAVE download has `{modules, cables, settings}` incl. `settings.vco1`, filename `moog-setup-<date>.moog`; LOAD a crafted `.moog` (freqBase 0.9 → 108°) applies after reload; RESET returns to default (0°) and lands back on the Moog; zero console/page errors. Toolbar screenshot confirms clean placement.
 
-**Follow-up 63b — mount-ordering fix (Dylan-reported):** after loading a setup the knob POSITIONS restored but the AUDIO stayed at each node's hardcoded default until the knob was moved. Root cause: the engine's node-creation effect in `useMoogAudio.js` was a passive `useEffect` — a PARENT passive effect, which React runs AFTER the child module passive effects — so each module's mount-time `onParamUpdate` hit `nodesRef.current === null` and no-op'd (the existing line-597 comment already noted this for VCO). Invisible pre-63 because every node was built at the same default the knob started at; Phase 63 made saved values diverge from those defaults, exposing it. **Fix (one line): the node-creation effect is now `useLayoutEffect`.** React fires ALL layout effects before ANY passive effect, so nodes exist by the time every module's passive param effect runs on mount → saved values apply with no knob interaction. Uses each module's own value→param derivation (no duplication). **Verified:** loaded a `.moog` with chorus wet 1.0 / reverb wet 0.8 / master 0.2 / vcf cutoff 0.1, powered on WITHOUT touching a knob, read the live audio nodes → `chorus.wet=1.0`, `reverb.wet=0.8`, `master.volume=-46.8 dB` (default is −13.8), `vcf.frequency=39.9 Hz` (default ~20 kHz). All applied; zero errors.
+**Follow-up 63b — mount-ordering fix (Dylan-reported):** after loading a setup the knob POSITIONS restored but the AUDIO stayed at each node's hardcoded default until the knob was moved. Root cause: the engine's node-creation effect in `useVoxAudio.js` was a passive `useEffect` — a PARENT passive effect, which React runs AFTER the child module passive effects — so each module's mount-time `onParamUpdate` hit `nodesRef.current === null` and no-op'd (the existing line-597 comment already noted this for VCO). Invisible pre-63 because every node was built at the same default the knob started at; Phase 63 made saved values diverge from those defaults, exposing it. **Fix (one line): the node-creation effect is now `useLayoutEffect`.** React fires ALL layout effects before ANY passive effect, so nodes exist by the time every module's passive param effect runs on mount → saved values apply with no knob interaction. Uses each module's own value→param derivation (no duplication). **Verified:** loaded a `.moog` with chorus wet 1.0 / reverb wet 0.8 / master 0.2 / vcf cutoff 0.1, powered on WITHOUT touching a knob, read the live audio nodes → `chorus.wet=1.0`, `reverb.wet=0.8`, `master.volume=-46.8 dB` (default is −13.8), `vcf.frequency=39.9 Hz` (default ~20 kHz). All applied; zero errors.
 
 **Follow-up 63c — HARD SYNC: enable-state restore + unpowered leak (Dylan-reported):** Dylan hit "hard sync not working" plus "enabling sync + patching the VCO to the I/O makes noise even when the synth is off." Investigation (Playwright + a temporary worklet message-port probe + FFT of the slave output) proved the **worklet DSP is fully correct** — master reaches the input, the >0.5 downward-jump detector fires ~1×/master-cycle, the slave phase-locks (with the master patched, slave-freq energy drops ~60 dB and the output locks to the master fundamental). **The "not working" was a patching mistake (SAW → VCO2 CV instead of → VCO2 SYNC↓); hard sync itself is fine.** Two REAL bugs were found and fixed:
 1. **Enable state not restored (same class as 63b):** `VcoModule` only called `onSyncChange` from the click handler, never on mount — so a `syncOn` restored from a saved `.moog` showed the switch ON but never told the engine. **Fix:** `useEffect(() => onSyncChange?.(syncOn), [syncOn, onSyncChange])` (mount + change); `handleSyncToggle` is now just `setSyncOn(v => !v)`. Relies on 63b's `useLayoutEffect` ordering.
@@ -1212,13 +1221,13 @@ Diagnosis note for future: a hard-synced saw's spectral PEAK sits at the slave f
 
 ### [2026-07-12] Moog Phase 61d — Retina scroll fix: MODULE-level layer promotion (final; nothing hidden)
 
-**Files modified:** `MoogShell.module.css`, `MoogKnob.module.css`, `MoogKnob.jsx`, `MoogShell.jsx`
+**Files modified:** `VoxShell.module.css`, `VoxKnob.module.css`, `VoxKnob.jsx`, `VoxShell.jsx`
 
 **The fix Dylan kept.** Every component stays visible, full-res and animating, with no scroll lag on a Retina display.
 
 **Root cause (confirmed at DPR 2 — Dylan is on a Retina Mac, 4× the pixels; DPR-1 tests were blind to this):** during a pan the GPU re-composites the whole photoreal rack every frame, and the dominant cost was **~130 per-knob compositor layers** (each `.knob` carried a permanent `will-change: transform`). Blending 130 full-res knob textures every frame at 2× saturates the GPU.
 
-**The fix (one lever):** move layer promotion UP from each knob to each **`.module`** — `will-change: transform` on `.module`, removed from `.knob`. A pan now translates ~30 cached module textures (knobs painted into them) instead of blending 130 knob layers. `MoogKnob.jsx` re-promotes ONLY the knob being dragged (transient `will-change` on mousedown, cleared on mouseup) so live rotation stays crisp without re-rastering its whole module. Measured at DPR 2, real pan (short viewport so the rack actually overflows/pans): baseline ~1000 ms GPU-thread busy → **~370–430 ms warm, p95 9 ms, ~2 dropped frames — smoother than even lights-out (545 ms)**, with knobs/glow/shadows/overlay/LEDs all visible and animating. Knob drag verified (rotation 0°→135°, transient will-change applies then clears). Full-render screenshot confirms zero visual regression (crisp text, 3D knobs, glow all intact).
+**The fix (one lever):** move layer promotion UP from each knob to each **`.module`** — `will-change: transform` on `.module`, removed from `.knob`. A pan now translates ~30 cached module textures (knobs painted into them) instead of blending 130 knob layers. `VoxKnob.jsx` re-promotes ONLY the knob being dragged (transient `will-change` on mousedown, cleared on mouseup) so live rotation stays crisp without re-rastering its whole module. Measured at DPR 2, real pan (short viewport so the rack actually overflows/pans): baseline ~1000 ms GPU-thread busy → **~370–430 ms warm, p95 9 ms, ~2 dropped frames — smoother than even lights-out (545 ms)**, with knobs/glow/shadows/overlay/LEDs all visible and animating. Knob drag verified (rotation 0°→135°, transient will-change applies then clears). Full-render screenshot confirms zero visual regression (crisp text, 3D knobs, glow all intact).
 
 **CRITICAL testing lesson — measure a REAL pan:** the default rack (natH 1799) FITS a normal-height viewport, so wheel events hit the zoom path and early-return at z=1 *without panning*. Every earlier "scroll" measurement (tall viewport) was actually IDLE animation, not a pan — which sent me down two wrong paths (below). Use a SHORT viewport (≤ ~650 px) at DPR 2 so the rack overflows and wheel truly pans; confirm via a transform before/after check.
 
@@ -1233,7 +1242,7 @@ Diagnosis note for future: a hard-synced saw's spectral PEAK sits at the slave f
 
 > **Follow-up (see 61c above):** 61b was necessary but NOT sufficient. It removed the culling-manager churn (real, and it fixed large-rack scroll regressions), but the default-rack lag Dylan felt was a *different* cost — Retina GPU compositing of the knob layers — invisible to 61b's DPR-1 tests. 61c is the actual default-rack fix.
 
-**Files modified:** `MoogShell.jsx`
+**Files modified:** `VoxShell.jsx`
 
 **Problem (Dylan-reported):** scrolling the rack while POWERED was still slow and choppy — even on the DEFAULT rack (no added modules). Decisive clue from Dylan: **with LIGHTS OUT the scroll is completely smooth.** Lights-out sets `opacity: 0` on the knob groups, so the diagnosis is paint/raster cost of the photorealistic content, not the LED writers.
 
@@ -1249,12 +1258,12 @@ Diagnosis note for future: a hard-synced saw's spectral PEAK sits at the slave f
 
 ### [2026-07-12] Moog Phase 61 — Powered-Rack Frame Rate: camera-driven content-visibility module culling
 
-**Files modified:** `MoogShell.jsx`, `Led.jsx`, `Oscilloscope.jsx`, `PatchCableOverlay.jsx`
+**Files modified:** `VoxShell.jsx`, `Led.jsx`, `Oscilloscope.jsx`, `PatchCableOverlay.jsx`
 
 **Problem (measured 2026-07-11, full evidence chain in the profiling-session entry below):** on a large custom rack, every visual invalidation re-runs compositor layerization (`PaintArtifactCompositor::Update`/`Layerize`) at ~31 ms per pass (31 added instances, 11.5k DOM nodes, cabinet 3420 layout px); the per-frame LED/meter/canvas writers pull that trigger every frame → the page locks near 30 fps while powered, even at idle. JS is idle (<5%) — the writers are triggers, not costs.
 
 **As built:**
-- **Visibility manager** (new MoogShell effect, deps `[dynModules, hiddenModules, audio.isPowered]`): stamps exact `contain-intrinsic-size` on every `.module` from measured layout boxes (gBCR ÷ current scale — the getSvgCoords trick), then toggles `content-visibility` between `'visible'` (pinned rendered) and `'auto'` (browser-skippable) from the camera's `apply()` via `moduleVisRef` (the camera publishes its live `view` object through `cameraViewRef`). **Activity-adaptive bands:** while the camera moves, promote 0.5 viewports ahead / demote only past 1.0 (hysteresis); after 1.2 s of camera stillness, sweep to a deep 0.05-viewport band. (Fixed generous margins were a shipped-then-fixed mistake — at the fit-width floor one viewport ≈ 1800 layout px, wider than the whole test rack, so nothing was ever skipped.) Promotions are time-sliced ≤2/frame so first-render paint bursts land a screen ahead of the visible edge, never mid-viewport. Far state is `'auto'`, never `'hidden'`: a banding miss degrades to browser-rendered content — a perf miss, not a visual hole (a skipped module still paints its own faceplate = blank plate). **Power-gated:** unpowered racks have no per-frame writers and thus no layerization pressure — the manager stays dormant and clears its styles, so unpowered scrolling keeps every module rendered (pre-61 behavior, pristine). Layout invariants: intrinsic size == rendered box → cabinet natural height byte-identical (3420 px probe-verified), no fit() oscillation (the Phase 55 trap), no ResizeObserver feedback; the manager's own debounced RO on the cabinet re-measures after fit()'s width-compensation rewraps; `document.fonts.ready` re-stamps sizes.
+- **Visibility manager** (new VoxShell effect, deps `[dynModules, hiddenModules, audio.isPowered]`): stamps exact `contain-intrinsic-size` on every `.module` from measured layout boxes (gBCR ÷ current scale — the getSvgCoords trick), then toggles `content-visibility` between `'visible'` (pinned rendered) and `'auto'` (browser-skippable) from the camera's `apply()` via `moduleVisRef` (the camera publishes its live `view` object through `cameraViewRef`). **Activity-adaptive bands:** while the camera moves, promote 0.5 viewports ahead / demote only past 1.0 (hysteresis); after 1.2 s of camera stillness, sweep to a deep 0.05-viewport band. (Fixed generous margins were a shipped-then-fixed mistake — at the fit-width floor one viewport ≈ 1800 layout px, wider than the whole test rack, so nothing was ever skipped.) Promotions are time-sliced ≤2/frame so first-render paint bursts land a screen ahead of the visible edge, never mid-viewport. Far state is `'auto'`, never `'hidden'`: a banding miss degrades to browser-rendered content — a perf miss, not a visual hole (a skipped module still paints its own faceplate = blank plate). **Power-gated:** unpowered racks have no per-frame writers and thus no layerization pressure — the manager stays dormant and clears its styles, so unpowered scrolling keeps every module rendered (pre-61 behavior, pristine). Layout invariants: intrinsic size == rendered box → cabinet natural height byte-identical (3420 px probe-verified), no fit() oscillation (the Phase 55 trap), no ResizeObserver feedback; the manager's own debounced RO on the cabinet re-measures after fit()'s width-compensation rewraps; `document.fonts.ready` re-stamps sizes.
 - **Trigger-side hygiene:** `Led`, FFB meter, and vocoder meter rAF loops quantize opacity to 1/64 steps and skip-if-unchanged (an identical style string never invalidates paint — silent/steady LEDs stop re-triggering layerization); Aura + Oscilloscope canvas loops skip drawing when `checkVisibility({ contentVisibilityAuto: true })` reports their module skipped (the scope also gained the previously missing hidden-page `offsetParent` gate). The QNT TRANSPOSE CV loop is untouched (deliberately ungated — it drives the worklet root while hidden).
 - **PatchCableOverlay hardening:** zero-size jack rects now return null from `getSvgCoords`, and a per-cable last-good endpoint cache (`lastCoordsRef`) covers transient nulls — a redraw that catches a jack mid-promotion keeps the cable in place instead of dropping it; the next healthy redraw refreshes.
 
@@ -1270,32 +1279,32 @@ Gemini's directive (react-window module virtualization, `will-change` on knobs/L
 
 ### [2026-07-11] Moog Phases 8b + 60f-2 + 12 — Noise LEVEL Wiring, Drag-to-Reorder, Knob Tooltips (roadmap close-out)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`, `VoxKnob.jsx`
 
 **Phase 8b — Noise LEVEL wiring (the knob was visual-only since Phase 1.5):** each noise module (3 static + dynamics) gets a `${id}WGain`/`${id}PGain` pair between the sources and the WHT/PNK jacks; one LEVEL knob drives both via id-keyed `updateNoiseParams(id, { level })`. **Mapping is knob 0–1 → gain 0–1.43× with unity at the 0.7 default**, so every pre-8b patch (which had no gain stage) sounds identical until the knob moves. Jacks re-point at the gains; dynamic factory + `nodeNames` updated.
 
 **Phase 60f-2 — Drag-to-reorder expansion modules:** each `dynSlot` gains a machined grip tab (`.dynGrip`, absolute-positioned so it never affects layout — the Phase 55 fit() trap; z-index 40, under the cable overlay). HTML5 DnD: dragged id in a ref (Zero-Re-render during the drag), drop splices the `dynModules` array, persists the order (array order = store order), and dispatches a `resize` on the next frame — **committed cables read jack rects at render time, so without the nudge they would keep pointing at the modules' old positions** (the overlay's existing resize reposition handles it). `e.dataTransfer` guarded for synthesized test events.
 
-**Phase 12 — resolved:** ✅ knob tooltips — native `title` on every `MoogKnob` (`"FREQ: 5.0 / 10 · shift = fine · double-click = reset"` — also the only in-UI documentation of fine mode and reset). ❌ **Module-level bypass switches — rejected as superseded:** every insert-FX module already has a transparent state (REV/BBD MIX at 0, VCF fully open, QNT BYPASS toggle exists since Phase 22) and the Phase 59 library removes whole modules; a second bypass affordance would clutter the photorealistic plates for no routing gain. ⏸ **Mobile/narrow fallback — deferred with reasons:** the 60a fit-width floor + vertical scroll already keeps narrow desktop windows usable; true mobile needs a touch-event camera (pinch/pan) and touch cable drags — a self-contained subproject — and VoxDaw is desktop-first (MediaPipe hand tracking).
+**Phase 12 — resolved:** ✅ knob tooltips — native `title` on every `VoxKnob` (`"FREQ: 5.0 / 10 · shift = fine · double-click = reset"` — also the only in-UI documentation of fine mode and reset). ❌ **Module-level bypass switches — rejected as superseded:** every insert-FX module already has a transparent state (REV/BBD MIX at 0, VCF fully open, QNT BYPASS toggle exists since Phase 22) and the Phase 59 library removes whole modules; a second bypass affordance would clutter the photorealistic plates for no routing gain. ⏸ **Mobile/narrow fallback — deferred with reasons:** the 60a fit-width floor + vertical scroll already keeps narrow desktop windows usable; true mobile needs a touch-event camera (pinch/pan) and touch cable drags — a self-contained subproject — and VoxDaw is desktop-first (MediaPipe hand tracking).
 
 **Verified (Playwright, zero console/page errors):** FFB band meter driven by `noise-wht` at LEVEL default 0.57 → **0.08 at LEVEL zero → 0.61 restored**; grip-drag swapped [vco6, kick2] → [kick2, vco6] **and the order persisted across reload** (cables repositioned); tooltip text present on VCO 1's FREQ knob.
 
 ### [2026-07-11] Moog Phase 60f — Cable & Rack Persistence with Stable Instance IDs (Dynamic Rack series)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogPatchContext.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxPatchContext.jsx`
 
 **The whole custom rack — dynamic instances AND patch cables — now survives reloads.** The "deterministic rewire-on-load" design the proposal called for:
 
 - **Stable ids (the linchpin):** `addModule(type, desiredNum)` — the restore path passes the PERSISTED instance number so jack ids (and therefore cables) stay valid across reloads; honored only when free (collision → fall back to minting, the Workstation projectIO duplicate-id lesson) and the mint counter is bumped past it either way. User adds keep minting monotonically.
 - **v2 rack store** (`moog-rack-v2`): one record `{ modules: [{id,type,num}], cables: [{from,to,color}] }`; v1 (types only) migrates transparently on read. **Writes only from user events:** module add/remove handlers write the modules slice; a new provider callback `onCablesChanged(cables)` (fired outside setState updaters on drag-commit / click-off / library strip, and deliberately NOT by restores) writes the cables slice — the 60c StrictMode wipe rule extended to cables.
-- **`MoogPatchProvider.restoreCables(stored)`:** validates both endpoints against the live jack registry (repair — cables to removed modules are dropped), dedupes, draws in one setState, fires the audio bridge per cable. `completeDrag`/`removeCable` switched to eager `cablesRef` mirror updates (value-form setState) so same-tick strip loops read correctly.
+- **`VoxPatchProvider.restoreCables(stored)`:** validates both endpoints against the live jack registry (repair — cables to removed modules are dropped), dedupes, draws in one setState, fires the audio bridge per cable. `completeDrag`/`removeCable` switched to eager `cablesRef` mirror updates (value-form setState) so same-tick strip loops read correctly.
 - **`CableRestorer`** (rendered as the provider's LAST child — sibling effects run in tree order, so its effect fires after the restored modules' Jack registration effects in the same commit): gated on `dynRestored`, restores from the store, then re-fires `audio.connect` on an **idempotent retry schedule (0.8 s / 2.5 s)**. The retries cover the two rewire-ordering gaps: (1) worklet-deferred jacks (`qnt*-cv-in` is `dest:null` until the async worklet load) and (2) the StrictMode double-mount, where the restorer's effect re-runs BEFORE the parent's engine-rebuild effect — the immediate pass no-ops against the disposed engine and the retries land on the fresh one. `connect()` dedupes committed keys, so every retry is safe.
 
 **Verified (Playwright, zero console/page errors):** 3-cable rack (dynamic kick gate + worklet-deferred `seq-pitch-out → qnt-cv-in` + plain `vco1-saw → vcf-in`) → reload → **same ids (kick2/vco6), all 3 cables redrawn, and the kick fired 12×/3 s (exact 8n)** — the audio bridge fully survived the reload; the restored worklet-deferred cable drives the QNT display (F3 174.6 Hz) proving the retry pass; clicking a cable off persists (2 after reload); removing kick2 via the library persists (kick2 gone, vco6 intact, 2 cables). **Remaining from the 60f line:** drag-to-reorder (pure UX, deferred).
 
 ### [2026-07-11] Moog Phase 60e (part 4) — Dynamic QNT Instances — ALL 14 MODULE TYPES NOW DYNAMIC (Dynamic Rack series)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 **The quantizer — the deepest-entangled type (worklet + Phase 57/58 knob-stepper + chord override) — goes dynamic** (`+ QNT`, cap 4, width 442 measured). This completes the migration: every removable module type can now be instantiated from the bank.
 
@@ -1309,7 +1318,7 @@ Gemini's directive (react-window module virtualization, `will-change` on knobs/L
 
 ### [2026-07-10] Moog Phase 60e (part 3) — Dynamic VOCODER Instances (Dynamic Rack series)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 **The 16-band vocoder goes dynamic** (`+ VOCODER`, cap 2 — the ~70-node cost from the proposal table; width 586, measured). All static node names already used the `voc` prefix, so `${vid}Wet` / `${vid}CarrBPF${i}` composition needed zero renames.
 
@@ -1322,7 +1331,7 @@ Gemini's directive (react-window module virtualization, `will-change` on knobs/L
 
 ### [2026-07-10] Moog Phase 60e (part 2) — Dynamic CHORD Sequencers (Dynamic Rack series)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 **The chord sequencer goes dynamic** (`+ CHORD`, cap 4, width 491 — measured), reusing the 960's template from part 1 plus the chord-specific entanglements:
 
@@ -1338,7 +1347,7 @@ Gemini's directive (react-window module virtualization, `will-change` on knobs/L
 
 ### [2026-07-10] Moog Phase 60e (part 1) — Dynamic 960 Sequencers + Restored-Instance JackMap Fix (Dynamic Rack series)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 **First Tone.Loop-owning type goes dynamic** (`+ 960`, cap 4, width 737 — measured against the static sibling at `FLOOR_LAYOUT_W`). The pattern established here (id-keyed state maps + a loop builder + loop lifecycle in add/removeModule) is the template for CHORD in part 2.
 
@@ -1355,7 +1364,7 @@ Gemini's directive (react-window module virtualization, `will-change` on knobs/L
 
 ### [2026-07-10] Moog Phase 60d — Dynamic KICK + 914 FFB + Per-Instance Hard Sync (Dynamic Rack series)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`
 
 **Bank now offers 10 types** (`+ KICK` cap 8 / 360px, `+ 914` cap 4 / 526px — widths measured against the static siblings at `FLOOR_LAYOUT_W`). The 60c leftovers with callback/loop entanglements are now dynamic:
 
@@ -1370,7 +1379,7 @@ Gemini's directive (react-window module virtualization, `will-change` on knobs/L
 
 ### [2026-07-09] Moog Phase 60c — Dynamic Instances for 6 More Types + Rack Persistence (Dynamic Rack series)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`
 
 **Bank now offers 8 types:** VCO, NOISE, VCF, LFO, VCA, ENV, REV, BBD — each with per-type caps and expansion-row widths (`DYN_TYPES`). Factories mirror the static recipes exactly (VCF + 3 CV scaler gains; LFO + modGain + WaveAnalyser; ENV + Meter with `envId`-tagged gate jack — `triggerGate`/`updateEnvParams` are already id-generic; REV mints `reverb<n>` ids + post-reverb Aura analyser; BBD mints `chorus<n>` — ChorusModule gained a `number` prop). New generic APIs: `updateDynModuleParams(id, params)` (dispatch by instance type, mappings copied from the static updaters), `getLfoInstantById(id)` (name-composed — works for static + dynamic), `getReverbAuraData` now accepts instance ids. Shell caches per-instance bindings (`bindingsFor(id)`: meter/lfoLed/aura/params closures) so Led rAF loops and module effects never restart. Verified: dynamic→dynamic patching works (lfo3-sin → vcf3-cv1 cable committed + audio-bridged).
 
@@ -1380,37 +1389,37 @@ Gemini's directive (react-window module virtualization, `will-change` on knobs/L
 
 ### [2026-07-09] Moog Phase 60b — Engine Instance Registry + VCO/Noise Pilot (Dynamic Rack series)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`
 
 **Users can now add and remove real module instances.** Library modal gained an EXPANSION section: `+ VCO` (cap 10) / `+ NOISE` (cap 8) buttons and a removable list of live instances; new modules render in an expansion row inside the Voice Case at fixed per-type widths (435/262px — matching static siblings at `FLOOR_LAYOUT_W`), wrapping onto new lines that grow the rack into the 60a floor+scroll.
 
-**Engine (`useMoogAudio.js`):** `addModule(type)` / `removeModule(id)` + registries (`dynInstancesRef`, `allVcoIdsRef`, `nextInstNumRef` — monotonic mint, ids never reused). **Key design: instance nodes are registered into `nodesRef.current` under the same composed names as the static graph** (`vco6`, `vco6GlideBus`, `vco6Meter`, `vco6fm`…), so every existing name-composed lookup — `updateVcoParams`, `getMeterValue`, `connect()`'s glideBus/isVcoCv path, knob-stepper — works on dynamic instances with zero changes. All 9 `for (const vcoId of VCO_IDS)` sites (seq/seq2/chordseq loops, vibrato rAF, qnt port fanout) + 3 Phase-57/58 helpers now iterate `allVcoIdsRef.current`. Power on/off starts/stops dynamic sources; unmount cleanup disposes them via the existing `Object.values(n)` sweep and resets the registries (StrictMode-safe). **Removal order is load-bearing:** LibraryModal strips cables by `${id}-` prefix (firing audio disconnects) BEFORE `removeModule` disposes — never dispose a patched node. Dynamic VCOs ship without HARD SYNC (per-instance worklet = Phase 60d); `?.` guards make the absent sync node a no-op everywhere.
+**Engine (`useVoxAudio.js`):** `addModule(type)` / `removeModule(id)` + registries (`dynInstancesRef`, `allVcoIdsRef`, `nextInstNumRef` — monotonic mint, ids never reused). **Key design: instance nodes are registered into `nodesRef.current` under the same composed names as the static graph** (`vco6`, `vco6GlideBus`, `vco6Meter`, `vco6fm`…), so every existing name-composed lookup — `updateVcoParams`, `getMeterValue`, `connect()`'s glideBus/isVcoCv path, knob-stepper — works on dynamic instances with zero changes. All 9 `for (const vcoId of VCO_IDS)` sites (seq/seq2/chordseq loops, vibrato rAF, qnt port fanout) + 3 Phase-57/58 helpers now iterate `allVcoIdsRef.current`. Power on/off starts/stops dynamic sources; unmount cleanup disposes them via the existing `Object.values(n)` sweep and resets the registries (StrictMode-safe). **Removal order is load-bearing:** LibraryModal strips cables by `${id}-` prefix (firing audio disconnects) BEFORE `removeModule` disposes — never dispose a patched node. Dynamic VCOs ship without HARD SYNC (per-instance worklet = Phase 60d); `?.` guards make the absent sync node a no-op everywhere.
 
 **Verified (Playwright, full flow):** add VCO6+NOISE4 → natH 1799→2125, scale floors at 0.4917 (modules keep full size); dynamic jacks live; **qnt-cv-out → vco6-cv lights the knob-stepper glow on the dynamic VCO** (Phase 57/58 machinery works through the combined list); removing VCO6 while patched strips the cable then disposes cleanly; re-add mints vco7 (no id reuse); zero console/page errors.
 
 ### [2026-07-08] Moog Phase 60a — Camera Fit-Width Floor + Vertical Scroll (Dynamic Rack series)
 
-**Files modified:** `MoogShell.jsx` (camera effect only)
+**Files modified:** `VoxShell.jsx` (camera effect only)
 
-First phase of the Dynamic Rack series (proposal in MOOG_ARCHITECTURE.md). `fit()` scale is now `clamp(availH/natH, availW/FLOOR_LAYOUT_W, 1)` — auto-shrink stops at the scale that renders a **`FLOOR_LAYOUT_W = 3010`**-wide layout at exactly screen width (chosen just under the default rack's 3009px layout width at 1512×945, so today's rack is byte-identical: 0.4919 height-fit still wins by a hair). When the floor engages (any added case, or a shorter window): the rack overflows the viewport bottom and becomes **vertically pannable at z=1** — plain wheel scrolls (`overflowsV()` gate; ctrl/pinch still zooms; once zoomed, wheel zooms as always so default-rack UX is unchanged), empty-faceplate drag pans (grab cursor extended to the floored state), Esc/double-click returns a scrolled rack to the top (reset guard now checks tx/ty, not just z). `clampPan` needed no changes — it already handled taller-than-viewport content.
+First phase of the Dynamic Rack series (proposal in VOX_ARCHITECTURE.md). `fit()` scale is now `clamp(availH/natH, availW/FLOOR_LAYOUT_W, 1)` — auto-shrink stops at the scale that renders a **`FLOOR_LAYOUT_W = 3010`**-wide layout at exactly screen width (chosen just under the default rack's 3009px layout width at 1512×945, so today's rack is byte-identical: 0.4919 height-fit still wins by a hair). When the floor engages (any added case, or a shorter window): the rack overflows the viewport bottom and becomes **vertically pannable at z=1** — plain wheel scrolls (`overflowsV()` gate; ctrl/pinch still zooms; once zoomed, wheel zooms as always so default-rack UX is unchanged), empty-faceplate drag pans (grab cursor extended to the floored state), Esc/double-click returns a scrolled rack to the top (reset guard now checks tx/ty, not just z). `clampPan` needed no changes — it already handled taller-than-viewport content.
 
 **Verified (Playwright):** default 1512×945 — scale 0.4919, stable, no grab cursor, plain wheel zooms (unchanged). Short 1512×700 — scale floors at exactly 0.4917 (=1480/3010) instead of shrinking to 0.3558; wheel scrolls ty 0→−200; drag pans to the −244.6 clamp; Esc returns to 0; scroll clamps at top; zero errors.
 
 ### [2026-07-08] Moog Phase 59 — Case System: Aesthetic + Module Library (Gemini directive, descoped with Dylan's approval)
 
-**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `VoxShell.jsx`, `VoxShell.module.css`
 
-**Dylan-approved scope (via option question):** case *aesthetic* + module *library over the fixed inventory*; **fit camera kept** (Gemini's "forbid transform:scale" rejected — native scale is 2930×1685px, ~⅓ visible on a laptop). **Rejected:** dynamic module instantiation (a useMoogAudio rewrite — every node is statically created/wired; per-module lifecycle means jack-registry rebuilds + cable preservation + node disposal), implicit "global bus routing" (jack ids are already globally unique — cables cross rows today), per-module "✕" buttons (clutter on photorealistic faceplates; the library modal handles both directions), and RackManager/CaseContainer/ModuleRegistry as separate files (three case wrappers + one modal inside MoogShell.jsx match the existing single-file structure).
+**Dylan-approved scope (via option question):** case *aesthetic* + module *library over the fixed inventory*; **fit camera kept** (Gemini's "forbid transform:scale" rejected — native scale is 2930×1685px, ~⅓ visible on a laptop). **Rejected:** dynamic module instantiation (a useVoxAudio rewrite — every node is statically created/wired; per-module lifecycle means jack-registry rebuilds + cable preservation + node disposal), implicit "global bus routing" (jack ids are already globally unique — cables cross rows today), per-module "✕" buttons (clutter on photorealistic faceplates; the library modal handles both directions), and RackManager/CaseContainer/ModuleRegistry as separate files (three case wrappers + one modal inside VoxShell.jsx match the existing single-file structure).
 
 **Case aesthetic:** the 4 tiers now sit in 3 walnut road-cases inside the cabinet — VOICE CASE (rows 1–2), PERCUSSION & FX CASE (row 3), SEQUENCER CASE (row 4) — each with a stamped label strip, wood-grain frame, dark `.caseInterior` mounting area, and 12px rail gaps (`.rack` gap). Lights-out blacks the wood + labels. **Cost: natH 1685→1799, fit scale 0.525→0.492 (~6% smaller modules)** — accepted tradeoff for the approved look.
 
-**Module library:** `MODULE_REGISTRY` (28 removable modules; I/O + keyboard fixed) with per-module jack-id prefixes chosen collision-free (`'vca-'` cannot match `'vca2-…'`). `hiddenModules` Set in MoogShell (session-only); hidden modules render `<BlankPanel />` **in the same grid cell** so tier templates and row heights never change (Phase 55 oscillation trap avoided — verified fit stayed byte-identical through remove/re-add). `LibraryModal` lives inside MoogPatchProvider: removal strips every cable touching the module's jacks via `removeCable(id)` (each firing the audio-bridge disconnect — so e.g. removing QNT correctly restores knob pitch/glow through the existing disconnect handlers), then hides. Modal is always-dark (overlay-terminal rule), grouped by case, mint status dots.
+**Module library:** `MODULE_REGISTRY` (28 removable modules; I/O + keyboard fixed) with per-module jack-id prefixes chosen collision-free (`'vca-'` cannot match `'vca2-…'`). `hiddenModules` Set in VoxShell (session-only); hidden modules render `<BlankPanel />` **in the same grid cell** so tier templates and row heights never change (Phase 55 oscillation trap avoided — verified fit stayed byte-identical through remove/re-add). `LibraryModal` lives inside VoxPatchProvider: removal strips every cable touching the module's jacks via `removeCable(id)` (each firing the audio-bridge disconnect — so e.g. removing QNT correctly restores knob pitch/glow through the existing disconnect handlers), then hides. Modal is always-dark (overlay-terminal rule), grouped by case, mint status dots.
 
 **Verified (Playwright):** fit stable+consistent (0.4919) before/during/after; removing QNT stripped its live cable (1→0) and rendered 1 blank panel; re-install restored it; zero console/page errors.
 
 ### [2026-07-08] Moog Phase 58 — Quantizer Modulation Mode (stepped LFO pitch; Gemini directive, mostly rejected)
 
-**Files modified:** `public/quantizer-worklet.js`, `useMoogAudio.js`
+**Files modified:** `public/quantizer-worklet.js`, `useVoxAudio.js`
 
 **The patch `lfo-sin → qnt-cv-in` + `qnt-cv-out → vcoN-cv` now produces stepped scale runs.** The worklet gained modulation mode: per-sample, input with |v| ≤ `MOD_MAX = 8` is modulator-range CV (LFOs emit ±1·depth; real pitch CV is ≥ 32.7 Hz) and maps to `baseHz · 2^v` — ±12 semitones around a center — before quantization; Hz-range input keeps the existing direct behavior. `baseHz` = the qnt-patched VCO's FREQ knob (posted from `updateVcoParams` + seeded at cable connect; last-moved knob wins if several VCOs share qnt-cv-out), so the knob transposes the sweep center live and LFO DEPTH sets sweep width (full = ±1 octave). **BYPASS outputs the unquantized sweep** (`baseHz · 2^v` raw) — smooth slides back without unpatching, per the directive's intent. Verified live: quantized pass = 15 distinct readouts, all C-major tones centered on 220 Hz; bypass pass = 25 readouts including chromatic off-scale values; zero errors.
 
@@ -1418,31 +1427,31 @@ First phase of the Dynamic Rack series (proposal in MOOG_ARCHITECTURE.md). `fit(
 
 ### [2026-07-08] Moog Phase 57 — VCO Knob-Stepper Mode (Quantized FREQ knob; Gemini directive, corrected)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogKnob.jsx`, `MoogKnob.module.css`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxKnob.jsx`, `VoxKnob.module.css`
 
-Patching `qnt-cv-out → vcoN-cv` with **nothing feeding `qnt-cv-in`** puts that VCO's FREQ knob in note-stepper mode: the knob stays live but its Hz is snapped through the quantizer's current scale/root/oct config before hitting the glideBus, so it steps note-to-note. The QNT display/LEDs mirror each snapped note. The FREQ knob's indicator line pulses mint (`MoogKnob glow` prop → `.knobGlow .knobCap` drop-shadow animation). BYPASS reverts the knob to continuous and kills the glow.
+Patching `qnt-cv-out → vcoN-cv` with **nothing feeding `qnt-cv-in`** puts that VCO's FREQ knob in note-stepper mode: the knob stays live but its Hz is snapped through the quantizer's current scale/root/oct config before hitting the glideBus, so it steps note-to-note. The QNT display/LEDs mirror each snapped note. The FREQ knob's indicator line pulses mint (`VoxKnob glow` prop → `.knobGlow .knobCap` drop-shadow animation). BYPASS reverts the knob to continuous and kills the glow.
 
 **Mode ownership (Single Writer):** the glideBus writer for a qnt-patched VCO is exactly one of: worklet `port.onmessage` (when a CV source feeds `qnt-cv-in` — the existing melody-quantize path, unchanged) or the knob-stepper path (when the quantizer is idle). Transitions re-apply/notify at every boundary: connect/disconnect of `qnt-cv-out→vco-cv`, connect/disconnect of `*→qnt-cv-in` (`qntHasCvInput()` scans connection keys), and `updateQuantizerParams` (config changes re-snap live; bypass toggles the glow via `notifyKnobQuantize`).
 
 **Gemini spec corrections:** no `quantizeValue()` exists — quantization lives in the AudioWorklet on the audio-rate CV path and never sees knob values; added `quantizeHzJs()` as a JS mirror (nearest in-scale MIDI note + octShift). Gemini's premise "QNT patched → quantize the knob" unconditionally would have broken the existing melody-quantize patch (kbd→qnt-in, qnt-out→vco-cv) and double-written the glideBus; the no-input-patched condition makes the modes mutually exclusive. Phase number was stale again ("49" → this is 57).
 
-**UI plumbing:** `setVcoQuantizedCallback(fn)` fires `fn(vcoIds[])` on every mode-boundary change (and immediately on registration); MoogShell holds `quantizedVcos` React state (event-driven, not per-frame — Zero-Re-render applies to rAF loops) → `quantized` prop → FREQ knob `glow`.
+**UI plumbing:** `setVcoQuantizedCallback(fn)` fires `fn(vcoIds[])` on every mode-boundary change (and immediately on registration); VoxShell holds `quantizedVcos` React state (event-driven, not per-frame — Zero-Re-render applies to rAF loops) → `quantized` prop → FREQ knob `glow`.
 
 **Verified (Playwright, full flow):** power on → patch qnt→vco1 → glow ON; dragging FREQ steps the QNT display through discrete in-scale notes (A3→B3→D4→E4→F4… in C-MAJ); BYPASS ON → glow off / OFF → glow back; patching kbd→qnt-in → glow off (worklet owns pitch); clicking that cable off → glow returns. Zero console/page errors.
 
 ### [2026-07-07] Moog Phase 56 — Reverb "Aura" Display (Gemini directive, corrected)
 
-**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `useMoogAudio.js`
+**Files modified:** `VoxShell.jsx`, `VoxShell.module.css`, `useVoxAudio.js`
 
 Both REV modules gained a rectangular 100×60 frosted-glass OLED screen in the bottom-right slack beside the IN/OUT jacks (`revBottomRow`: jacks left, screen right, bottom-aligned): a rotating ice-blue **wireframe gridded sphere** (Dylan iterated from the initial circular halo; chose Gemini's blue over the green-phosphor alternative). **Sphere radius tracks ROOM (roomSize)**; **spin rate tracks MIX (wet) + live FFT energy**; per-vertex shimmer is signal-only (each vertex's radial jitter reads its own FFT bin, so the grid ripples with the actual spectrum). Spin angle is **integrated per frame** (`angle += dt * speed`, dt clamped to 0.1s for tab-return gaps) — a naive `t * speed` would snap the rotation discontinuously whenever MIX changes. Idle = small dim deep-blue sphere; active = expanded sky-blue/white. 6 meridians × 5 parallels × 28 segments, per-segment depth-based alpha/width (back lines fade → reads as 3D), mild perspective, fixed 0.42-rad axis tilt. Chrome bezel matches the jewel-lamp housings; lamp-aligned glass sheen; lights-out kills the bezel but keeps the emissive sphere (oscilloscope rule).
 
-**Gemini spec corrections applied:** it referenced `Tone.Reverb` with `.mix`/`.decay` — the actual nodes are `Tone.Freeverb` (`wet`/`roomSize`, no decay param), so mappings were remapped wet→size, roomSize→activity. It said "replace the knob feedback" — knobs kept (they're the only control affordance); display added above them. There is no `ReverbModule.jsx` (it's in MoogShell.jsx), there are TWO reverbs (both got displays via one `getReverbAuraData(num)` getter), and its "Phase 48" number was stale.
+**Gemini spec corrections applied:** it referenced `Tone.Reverb` with `.mix`/`.decay` — the actual nodes are `Tone.Freeverb` (`wet`/`roomSize`, no decay param), so mappings were remapped wet→size, roomSize→activity. It said "replace the knob feedback" — knobs kept (they're the only control affordance); display added above them. There is no `ReverbModule.jsx` (it's in VoxShell.jsx), there are TWO reverbs (both got displays via one `getReverbAuraData(num)` getter), and its "Phase 48" number was stale.
 
 **Implementation:** `reverbAnalyser`/`reverb2Analyser` (`Tone.Analyser('fft', 256)`) tap each reverb's **output** (dead-end side connections) so the halo keeps shimmering through the tail after the source stops. `AuraDisplay` component: 144px canvas backing (2× for zoom), rAF loop with `offsetParent === null` hidden-page skip, knob values read through ref mirrors (`wetRef`/`roomRef`) so the loop never restarts or stale-captures — zero React state per frame. Halo = 48-point jittered loop (per-point sinusoid + FFT bin), smoothed through quadratic midpoints, drawn as interior radial haze + 3 stroke passes (wide/faint → tight/bright) for the frosted glow. Verified: natH unchanged (1685, fit scale 0.5252 stable+consistent — the display fits inside the REV modules' tier-2 slack), zero console errors, screenshot shows idle + active states.
 
 ### [2026-07-07] Moog Phase 55 — Typography Legibility Pass (Dylan-driven)
 
-**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.module.css`, `Led.module.css`, `KeyboardModule.module.css`
+**Files modified:** `VoxShell.jsx`, `VoxShell.module.css`, `VoxKnob.module.css`, `Led.module.css`, `KeyboardModule.module.css`
 
 Dylan: "the words are hard to read — increase the size of all words, lettering, numbers, and the wave symbols, without overlap; adjust modules to use the extra space."
 
@@ -1458,7 +1467,7 @@ Dylan: "the words are hard to read — increase the size of all words, lettering
 
 ### [2026-07-04] Bug Fix — Black-Flashing Modules (GPU layer thrash from Phase 53's `will-change`)
 
-**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `VoxShell.jsx`, `VoxShell.module.css`
 
 **Symptom (Dylan):** modules flashed black for ~a second on ENV gate-button presses and when switching back to the tab.
 
@@ -1470,7 +1479,7 @@ Dylan: "the words are hard to read — increase the size of all words, lettering
 
 ### [2026-07-04] Rack Densification — Maximize On-Screen Component Size (Phase 54, Dylan-driven)
 
-**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.jsx`, `MoogKnob.module.css`, `Led.module.css`, `KeyboardModule.jsx`, `KeyboardModule.module.css`
+**Files modified:** `VoxShell.jsx`, `VoxShell.module.css`, `VoxKnob.jsx`, `VoxKnob.module.css`, `Led.module.css`, `KeyboardModule.jsx`, `KeyboardModule.module.css`
 
 Dylan: "everything is too small — maximize the modules." Under fit(), uniform px inflation is a no-op (Phase 53 lesson), so the win came from **non-uniform** changes: cutting vertical slack (raises the fit scale) + growing components into under-filled space. Measured-first with a Playwright geometry script (per-tier heights, per-module slack).
 
@@ -1488,11 +1497,11 @@ Dylan: "everything is too small — maximize the modules." Under fit(), uniform 
 
 ### [2026-07-04] Viewport Camera — Wheel Zoom + Drag Pan (Phase 53, from a Gemini blueprint — largely rejected)
 
-**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.module.css`
+**Files modified:** `VoxShell.jsx`, `VoxShell.module.css`, `VoxKnob.module.css`
 
 Gemini's "High-Readability" phase. The legibility complaint was real; the prescription was mostly wrong — the one sound idea (a zoom/pan viewport) was implemented, the rest rejected.
 
-**Implemented — viewport camera (`MoogShell.jsx` fit effect, rewritten):**
+**Implemented — viewport camera (`VoxShell.jsx` fit effect, rewritten):**
 - `transform: translate(tx,ty) scale(s0·z)` on the cabinet, origin `0 0`; `s0` = fit scale (the zoomed-out home state, unchanged math), `z` = user zoom 1–8×. Cabinet gains `align-self: flex-start` so its layout origin is the shell's content corner — translate math needs no centering compensation (horizontal centering at rest comes from fit's width compensation making scaled width == availW exactly).
 - **Wheel/pinch zooms toward the cursor** (`t' = p − ((p−t)/S)·S'`; ctrlKey = trackpad pinch, larger factor). **Drag empty faceplate pans** when zoomed. **Esc / double-click empty plate** animates back (0.35s transition, cleared after).
 - **Interactivity detection with zero per-component markup:** `cursor` is an inherited CSS property and every control in the rack resolves to `pointer`/`ns-resize` (knobs, jacks, keys, selectors, cables) while bare faceplate resolves to `auto` — one `getComputedStyle(target).cursor` check (+ `closest('button, input, select, [data-jack-id]')`) gates pan/dblclick-reset. Knob drags, cable drags, and piano keys all work while zoomed.
@@ -1510,7 +1519,7 @@ Gemini's "High-Readability" phase. The legibility complaint was real; the prescr
 
 ### [2026-07-04] Period-Correct System 55 Component Pass (Phase 52, from a Gemini blueprint — partially rejected)
 
-**Files modified:** `MoogKnob.module.css`, `MoogShell.module.css`, `Led.module.css`, `PatchCableOverlay.jsx`
+**Files modified:** `VoxKnob.module.css`, `VoxShell.module.css`, `Led.module.css`, `PatchCableOverlay.jsx`
 
 Refinement pass on Phase 51 toward the exact vintage System 55 components. All static paint; no JSX changes except the cable layer removal. (Gemini labeled this "Phase 45"; renumbered — 45 was Vocoder Synth Expansion.)
 
@@ -1534,11 +1543,11 @@ Refinement pass on Phase 51 toward the exact vintage System 55 components. All s
 
 ### [2026-07-04] Photorealistic Material Overhaul (Phase 51, from a Gemini blueprint — partially rejected)
 
-**Files modified:** `MoogKnob.jsx`, `MoogKnob.module.css`, `MoogShell.jsx`, `MoogShell.module.css`, `Led.jsx`, `Led.module.css`, `PatchCableOverlay.jsx`
+**Files modified:** `VoxKnob.jsx`, `VoxKnob.module.css`, `VoxShell.jsx`, `VoxShell.module.css`, `Led.jsx`, `Led.module.css`, `PatchCableOverlay.jsx`
 
 Full material/lighting pass — all static CSS/SVG paint, zero runtime cost, Zero-Re-render Rule untouched. (Gemini labeled this "Phase 44"; renumbered — 44 was Vocoder Loudness.)
 
-- **Knobs (flagship):** silver knobs → **black skirted vintage bakelite** with white pointer line; **cream/ivory variant** on the 960 step dials (photo-accurate two-tone). New `variant` prop on `MoogKnob` (`'black'` default | `'cream'`). Fluted skirt = `repeating-conic-gradient` on the rotating `.knob` (physical — flutes spin with the value); dome cap = opaque-center radial layer above it. **Shadow physics:** `.knobShading` counter-rotates (−θ inside +θ ⇒ net screen transform is identity), so both its speculars AND the new directional outer drop shadow (`-5px 7px`, lamp upper-right → shadow lower-left) render screen-fixed at every knob position; only rotationally-symmetric ring shadows stay on `.knob`.
+- **Knobs (flagship):** silver knobs → **black skirted vintage bakelite** with white pointer line; **cream/ivory variant** on the 960 step dials (photo-accurate two-tone). New `variant` prop on `VoxKnob` (`'black'` default | `'cream'`). Fluted skirt = `repeating-conic-gradient` on the rotating `.knob` (physical — flutes spin with the value); dome cap = opaque-center radial layer above it. **Shadow physics:** `.knobShading` counter-rotates (−θ inside +θ ⇒ net screen transform is identity), so both its speculars AND the new directional outer drop shadow (`-5px 7px`, lamp upper-right → shadow lower-left) render screen-fixed at every knob position; only rotationally-symmetric ring shadows stay on `.knob`.
 - **Faceplate:** glossy piano-black → matte crinkle-black with micro-grain via inline SVG `feTurbulence` data-URI (rasterized once, tiles as background-image); specular toned down.
 - **Screws:** 7→8px, lamp-aligned highlight (68% 22%), cast shadow lower-left, per-corner slot rotation (18/−11/−27/7°).
 - **Jacks:** hex mounting-nut facets — `repeating-conic-gradient` 60°-period seam lines over the chrome ring; directional cast shadow.
@@ -1558,7 +1567,7 @@ Full material/lighting pass — all static CSS/SVG paint, zero runtime cost, Zer
 
 ### [2026-07-02] Chord Seq glide + bigger chord buttons, Keyboard glide staircase fix (Phase 50)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`
 
 Two independent items.
 
@@ -1573,7 +1582,7 @@ Two independent items.
 
 ### [2026-06-26 → 06-28] Vocoder Condense, Row 3 placement + faceplate rework (Phase 49)
 
-**Files modified:** `MoogKnob.jsx`, `MoogKnob.module.css`, `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `VoxKnob.jsx`, `VoxKnob.module.css`, `VoxShell.jsx`, `VoxShell.module.css`
 
 Visual-only (no audio/behavior changes). Moved the vocoder into **Row 3** (8th column; `tierRow3` extended to 8 cols). Added a new ultra-compact **`xs`** knob size (18px body, **no tick ring**, 7px label, tight group gap) — globally available but used only by the vocoder grid. Shortened grid labels (VOL/C.MIX/PWID/S.RT/S.AMP/PRES/CLAR); meter LEDs 5→4px.
 
@@ -1585,7 +1594,7 @@ Final faceplate (`.vocLayout`, two columns hugging each other, `gap: 2px`):
 
 ### [2026-06-26] Merge EXT IN into the Vocoder (Phase 48)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MOOG_ARCHITECTURE.md`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`, `VOX_ARCHITECTURE.md`
 
 The standalone EXT IN module existed only to feed the vocoder modulator, so it was merged into the Vocoder as a single module.
 
@@ -1594,13 +1603,13 @@ The standalone EXT IN module existed only to feed the vocoder modulator, so it w
 
 ### [2026-06-26] Vocoder Knob Cleanup — single VOLUME (Phase 47)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MOOG_ARCHITECTURE.md`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VOX_ARCHITECTURE.md`
 
 Consolidated the two level knobs (OUT makeup + VOL) into one **VOLUME**. `vocOut` now carries a fixed ×3 internal makeup (the band bank is intrinsically quiet); the single VOLUME knob drives `vocVolume` (the jack node) at 0–2× — so it scales the **whole module** including the CLARITY blend, and combines with the fixed makeup to the same ≤6× ceiling as before. Defaults preserve the prior loudness (VOLUME 0.5 → ×1 → ×3 net). `updateVocoderParams` drops `out`, renames `vol` → `volume`. Grid: 14 → 13 knobs.
 
 ### [2026-06-25] Vocoder "Daft Punk" Pre/Post Chain (Phase 46, from a Gemini blueprint — partially rejected)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MOOG_ARCHITECTURE.md`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VOX_ARCHITECTURE.md`
 
 Implemented the genuinely useful parts of Gemini's Phase 43 plan; rejected the rest with reasons.
 
@@ -1616,7 +1625,7 @@ Implemented the genuinely useful parts of Gemini's Phase 43 plan; rejected the r
 
 ### [2026-06-25] Vocoder Synth Expansion — 9 new controls (Phase 45)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MOOG_ARCHITECTURE.md`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`, `VOX_ARCHITECTURE.md`
 
 Added fully-functional controls (no skeletons): PWIDTH, CARR MIX, SHIFT, RES, SH RATE, SH AMP, DECAY, VOL. (A FREQ knob for the internal carrier was added then removed at the user's request — the internal osc now runs at a fixed 130 Hz; PWIDTH/CARR MIX still apply.)
 
@@ -1628,7 +1637,7 @@ Added fully-functional controls (no skeletons): PWIDTH, CARR MIX, SHIFT, RES, SH
 
 ### [2026-06-25] Vocoder Loudness + Intelligibility (Phase 44)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MOOG_ARCHITECTURE.md`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VOX_ARCHITECTURE.md`
 
 Two user-driven improvements: the vocoder was too quiet when mixed with other instruments, and the words were hard to make out.
 
@@ -1639,7 +1648,7 @@ Two user-driven improvements: the vocoder was too quiet when mixed with other in
 
 ### [2026-06-24] EXT IN — External Mic Input (Phase 43)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MOOG_ARCHITECTURE.md`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`, `VOX_ARCHITECTURE.md`
 
 Added a live microphone as a patchable audio source so the user can sing through the vocoder (`ext-out → voc-mod-in`, VCOs → `voc-carr-in`, `voc-out → mixer`). Built as a dedicated **EXT IN** module rather than folding into I/O (keeps I/O uncluttered; consistent with recent dedicated-module phases).
 
@@ -1651,9 +1660,9 @@ Added a live microphone as a patchable audio source so the user can sing through
 
 ### [2026-06-24] 16-Band Vocoder (Phase 42)
 
-**Files modified:** `useMoogAudio.js`, `MoogShell.jsx`, `MoogShell.module.css`, `MOOG_ARCHITECTURE.md`
+**Files modified:** `useVoxAudio.js`, `VoxShell.jsx`, `VoxShell.module.css`, `VOX_ARCHITECTURE.md`
 
-Added a self-contained, patchable 16-band spectral vocoder built on the shared Tone.js context (NOT reusing `useVocoder.js`, which spins its own AudioContext + internal carriers — both forbidden by `MOOG_ARCHITECTURE.md`). Modeled structurally on the 914 FFB.
+Added a self-contained, patchable 16-band spectral vocoder built on the shared Tone.js context (NOT reusing `useVocoder.js`, which spins its own AudioContext + internal carriers — both forbidden by `VOX_ARCHITECTURE.md`). Modeled structurally on the 914 FFB.
 
 - **`VOC_BANDS`** — 16 log-spaced bandpass bands (100 Hz → 8 kHz, ratio ≈ 1.339, Q 4), exported like `FFB_BANDS`.
 - **DSP:** `vocModIn` fans to 16 modulator bands `BPF → rectifier(Tone.WaveShaper |x|·VOC_ENV_DRIVE) → envLP(20 Hz)`; each env follower connects directly to the matching carrier band's `vocCarrVCA.gain` AudioParam (audio-rate, zero polling). `vocCarrIn → 16× carrBPF → carrVCA → vocSum → vocWet`. **MIX** crossfades `vocDry` (raw carrier passthrough) ↔ `vocWet` via `updateVocoderParams({ mix })`. `vocAnalyser` (FFT 512) taps `vocModIn`.
@@ -1685,7 +1694,7 @@ Internalized Web MIDI API into the 953 Keyboard Controller. Physical USB MIDI ke
 
 ### [2026-06-11] 61-Key Keyboard + Wooden Barrier
 
-**Files modified:** `KeyboardModule.jsx`, `KeyboardModule.module.css`, `MoogShell.jsx`, `MoogShell.module.css`
+**Files modified:** `KeyboardModule.jsx`, `KeyboardModule.module.css`, `VoxShell.jsx`, `VoxShell.module.css`
 
 - **61 keys (C2–C7):** `buildKeys()` loops 5 octaves (C2–B6) + appends top C7. `WW` 28→20px, `BW` 17→12px; `SEMI_BLACK` recalculated for new geometry (`[null,14,null,34,null,null,74,null,94,null,114,null]`). All 61 keys share the same `onPointerDown` handler.
 - **Wooden barrier (`kbdBarrier`):** `<div className={styles.kbdBarrier} />` between `.rack` and `<KeyboardModule>`. Horizontal grain via `repeating-linear-gradient(90deg)`, walnut color matching cabinet (`#b46030`–`#c87038`), `border-top`/`border-bottom` for physical depth.
@@ -1694,7 +1703,7 @@ Internalized Web MIDI API into the 953 Keyboard Controller. Physical USB MIDI ke
 
 ### [2026-06-11] Visual Aesthetic Overhaul
 
-**Files modified:** `MoogShell.module.css`, `MoogKnob.jsx`, `MoogKnob.module.css`
+**Files modified:** `VoxShell.module.css`, `VoxKnob.jsx`, `VoxKnob.module.css`
 
 **Glossy black faceplates:** `.plate` background replaced from warm charcoal micro-texture with piano-black `#080808` + right-to-left ambient diffuse gradient. `.plate::after` changed from centered hotspot to directional `to bottom left` specular matching lamp at `78% 18%`.
 
@@ -1712,12 +1721,12 @@ Internalized Web MIDI API into the 953 Keyboard Controller. Physical USB MIDI ke
 
 ### [2026-06-10] LFO Rate Modulation (Cascading LFOs)
 
-**Files modified:** `MoogShell.jsx`, `useMoogAudio.js`
+**Files modified:** `VoxShell.jsx`, `useVoxAudio.js`
 
 Added rate FM input and MOD DEPTH knob to both LFO modules, plus waveform-analyser-driven LEDs.
 
-- `useMoogAudio.js`: Added `lfo1modGain`/`lfo2modGain` (`Tone.Gain(0)`) — permanent wired to `lfo.frequency`/`lfo2.frequency`; `lfoWaveAnalyser`/`lfo2WaveAnalyser` (`Tone.Analyser('waveform', 32)`) dead-end taps on each LFO; `lfo-fm`/`lfo2-fm` jacks → the mod Gain nodes; `updateLfoParams`/`updateLfo2Params` extended with `modDepth` param → `safeRamp(lfo1modGain.gain, modDepth * 10)` (0–10 Hz swing range); `getLfoInstant`/`getLfo2Instant` callbacks read `data[last]` from each waveform analyser, normalized `(v+1)/2`, guarded by `isPoweredRef` so LED stays dim when off.
-- `MoogShell.jsx`: `LfoModule` gains `modDepth` state + `MOD` sm-knob; jack rows split: inputs (`SYNC`, `FM`) above outputs (`SIN`, `TRI`, `SQR`, `SAW`); `getLfoInstant`/`getLfo2Instant` stable getters added to `MoogShell` and passed as `getLedValue`.
+- `useVoxAudio.js`: Added `lfo1modGain`/`lfo2modGain` (`Tone.Gain(0)`) — permanent wired to `lfo.frequency`/`lfo2.frequency`; `lfoWaveAnalyser`/`lfo2WaveAnalyser` (`Tone.Analyser('waveform', 32)`) dead-end taps on each LFO; `lfo-fm`/`lfo2-fm` jacks → the mod Gain nodes; `updateLfoParams`/`updateLfo2Params` extended with `modDepth` param → `safeRamp(lfo1modGain.gain, modDepth * 10)` (0–10 Hz swing range); `getLfoInstant`/`getLfo2Instant` callbacks read `data[last]` from each waveform analyser, normalized `(v+1)/2`, guarded by `isPoweredRef` so LED stays dim when off.
+- `VoxShell.jsx`: `LfoModule` gains `modDepth` state + `MOD` sm-knob; jack rows split: inputs (`SYNC`, `FM`) above outputs (`SIN`, `TRI`, `SQR`, `SAW`); `getLfoInstant`/`getLfo2Instant` stable getters added to `VoxShell` and passed as `getLedValue`.
 
 **Gemini corrections:** `LFOModule.jsx` rejected (co-location rule). JS formula for rate calculation is impossible for audio-rate CV — the correct architecture is a `Tone.Gain` scaler node feeding `lfo.frequency` (same as `vcfenv` pattern). Smoothed `Tone.Meter` doesn't pulse at LFO rate; waveform analyser `data[last]` does. `isPoweredRef` guard prevents 50%-brightness LED when synth is off (analyser returns 0 → `(0+1)/2 = 0.5` without the guard).
 
@@ -1727,13 +1736,13 @@ Added rate FM input and MOD DEPTH knob to both LFO modules, plus waveform-analys
 
 ### [2026-06-10] BBD Chorus Module
 
-**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `useMoogAudio.js`
+**Files modified:** `VoxShell.jsx`, `VoxShell.module.css`, `useVoxAudio.js`
 
 Added a patchable BBD Bucket Brigade Chorus effect module to Row 2.
 
-- `useMoogAudio.js`: `n.chorus = new Tone.Chorus({ frequency:1.5, delayTime:3.5, depth:0.7, wet:0.0 })`; added to `powerOn`/`powerOff`/cleanup start+stop arrays; `chorus-in`/`chorus-out` jacks in buildJackMap; `updateChorusParams({ rate, depth, wet })` — rate uses exponential `0.1*50^rate` mapping (0.1–5 Hz), depth uses direct assignment (plain JS setter, not AudioParam — `safeRamp` would throw), wet uses `safeRamp`.
-- `MoogShell.jsx`: `ChorusModule` co-located; RATE LED uses a `useCallback` getter that computes `Math.abs(sin(Date.now()*hz))` against a `rateHzRef` updated in the param `useEffect` — stable reference so Led's rAF never restarts. Knobs: RATE (md), DEPTH (md), MIX (md). Jacks: IN, OUT.
-- `MoogShell.module.css`: `.tierRow2` updated to `1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr 0.8fr` (7 col).
+- `useVoxAudio.js`: `n.chorus = new Tone.Chorus({ frequency:1.5, delayTime:3.5, depth:0.7, wet:0.0 })`; added to `powerOn`/`powerOff`/cleanup start+stop arrays; `chorus-in`/`chorus-out` jacks in buildJackMap; `updateChorusParams({ rate, depth, wet })` — rate uses exponential `0.1*50^rate` mapping (0.1–5 Hz), depth uses direct assignment (plain JS setter, not AudioParam — `safeRamp` would throw), wet uses `safeRamp`.
+- `VoxShell.jsx`: `ChorusModule` co-located; RATE LED uses a `useCallback` getter that computes `Math.abs(sin(Date.now()*hz))` against a `rateHzRef` updated in the param `useEffect` — stable reference so Led's rAF never restarts. Knobs: RATE (md), DEPTH (md), MIX (md). Jacks: IN, OUT.
+- `VoxShell.module.css`: `.tierRow2` updated to `1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr 0.8fr` (7 col).
 
 **Gemini corrections:** `ChorusModule.jsx` rejected (co-location rule). `Tone.Chorus.depth` is a plain JS setter not an AudioParam — `safeRamp` would have thrown. `chorus.start()`/`.stop()` not mentioned by Gemini. "Processor tier" doesn't exist — placed in Row 2. Rate range narrowed to chorus-appropriate 0.1–5 Hz (not LFO's 0.1–30 Hz).
 
@@ -1743,13 +1752,13 @@ Added a patchable BBD Bucket Brigade Chorus effect module to Row 2.
 
 ### [2026-06-10] VCF 2 — Second Voltage Controlled Filter
 
-**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `useMoogAudio.js`
+**Files modified:** `VoxShell.jsx`, `VoxShell.module.css`, `useVoxAudio.js`
 
 Added a second independent VCF module to Row 2.
 
-- `useMoogAudio.js`: Added `vcf2: Tone.Filter(20kHz, lowpass, -24)` + `vcf2cv1/vcf2cv2/vcf2env` Gain scalers (×5000/×5000/×1000); permanent scaler→frequency connections; `vcf2-in/cv1/cv2/env/out` jacks in buildJackMap; `updateVcf2Params` callback.
-- `MoogShell.jsx`: `VcfModule` gains `number = 1` prop; jack IDs derived as `vcf` (n=1) or `vcf${n}` (n>1); plate header now shows `plateNum`; second instance `<VcfModule number={2} onParamUpdate={audio.updateVcf2Params} />` added to Row 2.
-- `MoogShell.module.css`: `.tierRow2` updated from `1.5fr 1fr 1fr 0.75fr 0.75fr` (5 col) to `1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr` (6 col).
+- `useVoxAudio.js`: Added `vcf2: Tone.Filter(20kHz, lowpass, -24)` + `vcf2cv1/vcf2cv2/vcf2env` Gain scalers (×5000/×5000/×1000); permanent scaler→frequency connections; `vcf2-in/cv1/cv2/env/out` jacks in buildJackMap; `updateVcf2Params` callback.
+- `VoxShell.jsx`: `VcfModule` gains `number = 1` prop; jack IDs derived as `vcf` (n=1) or `vcf${n}` (n>1); plate header now shows `plateNum`; second instance `<VcfModule number={2} onParamUpdate={audio.updateVcf2Params} />` added to Row 2.
+- `VoxShell.module.css`: `.tierRow2` updated from `1.5fr 1fr 1fr 0.75fr 0.75fr` (5 col) to `1.1fr 1.1fr 1fr 1fr 0.75fr 0.75fr` (6 col).
 
 **Row 2 is now:** VCF 1 + VCF 2 + LFO 1 + LFO 2 + Rev 1 + Rev 2
 
@@ -1757,9 +1766,9 @@ Added a second independent VCF module to Row 2.
 
 ### [2026-06-10] Rack Expansion, UI Polish, Pitch Architecture Overhaul & Chord-Seq Routing
 
-**Files modified:** `MoogShell.jsx`, `MoogShell.module.css`, `MoogKnob.module.css`, `useMoogAudio.js`
+**Files modified:** `VoxShell.jsx`, `VoxShell.module.css`, `VoxKnob.module.css`, `useVoxAudio.js`
 
-**Global font size pass (~30% bump):** All module labels, jack labels, knob labels, selector values, plate titles, nameplates, and quantizer display text bumped across `MoogShell.module.css` and `MoogKnob.module.css`. Chord seq root buttons 7→14px, chord type buttons 5→10px; button heights increased to match.
+**Global font size pass (~30% bump):** All module labels, jack labels, knob labels, selector values, plate titles, nameplates, and quantizer display text bumped across `VoxShell.module.css` and `VoxKnob.module.css`. Chord seq root buttons 7→14px, chord type buttons 5→10px; button heights increased to match.
 
 **CP3 Mixer removed:** Component, 5 `Tone.Gain` nodes (`cp3ch1–4`, `cp3bus`), 5 jacks, and 4 internal `connect()` calls all deleted. Row 2 grid updated from 4 to 3 columns.
 
@@ -1771,7 +1780,7 @@ Added a second independent VCF module to Row 2.
 - Row 3: VCA 2 + VCA 3 (`vca2/3-in/cv/out` jacks, `updateVca2/3Params`) + ENV 3 (`env3-*` jacks, `env3Meter`, full gate routing)
 - Row 4: Second 960 Sequencer stacked under first (`.seqStack` flex column, `flex: 1` on `.module` fills height); `seq2-*` jacks (`seq2-pitch-out`, `seq2-gate-out`, etc.), `seq2Loop`, `updateSeq2Steps`, `setSeq2StepCallback`
 
-**Bug fix — sequencer jack ID collision:** Both `SequencerModule` instances were registering identical jack IDs (`seq-pitch-out` etc.), causing the second to overwrite the first in `MoogPatchContext.jackRefs`. `SequencerModule` now accepts `number` prop; jack prefix is `seq` or `seq2`.
+**Bug fix — sequencer jack ID collision:** Both `SequencerModule` instances were registering identical jack IDs (`seq-pitch-out` etc.), causing the second to overwrite the first in `VoxPatchContext.jackRefs`. `SequencerModule` now accepts `number` prop; jack prefix is `seq` or `seq2`.
 
 **VCO CV-in override architecture:** `connect()` now zeroes `vco.frequency.value` when any source is patched to `vco*-cv`, making the source the sole pitch provider (base=0 + source = correct Hz). `updateVcoParams` suppresses the frequency write while CV is connected (via `connectionsRef` scan); `vcoKnobHzRef` stores the last knob Hz for restoration on disconnect. Fixes pitch being wrong for ALL CV paths (sequencer, quantizer, chord seq).
 
@@ -1801,7 +1810,7 @@ Added a second independent VCF module to Row 2.
 **Oscilloscope waveform not reaching edge (`Oscilloscope.jsx` + `Oscilloscope.module.css`):**
 The `<canvas>` element (200×64 attribute) had `display: block; width: 100%` CSS but no explicit `height`. Replaced elements maintain their intrinsic aspect ratio when only width is constrained — on a ~350px-wide I/O module the canvas rendered at ~112px tall (350 × 64/200) instead of 64px. Added `height: 64px` to `.canvas` to lock it to its intended height regardless of display width. The waveform width was also fixed by syncing `canvas.width = canvas.offsetWidth` each rAF frame so drawing always spans the full CSS display width.
 
-**Rack rendering outside viewport (two-pass fix, `MoogShell.jsx`):**
+**Rack rendering outside viewport (two-pass fix, `VoxShell.jsx`):**
 - **Root cause 1** (oscilloscope): the oversized canvas nearly doubled the I/O module height, making total rack height ~1490px+ and forcing an extreme scale factor.
 - **Root cause 2** (fit() loop instability): the `fitting` boolean + `setTimeout(0)` reset had a race condition — `setTimeout` could fire before the ResizeObserver callback on some browsers, allowing re-entrant fit() calls with stale state.
 - **Root cause 3** (display:none to block): `fit()` was not re-running when the Moog page was navigated back to (Root.js sets inactive pages to `display:none`).
@@ -1836,26 +1845,26 @@ The `<canvas>` element (200×64 attribute) had `display: block; width: 100%` CSS
 ### [2026-06-07] Moog Phase 26 — Chord Step-Editor Implementation
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js`:
+- `src/components/VoxModular/useVoxAudio.js`:
   1. **SCALE_DEFS extended** with 7 chord type interval arrays: `CMAJ [0,4,7]`, `CMIN [0,3,7]`, `CDOM [0,4,7,10]`, `CMAJ7 [0,4,7,11]`, `CMIN7 [0,3,7,10]`, `CSUS4 [0,5,7]`, `CDIM [0,3,6]`. The quantizer worklet already accepts arbitrary interval arrays — no worklet changes needed.
   2. **`CHORD_BASE_HZ = 130.81`** (C3) — root Hz base. `rootClass 0-11 → C3…B3` (130–247 Hz). All values > 10 Hz so qnt-transpose-in analyser threshold correctly detects them.
   3. **`chordSeqStepsRef`** now stores `{ rootClass: 0-11, chordType: string }` per step. Default: I-IV-V-I (C, C, F, F, G, G, C, C).
   4. **`chordSeqChordCbRef`** + **`setChordSeqChordCallback`** — fires `fn(rootClass, chordType)` on each chord step advance.
   5. **Chord loop** updated: Hz from `CHORD_BASE_HZ * 2^(rootClass/12)`; fires both step LED callback and chord callback.
 
-- `src/components/MoogModular/MoogShell.jsx`:
-  1. **`CHORD_TYPES` / `CHORD_TYPE_LABELS`** — module-level constants; used in ChordSeqModule AND MoogShell's chord callback (separate data planes: UI display vs postMessage).
+- `src/components/VoxModular/VoxShell.jsx`:
+  1. **`CHORD_TYPES` / `CHORD_TYPE_LABELS`** — module-level constants; used in ChordSeqModule AND VoxShell's chord callback (separate data planes: UI display vs postMessage).
   2. **`ChordSeqModule` rewritten**: steps have `{ rootClass, chordType }`; 8-column `.chordSeqGrid`; each step column: LED + `.chordSeqRoot` button (cycles 12 notes on click) + `.chordSeqType` button (cycles 7 chord types on click). Clock div selector and ROOT CV jack preserved.
-  3. **MoogShell** adds `chordMapRef` (useRef) and a `useEffect` registering the chord callback: calls `updateQuantizerParams({ root, scale: chordType })` AND writes chord type label to `chordMapRef.current.textContent`. Both are DOM mutations — no React re-render.
+  3. **VoxShell** adds `chordMapRef` (useRef) and a `useEffect` registering the chord callback: calls `updateQuantizerParams({ root, scale: chordType })` AND writes chord type label to `chordMapRef.current.textContent`. Both are DOM mutations — no React re-render.
   4. **`QuantizerModule`** accepts `chordMapRef` prop; attaches it to a new `.qntExtChordType` span in the EXT row. Root note span (rAF) and chord type span (chord callback) are separate DOM elements — no write conflicts.
 
-- `src/components/MoogModular/MoogShell.module.css`: `.chordSeqGrid`, `.chordSeqRoot`, `.chordSeqType`, `.qntExtChordType`.
+- `src/components/VoxModular/VoxShell.module.css`: `.chordSeqGrid`, `.chordSeqRoot`, `.chordSeqType`, `.qntExtChordType`.
 
 **Data flow:**
 ```
 ChordSeqModule step click → setSteps (React state) → onStepsChange → chordSeqStepsRef
 Tone.Loop tick → rootClass → CHORD_BASE_HZ * 2^(rc/12) → chordSeqPitchOut (Hz, audio domain)
-             → chordSeqChordCbRef → MoogShell callback:
+             → chordSeqChordCbRef → VoxShell callback:
                  → updateQuantizerParams({ root, scale: chordType }) → worklet postMessage
                  → chordMapRef.current.textContent = "maj7" (DOM mutation)
 ```
@@ -1863,7 +1872,7 @@ Tone.Loop tick → rootClass → CHORD_BASE_HZ * 2^(rc/12) → chordSeqPitchOut 
 **Chord-aware quantization:** When chord seq advances to "G CMIN7", the quantizer's scale becomes `[0,3,7,10]` with root=7 → snaps melody to G, Bb, D, F only.
 
 **Gemini plan corrections:**
-- `ChordSeqModule.jsx` — rejected. Co-located in MoogShell.jsx.
+- `ChordSeqModule.jsx` — rejected. Co-located in VoxShell.jsx.
 - `{ root, type, notes }` — `notes[]` redundant (derived). Correct: `{ rootClass, chordType }`.
 - "CHORD CV = Chord Program" — audio signals carry one float; chord type travels via postMessage, not CV.
 - Quantizer worklet changes — not needed; SCALE_DEFS extension + existing postMessage protocol suffices.
@@ -1873,12 +1882,12 @@ Tone.Loop tick → rootClass → CHORD_BASE_HZ * 2^(rc/12) → chordSeqPitchOut 
 ### [2026-06-07] Moog Phase 25 — Intelligent Patch-Sensing Transposition
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js`:
+- `src/components/VoxModular/useVoxAudio.js`:
   1. **`qntTransposeAnalyser`** — `new Tone.Analyser('waveform', 256)` in node creation. `Tone.Analyser` with waveform type calls `getFloatTimeDomainData`, which returns actual float values. A patched `chordSeqPitchOut` (ConstantSourceNode, offset = Hz) returns ~Hz in every sample; no cable returns zeros.
   2. **`'qnt-transpose-in'`** jack added to `buildJackMap` pointing to `n.qntTransposeAnalyser`.
   3. **`getQntTransposeData()`** — `useCallback`, returns `n.qntTransposeAnalyser.getValue()` (Float32Array of 256 samples).
 
-- `src/components/MoogModular/MoogShell.jsx` — `QuantizerModule` extended:
+- `src/components/VoxModular/VoxShell.jsx` — `QuantizerModule` extended:
   1. `getTransposeData` prop added.
   2. `transposeActiveRef`, `rootRef`, `lastExtNoteClassRef`, `extLedRef`, `extRootRef`, `extRowRef` refs.
   3. `useEffect([root])` keeps `rootRef` current for rAF closure reads.
@@ -1887,12 +1896,12 @@ Tone.Loop tick → rootClass → CHORD_BASE_HZ * 2^(rc/12) → chordSeqPitchOut 
   6. EXT status row (hidden by CSS `display: none`; shown via `extRowRef.current.style.display = 'flex'` in rAF). EXT LED + "EXT ROOT" label + current root note text — all DOM-mutated, zero React state.
   7. `qnt-transpose-in` (TRP) jack added alongside CV IN and OUT.
 
-- `src/components/MoogModular/MoogShell.module.css`: `.qntExtRow`, `.qntExtLed`, `.qntExtLabel`, `.qntExtDisplay`.
+- `src/components/VoxModular/VoxShell.module.css`: `.qntExtRow`, `.qntExtLed`, `.qntExtLabel`, `.qntExtDisplay`.
 
 **Why no worklet changes:** Root overrides happen at chord-change rate (~1–2 Hz at 120 BPM / 1 bar). Sending `port.postMessage` at 60 fps → delta check reduces actual messages to ≤ chord-change rate. No audio-rate accuracy needed; worklet already handles dynamic root updates.
 
 **Gemini plan corrections:**
-- `QuantizerModule.jsx` — rejected. Co-located in `MoogShell.jsx`.
+- `QuantizerModule.jsx` — rejected. Co-located in `VoxShell.jsx`.
 - `rawCV * 12 + baseRoot` — wrong. CV is Hz (32–1046 Hz), not 0–1. Correct: `midi = 69 + 12 * log2(hz / 440)`, then `noteClass = round(midi) % 12`.
 - "null check or patch-cable state tracker" — the analyser's zero-output with no input IS the cable detector. No separate tracking needed.
 - "Modify quantizer AudioWorklet" — not needed. Root updates via `port.postMessage` are adequate for musical tempo.
@@ -1902,26 +1911,26 @@ Tone.Loop tick → rootClass → CHORD_BASE_HZ * 2^(rc/12) → chordSeqPitchOut 
 ### [2026-06-07] Moog Phase 24 — Chord & Note Transposition Sequencer
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js`:
+- `src/components/VoxModular/useVoxAudio.js`:
   1. **`chordSeqPitchOut`** — `new Tone.Signal(SEQ_HZ_MIN)` in node creation; exposes `chordseq-cv-out` jack (same type as `seq-pitch-out`).
   2. **`chordSeqLoop`** — `new Tone.Loop` at configurable interval (default `'1m'`); advances 8 steps, sets Hz via `setValueAtTime`, fires LED callback.
   3. **`chordSeqLoopRef` / `chordSeqStepsRef` / `chordSeqCurrentStepRef` / `chordSeqStepCbRef` / `chordSeqDivisionRef`** — parallel to the 960 sequencer refs.
   4. **`powerOn` / `powerOff`** — chord loop started/stopped alongside the main seq loop; LEDs cleared on powerOff.
   5. **`updateChordSeqSteps`** / **`setChordSeqStepCallback`** / **`setChordSeqDivision`** — matching the existing sequencer export pattern. `setChordSeqDivision` writes `chordSeqLoopRef.current.interval` for immediate effect.
 
-- `src/components/MoogModular/MoogShell.jsx`:
+- `src/components/VoxModular/VoxShell.jsx`:
   - `CHORD_DIVS` / `CHORD_LABELS` module-level constants.
   - `ChordSeqModule` co-located function component: 8-step `chordSeqStep` columns (LED + sm knob), clock division selector (½ BAR / 1 BAR / 2 BAR / 4 BAR), `chordseq-cv-out` jack. LED animation via DOM `classList` — same pattern as `SequencerModule`.
   - Row 4 grid: `3.5fr 0.9fr 1fr` → `2.5fr 1fr 0.9fr 1fr` (960 Seq | Chord Seq | Quantizer | I/O).
 
-- `src/components/MoogModular/MoogShell.module.css`:
+- `src/components/VoxModular/VoxShell.module.css`:
   - `.chordSeqStep` — identical to `.seqStep` without the gate button space.
   - `.tierRow4` updated to 4 columns.
 
 **Killer patch:** `chordseq-cv-out → qnt-cv-in` → `qnt-cv-out → vco1-cv` with `seq-pitch-out → vco1-fm`. Chord seq sets root every bar; quantizer snaps it to scale; 960 seq plays melodic variation on top via FM modulation.
 
 **Gemini plan corrections:**
-- `ChordSeqModule.jsx` — rejected. Co-located in MoogShell.jsx.
+- `ChordSeqModule.jsx` — rejected. Co-located in VoxShell.jsx.
 - "patches into Base Frequency or Transposition input" — no special input needed; `vco-cv` is additive by design.
 - "Clock Division knob" — selector is correct for discrete musical values; a continuous knob can't map to `'2n'`/`'1m'`/`'2m'`/`'4m'` meaningfully.
 
@@ -1930,18 +1939,18 @@ Tone.Loop tick → rootClass → CHORD_BASE_HZ * 2^(rc/12) → chordSeqPitchOut 
 ### [2026-06-07] Moog Phase 23 — Multi-Channel Master Mixer
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Three additions:
+- `src/components/VoxModular/useVoxAudio.js` — Three additions:
   1. **`ioCh1`–`ioCh4`** — `new Tone.Gain(0.8)` in node creation block. Each connects to `n.master` (summing) and to a dedicated `Tone.Meter` tap (post-gain, so LEDs reflect actual contribution).
   2. **`ioCh1Meter`–`ioCh4Meter`** — `new Tone.Meter({ normalRange: true, smoothing: 0.2 })`. Dead-end side taps after each channel gain. `getMeterValue('ioCh1')` etc. already works via the existing `n[${id}Meter]` lookup convention.
   3. **`'io-in1'`–`'io-in4'` jacks** added to `buildJackMap` pointing to `n.ioCh1`–`n.ioCh4` as destinations. Legacy `'io-in'` → `n.master` preserved for patch compatibility.
   4. **`updateIoChannelVol(channelIndex, value)`** — single writer for ioCh1–ioCh4 gain params; uses `safeRamp` consistently with all other param writers.
 
-- `src/components/MoogModular/MoogShell.jsx` — Three additions:
+- `src/components/VoxModular/VoxShell.jsx` — Three additions:
   1. **`ZERO_GETTER`** — module-level `() => 0` constant; used as stable fallback for `Led.getValue` to prevent rAF restarts on render if `getChLevels` is ever undefined.
-  2. **`getIoCh1Level`–`getIoCh4Level`** — four stable `useCallback` getters in `MoogShell` (same pattern as `getLfoLevel`, `getEnv1Level` etc.).
+  2. **`getIoCh1Level`–`getIoCh4Level`** — four stable `useCallback` getters in `VoxShell` (same pattern as `getLfoLevel`, `getEnv1Level` etc.).
   3. **`IoModule`** — extended with `getChLevels` (array of 4) and `onChannelVolChange` props. New `chVols` state (`[0.8,0.8,0.8,0.8]`); `useEffect([chVols])` fires `onChannelVolChange(i+1, v)` for each channel. Four `.ioChRow` divs replace the single jack row: each row is `[activity LED] [CH n VOL sm-knob] [IN n jack]`. Legacy `io-in` kept at bottom below a divider (labeled "IN ✦" to distinguish it from the channel inputs).
 
-- `src/components/MoogModular/MoogShell.module.css` — Added `.ioChRow` (flex row, align-items center, gap 6px).
+- `src/components/VoxModular/VoxShell.module.css` — Added `.ioChRow` (flex row, align-items center, gap 6px).
 
 **Architecture notes:**
 - Single-writer rule preserved: `ioCh1–4.gain` owned exclusively by `updateIoChannelVol`; `master.volume` owned by `updateIoParams`; no overlap.
@@ -1950,7 +1959,7 @@ Tone.Loop tick → rootClass → CHORD_BASE_HZ * 2^(rc/12) → chordSeqPitchOut 
 
 **Gemini plan corrections:**
 - `masterIn`/`masterOut` naming — invented, doesn't exist. Real node is `n.master` (Tone.Volume).
-- `MasterMixerModule.jsx` — rejected (recurring error since Phase 3). All modules co-located in `MoogShell.jsx`.
+- `MasterMixerModule.jsx` — rejected (recurring error since Phase 3). All modules co-located in `VoxShell.jsx`.
 - Meter tap location: Gemini unspecified; tapped post-gain (from ioCh output) so LEDs show channel contribution, not raw input.
 - Stable `ZERO_GETTER` for `Led` fallback — inline `() => 0` would restart rAF on every render.
 
@@ -1976,9 +1985,9 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 
 ### [2026-06-07] Moog Phase 22 — Quantizer Improvements + VCO UI Cleanup
 
-**VCO modules (`MoogShell.jsx`):** Removed `cvMode` state, `cycleCvMode`, `handleTune`, `onTune` prop, and CV MODE/TUNE selectorRow. Reverted to original minimalist design (WAVE, RANGE, HARD SYNC for VCO2, jacks only).
+**VCO modules (`VoxShell.jsx`):** Removed `cvMode` state, `cycleCvMode`, `handleTune`, `onTune` prop, and CV MODE/TUNE selectorRow. Reverted to original minimalist design (WAVE, RANGE, HARD SYNC for VCO2, jacks only).
 
-**Quantizer additions (`useMoogAudio.js` + `public/quantizer-worklet.js` + `MoogShell.jsx` + `.module.css`):**
+**Quantizer additions (`useVoxAudio.js` + `public/quantizer-worklet.js` + `VoxShell.jsx` + `.module.css`):**
 - **BYPASS toggle** — when ON, worklet copies `inputCh[i]` directly to `outputCh[i]` without quantizing. Orange accent when active. Useful to confirm cable patching without quantization.
 - **IN LED** — worklet detects `hasSignal` (cable connected/disconnected) and posts `{ hasSignal }` on transitions only. DOM-mutated round LED in the Quantizer panel lights when a source is connected to `qnt-cv-in`.
 - **OCT SHIFT** — click-to-cycle selector (−3..+3 octaves). Applied in worklet as `bestMidi + octShift * 12` before Hz conversion. Solves additive VCO pitch alignment without touching VCO FREQ knob extensively.
@@ -1996,7 +2005,7 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 - `public/quantizer-worklet.js` — `QuantizerProcessor` AudioWorkletProcessor. Per-sample Hz→nearest-scale-note→Hz mapping. Algorithm: convert input Hz to fractional MIDI, iterate scale degrees, find nearest `12k + root + degree` to input MIDI, convert winner back to Hz. Delta-checked `port.postMessage({ noteClass })` fires only when the quantized note class changes — limits main-thread LED update traffic to ≤1 message per 128-sample block. Default scale: MAJ / C on construction; scale+root received via `port.onmessage`.
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Six additions:
+- `src/components/VoxModular/useVoxAudio.js` — Six additions:
   1. **`SCALE_DEFS`** — module-level constant (CHR/MAJ/MIN/PMAJ/PMIN arrays).
   2. **`quantizerStepCbRef`** — UI LED callback ref (same pattern as `seqStepCbRef`).
   3. **`quantizerParamsRef`** — buffers latest `{scale, root}` so config changes made before worklet loads are flushed correctly on load.
@@ -2004,9 +2013,9 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
   5. **`'qnt-cv-in'` / `'qnt-cv-out'` jacks** — added to `buildJackMap`. `qnt-cv-in.dest = n.quantizerNode ?? null` (deferred until worklet loads; jackMap rebuilt after). `qnt-cv-out.node = n.quantizerOut` (always live).
   6. **`updateQuantizerParams({scale, root})`** and **`setQuantizerCallback(fn)`** — matching the existing sequencer callback pattern. `updateQuantizerParams` buffers in `quantizerParamsRef` first, then posts to worklet (no-op if worklet not yet loaded).
 
-- `src/components/MoogModular/MoogShell.jsx` — `QuantizerModule` component co-located. State: `scale` ('MAJ'), `root` (0). `selectorRow` with SCALE and ROOT click-to-cycle selectors. 12-LED chromatic note display: DOM refs array + LED callback from `onSetCallback` — active LED `background/#5DCAA5 box-shadow` set directly (no React state). Two jacks: `qnt-cv-in`, `qnt-cv-out`. Mounted in Row 4 between Sequencer and I/O.
+- `src/components/VoxModular/VoxShell.jsx` — `QuantizerModule` component co-located. State: `scale` ('MAJ'), `root` (0). `selectorRow` with SCALE and ROOT click-to-cycle selectors. 12-LED chromatic note display: DOM refs array + LED callback from `onSetCallback` — active LED `background/#5DCAA5 box-shadow` set directly (no React state). Two jacks: `qnt-cv-in`, `qnt-cv-out`. Mounted in Row 4 between Sequencer and I/O.
 
-- `src/components/MoogModular/MoogShell.module.css` — `tierRow4` updated `3.5fr 1fr → 3.5fr 0.9fr 1fr`. Added `.qntLeds`, `.qntLedGroup`, `.qntLed`, `.qntLedBlack`, `.qntLedLabel` LED display styles.
+- `src/components/VoxModular/VoxShell.module.css` — `tierRow4` updated `3.5fr 1fr → 3.5fr 0.9fr 1fr`. Added `.qntLeds`, `.qntLedGroup`, `.qntLed`, `.qntLedBlack`, `.qntLedLabel` LED display styles.
 
 **Classic patch:**
 `seq-pitch-out → qnt-cv-in` → `qnt-cv-out → vco1-cv`. Sequencer steps are forced to the scale; notes outside the scale (step voltage knobs in between) snap to nearest scale degree. Set VCO1 FREQ to minimum for pure sequencer pitch control.
@@ -2014,8 +2023,8 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 **Gemini plan corrections:**
 - `Tone.Signal` bridge for real-time processing — impossible; `Tone.Signal` is a constant-value source, not a processor. AudioWorklet is the correct tool.
 - `Tone.Analyser` / `setInterval` for audio-rate processing — `Tone.Analyser` is read-only FFT display; `setInterval` runs on main thread at ~60fps with no audio-rate timing. AudioWorklet runs at 44100 Hz in the audio rendering thread.
-- `QuantizerModule.jsx` — all modules co-located in `MoogShell.jsx`. Documented since Phase 3.
-- `<MoogKnob>` for SCALE — click-to-cycle selector is correct for discrete options (same as WAVE/RANGE in VcoModule).
+- `QuantizerModule.jsx` — all modules co-located in `VoxShell.jsx`. Documented since Phase 3.
+- `<VoxKnob>` for SCALE — click-to-cycle selector is correct for discrete options (same as WAVE/RANGE in VcoModule).
 
 ---
 
@@ -2025,14 +2034,14 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 - `public/hard-sync-worklet.js` — `HardSyncProcessor` AudioWorkletProcessor. Phase-accumulator master tracking + slave reset on detected sawtooth discontinuities (`prev > 0 && m < prev - 0.5` threshold — robust for sawtooth and square master waveforms, immune to smooth waveforms). AudioParams: `slaveFreq` (k-rate, Hz), `slaveDetune` (k-rate, cents). Always outputs slave sawtooth; phase-resets to 0 on each master cycle boundary. Runs entirely in the audio rendering thread — zero main-thread overhead.
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Five additions:
+- `src/components/VoxModular/useVoxAudio.js` — Five additions:
   1. **`n.vco2syncOut`** — `new Tone.Gain(0)` created synchronously with other nodes. Acts as the gain-gate wrapper: gain=0 when HARD SYNC is off, ramps to 1 when on.
   2. **Async worklet load** — `rawCtx.audioWorklet.addModule('/hard-sync-worklet.js').then()` runs after node creation. On load: creates `AudioWorkletNode('hard-sync-processor')`, assigns to `n.hardSyncNode`; connects `n.vco2fm → hardSyncNode.parameters.get('slaveFreq')` (additive — FM/envelope modulation on vco2-fm now drives both VCO2.frequency AND the worklet slave, no extra cables needed); connects `hardSyncNode → n.vco2syncOut`; rebuilds jackMap. Race condition guard: `nodesRef.current = null` is set first in cleanup, so any in-flight `.then()` aborts on `if (!nodesRef.current) return`.
   3. **`vco2-sync-in` / `vco2-sync-out` jacks** — added to `buildJackMap`. `vco2-sync-in: { type:'in', dest: n.hardSyncNode ?? null }` (deferred to null before worklet loads; jackMap rebuilt after load). `vco2-sync-out: { type:'out', node: n.vco2syncOut }` (always live; outputs silence until toggle enables gain and worklet connects).
   4. **`updateVcoParams` dual-write** — when `vcoId === 'vco2'` and `n.hardSyncNode` exists, also calls `setTargetAtTime` on `slaveFreq` / `slaveDetune` AudioParams to keep the worklet's base frequency in sync with the FREQ/FINE knobs.
   5. **`setVco2SyncEnabled(enabled)`** — `safeRamp(n.vco2syncOut.gain, enabled ? 1 : 0, 0.01)`. 10ms click-free ramp. Returned from hook.
 
-- `src/components/MoogModular/MoogShell.jsx` — Two additions:
+- `src/components/VoxModular/VoxShell.jsx` — Two additions:
   1. **`VcoModule`** gains `onSyncChange` prop and `syncOn` state. When provided, renders a HARD SYNC selectorGroup (click to toggle, value green when ON) and a second `jackRow` with SYNC↓ (sync-in) and SYNC↑ (sync-out) jacks.
   2. **VCO2 call site** — `onSyncChange={audio.setVco2SyncEnabled}` wired.
 
@@ -2061,7 +2070,7 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 - `src/components/Workstation/transcribeAudio.js` — Monophonic pitch detection using `pitchfinder.YIN` (already in the project via `useAutotune.js`). Two-pass algorithm: (1) per-hop-frame (2048-sample window, 512-sample hop) — run YIN with RMS gate (0.01) to skip silence, convert Hz → note name via standard MIDI formula `69 + 12*log2(hz/440)`; (2) merge consecutive same-pitch frames into note events with `startBeat` (relative to region start), `durationBeats`, `velocity` (from peak RMS). Notes shorter than 80 ms are discarded as transients. Pure function, no Tone.js dependency.
 
 **Files modified:**
-- `src/components/Workstation/WorkstationShell.jsx` — Imports `transcribeAudio`. In `handleMoogRecord` stop branch: after the audio is decoded to a native `AudioBuffer`, calls `transcribeAudio(nativeBuf, Tone.Transport.bpm.value)`. Transcribed notes replace existing notes for that region via `setNotes(prev => [...prev.filter(n => n.regionId !== regionId), ...newNotes])` — re-recording overwrites the previous transcription. Note objects match the existing Workstation schema: `{ id, regionId, trackId, note, startBeat, durationBeats, velocity }`. Toast message reports detected count with hint to open piano roll.
+- `src/components/Workstation/WorkstationShell.jsx` — Imports `transcribeAudio`. In `handleVoxRecord` stop branch: after the audio is decoded to a native `AudioBuffer`, calls `transcribeAudio(nativeBuf, Tone.Transport.bpm.value)`. Transcribed notes replace existing notes for that region via `setNotes(prev => [...prev.filter(n => n.regionId !== regionId), ...newNotes])` — re-recording overwrites the previous transcription. Note objects match the existing Workstation schema: `{ id, regionId, trackId, note, startBeat, durationBeats, velocity }`. Toast message reports detected count with hint to open piano roll.
 
 **What Gemini thought needed building but already existed:**
 - NoteEditor component → `RegionEditor.jsx` already provides a full piano roll with note drag/resize
@@ -2080,46 +2089,46 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 **Scope implemented:** simultaneous page mounting + live Moog→Workstation audio bus + Workstation recorder button. Timeline clip integration is Phase 18+.
 
 **Files modified:**
-- `src/Root.js` — Full rewrite. Replaced single-page conditional render with a **visited-based lazy mount** strategy: pages mount on first visit and stay alive in the React tree (audio engines persist). CSS `display: none` hides inactive pages. Uses `useCallback` for stable `navigate` and `getMoogBusNode` references. `moogBusGetterRef` (ref, not state) stores the Moog's bus-node getter without causing Root re-renders.
+- `src/Root.js` — Full rewrite. Replaced single-page conditional render with a **visited-based lazy mount** strategy: pages mount on first visit and stay alive in the React tree (audio engines persist). CSS `display: none` hides inactive pages. Uses `useCallback` for stable `navigate` and `getVoxBusNode` references. `voxBusGetterRef` (ref, not state) stores the Moog's bus-node getter without causing Root re-renders.
 
-- `src/components/MoogModular/useMoogAudio.js` — Two additions:
-  1. **`n.moogBus = new Tone.Gain(1)`** in node creation block; hardwired `n.seqMasterGate.connect(n.moogBus)` as a dead-end side tap. Not connected to Destination — solely for the Workstation's `Tone.Recorder`.
-  2. **`getMoogBusNode()`** (`useCallback`, `[]` deps) — returns `nodesRef.current?.moogBus ?? null`. Available immediately after MoogShell mounts (the node exists from creation, not from `powerOn`).
+- `src/components/VoxModular/useVoxAudio.js` — Two additions:
+  1. **`n.voxBus = new Tone.Gain(1)`** in node creation block; hardwired `n.seqMasterGate.connect(n.voxBus)` as a dead-end side tap. Not connected to Destination — solely for the Workstation's `Tone.Recorder`.
+  2. **`getVoxBusNode()`** (`useCallback`, `[]` deps) — returns `nodesRef.current?.voxBus ?? null`. Available immediately after VoxShell mounts (the node exists from creation, not from `powerOn`).
 
-- `src/components/MoogModular/MoogShell.jsx` — Accepts `onBusReady(getter)` prop. A `useEffect([onBusReady, audio.getMoogBusNode])` registers `() => audio.getMoogBusNode()` with Root.js once on mount.
+- `src/components/VoxModular/VoxShell.jsx` — Accepts `onBusReady(getter)` prop. A `useEffect([onBusReady, audio.getVoxBusNode])` registers `() => audio.getVoxBusNode()` with Root.js once on mount.
 
-- `src/components/Workstation/Workstation.jsx` — Accepts and passes `getMoogBusNode` prop through to `WorkstationShell`.
+- `src/components/Workstation/Workstation.jsx` — Accepts and passes `getVoxBusNode` prop through to `WorkstationShell`.
 
 - `src/components/Workstation/WorkstationShell.jsx` — Four additions:
-  1. Accepts `getMoogBusNode` prop.
-  2. `moogRecording` / `moogRecordSec` state + `moogRecorderRef` / `moogBusNodeRef` / `moogTimerRef` / `moogRecordingRef` refs.
-  3. **`handleMoogRecord`** (`useCallback`, `[getMoogBusNode]` dep) — toggle start/stop: calls `getMoogBusNode()`, connects a `Tone.Recorder` to the bus, starts recording + 1-second interval counter. Stop: `recorder.stop()` → Blob → triggers download as `.webm`. Uses `moogRecordingRef` (not `moogRecording` state) inside the callback to avoid stale closures. `setToastMessage` for error states.
+  1. Accepts `getVoxBusNode` prop.
+  2. `voxRecording` / `voxRecordSec` state + `voxRecorderRef` / `voxBusNodeRef` / `voxTimerRef` / `voxRecordingRef` refs.
+  3. **`handleVoxRecord`** (`useCallback`, `[getVoxBusNode]` dep) — toggle start/stop: calls `getVoxBusNode()`, connects a `Tone.Recorder` to the bus, starts recording + 1-second interval counter. Stop: `recorder.stop()` → Blob → triggers download as `.webm`. Uses `voxRecordingRef` (not `voxRecording` state) inside the callback to avoid stale closures. `setToastMessage` for error states.
   4. Replaces the no-op `●` button with a live `● MOOG` / `■ Ns` toggle button.
 
 **How to use:**
-1. Visit Moog Modular, set up a patch, power on. Audio flows through `seqMasterGate → moogBus`.
+1. Visit Moog Modular, set up a patch, power on. Audio flows through `seqMasterGate → voxBus`.
 2. Navigate to Workstation (Moog stays alive, audio continues).
 3. Click **● MOOG** in the bottom transport bar. Recording starts (button shows elapsed seconds in red).
 4. Click **■ Ns** to stop. A `.webm` audio file downloads automatically.
 
 **Gemini plan corrections:**
-- `export const moogGlobalBus = new Tone.Gain(1)` at module level rejected — creates Tone.js nodes before AudioContext initialization. Used `useEffect` node creation instead.
+- `export const voxGlobalBus = new Tone.Gain(1)` at module level rejected — creates Tone.js nodes before AudioContext initialization. Used `useEffect` node creation instead.
 - "Always mount all pages unconditionally" rejected — VoxTool's getUserMedia, Workstation's audio engine, and Moog's Tone.js nodes would all initialize on app load before the user visits those pages. Visited-based lazy mount is correct.
-- "MoogPatchContext expose" rejected (7th time).
+- "VoxPatchContext expose" rejected (7th time).
 
 ---
 
 ### [2026-06-05] Moog Phase 16 — Studio Reverb Module
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Three additions:
+- `src/components/VoxModular/useVoxAudio.js` — Three additions:
   1. **`n.reverb`** — `new Tone.Freeverb({ roomSize: 0.7, dampening: 3000, wet: 0.0 })` in the `useEffect` node creation block. Uses `Tone.Freeverb` (not Gemini's `Tone.JCReverb`) because `Tone.Freeverb` is already proven in this codebase (VoxTool `arpReverbRef`). `wet: 0.0` on init so patching the reverb in is transparent until the user raises MIX.
   2. **`'reverb-in'` / `'reverb-out'` jacks** — added to `buildJackMap(n)` after VCA jacks. `reverb-in: { type: 'in', dest: n.reverb }`, `reverb-out: { type: 'out', node: n.reverb }`. Same dual-reference pattern as `vcf-in`/`vcf-out`.
   3. **`updateReverbParams({ roomSize, wet })`** — `useCallback`, empty deps, uses `safeRamp` on `n.reverb.roomSize` and `n.reverb.wet`. Returned from hook.
 
-- `src/components/MoogModular/MoogShell.jsx` — Added `ReverbModule` function component co-located in MoogShell.jsx (same pattern as all other modules). State: `roomSize=0.7`, `wet=0.0`. `useEffect([roomSize, wet])` → `onParamUpdate(...)`. Two `MoogKnob` elements (ROOM md, MIX md) + `Jack` pair (`reverb-in`, `reverb-out`). Mounted in Row 2 after `LfoModule`: `<ReverbModule onParamUpdate={audio.updateReverbParams} />`.
+- `src/components/VoxModular/VoxShell.jsx` — Added `ReverbModule` function component co-located in VoxShell.jsx (same pattern as all other modules). State: `roomSize=0.7`, `wet=0.0`. `useEffect([roomSize, wet])` → `onParamUpdate(...)`. Two `VoxKnob` elements (ROOM md, MIX md) + `Jack` pair (`reverb-in`, `reverb-out`). Mounted in Row 2 after `LfoModule`: `<ReverbModule onParamUpdate={audio.updateReverbParams} />`.
 
-- `src/components/MoogModular/MoogShell.module.css` — `.tierRow2` updated from `1.7fr 1.5fr 1fr` to `1.7fr 1.5fr 1fr 0.75fr` to accommodate the fourth module in Row 2.
+- `src/components/VoxModular/VoxShell.module.css` — `.tierRow2` updated from `1.7fr 1.5fr 1fr` to `1.7fr 1.5fr 1fr 0.75fr` to accommodate the fourth module in Row 2.
 
 **Patch path for reverb insert:**
 `vca-out → reverb-in` → `reverb-out → io-in` (reverb replaces the direct vca→io connection)
@@ -2127,51 +2136,51 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 **Gemini plan corrections:**
 - `Tone.JCReverb` → `Tone.Freeverb` (proven in this codebase; same parameters, no API risk).
 - `useRef(new Tone.Freeverb(...))` at hook call site rejected — moved to `useEffect` node creation block.
-- "Expose via MoogPatchContext" rejected — prop-drilled from MoogShell.
-- "ReverbModule.jsx" rejected — all modules co-located in MoogShell.jsx.
+- "Expose via VoxPatchContext" rejected — prop-drilled from VoxShell.
+- "ReverbModule.jsx" rejected — all modules co-located in VoxShell.jsx.
 
 ---
 
 ### [2026-06-05] Moog Phase 15 — Reactive LED Feedback
 
 **Files created:**
-- `src/components/MoogModular/Led.jsx` — Zero-re-render analog level LED. Props: `getValue` (fn → 0–1), `color` (`'green'`|`'yellow'`|`'red'`), `label` (optional string). `useEffect` starts a `requestAnimationFrame` loop that writes `el.style.opacity = 0.12 + val * 0.88` directly to the DOM ref — zero React state. `will-change: opacity` on the LED element keeps the animation on the GPU compositing layer (no layout/paint cost per frame). Cleanup: `cancelAnimationFrame` on unmount.
-- `src/components/MoogModular/Led.module.css` — Single-element LED design. Full glow state (radial gradient + two-layer box-shadow) always in CSS; `opacity` fades between `0.12` (authentic off-state dim dot) and `1.0` (fully lit with ambient glow). Green (ENV activity), yellow (LFO rate), red (master level indicator).
+- `src/components/VoxModular/Led.jsx` — Zero-re-render analog level LED. Props: `getValue` (fn → 0–1), `color` (`'green'`|`'yellow'`|`'red'`), `label` (optional string). `useEffect` starts a `requestAnimationFrame` loop that writes `el.style.opacity = 0.12 + val * 0.88` directly to the DOM ref — zero React state. `will-change: opacity` on the LED element keeps the animation on the GPU compositing layer (no layout/paint cost per frame). Cleanup: `cancelAnimationFrame` on unmount.
+- `src/components/VoxModular/Led.module.css` — Single-element LED design. Full glow state (radial gradient + two-layer box-shadow) always in CSS; `opacity` fades between `0.12` (authentic off-state dim dot) and `1.0` (fully lit with ambient glow). Green (ENV activity), yellow (LFO rate), red (master level indicator).
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Three additions:
+- `src/components/VoxModular/useVoxAudio.js` — Three additions:
   1. **4 `Tone.Meter` nodes** added to the `useEffect` node creation block (`lfoMeter`, `env1Meter`, `env2Meter`, `masterMeter`). Each has `normalRange: true` (returns 0–1, not dB) and tuned `smoothing` values: LFO `0.7` (averaged oscillating signal), ENV `0.25` (fast enough to track ADSR shape), master `0.2` (responsive to transients).
   2. **Meter connections** — all dead-end side taps. `n.lfo → n.lfoMeter`; `n.env1 → n.env1Meter`; `n.env2 → n.env2Meter`; `n.vca → n.masterMeter`. Master meter taps from `n.vca` (pre-master Volume) not `n.master` — after the -14 dB master attenuation, levels are too low (~0.07) to produce visible LED activity at default settings; tapping from VCA gives useful signal-present feedback.
   3. **`getMeterValue(id)`** (`useCallback`, empty deps) — looks up `n[${id}Meter]`, calls `.getValue()`, clamps to [0,1] with `isFinite` guard.
 
-- `src/components/MoogModular/MoogShell.jsx` — Four additions:
+- `src/components/VoxModular/VoxShell.jsx` — Four additions:
   1. `useCallback` added to React imports; `Led` imported.
-  2. Four stable getter closures created in `MoogShell` via `useCallback(() => audio.getMeterValue(id), [audio.getMeterValue])` — pre-bound so `Led`'s `useEffect` dep array never changes, preventing unnecessary rAF restarts on module re-renders.
+  2. Four stable getter closures created in `VoxShell` via `useCallback(() => audio.getMeterValue(id), [audio.getMeterValue])` — pre-bound so `Led`'s `useEffect` dep array never changes, preventing unnecessary rAF restarts on module re-renders.
   3. `LfoModule`, `EnvelopeModule`, `IoModule` signatures updated to accept `getLedValue` prop. `LfoModule`: LED in knobRow (yellow, before RATE). `EnvelopeModule`: LED in gateBtnRow (green, before GATE label). `IoModule`: LED in knobRow (red, after MASTER, labeled "PEAK").
   4. Stable getters wired at call sites: `getLedValue={getLfoLevel}`, `getLedValue={getEnv1Level}`, `getLedValue={getEnv2Level}`, `getLedValue={getMasterLevel}`.
 
 **Gemini plan corrections:**
 - `useRef(new Tone.Meter(...))` at hook call site — same bug documented in phases 3, 8, 9, 11, 13. Moved to `useEffect` node creation block.
-- "Open `LfoModule.jsx`" — no such file. All modules co-located in `MoogShell.jsx` (documented since phase 8).
-- "Expose via MoogPatchContext" — wrong abstraction rejected every phase. Prop-drilled from MoogShell.
+- "Open `LfoModule.jsx`" — no such file. All modules co-located in `VoxShell.jsx` (documented since phase 8).
+- "Expose via VoxPatchContext" — wrong abstraction rejected every phase. Prop-drilled from VoxShell.
 - "`lfo.current.connect(lfoMeter.current)`" — wrong. Nodes at `n.lfo`, not `lfo.current`.
 - Master meter tap moved from `n.master` to `n.vca` — at -14 dB master attenuation, `n.master` output is too attenuated for useful LED feedback at default settings.
-- Inline arrow prop `() => getMeterValue(id)` rejected — new function reference every render causes LED's `useEffect` to restart. Replaced with stable `useCallback` closures in MoogShell.
+- Inline arrow prop `() => getMeterValue(id)` rejected — new function reference every render causes LED's `useEffect` to restart. Replaced with stable `useCallback` closures in VoxShell.
 
 ---
 
 ### [2026-06-05] Moog Phase 14 — Vintage Studio Polish Pass
 
 **Files modified:**
-- `src/components/MoogModular/MoogShell.module.css` — Four additions:
+- `src/components/VoxModular/VoxShell.module.css` — Four additions:
   1. **Cabinet vignette + noise grain**: Two new background layers prepended to `.cabinet`'s existing 3-layer gradient. A `radial-gradient` vignette darkens corner/edges to simulate decades of oxidation. A tight 73° `repeating-linear-gradient` noise grain breaks up the smooth digital wood texture. No SVG data URIs or pseudo-elements — gradient layers are zero-overhead and avoid z-index collisions with patch cables (z-index: 50) and `will-change: transform` knobs.
   2. **Faceplate wear overlay**: Added `position: relative` to `.plate` and a `::after` pseudo-element — a subtle `radial-gradient` centered at 50% 42% (where main knobs sit) at ~2.5% white opacity. Simulates oil from thousands of finger turns wearing down the powder coat. `pointer-events: none` keeps all interactions intact.
   3. **`@keyframes flicker`**: 7-keyframe opacity oscillation (0.85–1.0 range) over a 5.3s loop. Keyframe positions are irregular to avoid a mechanical rhythm.
   4. **`.powerLamp` / `.powerLampOn`**: 10px jewel indicator light (dark red when off; bright red radial-gradient with 3-layer red glow when on). `.powerLampOn` applies `flicker` animation. Glow uses three stacked `box-shadow` layers at 6/16/30px blur to simulate lamp light bleeding onto the surrounding faceplate.
 
-- `src/components/MoogModular/MoogShell.jsx` — Added `<div className={styles.powerLamp} …/>` sibling to `<PowerSwitch>` inside `IoModule`'s `.switchRow`. Class list toggles `powerLampOn` based on `isPowered` prop (already available in scope).
+- `src/components/VoxModular/VoxShell.jsx` — Added `<div className={styles.powerLamp} …/>` sibling to `<PowerSwitch>` inside `IoModule`'s `.switchRow`. Class list toggles `powerLampOn` based on `isPowered` prop (already available in scope).
 
-- `src/components/MoogModular/Oscilloscope.module.css` — Three additions:
+- `src/components/VoxModular/Oscilloscope.module.css` — Three additions:
   1. `position: relative` on `.screen` — anchors the `::after` scanline overlay.
   2. Curved screen vignette via `radial-gradient` prepended to `.screen`'s background stack — sits behind the canvas but shows through cleared transparent pixels, darkening the corners to simulate CRT tube curvature.
   3. `.screen::after` — `repeating-linear-gradient` scanlines (1px dark / 2px transparent, 14% opacity, `pointer-events: none`). Paints above the canvas as a final CRT layer without affecting waveform interaction.
@@ -2187,40 +2196,40 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-06-05] Moog Phase 13 — 953 Keyboard Controller
 
 **Files created:**
-- `src/components/MoogModular/KeyboardModule.jsx` — playable 3-octave keyboard (C3–B5, 21 white + 15 black keys). Registers `kbd-pitch-out` and `kbd-gate-out` jacks via `MoogPatchContext` so patch cables connect them to the rest of the rack. Pointer events (single shared handler using `data-note-name`/`data-note-hz` attributes to avoid per-key closures) + window-level `pointerup` for reliable note-off on mouse-leave. Computer keyboard support: A W S E D F T G Y H U J K plays C4–C5. Note labels at each C key; computer shortcut hint on the key faces.
-- `src/components/MoogModular/KeyboardModule.module.css` — hardware-literal CSS. Walnut control strip matching the cabinet aesthetic; ivory white keys with `border-box` layout (28px each, shared left borders, bottom rounding); ebony black keys (`position:absolute`, 17px wide, z-index 2); pressed state via `transform: translateY(2px)` and darkened gradient; `drop-shadow` filter on the key bed for depth.
+- `src/components/VoxModular/KeyboardModule.jsx` — playable 3-octave keyboard (C3–B5, 21 white + 15 black keys). Registers `kbd-pitch-out` and `kbd-gate-out` jacks via `VoxPatchContext` so patch cables connect them to the rest of the rack. Pointer events (single shared handler using `data-note-name`/`data-note-hz` attributes to avoid per-key closures) + window-level `pointerup` for reliable note-off on mouse-leave. Computer keyboard support: A W S E D F T G Y H U J K plays C4–C5. Note labels at each C key; computer shortcut hint on the key faces.
+- `src/components/VoxModular/KeyboardModule.module.css` — hardware-literal CSS. Walnut control strip matching the cabinet aesthetic; ivory white keys with `border-box` layout (28px each, shared left borders, bottom rounding); ebony black keys (`position:absolute`, 17px wide, z-index 2); pressed state via `transform: translateY(2px)` and darkened gradient; `drop-shadow` filter on the key bed for depth.
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Four changes:
+- `src/components/VoxModular/useVoxAudio.js` — Four changes:
   1. **`kbdPitchOut`** Tone.Signal (init=SEQ_HZ_MIN) added to node creation; `kbd-pitch-out` jack added to jackMap; `kbd-gate-out` added as `{ isGate: true }` output.
   2. **`gateActionsRef` refactor** — rekeyed from `toJackId` to the full cable key (`"fromId→toId"`). Fixes a collision: if both `seq-gate-out` and `kbd-gate-out` connect to the same env jack, the second `set()` now uses a different key and neither overwrites the other. The sequencer loop now filters by `fromId === 'seq-gate-out'`; `updateKeyboard` filters by `'kbd-gate-out'`.
   3. **`connect()` / `disconnect()`** updated for the new gate key format.
   4. **`updateKeyboard(hz, isGateDown)`** — `kbdPitchOut.setValueAtTime(hz, Tone.now())` + iterate gate map (kbd-only) and `triggerAttack`/`triggerRelease`.
-- `src/components/MoogModular/MoogShell.jsx` — imported `KeyboardModule`; rendered below `.rack` inside `.cabinet` (inside the `MoogPatchProvider` so jacks can register, and inside the `PatchCableOverlay` z-index so cables reach keyboard jacks).
+- `src/components/VoxModular/VoxShell.jsx` — imported `KeyboardModule`; rendered below `.rack` inside `.cabinet` (inside the `VoxPatchProvider` so jacks can register, and inside the `PatchCableOverlay` z-index so cables reach keyboard jacks).
 
 **Gemini corrections:**
 - `useRef(new Tone.Signal(0))` at hook call site — nodes must be inside `useEffect`. Same bug as Phases 3, 8, 11, and the scaler phase.
 - "New `vco?-pitch-in` jacks" — unnecessary. `vco?-cv` already goes direct-to-frequency (previous CV scaling fix intentionally kept it as a bypass path for Hz-range sources). Keyboard patches there.
-- "Expose via MoogPatchContext" — rejected in every prior phase. Gate routing via `gateActionsRef` + `connect()`/`disconnect()`.
+- "Expose via VoxPatchContext" — rejected in every prior phase. Gate routing via `gateActionsRef` + `connect()`/`disconnect()`.
 
 ---
 
 ### [2026-06-04] Moog Phase 9 — 960 Sequential Controller
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Five changes:
+- `src/components/VoxModular/useVoxAudio.js` — Five changes:
   1. **`Tone.Signal seqPitchOut`** added to node creation block; exposed via `seq-pitch-out` jack (type `out`). Patch to any VCO `cv-in` for pitch control — outputs Hz in the C1–C6 range (same scale as the VCO FREQ knob; set VCO FREQ to minimum for pure sequencer pitch control).
   2. **`Tone.Loop`** created at node-init time (not in `powerOn`) for correct Tone.js lifecycle. Fires every `'8n'` on `Tone.Transport`. Loop callback: advances `seqCurrentStepRef` (0–7), calls `n.seqPitchOut.setValueAtTime(hz, time)` for sample-accurate pitch, triggers/releases connected envelopes at 80% gate width, and calls `seqStepCbRef.current(idx)` for DOM-direct LED animation.
   3. **Gate routing** — `env1-gate` / `env2-gate` jacks upgraded from deferred `dest:null` to `{ isGate:true, envId }`. `seq-gate-out` is `{ type:'out', isGate:true }`. `connect()` detects the `isGate` pair and registers the env in `gateActionsRef` (Map). `disconnect()` removes from the map. Programmatic `triggerAttack/Release` — `Tone.Envelope` has no CV-driveable AudioParam for gating.
   4. **Transport lifecycle** — `powerOn` calls `Tone.Transport.start()` + `seqLoop.start(0)`, resets `seqCurrentStepRef=-1` so first tick lands on step 0. `powerOff` calls `seqLoop.stop()`, `Tone.Transport.stop()`, fires `seqStepCbRef(-1)` to clear LEDs.
   5. **New exports**: `setTempo(bpm)` (ramps `Transport.bpm`), `updateSequencerSteps(steps[])` (writes `seqStepsRef` — zero React state), `setSeqStepCallback(fn|null)` (registers LED callback).
 
-- `src/components/MoogModular/MoogShell.jsx` — Added `SequencerModule` component (replaces `SequencerReservedPanel`). State: `steps[]` (8×`{voltage,gate}`), `tempo` (20–300 BPM). Tempo knob → `setTempoState` → `onTempoChange(bpm)` via `useEffect`. Steps → `onStepsChange(steps)` via `useEffect`. Step callback registered via `useEffect([onSetCallback])` — writes a DOM-mutation closure into `seqStepCbRef`; uses `ledRefs` array and `classList.add/remove` for zero re-render LED animation. Gate toggles are React state (click → `setSteps`) since they're discrete user actions, not audio-hot-path. Row 4 now uses `<SequencerModule>` + `<IoModule>`.
+- `src/components/VoxModular/VoxShell.jsx` — Added `SequencerModule` component (replaces `SequencerReservedPanel`). State: `steps[]` (8×`{voltage,gate}`), `tempo` (20–300 BPM). Tempo knob → `setTempoState` → `onTempoChange(bpm)` via `useEffect`. Steps → `onStepsChange(steps)` via `useEffect`. Step callback registered via `useEffect([onSetCallback])` — writes a DOM-mutation closure into `seqStepCbRef`; uses `ledRefs` array and `classList.add/remove` for zero re-render LED animation. Gate toggles are React state (click → `setSteps`) since they're discrete user actions, not audio-hot-path. Row 4 now uses `<SequencerModule>` + `<IoModule>`.
 
-- `src/components/MoogModular/MoogShell.module.css` — Updated `tierRow4` to `3.5fr 1fr` (sequencer takes most of the row). Added `.seqLayout`, `.seqCtrl`, `.seqBpmDisplay`, `.seqSteps`, `.seqStep`, `.seqLed`, `.seqLedActive`, `.seqGateBtn`, `.seqGateOn`.
+- `src/components/VoxModular/VoxShell.module.css` — Updated `tierRow4` to `3.5fr 1fr` (sequencer takes most of the row). Added `.seqLayout`, `.seqCtrl`, `.seqBpmDisplay`, `.seqSteps`, `.seqStep`, `.seqLed`, `.seqLedActive`, `.seqGateBtn`, `.seqGateOn`.
 
 **Gemini corrections:**
-- "Look up connected jacks in MoogPatchContext" — the audio hook has no context access. Gate routing uses `gateActionsRef` populated by the existing `connect()/disconnect()` pair.
+- "Look up connected jacks in VoxPatchContext" — the audio hook has no context access. Gate routing uses `gateActionsRef` populated by the existing `connect()/disconnect()` pair.
 - "Instantiate `Tone.Signal` at hook call site" — creates node during render, outside lifecycle. Moved to the `useEffect` node creation block alongside all other nodes.
 - "`Tone.Transport.start()` inside powerOn" — correct for the Moog page (separate route, only one page mounted at a time). Confirmed safe per ARCHITECTURE.md Tone.Transport coordination note.
 - Gemini proposed `useRef(new Tone.Loop(...))` at hook call site — same lifecycle issue as the Signal. Moved inside `useEffect`.
@@ -2230,12 +2239,12 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-06-04] Layout & Visual Fixes — Viewport Fit, Wood Removal, Screw Positioning
 
 **Files modified:**
-- `src/components/MoogModular/MoogShell.module.css` — Three rounds of layout fixes:
+- `src/components/VoxModular/VoxShell.module.css` — Three rounds of layout fixes:
   1. **Wood between rows removed**: `.tier` stripped of all walnut `background`, `border-radius`, `padding`, and `box-shadow` rings — now a plain transparent grid. `.rack` gets `background: #0a0908` (dark metal) and `gap: 2px`; the 2px gap shows as a thin rack rail between rows. Walnut now visible only at the outer `.cabinet` padding edges (reduced to `8px 10px 10px`). All internal spacing condensed: `.plate` padding `10px 13px 9px → 10px`, gap `7px → 5px`; `.plateBody` gap `6px → 4px`; `.knobRow/switchRow/selectorRow/jackRow/gateBtnRow` gaps and paddings reduced 2–4px each.
   2. **Screw overlap fixed**: Screws reduced to `7px × 7px`, positioned at `top/bottom: 2px, left/right: 2px` — corner of each screw reaches 9px from edge. Plate `padding: 10px` (all sides) ensures content starts at 10px — 1px clearance. Phillips cross arms reduced to 4px width/height.
   3. **`flex-shrink: 0` on `.cabinet`**: Prevents flexbox from shrinking the cabinet before `fit()` measures it, which was causing `el.offsetHeight` to return the shell height (not the cabinet's true content height), resulting in `scale = 1` and unscaled overflow.
 
-- `src/components/MoogModular/MoogShell.jsx` — `fit()` function overhauled:
+- `src/components/VoxModular/VoxShell.jsx` — `fit()` function overhauled:
   - Resets both `transform` and `marginBottom` before measuring so natural dimensions are always accurate.
   - Applies `marginBottom: Math.round(natH * (scale - 1))` (negative) after scaling — collapses the layout footprint left by `transform: scale()` (which is visual-only) so the flex container never exceeds `100vh`.
   - Added `ResizeObserver` on the cabinet alongside the `window.resize` listener — re-fires `fit()` if cabinet height settles after mount (font load, CSS cascade, etc.).
@@ -2245,58 +2254,58 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-06-04] Moog Phase 11 — Retro Oscilloscope Visualization
 
 **Files created:**
-- `src/components/MoogModular/Oscilloscope.jsx` — Zero-re-render canvas component. Receives `getData` prop (the `getOscilloscopeData` callback from `useMoogAudio`). `useEffect` starts a `requestAnimationFrame` loop that clears the canvas, calls `getData()`, then draws the waveform. Y-mapping: `(1 - sample) / 2 * H` maps +1→top, -1→bottom, 0→centre. Draws a flat centre line when `getData` returns null (pre-powerOn). Trace: `strokeStyle='#5DCAA5'` (VoxDAW accent mint), `lineWidth=1.5`, `shadowBlur=6` for phosphor glow. Shadow reset after each stroke to prevent bleed. `cancelAnimationFrame` on cleanup. Canvas fixed at 200×64 px.
-- `src/components/MoogModular/Oscilloscope.module.css` — CRT screen aesthetic: dark `#060e08` background, two-layer `repeating-linear-gradient` grid (8px horizontal divisions, 20px vertical divisions in dim green `rgba(80,180,120,0.10)`). Layered `box-shadow` for bezel recess and outer dark border.
+- `src/components/VoxModular/Oscilloscope.jsx` — Zero-re-render canvas component. Receives `getData` prop (the `getOscilloscopeData` callback from `useVoxAudio`). `useEffect` starts a `requestAnimationFrame` loop that clears the canvas, calls `getData()`, then draws the waveform. Y-mapping: `(1 - sample) / 2 * H` maps +1→top, -1→bottom, 0→centre. Draws a flat centre line when `getData` returns null (pre-powerOn). Trace: `strokeStyle='#5DCAA5'` (VoxDAW accent mint), `lineWidth=1.5`, `shadowBlur=6` for phosphor glow. Shadow reset after each stroke to prevent bleed. `cancelAnimationFrame` on cleanup. Canvas fixed at 200×64 px.
+- `src/components/VoxModular/Oscilloscope.module.css` — CRT screen aesthetic: dark `#060e08` background, two-layer `repeating-linear-gradient` grid (8px horizontal divisions, 20px vertical divisions in dim green `rgba(80,180,120,0.10)`). Layered `box-shadow` for bezel recess and outer dark border.
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Added `n.analyser = new Tone.Analyser('waveform', 512)` to the node creation block; connected via `n.master.connect(n.analyser)` (dead-end side tap — does not affect master→Destination path). `analyser` disposed in cleanup via the existing `Object.values(n).forEach(node => node.dispose())`. Added `getOscilloscopeData()` (`useCallback`, empty deps) that returns `n.analyser.getValue()` (Float32Array of 512 samples in [-1, 1]) or null.
-- `src/components/MoogModular/MoogShell.jsx` — Imported `Oscilloscope`. Added `getOscData` prop to `IoModule`; rendered `<Oscilloscope getData={getOscData} />` at top of `.plateBody`. Wired at call site: `getOscData={audio.getOscilloscopeData}`.
+- `src/components/VoxModular/useVoxAudio.js` — Added `n.analyser = new Tone.Analyser('waveform', 512)` to the node creation block; connected via `n.master.connect(n.analyser)` (dead-end side tap — does not affect master→Destination path). `analyser` disposed in cleanup via the existing `Object.values(n).forEach(node => node.dispose())`. Added `getOscilloscopeData()` (`useCallback`, empty deps) that returns `n.analyser.getValue()` (Float32Array of 512 samples in [-1, 1]) or null.
+- `src/components/VoxModular/VoxShell.jsx` — Imported `Oscilloscope`. Added `getOscData` prop to `IoModule`; rendered `<Oscilloscope getData={getOscData} />` at top of `.plateBody`. Wired at call site: `getOscData={audio.getOscilloscopeData}`.
 
 **Gemini corrections:**
 - `useRef(new Tone.Analyser(...))` at the hook call site creates the node during render, outside any lifecycle. Moved to the `useEffect` node creation block alongside all other nodes — correct lifecycle management.
-- No `MoogPatchContext` — same correction as every previous phase. Prop-drill: `MoogShell → IoModule → Oscilloscope`.
+- No `VoxPatchContext` — same correction as every previous phase. Prop-drill: `VoxShell → IoModule → Oscilloscope`.
 
 ---
 
 ### [2026-06-04] Moog Phase 10 — Master I/O & True Modular Routing
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Four changes:
+- `src/components/VoxModular/useVoxAudio.js` — Four changes:
   1. **CP3 internal wiring moved to `useEffect` (node creation)**: `cp3ch1-4 → cp3bus` now connects synchronously at node creation time. These are CP3's internal fixed architecture (channels always sum to bus), not "training wheels" — moved out of `powerOn` where they had a redundant `hardwiredRef` guard. `hardwiredRef` ref deleted.
   2. **VCA → Master hardwire removed from `powerOn`**: Audio no longer reaches the destination automatically. The user must patch `vca-out → io-in` (or any source → `io-in`) for sound to exit. True modular routing.
   3. **`io-in` jack added to `buildJackMap`**: `{ type: 'in', dest: n.master }` — replaces the former `io-spkr-out: { type: 'in', dest: null }`. Patching any source to `io-in` connects it to the `Tone.Volume` master node → Destination.
   4. **`updateIoParams({ volume })`** added (useCallback, empty deps): maps `volume` (0–1) linearly to -60 dB to +6 dB (`-60 + volume * 66`); uses `safeRamp` on `n.master.volume`. At default `volume=0.75`: ≈ -10.5 dB. Master `Tone.Volume` init changed from -12 → -14 dB (matches 0.7 knob default more closely).
-- `src/components/MoogModular/MoogShell.jsx` — `IoModule`: added `onParamUpdate` prop; `useEffect([masterVol])` → `onParamUpdate({ volume: masterVol })`; jack renamed `io-spkr-out` → `io-in` with label "IN". Wired at call site with `onParamUpdate={audio.updateIoParams}`.
+- `src/components/VoxModular/VoxShell.jsx` — `IoModule`: added `onParamUpdate` prop; `useEffect([masterVol])` → `onParamUpdate({ volume: masterVol })`; jack renamed `io-spkr-out` → `io-in` with label "IN". Wired at call site with `onParamUpdate={audio.updateIoParams}`.
 
 **Gemini corrections:**
 - CP3 internal wires are NOT training wheels — they're the mixer's fixed internal architecture. They were correctly kept, just moved to the right location (node creation, not `powerOn`).
 - VCA→Master WAS a training wheel and is correctly removed.
-- No `MoogPatchContext` — same correction as every previous phase.
+- No `VoxPatchContext` — same correction as every previous phase.
 - `safeRamp` used for master volume — consistent with the [0, 0] RangeError fix.
 
 ---
 
-### [2026-06-04] Bug Fix — Tone.js rampTo RangeError [0, 0] (`useMoogAudio.js`)
+### [2026-06-04] Bug Fix — Tone.js rampTo RangeError [0, 0] (`useVoxAudio.js`)
 
 **Root cause:** `Param.rampTo()` calls Tone.js's `assertRange(value, param.minValue, param.maxValue)`. When the AudioContext is **suspended** (before `powerOn()`), AudioParams report `minValue = maxValue = 0`, so any call to `rampTo` throws `RangeError: Value must be within [0, 0], got: 1e-7`. All module `useEffect` hooks fire on mount before POWER is clicked, which was calling `updateVcoParams`, `updateVcfParams`, etc. into a suspended context. Secondary issue: `resonance=0.0 → Q=0`, which Tone.js substitutes as `1e-7` for exponential ramps, hitting the same validation.
 
-**Fix (`useMoogAudio.js` only):** Added module-level `safeRamp(param, value, rampTime)` — uses `.rampTo()` when `Tone.context.state === 'running'`, direct `.value =` assignment otherwise. `.value` is always valid regardless of context state and pre-initialises the params so they are correct the moment `powerOn()` resumes the AudioContext. Replaced all 7 `.rampTo()` calls in `updateVcoParams`, `updateVcfParams`, `updateVcaParams`, and `updateLfoParams` with `safeRamp()`. Added `Math.max(0.001, resonance * 20)` floor on VCF Q — Q=0 fails exponential ramp validation even in a running context.
+**Fix (`useVoxAudio.js` only):** Added module-level `safeRamp(param, value, rampTime)` — uses `.rampTo()` when `Tone.context.state === 'running'`, direct `.value =` assignment otherwise. `.value` is always valid regardless of context state and pre-initialises the params so they are correct the moment `powerOn()` resumes the AudioContext. Replaced all 7 `.rampTo()` calls in `updateVcoParams`, `updateVcfParams`, `updateVcaParams`, and `updateLfoParams` with `safeRamp()`. Added `Math.max(0.001, resonance * 20)` floor on VCF Q — Q=0 fails exponential ramp validation even in a running context.
 
-**Gemini plan corrections:** Jack IDs were already in sync (no audit needed). The `MoogPatchContext connect()` null guards already existed. The jack map multi-waveform routing was already correct. Only the `rampTo` crash was real.
+**Gemini plan corrections:** Jack IDs were already in sync (no audit needed). The `VoxPatchContext connect()` null guards already existed. The jack map multi-waveform routing was already correct. Only the `rampTo` crash was real.
 
 ---
 
 ### [2026-06-03] Moog Phase 8 — LFO Audio Wiring
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Added `updateLfoParams({ rate, depth, type })` (useCallback, empty deps). Maps `rate` (0–1) exponentially to 0.1–30 Hz via `0.1 * Math.pow(300, rate)` and calls `n.lfo.frequency.rampTo(hz, 0.05)`. Maps `depth` (0–1) directly to `n.lfo.amplitude.rampTo(depth, 0.05)` — the LFO amplitude scales the ±1 output swing. Sets `n.lfo.type = type` for UI-driven waveform default (cable connections still override waveform at connect-time via `from.waveform` in `connect()`). Returned from hook.
-- `src/components/MoogModular/MoogShell.jsx` — Rewrote `LfoModule` in-place (same file, same pattern as all other modules). State: `rate=0.3`, `depth=0.5`, `waveType='sine'`. `useEffect` on all three calls `onParamUpdate({ rate, depth, type: waveType })`. Added click-to-cycle WAVE selector using existing `.selectorRow`/`.selectorGroup` CSS (consistent with VCO Phase 4). Renamed "LEVEL" knob → "DEPTH" (correct terminology for LFO modulation amount). SYNC toggle remains visual-only (audio SYNC is future work). Wired at call site: `<LfoModule onParamUpdate={audio.updateLfoParams} />`.
+- `src/components/VoxModular/useVoxAudio.js` — Added `updateLfoParams({ rate, depth, type })` (useCallback, empty deps). Maps `rate` (0–1) exponentially to 0.1–30 Hz via `0.1 * Math.pow(300, rate)` and calls `n.lfo.frequency.rampTo(hz, 0.05)`. Maps `depth` (0–1) directly to `n.lfo.amplitude.rampTo(depth, 0.05)` — the LFO amplitude scales the ±1 output swing. Sets `n.lfo.type = type` for UI-driven waveform default (cable connections still override waveform at connect-time via `from.waveform` in `connect()`). Returned from hook.
+- `src/components/VoxModular/VoxShell.jsx` — Rewrote `LfoModule` in-place (same file, same pattern as all other modules). State: `rate=0.3`, `depth=0.5`, `waveType='sine'`. `useEffect` on all three calls `onParamUpdate({ rate, depth, type: waveType })`. Added click-to-cycle WAVE selector using existing `.selectorRow`/`.selectorGroup` CSS (consistent with VCO Phase 4). Renamed "LEVEL" knob → "DEPTH" (correct terminology for LFO modulation amount). SYNC toggle remains visual-only (audio SYNC is future work). Wired at call site: `<LfoModule onParamUpdate={audio.updateLfoParams} />`.
 
 **Gemini corrections:**
 - `Tone.LFO` was already instantiated in Phase 3 (`n.lfo`) and already started in `powerOn` — Gemini's "instantiate and start immediately" would have created a duplicate.
 - Jack map already has 4 waveform output jacks (`lfo-sin/tri/sqr/saw`) — Gemini's proposed single `"lfo-out"` jack would be worse; the 4-jack design is authentic to the Moog hardware and cable-connects already set waveform.
-- No separate `LfoModule.jsx` file — all modules are co-located in `MoogShell.jsx`, and that pattern is correct.
-- No `MoogPatchContext` — same correction as all previous phases.
+- No separate `LfoModule.jsx` file — all modules are co-located in `VoxShell.jsx`, and that pattern is correct.
+- No `VoxPatchContext` — same correction as all previous phases.
 - Wave selector uses existing CSS (`.selectorRow`/`.selectorGroup`) from Phase 4 — zero new CSS needed.
 
 ---
@@ -2304,18 +2313,18 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-06-03] Moog Phase 6 — Envelope & VCA Wiring
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Added three new functions, all `useCallback` with `[]` deps:
+- `src/components/VoxModular/useVoxAudio.js` — Added three new functions, all `useCallback` with `[]` deps:
   - `updateEnvParams(envId, { attack, decay, sustain, release })` — looks up `nodesRef.current[envId]` (env1/env2, both `Tone.Envelope`); maps A/D/R exponentially `0.01 * Math.pow(1000, v)` (0.01s–10s) and sustain linearly (0–1); writes directly to `env.attack/decay/sustain/release` properties (no rampTo on time params — Tone.Envelope properties are not AudioParams).
   - `triggerGate(envId, isDown)` — calls `env.triggerAttack()` or `env.triggerRelease()` on the named envelope. Works with `Tone.Envelope` (CV source) — when patched via cable `env1-out → vca-cv`, the Web Audio additive connection gates the VCA gain. The VCA GAIN knob sets the bias (initial gain); set GAIN=0 for full envelope gating.
   - `updateVcaParams({ gain })` — ramps `n.vca.gain.rampTo(gain, 0.05)` (linear 0–1); VCA is `Tone.Gain`, gain is an AudioParam.
   - Returned all five new functions alongside existing ones.
-- `src/components/MoogModular/MoogShell.jsx` — `VcaModule`: added `onParamUpdate` prop, `useEffect([gain])` → `onParamUpdate({ gain })`; ENV AMT visual-only. `EnvelopeModule`: added `onParamUpdate` and `onGate` props; `useEffect([attack,decay,sustain,release])` → `onParamUpdate(envId, {...})`; added GATE pushbutton (`onMouseDown/Up/Leave` → `onGate(envId, bool)`, mouse-leave prevents stuck notes). All three wired in `MoogShell`.
-- `src/components/MoogModular/MoogShell.module.css` — Added `.gateBtnRow`, `.gateBtnLabel`, `.gateBtn` — round (22px) deep-red vintage pushbutton with radial-gradient face, embossed ring shadow, press animation (`translateY(2px) scale(0.94)`), hover glow.
+- `src/components/VoxModular/VoxShell.jsx` — `VcaModule`: added `onParamUpdate` prop, `useEffect([gain])` → `onParamUpdate({ gain })`; ENV AMT visual-only. `EnvelopeModule`: added `onParamUpdate` and `onGate` props; `useEffect([attack,decay,sustain,release])` → `onParamUpdate(envId, {...})`; added GATE pushbutton (`onMouseDown/Up/Leave` → `onGate(envId, bool)`, mouse-leave prevents stuck notes). All three wired in `VoxShell`.
+- `src/components/VoxModular/VoxShell.module.css` — Added `.gateBtnRow`, `.gateBtnLabel`, `.gateBtn` — round (22px) deep-red vintage pushbutton with radial-gradient face, embossed ring shadow, press animation (`translateY(2px) scale(0.94)`), hover glow.
 
 **Gemini corrections:**
 - `Tone.Envelope` ≠ `Tone.AmplitudeEnvelope` — Gemini assumed the latter, but Phase 3 instantiated `Tone.Envelope` (CV source). `triggerAttack/Release` still works on `Tone.Envelope`; it outputs a 0–1 signal that adds to `vca.gain` when patched. VCA GAIN knob documented as "initial gain / bias" — this is authentic Moog hardware behavior (the original 902 VCA had an INITIAL GAIN control).
 - ADSR time params are Envelope properties, not AudioParams — no `.rampTo()`, direct property assignment.
-- No `MoogPatchContext` changes — same wrong abstraction as Phases 4 and 5. Prop-drilled from `MoogShell`.
+- No `VoxPatchContext` changes — same wrong abstraction as Phases 4 and 5. Prop-drilled from `VoxShell`.
 - VCA gain kept linear 0–1 (not dB conversion) — `Tone.Gain.gain` is a linear AudioParam; direct mapping is correct and avoids unnecessary complexity.
 
 ---
@@ -2323,13 +2332,13 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-06-03] Moog Phase 5 — VCF Panel Wiring
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Added `updateVcfParams({ cutoff, resonance })` (useCallback, empty deps). Maps `cutoff` (0–1) exponentially to 20 Hz–20 kHz via `20 * Math.pow(1000, cutoff)` and calls `n.vcf.frequency.rampTo(hz, 0.05)`. Maps `resonance` (0–1) to Q 0–20 and calls `n.vcf.Q.rampTo(q, 0.05)`. Also corrected VCF init frequency from 2000 Hz → 20000 Hz to match the knob's fully-open default of `cutoffBase=1.0` — prevents UI/audio desync on first load. Returned from the hook.
-- `src/components/MoogModular/MoogShell.jsx` — Added `onParamUpdate` prop to `VcfModule`. Fixed defaults: `cutoff=1.0` (fully open, matching 20 kHz init), `res=0.0`, `kbd=0.0`. Added `useEffect([cutoff, res, onParamUpdate])` that calls `onParamUpdate({ cutoff, resonance: res })`. ENV AMT and KBD knobs remain visual-only state (Phase 6 will wire them). Wired `<VcfModule onParamUpdate={audio.updateVcfParams} />` in MoogShell.
+- `src/components/VoxModular/useVoxAudio.js` — Added `updateVcfParams({ cutoff, resonance })` (useCallback, empty deps). Maps `cutoff` (0–1) exponentially to 20 Hz–20 kHz via `20 * Math.pow(1000, cutoff)` and calls `n.vcf.frequency.rampTo(hz, 0.05)`. Maps `resonance` (0–1) to Q 0–20 and calls `n.vcf.Q.rampTo(q, 0.05)`. Also corrected VCF init frequency from 2000 Hz → 20000 Hz to match the knob's fully-open default of `cutoffBase=1.0` — prevents UI/audio desync on first load. Returned from the hook.
+- `src/components/VoxModular/VoxShell.jsx` — Added `onParamUpdate` prop to `VcfModule`. Fixed defaults: `cutoff=1.0` (fully open, matching 20 kHz init), `res=0.0`, `kbd=0.0`. Added `useEffect([cutoff, res, onParamUpdate])` that calls `onParamUpdate({ cutoff, resonance: res })`. ENV AMT and KBD knobs remain visual-only state (Phase 6 will wire them). Wired `<VcfModule onParamUpdate={audio.updateVcfParams} />` in VoxShell.
 
 **Gemini corrections:**
-- Rejected exposing `updateVcfParams` through `MoogPatchContext` — same wrong abstraction as Phase 4. Prop-drilling from `MoogShell` is correct.
+- Rejected exposing `updateVcfParams` through `VoxPatchContext` — same wrong abstraction as Phase 4. Prop-drilling from `VoxShell` is correct.
 - `vcf.current` in Gemini's description was wrong — node lives at `nodesRef.current.vcf`.
-- No `KnobPlaceholder` replacements needed — Phase 2 had already installed `MoogKnob` on all VCF controls.
+- No `KnobPlaceholder` replacements needed — Phase 2 had already installed `VoxKnob` on all VCF controls.
 - Fixed VCF node init frequency to 20000 Hz to match the UI default — Gemini's plan left an implicit init/UI mismatch.
 
 ---
@@ -2337,12 +2346,12 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-06-03] Moog Phase 4 — VCO Panel Wiring
 
 **Files modified:**
-- `src/components/MoogModular/useMoogAudio.js` — Added `updateVcoParams(vcoId, { hz, detune, type })` (useCallback, empty deps). Looks up `nodesRef.current[vcoId]` (vco1/vco2/vco3); calls `vco.frequency.rampTo(hz, 0.05)`, `vco.detune.rampTo(detune, 0.05)`, and `vco.type = type` for each provided field. Returned from the hook.
-- `src/components/MoogModular/MoogShell.jsx` — Rewrote `VcoModule`. Replaced the continuous `wave` knob (wrong for a discrete waveform selection) and the static `ToggleSwitch` pairs with click-to-cycle selectors. State: `freqBase` (0–1, default 0.5), `fineTune` (0–1, VCO2=0.52/VCO3=0.48 for built-in analog detuning), `waveType` (string, default 'sawtooth'), `rangeOctave` (int -2..+2, default 0). `useEffect` on all four: exponential Hz map (C1=32.703 Hz → C6=1046.502 Hz), `rangeOctave` octave multiplier, `fineTune` → ±100 cents, calls `onParamUpdate`. `VcoModule` receives `onParamUpdate` prop (prop-drilled from MoogShell, not via MoogPatchContext which owns cable state only). All three VcoModules wired: `onParamUpdate={audio.updateVcoParams}`.
-- `src/components/MoogModular/MoogShell.module.css` — Added `.selectorRow`, `.selectorGroup`, `.selectorLabel`, `.selectorValue` styles: inset dark display pill, hover/active accent, hardware-literal palette. Removed duplicate Phase 3 entry from Future Phases.
+- `src/components/VoxModular/useVoxAudio.js` — Added `updateVcoParams(vcoId, { hz, detune, type })` (useCallback, empty deps). Looks up `nodesRef.current[vcoId]` (vco1/vco2/vco3); calls `vco.frequency.rampTo(hz, 0.05)`, `vco.detune.rampTo(detune, 0.05)`, and `vco.type = type` for each provided field. Returned from the hook.
+- `src/components/VoxModular/VoxShell.jsx` — Rewrote `VcoModule`. Replaced the continuous `wave` knob (wrong for a discrete waveform selection) and the static `ToggleSwitch` pairs with click-to-cycle selectors. State: `freqBase` (0–1, default 0.5), `fineTune` (0–1, VCO2=0.52/VCO3=0.48 for built-in analog detuning), `waveType` (string, default 'sawtooth'), `rangeOctave` (int -2..+2, default 0). `useEffect` on all four: exponential Hz map (C1=32.703 Hz → C6=1046.502 Hz), `rangeOctave` octave multiplier, `fineTune` → ±100 cents, calls `onParamUpdate`. `VcoModule` receives `onParamUpdate` prop (prop-drilled from VoxShell, not via VoxPatchContext which owns cable state only). All three VcoModules wired: `onParamUpdate={audio.updateVcoParams}`.
+- `src/components/VoxModular/VoxShell.module.css` — Added `.selectorRow`, `.selectorGroup`, `.selectorLabel`, `.selectorValue` styles: inset dark display pill, hover/active accent, hardware-literal palette. Removed duplicate Phase 3 entry from Future Phases.
 
 **Gemini corrections:**
-- Rejected exposing `updateVcoParams` through `MoogPatchContext` — that context owns cable routing, not audio control. Prop-drilling from `MoogShell` is the correct and simpler path.
+- Rejected exposing `updateVcoParams` through `VoxPatchContext` — that context owns cable routing, not audio control. Prop-drilling from `VoxShell` is the correct and simpler path.
 - `vco.current` in Gemini's description was wrong — nodes live at `nodesRef.current[vcoId]`.
 - Replaced the continuous WAVE knob with a click-to-cycle selector — a 0–1 knob cannot map meaningfully to discrete waveform types.
 
@@ -2351,11 +2360,11 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-06-02] Moog Phase 3 — Audio Architecture & Patch Bridge
 
 **Files created:**
-- `src/components/MoogModular/useMoogAudio.js` — Tone.js audio hook. 15 nodes created in `useEffect([], [])`, disposed on unmount: `vco1/2/3` (Tone.Oscillator), `noiseW/P` (Tone.Noise), `cp3ch1–ch4` (Tone.Gain 0.8), `cp3bus` (Tone.Gain 0.7), `vcf` (Tone.Filter lowpass rolloff -24), `vca` (Tone.Gain 1.0), `env1/2` (Tone.Envelope), `lfo` (Tone.LFO), `master` (Tone.Volume -12 dB → Destination). `buildJackMap(n)` maps all 52 jack IDs to `{type:'out', node, waveform?}` or `{type:'in', dest}` port descriptors; deferred jacks have `dest: null` (silently no-op on connect). `powerOn()`: `await Tone.start()`, starts VCOs/noise/LFO, hardwires cp3ch1–4→cp3bus and vca→master (once only via `hardwiredRef`). `powerOff()`: stops sources. `connect(fromId, toId)`: sets VCO/LFO waveform if `from.waveform`, calls `from.node.connect(to.dest)`. `disconnect`: tracks connections in a Map, calls `node.disconnect(dest)`.
+- `src/components/VoxModular/useVoxAudio.js` — Tone.js audio hook. 15 nodes created in `useEffect([], [])`, disposed on unmount: `vco1/2/3` (Tone.Oscillator), `noiseW/P` (Tone.Noise), `cp3ch1–ch4` (Tone.Gain 0.8), `cp3bus` (Tone.Gain 0.7), `vcf` (Tone.Filter lowpass rolloff -24), `vca` (Tone.Gain 1.0), `env1/2` (Tone.Envelope), `lfo` (Tone.LFO), `master` (Tone.Volume -12 dB → Destination). `buildJackMap(n)` maps all 52 jack IDs to `{type:'out', node, waveform?}` or `{type:'in', dest}` port descriptors; deferred jacks have `dest: null` (silently no-op on connect). `powerOn()`: `await Tone.start()`, starts VCOs/noise/LFO, hardwires cp3ch1–4→cp3bus and vca→master (once only via `hardwiredRef`). `powerOff()`: stops sources. `connect(fromId, toId)`: sets VCO/LFO waveform if `from.waveform`, calls `from.node.connect(to.dest)`. `disconnect`: tracks connections in a Map, calls `node.disconnect(dest)`.
 
 **Files modified:**
-- `src/components/MoogModular/MoogPatchContext.jsx` — Added `onCableAdded`/`onCableRemoved` callback props to `MoogPatchProvider` (stored in refs — never in useCallback deps). Added `cableSetRef` (Set of `"fromId→toId"` strings) for synchronous O(1) duplicate detection. Added `cablesRef` (mirror of cables state) for synchronous cable lookup in `removeCable`. Added `setCables` wrapper that keeps `cablesRef` in sync. Audio bridge callbacks called OUTSIDE setState updaters to avoid React purity violations.
-- `src/components/MoogModular/MoogShell.jsx` — Added `import useMoogAudio`. Added `PowerSwitch` component (reuses `.toggle`/`.toggleLever` CSS, lever turns green on `isPowered`). Added `IoModule` component (plate header "I/O", POWER toggle, MASTER VOL knob, SPKR jack). `MoogShell` now calls `const audio = useMoogAudio()` and passes `onCableAdded={audio.connect}` / `onCableRemoved={audio.disconnect}` to `<MoogPatchProvider>`. Row 4 second panel replaced with `<IoModule isPowered={audio.isPowered} onPower={audio.powerOn} />`.
+- `src/components/VoxModular/VoxPatchContext.jsx` — Added `onCableAdded`/`onCableRemoved` callback props to `VoxPatchProvider` (stored in refs — never in useCallback deps). Added `cableSetRef` (Set of `"fromId→toId"` strings) for synchronous O(1) duplicate detection. Added `cablesRef` (mirror of cables state) for synchronous cable lookup in `removeCable`. Added `setCables` wrapper that keeps `cablesRef` in sync. Audio bridge callbacks called OUTSIDE setState updaters to avoid React purity violations.
+- `src/components/VoxModular/VoxShell.jsx` — Added `import useVoxAudio`. Added `PowerSwitch` component (reuses `.toggle`/`.toggleLever` CSS, lever turns green on `isPowered`). Added `IoModule` component (plate header "I/O", POWER toggle, MASTER VOL knob, SPKR jack). `VoxShell` now calls `const audio = useVoxAudio()` and passes `onCableAdded={audio.connect}` / `onCableRemoved={audio.disconnect}` to `<VoxPatchProvider>`. Row 4 second panel replaced with `<IoModule isPowered={audio.isPowered} onPower={audio.powerOn} />`.
 
 **How to hear audio (Phase 3 workflow):**
 1. Click POWER (I/O module, Row 4) — `Tone.start()` resumes AudioContext; VCOs drone at 220 Hz
@@ -2369,13 +2378,13 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-06-02] Moog Phase 7 — Visual Patch Cable Simulation
 
 **Files created:**
-- `src/components/MoogModular/MoogPatchContext.jsx` — React Context. `cables` state (`[{id,fromJackId,toJackId,color}]`); `jackRefs` mutable Map (id→HTMLElement, no re-renders on registration); `dragRef` (`{active,fromJackId,color}`). Functions: `registerJack/unregisterJack`, `startDrag` (pre-assigns cable color from 6-color vintage palette), `completeDrag` (deduplicates, advances color index), `cancelDrag`, `removeCable`. All callbacks have empty deps (only touch refs + stable `setCables`).
-- `src/components/MoogModular/PatchCableOverlay.jsx` — SVG `position:absolute; inset:0; overflow:visible; z-index:50`. `getSvgCoords` divides `getBoundingClientRect` screen-space deltas by `svgRect.width / svgEl.offsetWidth` to correctly handle `transform:scale()` on the cabinet parent. `cablePath` computes cubic bezier drooping downward (`drop = max(50, min(|dy|×0.4+65, 180))`). Committed cables rendered as `<path>` with `pointerEvents="stroke"` + drop-shadow filter; click removes cable. Active drag path updated imperatively via `setAttribute('d',...)` — zero React re-renders during drag. Window `mousemove`/`mouseup` always attached (early-exit when `dragRef.current.active === false`). Drop detection: `document.elementFromPoint` → ancestor walk for `data-jack-id`. `justEndedRef` prevents accidental cable removal on drag release. `useReducer` forceUpdate on `window.resize` repositions committed cables.
-- `src/components/MoogModular/PatchCableOverlay.module.css` — minimal overlay positioning.
+- `src/components/VoxModular/VoxPatchContext.jsx` — React Context. `cables` state (`[{id,fromJackId,toJackId,color}]`); `jackRefs` mutable Map (id→HTMLElement, no re-renders on registration); `dragRef` (`{active,fromJackId,color}`). Functions: `registerJack/unregisterJack`, `startDrag` (pre-assigns cable color from 6-color vintage palette), `completeDrag` (deduplicates, advances color index), `cancelDrag`, `removeCable`. All callbacks have empty deps (only touch refs + stable `setCables`).
+- `src/components/VoxModular/PatchCableOverlay.jsx` — SVG `position:absolute; inset:0; overflow:visible; z-index:50`. `getSvgCoords` divides `getBoundingClientRect` screen-space deltas by `svgRect.width / svgEl.offsetWidth` to correctly handle `transform:scale()` on the cabinet parent. `cablePath` computes cubic bezier drooping downward (`drop = max(50, min(|dy|×0.4+65, 180))`). Committed cables rendered as `<path>` with `pointerEvents="stroke"` + drop-shadow filter; click removes cable. Active drag path updated imperatively via `setAttribute('d',...)` — zero React re-renders during drag. Window `mousemove`/`mouseup` always attached (early-exit when `dragRef.current.active === false`). Drop detection: `document.elementFromPoint` → ancestor walk for `data-jack-id`. `justEndedRef` prevents accidental cable removal on drag release. `useReducer` forceUpdate on `window.resize` repositions committed cables.
+- `src/components/VoxModular/PatchCableOverlay.module.css` — minimal overlay positioning.
 
 **Files modified:**
-- `src/components/MoogModular/MoogShell.jsx` — `Jack` upgraded: `useRef`+`useEffect` for DOM registration, `data-jack-id` attribute, `cursor:crosshair`, `onMouseDown` → `startDrag`. All 52 jacks given unique IDs (VCO1-3: `vco{n}-{cv/fm/sin/tri/saw/sqr}`; Noise: `noise-{wht/pnk}`; CP3: `cp3-{in1-4/out}`; VCF: `vcf-{in/cv1/cv2/env/out}`; LFO: `lfo-{sync/sin/tri/sqr/saw}`; VCA: `vca-{in/cv/out}`; ENV1/2: `env{1|2}-{gate/trig/out}`; Mult: `mult-{a|b}{1-4}`). `VcoModule` derives prefix from `number` prop; `EnvelopeModule` derives from `label` via `.toLowerCase().replace(/\s+/g,'')`. Wrapped in `<MoogPatchProvider>` + `<PatchCableOverlay />` added as first child of `.cabinet`.
-- `src/components/MoogModular/MoogShell.module.css` — `position: relative` added to `.cabinet` to anchor the overlay.
+- `src/components/VoxModular/VoxShell.jsx` — `Jack` upgraded: `useRef`+`useEffect` for DOM registration, `data-jack-id` attribute, `cursor:crosshair`, `onMouseDown` → `startDrag`. All 52 jacks given unique IDs (VCO1-3: `vco{n}-{cv/fm/sin/tri/saw/sqr}`; Noise: `noise-{wht/pnk}`; CP3: `cp3-{in1-4/out}`; VCF: `vcf-{in/cv1/cv2/env/out}`; LFO: `lfo-{sync/sin/tri/sqr/saw}`; VCA: `vca-{in/cv/out}`; ENV1/2: `env{1|2}-{gate/trig/out}`; Mult: `mult-{a|b}{1-4}`). `VcoModule` derives prefix from `number` prop; `EnvelopeModule` derives from `label` via `.toLowerCase().replace(/\s+/g,'')`. Wrapped in `<VoxPatchProvider>` + `<PatchCableOverlay />` added as first child of `.cabinet`.
+- `src/components/VoxModular/VoxShell.module.css` — `position: relative` added to `.cabinet` to anchor the overlay.
 
 **Audio wiring deferred** to "Moog Phase 7 (audio wiring)" future phase, which requires Phase 3 first.
 
@@ -2384,13 +2393,13 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-06-02] Moog Phase 1.6 — Photorealistic UI Overhaul
 
 **Files modified:**
-- `src/components/MoogModular/MoogShell.module.css` — four targeted visual improvements: **(1) Multi-cabinet layout**: `.rack` is now a gap-only spacer (`gap: 14px`, no background); each `.tier` carries its own walnut `repeating-linear-gradient` background, `border-radius: 6px`, `padding: 6px 10px 8px`, and cabinet `box-shadow` with `inset 0 2px 10px rgba(0,0,0,0.80)` to simulate modules recessed into wood. The outer `.cabinet` is intentionally darker/more muted so each tier reads as its own cabinet unit. **(2) Faceplates**: base color darkened to `#141312`, added `border-right: 1px solid #1c1a18` for clean module edge definition. **(3) Typography**: `plateTitle` bumped to `#cec5a2` (more ivory/cream, matches vintage silkscreen) and `multBankLabel` updated to match. **(4) Jacks**: size 16→18px, ring warmed to `#888078`, thicker `border: 2.5px`, added `inset 0 1px 0 rgba(168,162,150,0.32)` top-edge ring highlight. Screws: slightly brighter face highlight.
-- `src/components/MoogModular/MoogShell.jsx` — removed 3 × `<TierSep />` (spacing now handled by `gap: 14px` on `.rack`).
+- `src/components/VoxModular/VoxShell.module.css` — four targeted visual improvements: **(1) Multi-cabinet layout**: `.rack` is now a gap-only spacer (`gap: 14px`, no background); each `.tier` carries its own walnut `repeating-linear-gradient` background, `border-radius: 6px`, `padding: 6px 10px 8px`, and cabinet `box-shadow` with `inset 0 2px 10px rgba(0,0,0,0.80)` to simulate modules recessed into wood. The outer `.cabinet` is intentionally darker/more muted so each tier reads as its own cabinet unit. **(2) Faceplates**: base color darkened to `#141312`, added `border-right: 1px solid #1c1a18` for clean module edge definition. **(3) Typography**: `plateTitle` bumped to `#cec5a2` (more ivory/cream, matches vintage silkscreen) and `multBankLabel` updated to match. **(4) Jacks**: size 16→18px, ring warmed to `#888078`, thicker `border: 2.5px`, added `inset 0 1px 0 rgba(168,162,150,0.32)` top-edge ring highlight. Screws: slightly brighter face highlight.
+- `src/components/VoxModular/VoxShell.jsx` — removed 3 × `<TierSep />` (spacing now handled by `gap: 14px` on `.rack`).
 
 **Gemini directives rejected:**
 - Layout restructuring (Row 1–4 signal-flow order is correct; Phase 1.5 work preserved)
 - 960 Sequencer 3×8 placeholder (Phase 9; building throw-away UI now is scope creep)
-- "Fixed Filter Bank" placeholder (not in MOOG_ARCHITECTURE.md, no signal-flow definition)
+- "Fixed Filter Bank" placeholder (not in VOX_ARCHITECTURE.md, no signal-flow definition)
 - Complete knob redesign ("black fluted skirts" — Phase 1c silver aesthetic is correct and verified)
 
 ---
@@ -2398,29 +2407,29 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-06-02] Moog Phase 2 — Tactile Knob Component
 
 **Files created:**
-- `src/components/MoogModular/MoogKnob.jsx` — fully controlled knob component. Props: `value` (0–1), `onChange`, `label`, `size` (xl/lg/md/sm), `defaultValue`. CSS rotation maps value → −135° to +135° (270° travel). Drag: `mousedown` captures `startY` + `startValue` via closure; `mousemove` on `window` computes `startValue + (startY − currentY) / range` where range is 100px normal / 400px with Shift held (4× fine mode). `mouseup` cleans up listeners + restores cursor. `dblclick` fires `onChange(defaultValue)`. `will-change: transform` on knob body for GPU compositing.
-- `src/components/MoogModular/MoogKnob.module.css` — complete knob CSS: silver radial-gradient face, dark indicator line (`.knobCap`), fixed scale tick marks (`.knobScale`/`.tickArm`/`.tickLine`/`.tickMajor`/`.tickNum`). `cursor: ns-resize`, `user-select: none`, `touch-action: none` on knob body.
+- `src/components/VoxModular/VoxKnob.jsx` — fully controlled knob component. Props: `value` (0–1), `onChange`, `label`, `size` (xl/lg/md/sm), `defaultValue`. CSS rotation maps value → −135° to +135° (270° travel). Drag: `mousedown` captures `startY` + `startValue` via closure; `mousemove` on `window` computes `startValue + (startY − currentY) / range` where range is 100px normal / 400px with Shift held (4× fine mode). `mouseup` cleans up listeners + restores cursor. `dblclick` fires `onChange(defaultValue)`. `will-change: transform` on knob body for GPU compositing.
+- `src/components/VoxModular/VoxKnob.module.css` — complete knob CSS: silver radial-gradient face, dark indicator line (`.knobCap`), fixed scale tick marks (`.knobScale`/`.tickArm`/`.tickLine`/`.tickMajor`/`.tickNum`). `cursor: ns-resize`, `user-select: none`, `touch-action: none` on knob body.
 
 **Files modified:**
-- `src/components/MoogModular/MoogShell.jsx` — removed `KnobPlaceholder`, `KnobScale`, `TICK_COUNT/MIN_ANGLE/MAX_ANGLE` (all moved to `MoogKnob.jsx`). Added `import { useState }` + `import MoogKnob`. Each module component now owns local `useState` for its knob values (`VcoModule` freq/fine/wave; `Cp3MixerModule` ch1–ch4/master; `VcfModule` cutoff/res/envAmt/kbd; `LfoModule` rate/level; `VcaModule` gain/envAmt; `EnvelopeModule` attack/decay/sustain/release; `NoiseModule` level). **Phase 3 must lift this local state up to `MoogShell` and convert to refs for audio wiring.**
+- `src/components/VoxModular/VoxShell.jsx` — removed `KnobPlaceholder`, `KnobScale`, `TICK_COUNT/MIN_ANGLE/MAX_ANGLE` (all moved to `VoxKnob.jsx`). Added `import { useState }` + `import VoxKnob`. Each module component now owns local `useState` for its knob values (`VcoModule` freq/fine/wave; `Cp3MixerModule` ch1–ch4/master; `VcfModule` cutoff/res/envAmt/kbd; `LfoModule` rate/level; `VcaModule` gain/envAmt; `EnvelopeModule` attack/decay/sustain/release; `NoiseModule` level). **Phase 3 must lift this local state up to `VoxShell` and convert to refs for audio wiring.**
 
 ---
 
 ### [2026-06-02] Moog Phase 1.5 — Massive Visual Expansion (4-Tier Rack)
 
 **Files modified:**
-- `src/components/MoogModular/MoogShell.jsx` — added 5 new module components: `NoiseModule` (LEVEL knob + WHITE/PINK jacks), `Cp3MixerModule` (4× CH sm knobs + MASTER lg + 5 jacks), `LfoModule` (RATE/LEVEL knobs + SYNC toggle + 5 output jacks), `MultiplesModule` (2× bank-of-4 vertical jack columns, no knobs), `SequencerReservedPanel` (blank + 960 SEQUENCER label). Reorganized from 3-tier to 4-tier rack: Row 1 (VCO×3 + Noise), Row 2 (CP3 + VCF + LFO), Row 3 (VCA + ENV×2 + Multiples), Row 4 (two Sequencer reserved blanks).
-- `src/components/MoogModular/MoogShell.module.css` — thickened walnut cabinet (padding 12→16px vertical, 20→28px horizontal; triple-ring box-shadow 3/6/8px vs old 2/4px); added diagonal micro-texture to `.plate` via two `repeating-linear-gradient` overlays at 118° and 208° (simulates stamped metal); strengthened directional knob drop shadow (6px/18px + 10px/28px ambient vs old 5px/14px); strengthened jack drop shadow (3px/8px); replaced `.tierVco/.tierFilt/.tierEnv` with `.tierRow1–4` grid classes; added `.multiplesGrid`/`.multBank`/`.multBankLabel` for Multiples layout; added `.blankSub` for SequencerReservedPanel.
-- `src/components/MoogModular/MOOG_ARCHITECTURE.md` — added §7 CP3 Mixer, §8 Noise Generator, §9 Multiples specs. Former §7 I/O renumbered to §10. Updated implementation roadmap to include Phase 1.5 ✅ and Phases 8a/8b.
-- `src/components/MoogModular/MOOG_PLAN.md` — this log entry; updated Phase 8 note to reflect visual is done; added Phase 8a (CP3 wiring) and Phase 8b (Noise wiring).
+- `src/components/VoxModular/VoxShell.jsx` — added 5 new module components: `NoiseModule` (LEVEL knob + WHITE/PINK jacks), `Cp3MixerModule` (4× CH sm knobs + MASTER lg + 5 jacks), `LfoModule` (RATE/LEVEL knobs + SYNC toggle + 5 output jacks), `MultiplesModule` (2× bank-of-4 vertical jack columns, no knobs), `SequencerReservedPanel` (blank + 960 SEQUENCER label). Reorganized from 3-tier to 4-tier rack: Row 1 (VCO×3 + Noise), Row 2 (CP3 + VCF + LFO), Row 3 (VCA + ENV×2 + Multiples), Row 4 (two Sequencer reserved blanks).
+- `src/components/VoxModular/VoxShell.module.css` — thickened walnut cabinet (padding 12→16px vertical, 20→28px horizontal; triple-ring box-shadow 3/6/8px vs old 2/4px); added diagonal micro-texture to `.plate` via two `repeating-linear-gradient` overlays at 118° and 208° (simulates stamped metal); strengthened directional knob drop shadow (6px/18px + 10px/28px ambient vs old 5px/14px); strengthened jack drop shadow (3px/8px); replaced `.tierVco/.tierFilt/.tierEnv` with `.tierRow1–4` grid classes; added `.multiplesGrid`/`.multBank`/`.multBankLabel` for Multiples layout; added `.blankSub` for SequencerReservedPanel.
+- `src/components/VoxModular/VOX_ARCHITECTURE.md` — added §7 CP3 Mixer, §8 Noise Generator, §9 Multiples specs. Former §7 I/O renumbered to §10. Updated implementation roadmap to include Phase 1.5 ✅ and Phases 8a/8b.
+- `src/components/VoxModular/VOX_PLAN.md` — this log entry; updated Phase 8 note to reflect visual is done; added Phase 8a (CP3 wiring) and Phase 8b (Noise wiring).
 
 ---
 
 ### [2026-05-28] Moog Phase 1c — Knob Silver Redesign + Scale Marks
 
 **Files modified:**
-- `src/components/MoogModular/MoogShell.jsx` — added `KnobScale` component (11 tick marks, 270° arc, −135° to +135°). `KnobPlaceholder` now wraps knob in `.knobWrap` alongside `<KnobScale>`. Numbers (0 / 5 / 10) shown on `xl` + `lg` sizes only; counter-rotated inline so they stay upright at all arc positions.
-- `src/components/MoogModular/MoogShell.module.css` — complete knob and jack visual overhaul.
+- `src/components/VoxModular/VoxShell.jsx` — added `KnobScale` component (11 tick marks, 270° arc, −135° to +135°). `KnobPlaceholder` now wraps knob in `.knobWrap` alongside `<KnobScale>`. Numbers (0 / 5 / 10) shown on `xl` + `lg` sizes only; counter-rotated inline so they stay upright at all arc positions.
+- `src/components/VoxModular/VoxShell.module.css` — complete knob and jack visual overhaul.
 
 **Knob changes:**
 - Top face: three-layer radial gradient — sharp specular highlight ellipse (top-left, simulating studio lamp) + warm secondary bounce + `#d8d5ce → #464640` silver-to-pewter base. Indicator line inverted to dark `#1a1a18` for contrast against silver.
@@ -2442,8 +2451,8 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-05-28] Moog Phase 1b — Layout Compaction + Wood-Border Fix
 
 **Files modified:**
-- `src/components/MoogModular/MoogShell.jsx` — removed all space-wasting elements: `tierLabel` (×3), `tierRail` (×2), `cabinetFloor`, `footerStamp`. Replaced `tierRail` with slim `<TierSep />` (4px machined-metal strip).
-- `src/components/MoogModular/MoogShell.module.css` — full layout compaction.
+- `src/components/VoxModular/VoxShell.jsx` — removed all space-wasting elements: `tierLabel` (×3), `tierRail` (×2), `cabinetFloor`, `footerStamp`. Replaced `tierRail` with slim `<TierSep />` (4px machined-metal strip).
+- `src/components/VoxModular/VoxShell.module.css` — full layout compaction.
 
 **Layout changes:**
 - `.shell`: `height: 100vh; justify-content: center; padding: 18px 16px` — whole cabinet fits in one viewport, no scrolling required.
@@ -2457,15 +2466,15 @@ Worklet compared `noteClass` (0–11) for change detection. C3 → C4 (both = cl
 ### [2026-05-27] Moog Phase 1 — Visual Shell + Routing
 
 **Files created:**
-- `src/components/MoogModular/MoogShell.jsx` — main container with 3-tier rack: VCO bank (×3), VCF + VCA, Envelope (×2) + blank panel. Sub-components: `Screw`, `KnobPlaceholder`, `Jack`, `ToggleSwitch`, `VcoModule`, `VcfModule`, `VcaModule`, `EnvelopeModule`, `BlankPanel`. No audio, no state — pure visual scaffold.
-- `src/components/MoogModular/MoogShell.module.css` — CSS-only 1960s hardware aesthetic: walnut wood cabinet (multi-layer `repeating-linear-gradient`), matte charcoal module faceplates, cream/ivory labels, Bakelite knob radial gradients, brass jack sockets, metallic corner screws.
-- `src/components/MoogModular/MOOG_PLAN.md` — this file; project roadmap and phase log.
-- `src/components/MoogModular/MOOG_ARCHITECTURE.md` — module signal-flow spec and Tone.js implementation blueprint.
+- `src/components/VoxModular/VoxShell.jsx` — main container with 3-tier rack: VCO bank (×3), VCF + VCA, Envelope (×2) + blank panel. Sub-components: `Screw`, `KnobPlaceholder`, `Jack`, `ToggleSwitch`, `VcoModule`, `VcfModule`, `VcaModule`, `EnvelopeModule`, `BlankPanel`. No audio, no state — pure visual scaffold.
+- `src/components/VoxModular/VoxShell.module.css` — CSS-only 1960s hardware aesthetic: walnut wood cabinet (multi-layer `repeating-linear-gradient`), matte charcoal module faceplates, cream/ivory labels, Bakelite knob radial gradients, brass jack sockets, metallic corner screws.
+- `src/components/VoxModular/VOX_PLAN.md` — this file; project roadmap and phase log.
+- `src/components/VoxModular/VOX_ARCHITECTURE.md` — module signal-flow spec and Tone.js implementation blueprint.
 
 **Files modified (one-time routing exception):**
-- `src/Root.js` — added `moogmodular` page branch, imported `MoogShell`
+- `src/Root.js` — added `voxmodular` page branch, imported `VoxShell`
 - `src/components/HomePage/HomePage.jsx` — added third nav button `[ Moog Modular ]`
-- `src/components/HomePage/HomePage.module.css` — added `.moogBtn` with walnut/brass border color scheme
+- `src/components/HomePage/HomePage.module.css` — added `.voxBtn` with walnut/brass border color scheme
 
 **Design decisions:**
 - Walnut grain via three layered `repeating-linear-gradient`s (no images, pure CSS)

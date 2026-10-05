@@ -1,6 +1,6 @@
 // VCO Core + Hard Sync AudioWorklet Processor (Moog Phase 68b)
 //
-// This is the full oscillator CORE for every Moog VCO — not just a sync helper.
+// This is the full oscillator CORE for every Vox Modular VCO — not just a sync helper.
 // A single phase accumulator generates FOUR simultaneous waveforms (sine,
 // triangle, sawtooth, pulse) on four separate mono outputs, so all four of a
 // VCO's output jacks are live at once (a real 921/901 VCO behaviour).
@@ -21,7 +21,7 @@
 //
 // Input  [0]:            master oscillator signal (patch another VCO's SAW/SYNC-OUT here)
 // Output [0], channels:  STEREO PAIRS (Phase 106) — 0/1=sine L/R 2/3=triangle L/R
-//                        4/5=sawtooth L/R 6/7=pulse L/R, each [-1, +1]. useMoogAudio
+//                        4/5=sawtooth L/R 6/7=pulse L/R, each [-1, +1]. useVoxAudio
 //                        gates the 8 channels with a single Gain, splits them and
 //                        re-merges each pair into that waveform's tap. L === R exactly
 //                        unless KEY PAN is engaged, and the taps downmix to mono
@@ -47,7 +47,7 @@
 // every non-keyboard pitch source (seq/qnt/chord/knob) keeps getting.
 //
 // The processor returns true forever (keeps running). Its outputs are silenced
-// while the synth is unpowered by the per-VCO waveform Gain nodes in useMoogAudio,
+// while the synth is unpowered by the per-VCO waveform Gain nodes in useVoxAudio,
 // which are held at 0 until powerOn (the worklet itself cannot be stopped).
 
 const MAX_SLOTS    = 12;     // 8 held notes + headroom for notes still fading out

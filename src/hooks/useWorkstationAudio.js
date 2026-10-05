@@ -1234,7 +1234,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
         }
       }
 
-      // (Re)build Part. A region with a live Moog recording (hasAudio) plays via
+      // (Re)build Part. A region with a live Vox Modular recording (hasAudio) plays via
       // its Tone.Player in WorkstationShell — its transcription notes are silenced
       // here so the two don't layer (the transcription is for piano-roll editing).
       if (partChanged || synthChanged) {
@@ -1981,7 +1981,7 @@ export function scheduleFadeEnvelope(fadeGain, r, mapRef) {
 // Internal — change-detection keys
 function computePartKey(r, notes) {
   // Anything that buildRegionEvents reads. `hasAudio` is included so a region
-  // that gains/loses a live Moog recording rebuilds its Part — its transcription
+  // that gains/loses a live Vox Modular recording rebuilds its Part — its transcription
   // notes are silenced while the recorded audio plays (they're edit-only).
   let key = `${r.id}|${r.startMeasure}|${r.durationMeasures}|${r.clipOffset ?? 0}|${r.loopInterval ?? 'n'}|${r.loopPhase ?? 0}|${r.isMuted ? 'm' : ''}|${r.hasAudio ? 'A' : ''}`;
   for (const n of notes) {

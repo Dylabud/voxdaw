@@ -1,10 +1,10 @@
 import { createContext, useContext, useRef, useState, useCallback } from 'react';
 
-const MoogPatchContext = createContext(null);
+const VoxPatchContext = createContext(null);
 
 const CABLE_COLORS = ['#e84040', '#4080e8', '#40b840', '#e8c040', '#e87830', '#d4d0b8'];
 
-// MoogPatchProvider accepts optional audio bridge callbacks:
+// VoxPatchProvider accepts optional audio bridge callbacks:
 //   onCableAdded(fromJackId, toJackId)   — called after a cable is committed
 //   onCableRemoved(fromJackId, toJackId) — called after a cable is removed
 //   onCablesChanged(cables)              — called after a USER add/remove with the
@@ -12,7 +12,7 @@ const CABLE_COLORS = ['#e84040', '#4080e8', '#40b840', '#e8c040', '#e87830', '#d
 //     restoreCables: persistence writes must never originate from mount-phase
 //     restores (the Phase 60c StrictMode wipe lesson).
 // These props are stored in refs so they never need to appear in useCallback deps.
-export function MoogPatchProvider({ children, onCableAdded, onCableRemoved, onCablesChanged }) {
+export function VoxPatchProvider({ children, onCableAdded, onCableRemoved, onCablesChanged }) {
   const [cables, setCables_internal] = useState([]);
 
   // Synchronous mirrors and trackers — avoid side effects inside setState
@@ -143,7 +143,7 @@ export function MoogPatchProvider({ children, onCableAdded, onCableRemoved, onCa
   }, [setCables]);
 
   return (
-    <MoogPatchContext.Provider value={{
+    <VoxPatchContext.Provider value={{
       cables,
       jackRefs,
       dragRef,
@@ -157,12 +157,12 @@ export function MoogPatchProvider({ children, onCableAdded, onCableRemoved, onCa
       removeCablesNotIn,
     }}>
       {children}
-    </MoogPatchContext.Provider>
+    </VoxPatchContext.Provider>
   );
 }
 
-export function useMoogPatch() {
-  const ctx = useContext(MoogPatchContext);
-  if (!ctx) throw new Error('useMoogPatch must be used inside MoogPatchProvider');
+export function useVoxPatch() {
+  const ctx = useContext(VoxPatchContext);
+  if (!ctx) throw new Error('useVoxPatch must be used inside VoxPatchProvider');
   return ctx;
 }

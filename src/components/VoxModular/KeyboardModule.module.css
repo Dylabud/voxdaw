@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════
-   953 Keyboard Controller — Moog Modular
+   953 Keyboard Controller — Vox Modular
    Hardware-literal: walnut strip, ivory + ebony keys
    ═══════════════════════════════════════════════════════ */
 
@@ -27,7 +27,7 @@
      case, ~9× the promoted cost). Harmless at 61 keys; at 88 bigger keys + the
      keybed's drop-shadow filter + 5 knobs + new controls it made the whole rack
      choppy on Dylan's Retina display, even unpowered. One cached layer; nothing
-     visual changes. (MoogKnob still transiently re-promotes the knob being dragged.) */
+     visual changes. (VoxKnob still transiently re-promotes the knob being dragged.) */
   will-change: transform;
 }
 
@@ -120,7 +120,7 @@
   gap: 4px;
 }
 
-/* Jack — same photorealistic chrome socket as MoogShell.module.css .jack
+/* Jack — same photorealistic chrome socket as VoxShell.module.css .jack
    (Phase 51 conic ring + hex nut facets + threaded recess + plug hole) */
 .jack {
   width: 29px;
@@ -392,7 +392,7 @@
 }
 
 /* POLY / MONO read-only mode lamp — same recipe as the LFO's FREE/SYNC
-   ModeIndicator (MoogShell.module.css .modeWord / .modeWordOn): both words stay
+   ModeIndicator (VoxShell.module.css .modeWord / .modeWordOn): both words stay
    printed, the live one burns red. Driven by GLIDE: 0 = POLY. */
 .modeIndicator {
   display: flex;

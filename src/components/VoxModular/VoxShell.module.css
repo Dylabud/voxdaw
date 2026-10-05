@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════
-   MoogShell — 1960s Moog Modular hardware aesthetic
+   VoxShell — 1960s Moog-style modular hardware aesthetic
    All colors are hardware-literal (not CSS-var themed)
    ═══════════════════════════════════════════════════════ */
 
@@ -271,7 +271,7 @@
   width: 100%;
   flex-shrink: 0; /* prevent flex from shrinking the cabinet before fit() measures it */
   /* Viewport camera (Phase 53): layout origin pinned to the shell's content
-     corner so translate/scale math in MoogShell.jsx needs no centering
+     corner so translate/scale math in VoxShell.jsx needs no centering
      compensation. Horizontal centering at rest comes from the width
      compensation in fit() (scaled width == availW exactly). */
   align-self: flex-start;
@@ -279,7 +279,7 @@
      (~2900×1750 px of textures/shadows/blends) exceeds GPU tile budgets — any
      small repaint (e.g. a gate button :active) or tab-return re-raster showed
      black modules while tiles rebuilt. The camera promotes transiently instead
-     (el.style.willChange during wheel/pan, released ~0.5s after — MoogShell.jsx). */
+     (el.style.willChange during wheel/pan, released ~0.5s after — VoxShell.jsx). */
   background:
     /* Vignette — edge darkening for physical depth */
     radial-gradient(
@@ -504,7 +504,7 @@
      component visible at full fidelity and still animating. Knobs paint into
      their module's cached layer (raster-on-pan is bounded to newly-exposed
      modules, unlike the whole-cabinet catastrophe of no layers at all). The
-     dragged knob is transiently re-promoted in MoogKnob.jsx so rotation stays
+     dragged knob is transiently re-promoted in VoxKnob.jsx so rotation stays
      crisp without re-rastering its whole module each frame. */
   will-change: transform;
 }
@@ -671,8 +671,8 @@
 }
 
 /* ══════════════════════════════════════════════════════
-   KNOBS — (styles here are legacy from pre-MoogKnob era;
-   active knob styles now live in MoogKnob.module.css)
+   KNOBS — (styles here are legacy from pre-VoxKnob era;
+   active knob styles now live in VoxKnob.module.css)
    ══════════════════════════════════════════════════════ */
 
 .knobRow {
@@ -699,7 +699,7 @@
   justify-content: center;
   flex-shrink: 0;
 }
-/* Dead classes — sizes now set inline in MoogKnob.jsx */
+/* Dead classes — sizes now set inline in VoxKnob.jsx */
 .knobWrap_xl { width: 76px; height: 76px; }
 .knobWrap_lg { width: 62px; height: 62px; }
 .knobWrap_md { width: 48px; height: 48px; }
@@ -714,7 +714,7 @@
   white-space: nowrap;
 }
 
-/* ── Scale marks (legacy — now live in MoogKnob.module.css) ── */
+/* ── Scale marks (legacy — now live in VoxKnob.module.css) ── */
 .knobScale {
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -1021,7 +1021,7 @@
 
 /* ── Overridden by a cable (Phase 95) ──
    A patched jack outranks this chip, so its number is no longer what the module
-   is using. Same mint pulse as MoogKnob's .knobGlow (Phase 57) at the same 1.6s
+   is using. Same mint pulse as VoxKnob's .knobGlow (Phase 57) at the same 1.6s
    period, so one indicator keeps one meaning across the rack: "this control is
    being driven from somewhere else." Currently: QNT ROOT while TRP is patched.
    Animating box-shadow rather than filter keeps it off the chip's inset shading. */
@@ -1967,8 +1967,8 @@
 }
 
 /* Phase 54: channels 4-across + legacy jack column — half the height of stacked rows.
-   Phase 104: EIGHT channels across, in the same plate width. A `sm` MoogKnob
-   reserves 52px for its tick ring; MoogFader reserves 26px — swapping the level
+   Phase 104: EIGHT channels across, in the same plate width. A `sm` VoxKnob
+   reserves 52px for its tick ring; VoxFader reserves 26px — swapping the level
    control is what bought the room, and the legacy jack became channel 5 rather
    than a spacer column of its own. The column is now sized by the JACK (29px),
    not by the level control, which is why this gap can be tight without the
@@ -2370,7 +2370,7 @@
   padding: 0 2px;
 }
 
-/* One band column: activity LED on top, then the MoogKnob (includes its own label) */
+/* One band column: activity LED on top, then the VoxKnob (includes its own label) */
 .ffbBand {
   display: flex;
   flex-direction: column;

@@ -198,7 +198,7 @@ export default function HomePage({ onNavigate, onOpenProject, theme, onThemeTogg
         <nav className={styles.headerNav}>
           <button className={styles.primaryBtn} onClick={() => onNavigate('voxtool')}>[ VoxTool ]</button>
           <button className={styles.ghostBtn}   onClick={() => onNavigate('workstation')}>[ Workstation ]</button>
-          <button className={styles.moogBtn}    onClick={() => onNavigate('moogmodular')}>[ Vox Modular ]</button>
+          <button className={styles.voxBtn}    onClick={() => onNavigate('voxmodular')}>[ Vox Modular ]</button>
           <button className={styles.aiBtn}      onClick={() => onNavigate('aigen')}>[ Instrument Generator ]</button>
           <button
             className={styles.themeBtn}

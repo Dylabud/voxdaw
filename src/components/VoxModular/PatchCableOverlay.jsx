@@ -1,5 +1,5 @@
 import { useRef, useEffect, useReducer } from 'react';
-import { useMoogPatch } from './MoogPatchContext';
+import { useVoxPatch } from './VoxPatchContext';
 import styles from './PatchCableOverlay.module.css';
 
 // Convert a jack DOM element's center to SVG coordinate space.
@@ -49,7 +49,7 @@ export default function PatchCableOverlay() {
   const {
     cables, jackRefs, dragRef,
     completeDrag, cancelDrag, removeCable,
-  } = useMoogPatch();
+  } = useVoxPatch();
 
   const svgRef         = useRef(null);
   const activePathRef  = useRef(null);
@@ -119,18 +119,18 @@ export default function PatchCableOverlay() {
         {/* Soft blur for the cast shadow path — the shadow is a separate
             offset path (lamp upper-right → shadow falls down-left) so it
             visibly drapes across the faceplates below the cable */}
-        <filter id="moogCableBlur" x="-30%" y="-30%" width="160%" height="160%">
+        <filter id="voxCableBlur" x="-30%" y="-30%" width="160%" height="160%">
           <feGaussianBlur stdDeviation="2.2" />
         </filter>
         {/* Nickel plug barrel — horizontal cylinder shading */}
-        <linearGradient id="moogPlugMetal" x1="0" y1="0" x2="1" y2="0">
+        <linearGradient id="voxPlugMetal" x1="0" y1="0" x2="1" y2="0">
           <stop offset="0"    stopColor="#5a564e" />
           <stop offset="0.35" stopColor="#d8d4ca" />
           <stop offset="0.55" stopColor="#a8a49a" />
           <stop offset="1"    stopColor="#3e3a34" />
         </linearGradient>
         {/* Rubber boot — same cylinder shading as a dark overlay on the cable color */}
-        <linearGradient id="moogBootShade" x1="0" y1="0" x2="1" y2="0">
+        <linearGradient id="voxBootShade" x1="0" y1="0" x2="1" y2="0">
           <stop offset="0"    stopColor="rgba(0,0,0,0.55)" />
           <stop offset="0.35" stopColor="rgba(255,255,255,0.22)" />
           <stop offset="0.55" stopColor="rgba(0,0,0,0.05)" />
@@ -165,7 +165,7 @@ export default function PatchCableOverlay() {
               strokeWidth={6}
               strokeLinecap="round"
               fill="none"
-              filter="url(#moogCableBlur)"
+              filter="url(#voxCableBlur)"
               pointerEvents="none"
             />
             {/* Cable body */}
@@ -200,9 +200,9 @@ export default function PatchCableOverlay() {
               <g key={i} pointerEvents="none">
                 {/* rubber strain-relief boot, cable color */}
                 <rect x={p.x - 4} y={p.y + 1} width={8} height={13} rx={3.2} fill={cable.color} />
-                <rect x={p.x - 4} y={p.y + 1} width={8} height={13} rx={3.2} fill="url(#moogBootShade)" />
+                <rect x={p.x - 4} y={p.y + 1} width={8} height={13} rx={3.2} fill="url(#voxBootShade)" />
                 {/* nickel collar seated on the jack */}
-                <rect x={p.x - 5} y={p.y - 4} width={10} height={6.5} rx={1.8} fill="url(#moogPlugMetal)" />
+                <rect x={p.x - 5} y={p.y - 4} width={10} height={6.5} rx={1.8} fill="url(#voxPlugMetal)" />
                 <rect x={p.x - 5} y={p.y - 4} width={10} height={1.6} rx={0.8} fill="rgba(255,255,255,0.35)" />
               </g>
             ))}

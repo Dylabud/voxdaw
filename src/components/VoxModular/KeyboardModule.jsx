@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useMoogPatch } from './MoogPatchContext';
-import MoogKnob from './MoogKnob';
+import { useVoxPatch } from './VoxPatchContext';
+import VoxKnob from './VoxKnob';
 import styles from './KeyboardModule.module.css';
 
 // ──────────── Key geometry ────────────
@@ -57,7 +57,7 @@ export default function KeyboardModule({
   onNoteOn, onNoteOff, onGlideChange, onVibratoChange, onBend, onMod, onKeyPanChange,
   externalActiveRef, saved = {}, usePersist,
 }) {
-  const { registerJack, unregisterJack, startDrag } = useMoogPatch();
+  const { registerJack, unregisterJack, startDrag } = useVoxPatch();
 
   const [glide,        setGlide]        = useState(saved.glide ?? 0);
   const [vibrato,      setVibrato]      = useState(saved.vibrato ?? 0);
@@ -67,7 +67,7 @@ export default function KeyboardModule({
   const [qwertyOct,    setQwertyOct]    = useState(saved.qwertyOct ?? 0);      // Z / X octave shift
   const [hold,         setHold]         = useState(false);                     // HOLD latch — runtime, never persisted
   // Knob positions survive a reload / SAVE SETUP like every other module's (Phase 63
-  // store, id 'kbd'). The hook is passed in from MoogShell, which owns the store.
+  // store, id 'kbd'). The hook is passed in from VoxShell, which owns the store.
   usePersist?.('kbd', { glide, vibrato, vibratoRate, vibratoDelay, keyPan, qwertyOct });
   const qwertyOctRef = useRef(qwertyOct);
   qwertyOctRef.current = qwertyOct;
@@ -224,7 +224,7 @@ export default function KeyboardModule({
   }, []);
 
   // ── MIDI message handler ── notes of any MIDI number play, even off the 88 drawn keys.
-  // Not gated on page visibility: a real MIDI keyboard always reaches the Moog.
+  // Not gated on page visibility: a real MIDI keyboard always reaches the Vox Modular.
   // Phase 106: velocity (→ GATE + VEL jack), sustain pedal CC64, mod wheel CC1,
   // pitch bend (±2 semitones), All Notes Off CC123 / All Sound Off CC120.
   const onBendRef = useRef(onBend);  onBendRef.current = onBend;
@@ -333,10 +333,10 @@ export default function KeyboardModule({
   useEffect(() => {
     const down = (e) => {
       // Root keeps visited pages mounted under display:none — don't play the
-      // hidden Moog while typing on another page (offsetParent is null under
+      // hidden Vox Modular while typing on another page (offsetParent is null under
       // a display:none ancestor; the module is never position:fixed). EXCEPTION:
-      // while the Workstation is recording the Moog (externalActiveRef), QWERTY is
-      // allowed through so the user can play the Moog live into the take (Phase 66).
+      // while the Workstation is recording the Vox Modular (externalActiveRef), QWERTY is
+      // allowed through so the user can play the Vox Modular live into the take (Phase 66).
       if (rootRef.current?.offsetParent === null && !externalActiveRef?.current) return;
       if (e.repeat) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;   // shortcuts (⌘S, ⌘A…) never play notes
@@ -352,7 +352,7 @@ export default function KeyboardModule({
       qwertyNoteRef.current.set(key, midi);    // release the note it PRESSED, even after Z/X
       press(midi, `k${key}`);
     };
-    // Releases are NOT page-gated: a key held while leaving the Moog must still let go.
+    // Releases are NOT page-gated: a key held while leaving the Vox Modular must still let go.
     const up = (e) => {
       // macOS swallows the keyup of any key released while ⌘ is down, so a note
       // pressed before ⌘ would stick forever — let go of every QWERTY note instead.
@@ -450,7 +450,7 @@ export default function KeyboardModule({
           </div>
         </div>
 
-        <MoogKnob
+        <VoxKnob
           label="GLIDE"
           size="sm"
           value={glide}
@@ -465,7 +465,7 @@ export default function KeyboardModule({
           <span className={poly ? styles.modeDark : styles.modeLit}>MONO</span>
         </div>
 
-        <MoogKnob
+        <VoxKnob
           label="VIBRATO"
           size="sm"
           value={vibrato}
@@ -473,7 +473,7 @@ export default function KeyboardModule({
           defaultValue={0}
         />
 
-        <MoogKnob
+        <VoxKnob
           label="VIB RATE"
           size="sm"
           value={vibratoRate}
@@ -481,7 +481,7 @@ export default function KeyboardModule({
           defaultValue={0.57}
         />
 
-        <MoogKnob
+        <VoxKnob
           label="VIB DLY"
           size="sm"
           value={vibratoDelay}
@@ -489,7 +489,7 @@ export default function KeyboardModule({
           defaultValue={0}
         />
 
-        <MoogKnob
+        <VoxKnob
           label="KEY PAN"
           size="sm"
           value={keyPan}

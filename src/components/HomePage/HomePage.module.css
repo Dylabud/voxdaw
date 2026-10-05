@@ -92,7 +92,7 @@
   color: var(--text-primary);
 }
 
-.moogBtn {
+.voxBtn {
   appearance: none;
   background: transparent;
   border: 1px solid #4a2c10;
@@ -107,7 +107,7 @@
   transition: border-color 0.2s, color 0.2s;
 }
 
-.moogBtn:hover {
+.voxBtn:hover {
   border-color: #c8a86a;
   color: #c8a86a;
 }

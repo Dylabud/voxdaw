@@ -175,7 +175,7 @@ const transposeWithRetarget = (prev, hit, semis) => {
   return rt.size ? next.map(n => rt.has(n.id) ? { ...n, glide: rt.get(n.id) } : n) : next;
 };
 
-export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle, getMoogBusNode, resetMoogSequencers, isMoogPowered, setMoogRecordingActive, pendingProject }) {
+export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle, getVoxBusNode, resetVoxSequencers, isVoxPowered, setVoxRecordingActive, pendingProject }) {
   const [isPlaying,      setIsPlaying]      = useState(false);
   const [tracks,         setTracks]         = useState([]);
   const [regions,        setRegions]        = useState([]);
@@ -242,18 +242,18 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     try { localStorage.setItem('voxdaw.performanceQuality', q); } catch {}
   }, []);
 
-  // ── Moog recording ──────────────────────────────────────────────────────────
-  const [moogRecording, setMoogRecording] = useState(false);
-  const [moogRecordSec, setMoogRecordSec] = useState(0);
-  const [moogCountingIn, setMoogCountingIn] = useState(false); // 1-bar count-in before record (Phase 66)
-  const moogRecorderRef  = useRef(null);  // Tone.Recorder instance while recording
-  const moogBusNodeRef   = useRef(null);  // connected bus node (for cleanup)
-  const moogTimerRef     = useRef(null);  // setInterval id for elapsed-time display
-  const moogRecordingRef = useRef(false); // ref mirror of moogRecording (avoids stale closures)
-  const moogCountingInRef = useRef(false); // ref mirror of moogCountingIn
-  const moogCountInTimerRef = useRef(null); // setTimeout id for count-in → record
-  const moogClickSynthRef = useRef(null);   // Tone.Synth for count-in clicks
-  const moogTargetRegionIdRef = useRef(null); // region captured at record-start (seek + placement)
+  // ── Vox Modular recording ──────────────────────────────────────────────────────────
+  const [voxRecording, setVoxRecording] = useState(false);
+  const [voxRecordSec, setVoxRecordSec] = useState(0);
+  const [voxCountingIn, setVoxCountingIn] = useState(false); // 1-bar count-in before record (Phase 66)
+  const voxRecorderRef  = useRef(null);  // Tone.Recorder instance while recording
+  const voxBusNodeRef   = useRef(null);  // connected bus node (for cleanup)
+  const voxTimerRef     = useRef(null);  // setInterval id for elapsed-time display
+  const voxRecordingRef = useRef(false); // ref mirror of voxRecording (avoids stale closures)
+  const voxCountingInRef = useRef(false); // ref mirror of voxCountingIn
+  const voxCountInTimerRef = useRef(null); // setTimeout id for count-in → record
+  const voxClickSynthRef = useRef(null);   // Tone.Synth for count-in clicks
+  const voxTargetRegionIdRef = useRef(null); // region captured at record-start (seek + placement)
 
   // Audio region playback — keyed by regionId
   const audioBuffersByRegionId = useRef(new Map()); // regionId → native AudioBuffer
@@ -2685,43 +2685,43 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     if (timeRef.current)              timeRef.current.textContent                  = '00:00:00';
   }, [silenceAll, recomputeFades]);
 
-  // ── Moog recording ────────────────────────────────────────
-  // Connects a Tone.Recorder to the Moog's moogBus tap node and captures audio.
+  // ── Vox Modular recording ────────────────────────────────────────
+  // Connects a Tone.Recorder to the Vox Modular's voxBus tap node and captures audio.
   // Three-state toggle: idle → (count-in) → recording → stop+place.
-  // Count-in (1 bar), auto-seek to the selected bar, restart the Moog sequence,
-  // and play the timeline as backing while capturing the Moog (Phase 66).
-  const handleMoogRecord = useCallback(async () => {
+  // Count-in (1 bar), auto-seek to the selected bar, restart the Vox Modular sequence,
+  // and play the timeline as backing while capturing the Vox Modular (Phase 66).
+  const handleVoxRecord = useCallback(async () => {
     // ── Cancel during count-in ──
-    if (moogCountingInRef.current) {
-      clearTimeout(moogCountInTimerRef.current);
-      moogCountInTimerRef.current = null;
-      try { moogClickSynthRef.current?.dispose(); } catch (_) {}
-      moogClickSynthRef.current = null;
-      moogCountingInRef.current = false;
-      setMoogCountingIn(false);
+    if (voxCountingInRef.current) {
+      clearTimeout(voxCountInTimerRef.current);
+      voxCountInTimerRef.current = null;
+      try { voxClickSynthRef.current?.dispose(); } catch (_) {}
+      voxClickSynthRef.current = null;
+      voxCountingInRef.current = false;
+      setVoxCountingIn(false);
       return;
     }
 
-    if (moogRecordingRef.current) {
+    if (voxRecordingRef.current) {
       // ── Stop ──
-      clearInterval(moogTimerRef.current);
-      moogTimerRef.current = null;
-      const blob = await moogRecorderRef.current?.stop();
-      try { moogBusNodeRef.current?.disconnect(moogRecorderRef.current); } catch (_) {}
-      moogRecorderRef.current = null;
-      moogBusNodeRef.current  = null;
-      moogRecordingRef.current = false;
-      setMoogRecording(false);
-      setMoogRecordSec(0);
-      setMoogRecordingActive?.(false); // QWERTY reverts to the hidden-page guard
-      // End the take — stop the shared transport (Moog seq + backing) and playhead.
+      clearInterval(voxTimerRef.current);
+      voxTimerRef.current = null;
+      const blob = await voxRecorderRef.current?.stop();
+      try { voxBusNodeRef.current?.disconnect(voxRecorderRef.current); } catch (_) {}
+      voxRecorderRef.current = null;
+      voxBusNodeRef.current  = null;
+      voxRecordingRef.current = false;
+      setVoxRecording(false);
+      setVoxRecordSec(0);
+      setVoxRecordingActive?.(false); // QWERTY reverts to the hidden-page guard
+      // End the take — stop the shared transport (Vox Modular seq + backing) and playhead.
       try { Tone.Transport.stop(); } catch (_) {}
       silenceAll();
       setIsPlaying(false);
       updatePlayhead();
       if (blob) {
         // Place into the region captured at record-start (seek + placement agree).
-        const regionId = moogTargetRegionIdRef.current;
+        const regionId = voxTargetRegionIdRef.current;
         const region   = regionsRef.current.find(r => r.id === regionId);
         if (!region) { setToastMessage('Selected region not found.'); return; }
 
@@ -2779,12 +2779,12 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     }
 
     // ── Start (validate → count-in → record) ──
-    const busNode = getMoogBusNode?.();
+    const busNode = getVoxBusNode?.();
     if (!busNode) {
       setToastMessage('Open the Vox Modular page first to initialise the audio connection.');
       return;
     }
-    if (isMoogPowered && !isMoogPowered()) {
+    if (isVoxPowered && !isVoxPowered()) {
       setToastMessage('Power on the Vox Modular first (its POWER switch) so it makes sound.');
       return;
     }
@@ -2797,7 +2797,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     const regionId = [...selIds][0];
     const region   = regionsRef.current.find(r => r.id === regionId);
     if (!region) { setToastMessage('Selected region not found.'); return; }
-    moogTargetRegionIdRef.current = regionId;
+    voxTargetRegionIdRef.current = regionId;
 
     try {
       await Tone.start();
@@ -2807,8 +2807,8 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
       updatePlayhead();
 
       // ── 1-bar count-in: 4 clicks at the project tempo, accented downbeat.
-      // Routed to Destination (NOT moogBus), so the clicks are heard but never
-      // captured by the recorder tapping the Moog bus.
+      // Routed to Destination (NOT voxBus), so the clicks are heard but never
+      // captured by the recorder tapping the Vox Modular bus.
       const beatSec = 60 / (bpm || 120);
       const t0 = Tone.now() + 0.12;
       const click = new Tone.Synth({
@@ -2817,35 +2817,35 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
       }).toDestination();
       click.volume.value = -9;
       for (let i = 0; i < 4; i++) click.triggerAttackRelease(i === 0 ? 'C7' : 'G6', 0.05, t0 + i * beatSec);
-      moogClickSynthRef.current = click;
-      moogCountingInRef.current = true;
-      setMoogCountingIn(true);
+      voxClickSynthRef.current = click;
+      voxCountingInRef.current = true;
+      setVoxCountingIn(true);
 
       const countInMs = ((t0 - Tone.now()) + 4 * beatSec) * 1000;
-      moogCountInTimerRef.current = setTimeout(() => {
-        moogCountInTimerRef.current = null;
-        try { moogClickSynthRef.current?.dispose(); } catch (_) {}
-        moogClickSynthRef.current = null;
-        moogCountingInRef.current = false;
-        setMoogCountingIn(false);
+      voxCountInTimerRef.current = setTimeout(() => {
+        voxCountInTimerRef.current = null;
+        try { voxClickSynthRef.current?.dispose(); } catch (_) {}
+        voxClickSynthRef.current = null;
+        voxCountingInRef.current = false;
+        setVoxCountingIn(false);
 
-        const bus = getMoogBusNode?.();
+        const bus = getVoxBusNode?.();
         if (!bus) { setToastMessage('Vox Modular audio not available.'); return; }
-        // Restart the Moog sequence from the top + arm QWERTY into the Moog keyboard.
-        resetMoogSequencers?.();
-        setMoogRecordingActive?.(true);
+        // Restart the Vox Modular sequence from the top + arm QWERTY into the Vox Modular keyboard.
+        resetVoxSequencers?.();
+        setVoxRecordingActive?.(true);
 
         const recorder = new Tone.Recorder();
         bus.connect(recorder);
         recorder.start();
-        moogRecorderRef.current  = recorder;
-        moogBusNodeRef.current   = bus;
-        moogRecordingRef.current = true;
-        setMoogRecording(true);
-        setMoogRecordSec(0);
-        moogTimerRef.current = setInterval(() => setMoogRecordSec(s => s + 1), 1000);
+        voxRecorderRef.current  = recorder;
+        voxBusNodeRef.current   = bus;
+        voxRecordingRef.current = true;
+        setVoxRecording(true);
+        setVoxRecordSec(0);
+        voxTimerRef.current = setInterval(() => setVoxRecordSec(s => s + 1), 1000);
 
-        // Start the shared transport — backing timeline + Moog sequence play in
+        // Start the shared transport — backing timeline + Vox Modular sequence play in
         // sync from the bar; mirrors handlePlayPause's start branch.
         silenceAll();
         recomputeFades();
@@ -2853,22 +2853,22 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
         setIsPlaying(true);
       }, countInMs);
     } catch (err) {
-      moogCountingInRef.current = false;
-      setMoogCountingIn(false);
+      voxCountingInRef.current = false;
+      setVoxCountingIn(false);
       setToastMessage(`Modular recording error: ${err.message}`);
     }
-  }, [getMoogBusNode, isMoogPowered, resetMoogSequencers, setMoogRecordingActive, bpm, silenceAll, recomputeFades, updatePlayhead]);
+  }, [getVoxBusNode, isVoxPowered, resetVoxSequencers, setVoxRecordingActive, bpm, silenceAll, recomputeFades, updatePlayhead]);
 
   // Clean up recorder and audio players on unmount.
   useEffect(() => {
     return () => {
-      clearInterval(moogTimerRef.current);
-      clearTimeout(moogCountInTimerRef.current);
-      try { moogClickSynthRef.current?.dispose(); } catch (_) {}
-      setMoogRecordingActive?.(false); // never leave the Moog QWERTY armed
-      if (moogRecorderRef.current) {
-        moogRecorderRef.current.stop().catch(() => {});
-        try { moogBusNodeRef.current?.disconnect(moogRecorderRef.current); } catch (_) {}
+      clearInterval(voxTimerRef.current);
+      clearTimeout(voxCountInTimerRef.current);
+      try { voxClickSynthRef.current?.dispose(); } catch (_) {}
+      setVoxRecordingActive?.(false); // never leave the Vox Modular QWERTY armed
+      if (voxRecorderRef.current) {
+        voxRecorderRef.current.stop().catch(() => {});
+        try { voxBusNodeRef.current?.disconnect(voxRecorderRef.current); } catch (_) {}
       }
       for (const [, player] of audioPlayersRef.current) {
         try { player.stop(); player.dispose(); } catch (_) {}
@@ -3130,7 +3130,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
   //
   // Cross-page guard: Root.js keeps every visited page mounted under
   // display:none, so these window listeners stay attached while the user is
-  // on the VoxTool/Moog pages — without the guard, Space there silently
+  // on the VoxTool/Vox Modular pages — without the guard, Space there silently
   // toggles the hidden Workstation transport. offsetParent is null under a
   // display:none ancestor (shell is never position:fixed, so this is exact).
   useEffect(() => {
@@ -3179,7 +3179,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
   useEffect(() => {
     const onKey = (e) => {
       // Same cross-page guard as the spacebar hijack — a Cmd+Z / Delete on the
-      // VoxTool/Moog pages must not silently mutate the hidden arrangement.
+      // VoxTool/Vox Modular pages must not silently mutate the hidden arrangement.
       if (!shellRef.current || shellRef.current.offsetParent === null) return;
       const el = document.activeElement;
       const inInput = el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.isContentEditable;
@@ -4149,7 +4149,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
                           textShadow: '0 0 6px rgba(93,202,165,0.55)',
                           pointerEvents: 'none', userSelect: 'none', zIndex: 2,
                         }}>
-                          ♪ MOOG
+                          ♪ MODULAR
                         </div>
                       )}
                       {(r.loopInterval ?? null) !== null && (() => {
@@ -4446,16 +4446,16 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
           onClick={handlePlayPause} title="Play / Pause (Space)">▶</button>
         <button className={styles.transportBtn} onClick={handleStop} title="Stop">■</button>
         <button
-          className={(moogRecording || moogCountingIn) ? styles.transportBtnActive : styles.transportBtn}
-          onClick={handleMoogRecord}
+          className={(voxRecording || voxCountingIn) ? styles.transportBtnActive : styles.transportBtn}
+          onClick={handleVoxRecord}
           title={
-            moogCountingIn ? 'Count-in… (click to cancel)'
-            : moogRecording ? 'Stop Vox Modular recording'
+            voxCountingIn ? 'Count-in… (click to cancel)'
+            : voxRecording ? 'Stop Vox Modular recording'
             : 'Record from Vox Modular — 1-bar count-in, then plays from the selected region'
           }
-          style={(moogRecording || moogCountingIn) ? { color: '#e04848' } : undefined}
+          style={(voxRecording || voxCountingIn) ? { color: '#e04848' } : undefined}
         >
-          {moogCountingIn ? '● count-in…' : moogRecording ? `■ ${moogRecordSec}s` : '● MODULAR'}
+          {voxCountingIn ? '● count-in…' : voxRecording ? `■ ${voxRecordSec}s` : '● MODULAR'}
         </button>
       </div>
       <ContextMenu menu={contextMenu} onClose={closeContextMenu} onCommand={handleContextCommand} tracks={tracks} />

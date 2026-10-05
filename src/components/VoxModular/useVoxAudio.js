@@ -116,7 +116,7 @@ function kickTuneHz(n, kid, connections, knobHz) {
 //   1. The manual TRIG button fires at `Tone.now()`, while the sequencer schedules
 //      lookAhead (~0.1 s) INTO THE FUTURE. Clicking TRIG while a step is already
 //      pending is therefore in the PAST relative to it — a guaranteed throw, not a
-//      rare race. (MOOG_PLAN logged this class as a heavy-load-only race; it isn't.)
+//      rare race. (VOX_PLAN logged this class as a heavy-load-only race; it isn't.)
 //   2. Under a main-thread stall the step loop itself can fall behind its own last
 //      scheduled time.
 // Clamping strictly forward makes both harmless: a hit that would land in the past is
@@ -246,7 +246,7 @@ function snapVoiceToKnobOctave(voiceHz, knobHz) {
 // ── LFO free-run rate range (Phase 70) ──
 // RATE knob 0..1 → Hz, exponentially. Widened from the original 0.1–30 Hz (×300):
 // the low end now reaches genuinely slow evolving sweeps (0.01 Hz = a 100-second
-// cycle, matching MOOG_ARCHITECTURE §2's spec) and the top crosses into audio rate
+// cycle, matching VOX_ARCHITECTURE §2's spec) and the top crosses into audio rate
 // for FM/growl territory. The ×10000 span lands on a decade per quarter-turn
 // (0.01 / 0.1 / 1 / 10 / 100 Hz), which keeps a knob this wide readable.
 // SYNC mode is unaffected — it stores the raw 0..1 knob in lfoRateRefs and maps it
@@ -310,7 +310,7 @@ function revDampHz(d) {
 // per channel offset by the 180° stereo spread. Real BBDs band-limit INSIDE the loop.
 // So the return path is Tone(lowpass) → FbHp(highpass) → Sat(tanh) → Fb(gain) → chorus
 // input: the TONE filter is now in-loop, a highpass kills the mud buildup, and the tanh
-// bounds any runaway. Same reasoning as CHRONOS's hand-built loop (MOOG_ARCHITECTURE §15).
+// bounds any runaway. Same reasoning as CHRONOS's hand-built loop (VOX_ARCHITECTURE §15).
 const BBD_MAX_FEEDBACK = 0.9;   // feedback loop — same runaway class as reverb roomSize
 const BBD_FB_HP_HZ     = 120;   // trims sub-bass from the recirculating signal only
 // LOAD-BEARING: an explicit Delay must sit in the return path. Web Audio MUTES any
@@ -386,11 +386,11 @@ function lfoWaveValue(type, phase) {
 // LP/HP use shelf filters; bandpass uses BiquadFilter(bandpass) → Gain (parallel sum).
 // Live sample rate for UI analyser bin math. Hardcoding 44100 mis-maps every bin on a
 // 48 kHz device (the common default on modern Macs), so meters light the wrong bands.
-export const moogSampleRate = () => Tone.context?.sampleRate || 44100;
+export const voxSampleRate = () => Tone.context?.sampleRate || 44100;
 // Tone.Analyser('fft', N) sets the underlying analyser's fftSize to N*2 and returns N
 // bins, so a bin spans sampleRate / (N*2) Hz — NOT sampleRate / N. Getting this wrong
 // puts every reading a full octave off. Both LED meters derive their bin width here.
-export const fftBinHz = (bins) => moogSampleRate() / (bins * 2);
+export const fftBinHz = (bins) => voxSampleRate() / (bins * 2);
 
 export const FFB_BANDS = [
   { freq: 100,  type: 'lowpass',  Q: 0.7, label: 'LP'   },
@@ -819,7 +819,7 @@ const vcfEnvAmtCents = (amt) => Math.max(0, Math.min(1, amt)) * VCF_ENV_CENTS;
 // The attenuators matter far more here than they did on the VCF, where they were
 // declined in Phase 70 on the grounds that "an LFO has its own DEPTH knob": the
 // VCA's usual CV source is an ENVELOPE, which has no level knob at all, so
-// without this there was no way to set modulation depth. (MOOG_PLAN Phase 70
+// without this there was no way to set modulation depth. (VOX_PLAN Phase 70
 // already flagged level-less sources as the gap in that decision.)
 //
 // LOG/LIN is that CV's response curve — the 902's LIN/EXP switch:
@@ -1051,7 +1051,7 @@ function buildJackMap(n) {
     // -out taps the VCA itself on every instance. It used to tap seqGateNode for
     // vca1 (plus an unreachable `vca-out2` on seq2GateNode), which silently chopped
     // VCA 1's output to sequencer 1's rhythm with no cable patched — a hardwired
-    // audio path, which MOOG_ARCHITECTURE forbids since Phase 10.
+    // audio path, which VOX_ARCHITECTURE forbids since Phase 10.
     // `-cv` keeps its original id (it is `vca-cv`, not `vca-cv1`) so cables saved
     // before CV 2 existed still resolve; only its panel LABEL became "CV 1".
     'vca-in':  { type: 'in',  dest: n.vca },
@@ -1119,7 +1119,7 @@ function buildJackMap(n) {
     // from Phase 9 to Phase 86 — connect() hit its no-op branches, so the jacks rendered,
     // accepted cables and did absolutely nothing. Same dead-port class as the 911's TRIG
     // before Phase 78. They are gate-domain ports, not audio: CLK↑ pulses once per step,
-    // CLK↓ takes over from the internal clock (MOOG_ARCHITECTURE §3).
+    // CLK↓ takes over from the internal clock (VOX_ARCHITECTURE §3).
     'seq-clk-in':    { type: 'in',  dest: null, isGate: true, isSeqClock: true, seqId: 'seq' },
     'seq-clk-out':   { type: 'out', node: null, isGate: true },
     // CYCLE↑ (Phase 93) — one pulse per completed cycle, not per step. Patch it into a
@@ -1177,7 +1177,7 @@ function buildJackMap(n) {
   };
 }
 
-export default function useMoogAudio() {
+export default function useVoxAudio() {
   const [isPowered, setIsPowered] = useState(false);
 
   const isPoweredRef        = useRef(false);
@@ -1277,7 +1277,7 @@ export default function useMoogAudio() {
   // TEMPO knob — which is the shared Transport, i.e. it moved every sequencer at once.
   const seqDivisionRefs    = useRef({ seq: '8n', seq2: '8n' });
   // seqId → true while a cable feeds its CLK↓. External clock replaces the internal
-  // Tone.Loop entirely (the loop is stopped), matching MOOG_ARCHITECTURE §3: "External
+  // Tone.Loop entirely (the loop is stopped), matching VOX_ARCHITECTURE §3: "External
   // clock pulse forces the sequencer forward one step. Overrides internal clock."
   const seqExtClockRefs    = useRef({});
   const seqClockDepthRef   = useRef(0);          // clock-chain recursion guard
@@ -1296,7 +1296,7 @@ const SEQ_CLOCK_MAX_DEPTH = 4;
 // note's length is the incoming gate's length. A TRIG is a momentary spike: it fires
 // attack → decay → release as a ONE-SHOT whose length comes from the envelope's own A+D
 // knobs, so a clock pulse or a one-step sequencer gate plays a percussive hit regardless
-// of how long the source is held. That distinction is the whole reason MOOG_ARCHITECTURE
+// of how long the source is held. That distinction is the whole reason VOX_ARCHITECTURE
 // §5 lists the two as separate ports on the 911.
 const triggerEnvOneShot = (env, time, velocity = 1) => {
   // A+D reaches the sustain point and releases from there, so the knobs still shape it.
@@ -1310,7 +1310,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
   // Chord sequencer — separate slower-clocked 8-step pitch CV source.
   // Each step stores { rootClass: 0-11, chordType: keyof SCALE_DEFS }.
   // On step fire: outputs root Hz via `${csId}PitchOut` AND calls the instance's
-  // chord callback so MoogShell can sync the quantizer scale / chord label.
+  // chord callback so VoxShell can sync the quantizer scale / chord label.
   // All state is id-keyed (Phase 60e part 2): 'chordseq' = the static module,
   // 'chordseq2'+ are dynamic instances. Node names compose from the id.
   // `gate` / `skip` are additive (Phase 92) — a step saved before them has neither key,
@@ -2002,8 +2002,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       // behave exactly like the dynamic sequencers, which never had a VCA tap.)
 
       // Recording tap — side connection from seqMasterGate so the Workstation's
-      // Tone.Recorder can capture Moog audio without touching the speaker path.
-      moogBus: new Tone.Gain(1),
+      // Tone.Recorder can capture Vox Modular audio without touching the speaker path.
+      voxBus: new Tone.Gain(1),
 
       // I/O 4-channel input gains — each sums independently into n.master.
       // Single writer per node: updateIoChannelVol owns these gain params.
@@ -2275,9 +2275,9 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     n.master.connect(n.masterLimit);
     n.masterLimit.connect(n.seqMasterGate);
 
-    // moogBus: side tap after the master gate, feeds the Workstation's Tone.Recorder.
+    // voxBus: side tap after the master gate, feeds the Workstation's Tone.Recorder.
     // Does not connect to Destination — purely a recording tap.
-    n.seqMasterGate.connect(n.moogBus);
+    n.seqMasterGate.connect(n.voxBus);
 
     // Oscilloscope taps master (pre-gate, so the scope still shows waveform shape
     // even on muted steps — useful for debugging patches).
@@ -2905,7 +2905,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       }
       jackMapRef.current = { ...buildJackMap(n), ...dynEntries };
     }).catch(err => {
-      console.warn('[MoogAudio] Quantizer worklet unavailable:', err);
+      console.warn('[VoxAudio] Quantizer worklet unavailable:', err);
     });
 
     // Load the hard sync AudioWorklet asynchronously.
@@ -2963,7 +2963,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       vocIdsRef.current.forEach(wireEnv);   // instances that already exist
       wireEnvFollowRef.current = wireEnv;   // and any added later
     }).catch(err => {
-      console.warn('[MoogAudio] Envelope-follower worklet unavailable, using symmetric filters:', err);
+      console.warn('[VoxAudio] Envelope-follower worklet unavailable, using symmetric filters:', err);
     });
 
     rawCtx.audioWorklet.addModule('/hard-sync-worklet.js').then(() => {
@@ -3023,7 +3023,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       // Dynamic VCOs added from now on wire inline in addModule.
       wireHardSyncRef.current = wire;
     }).catch(err => {
-      console.warn('[MoogAudio] Hard sync worklet unavailable:', err);
+      console.warn('[VoxAudio] Hard sync worklet unavailable:', err);
     });
 
     return () => {
@@ -3704,7 +3704,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       // in the stereo field. Tone.Panner wraps the native StereoPannerNode, which
       // is already an EQUAL-POWER panner, so one node gives Gemini's requested law
       // (no dual-VCA matrix). The whole rack downstream of io-in is 2-channel
-      // (master Volume → seqMasterGate → Destination + moogBus tap), so this pans
+      // (master Volume → seqMasterGate → Destination + voxBus tap), so this pans
       // to both the speakers and the Workstation recording tap.
       const id = `panner${num}`;
       n[`${id}In`]  = new Tone.Gain(1);
@@ -4758,7 +4758,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
         // Zero the offset so only the source drives the bus (no double-counting).
         glideBus.setValueAtTime(0, Tone.now());
         try { from.node.connect(glideBus); } catch (e) {
-          console.warn(`[MoogAudio] vco-cv pass-through connect ${key}:`, e.message);
+          console.warn(`[VoxAudio] vco-cv pass-through connect ${key}:`, e.message);
         }
       }
       connectionsRef.current.set(key, { isVcoCv: true, vcoId, sourceId: effFrom,
@@ -4818,7 +4818,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       from.node.connect(to.dest);
       connectionsRef.current.set(key, { node: from.node, dest: to.dest });
     } catch (e) {
-      console.warn(`[MoogAudio] connect ${key}:`, e.message);
+      console.warn(`[VoxAudio] connect ${key}:`, e.message);
     }
 
     // A CV source now feeds a quantizer — its worklet takes over qnt-driven
@@ -4900,7 +4900,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     try {
       conn.node.disconnect(conn.dest);
     } catch (e) {
-      console.warn(`[MoogAudio] disconnect ${key}:`, e.message);
+      console.warn(`[VoxAudio] disconnect ${key}:`, e.message);
     }
     connectionsRef.current.delete(key);
 
@@ -5145,10 +5145,10 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     return peak;
   }, []);
 
-  // Returns the Moog recording bus node (Tone.Gain) for the Workstation's Tone.Recorder.
+  // Returns the Vox Modular recording bus node (Tone.Gain) for the Workstation's Tone.Recorder.
   // Returns null until the audio engine has initialised (before POWER is first clicked is fine —
   // the bus node exists from creation, not from powerOn).
-  const getMoogBusNode = useCallback(() => nodesRef.current?.moogBus ?? null, []);
+  const getVoxBusNode = useCallback(() => nodesRef.current?.voxBus ?? null, []);
 
   // Returns the current waveform snapshot from the oscilloscope analyser tap.
   // Returns Float32Array of 512 samples in [-1, 1], or null before nodes are created.
@@ -5386,7 +5386,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     (fn) => setQuantizerLearnCallbackById('qnt', fn), [setQuantizerLearnCallbackById]);
 
   // Register the knob-stepper UI callback: fn(vcoIds[]) — the VCOs whose FREQ
-  // knob is currently quantized (MoogShell lights those knobs' glow).
+  // knob is currently quantized (VoxShell lights those knobs' glow).
   // Fires immediately with the current state so a re-mounting UI syncs up.
   const setVcoQuantizedCallback = useCallback((fn) => {
     vcoQuantizedCbRef.current = fn;
@@ -5400,7 +5400,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
   }, []);
 
   // Kick triggers — id-keyed (Phase 60d). The static KickModule uses the
-  // 'kick'-bound wrappers; dynamic instances bind their own id in MoogShell.
+  // 'kick'-bound wrappers; dynamic instances bind their own id in VoxShell.
   const triggerKickById = useCallback((kid, onFlash) => {
     const n = nodesRef.current;
     const synth = n?.[`${kid}Synth`];
@@ -5534,7 +5534,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       extMicRef.current = mic;
       return true;
     } catch (e) {
-      console.warn('[MoogAudio] mic enable failed:', e?.message ?? e);
+      console.warn('[VoxAudio] mic enable failed:', e?.message ?? e);
       return false;
     }
   }, []);
@@ -5790,7 +5790,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
   }, [kbdPolyVoices, broadcastKbdVoices]);
 
   // Restart every sequencer (960 + chord) from step 0 — the next Transport tick
-  // lands on the first step. Used by the Workstation's Moog-record count-in so a
+  // lands on the first step. Used by the Workstation's modular-record count-in so a
   // take begins at the top of the sequence (Phase 66). Same reset powerOn does.
   const resetSequencers = useCallback(() => {
     for (const id of Object.keys(seqLoopsRef.current))      seqCurrentStepRefs.current[id]      = -1;
@@ -5809,7 +5809,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     updateVcoParams, updateVcfParams, updateVcf2Params, updateEnvParams, triggerGate,
     updateVcaParams, updateVca2Params, updateVca3Params,
     updateLfoParams, updateLfo2Params, updateIoParams, updateIoChannelVol,
-    updateReverbParams, updateReverb2Params, getReverbAuraData, updateChorusParams, getMoogBusNode,
+    updateReverbParams, updateReverb2Params, getReverbAuraData, updateChorusParams, getVoxBusNode,
     getOscilloscopeData, getQntTransposeData, getMeterValue, getMasterPeak,
     getLfoInstant, getLfo2Instant,
     setTempo, updateSequencerSteps, setSeqStepCallback,

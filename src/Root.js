@@ -3,19 +3,23 @@ import { THEME_ORDER, nextTheme } from './utils/theme';
 import HomePage from './components/HomePage/HomePage';
 import App from './App';
 import WorkstationShell from './components/Workstation/WorkstationShell';
-import MoogModular from './components/MoogModular/MoogShell';
+import VoxModular from './components/VoxModular/VoxShell';
 import AIInstrumentGenerator from './components/AIGen/AIInstrumentGenerator';
 
 const THEME_KEY = 'voxdaw.theme';
 
 export default function Root() {
-  // A page may request to be re-landed after a full reload (the Moog's
+  // A page may request to be re-landed after a full reload (the Vox Modular's
   // reset/load-setup uses window.location.reload() to rebuild from its store —
-  // this returns the user to the Moog instead of the default home page).
+  // this returns the user to the Vox Modular instead of the default home page).
   const [page,       setPage]       = useState(() => {
     try {
       const ret = sessionStorage.getItem('voxdaw-return-page');
-      if (ret) { sessionStorage.removeItem('voxdaw-return-page'); return ret; }
+      if (ret) {
+        sessionStorage.removeItem('voxdaw-return-page');
+        // Pre-Vox-Phase-110 page id — a reload requested by an older tab.
+        return ret === 'moogmodular' ? 'voxmodular' : ret;
+      }
     } catch (_) {}
     return 'home';
   });
@@ -38,12 +42,12 @@ export default function Root() {
   const [visited, setVisited] = useState(() => new Set(['home', page]));
   const visitedRef = useRef(visited); visitedRef.current = visited;
 
-  // The Moog registers a small control surface here ({ getBusNode,
+  // The Vox Modular registers a small control surface here ({ getBusNode,
   // resetSequencers, isPowered }); the Workstation reads from it. The
   // recording-active ref flows the other way — the Workstation flips it true
-  // while recording so the Moog's KeyboardModule lets QWERTY through (Phase 66).
-  const moogApiRef = useRef(null);
-  const moogRecordingActiveRef = useRef(false);
+  // while recording so the Vox Modular's KeyboardModule lets QWERTY through (Phase 66).
+  const voxApiRef = useRef(null);
+  const voxRecordingActiveRef = useRef(false);
 
   // Open-a-project request for the Workstation. The shell stays mounted across
   // navigations, so a mount-time prop can't deliver later opens — instead each
@@ -75,12 +79,12 @@ export default function Root() {
 
   const onThemeToggle = useCallback(() => setTheme(prev => nextTheme(prev)), []);
 
-  // Stable handlers handed to the Workstation — call through to whatever the Moog
+  // Stable handlers handed to the Workstation — call through to whatever the Vox Modular
   // registered. useCallback [] means their references never change across renders.
-  const getMoogBusNode      = useCallback(() => moogApiRef.current?.getBusNode?.() ?? null, []);
-  const resetMoogSequencers = useCallback(() => moogApiRef.current?.resetSequencers?.(), []);
-  const isMoogPowered       = useCallback(() => moogApiRef.current?.isPowered?.() ?? false, []);
-  const setMoogRecordingActive = useCallback((v) => { moogRecordingActiveRef.current = !!v; }, []);
+  const getVoxBusNode      = useCallback(() => voxApiRef.current?.getBusNode?.() ?? null, []);
+  const resetVoxSequencers = useCallback(() => voxApiRef.current?.resetSequencers?.(), []);
+  const isVoxPowered       = useCallback(() => voxApiRef.current?.isPowered?.() ?? false, []);
+  const setVoxRecordingActive = useCallback((v) => { voxRecordingActiveRef.current = !!v; }, []);
 
   // Returns display:none style for any page that isn't active; undefined (no style) otherwise.
   const hide = (p) => page !== p ? { display: 'none' } : undefined;
@@ -113,29 +117,29 @@ export default function Root() {
         </div>
       )}
 
-      {/* Workstation — mounted on first visit; receives Moog bus getter for recording */}
+      {/* Workstation — mounted on first visit; receives Vox Modular bus getter for recording */}
       {visited.has('workstation') && (
         <div style={hide('workstation')}>
           <WorkstationShell
             onNavigateHome={() => navigate('home')}
             theme={theme}
             onThemeToggle={onThemeToggle}
-            getMoogBusNode={getMoogBusNode}
-            resetMoogSequencers={resetMoogSequencers}
-            isMoogPowered={isMoogPowered}
-            setMoogRecordingActive={setMoogRecordingActive}
+            getVoxBusNode={getVoxBusNode}
+            resetVoxSequencers={resetVoxSequencers}
+            isVoxPowered={isVoxPowered}
+            setVoxRecordingActive={setVoxRecordingActive}
             pendingProject={pendingProject}
           />
         </div>
       )}
 
-      {/* Moog Modular — mounted on first visit; registers its audio bus on mount */}
-      {visited.has('moogmodular') && (
-        <div style={hide('moogmodular')}>
-          <MoogModular
+      {/* Vox Modular — mounted on first visit; registers its audio bus on mount */}
+      {visited.has('voxmodular') && (
+        <div style={hide('voxmodular')}>
+          <VoxModular
             onNavigateHome={() => navigate('home')}
-            onBusReady={(api) => { moogApiRef.current = api; }}
-            recordingActiveRef={moogRecordingActiveRef}
+            onBusReady={(api) => { voxApiRef.current = api; }}
+            recordingActiveRef={voxRecordingActiveRef}
           />
         </div>
       )}

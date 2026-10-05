@@ -133,7 +133,7 @@ function scheduleOfflineAutomation(t, { volume, pan, panEntries = null, graphByF
  * is scheduled at all.
  */
 export async function bounceProject({ tracks, regions, notes, bpm, globalAutomations = [], groups = [], audioBuffers = new Map(), tailSec = null, capSec = Infinity }) {
-  // Recorded Moog audio lives in a regionId → native AudioBuffer map (session
+  // Recorded Vox Modular audio lives in a regionId → native AudioBuffer map (session
   // only — not persisted). Look-up tolerates a Map or a plain object.
   const getBuf = (id) => (audioBuffers instanceof Map ? audioBuffers.get(id) : audioBuffers?.[id]) || null;
   const rightMeasure = regions.reduce(
@@ -264,7 +264,7 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
       const track = tracks.find(t => t.id === r.trackId);
       if (!track) continue;
 
-      // Recorded Moog audio region: render the captured buffer instead of the
+      // Recorded Vox Modular audio region: render the captured buffer instead of the
       // transcription notes — raw to destination (matching the live Tone.Player),
       // gated on track audibility so mute/solo apply. A missing buffer falls
       // through to the note path (the transcription persists; the buffer does not).

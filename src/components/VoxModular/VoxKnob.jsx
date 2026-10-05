@@ -1,5 +1,5 @@
 import { useCallback, useRef } from 'react';
-import styles from './MoogKnob.module.css';
+import styles from './VoxKnob.module.css';
 
 const TICK_COUNT = 11;
 const MIN_DEG = -135;
@@ -39,7 +39,7 @@ function KnobScale({ size }) {
 }
 
 // glow — mint pulse on the indicator line (knob-stepper / quantized mode).
-export default function MoogKnob({ value = 0.5, onChange, label, size = 'md', defaultValue = 0.5, variant = 'black', glow = false, hint }) {
+export default function VoxKnob({ value = 0.5, onChange, label, size = 'md', defaultValue = 0.5, variant = 'black', glow = false, hint }) {
   const bodyPx = BODY_PX[size] ?? 26;
   const wrapPx = WRAP_PX[size] ?? 48;
   const rotateDeg = MIN_DEG + value * (MAX_DEG - MIN_DEG);

@@ -1,9 +1,9 @@
 /* ══════════════════════════════════════════════════════
-   MOOG FADER (Phase 104) — late-60s console slide fader
+   VOX FADER (Phase 104) — late-60s console slide fader
    A slot milled into the faceplate, with a knurled
    aluminium cap riding in it. Materials follow the rack's
    existing language: the same lamp-at-upper-right that
-   MoogKnob, .jack and the screws are all lit by.
+   VoxKnob, .jack and the screws are all lit by.
    ══════════════════════════════════════════════════════ */
 
 .faderGroup {
@@ -17,7 +17,7 @@
 /* The grab target is the whole body, not just the cap — that is how a real
    fader behaves, and it makes a 26px-wide control comfortably hittable.
    ns-resize is load-bearing: it tells the cabinet camera this is a control
-   (see MoogFader.jsx). */
+   (see VoxFader.jsx). */
 .faderBody {
   padding: 3px 4px;
   cursor: ns-resize;
@@ -107,7 +107,7 @@
   white-space: nowrap;
 }
 
-/* Lights out: the WHOLE fader goes, exactly as MoogKnob's `.knobGroup` does.
+/* Lights out: the WHOLE fader goes, exactly as VoxKnob's `.knobGroup` does.
    A fader is a physical control, not a lamp — with the room dark there is no
    light for its aluminium cap to catch, so it has nothing to be seen by. Only
    emissive things (LEDs, the QNT screen, the scope) stay lit.

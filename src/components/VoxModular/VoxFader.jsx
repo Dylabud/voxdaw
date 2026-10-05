@@ -1,17 +1,17 @@
 import { useRef } from 'react';
-import styles from './MoogFader.module.css';
+import styles from './VoxFader.module.css';
 
 // ── Vertical slide fader (Phase 104) ──
 //
 // A late-60s console fader: a recessed slot milled into the faceplate with a
 // knurled aluminium cap riding in it. Chosen over a rotary knob for the I/O input
-// stage because a fader is far NARROWER than a knob's tick ring (a `sm` MoogKnob
+// stage because a fader is far NARROWER than a knob's tick ring (a `sm` VoxKnob
 // reserves 52px of width; this reserves 26px), which is what let the channel count
 // go from 4 to 8 inside the same plate — the module got no wider or taller.
 //
 // Drag anywhere on the fader to move it; the whole body is the grab target, not
 // just the cap, which is how a real fader behaves and is far easier to hit.
-// Double-click resets to `defaultValue`, matching MoogKnob's gesture.
+// Double-click resets to `defaultValue`, matching VoxKnob's gesture.
 //
 // `cursor: ns-resize` is LOAD-BEARING, not decoration: it is what tells the
 // cabinet's `isInteractive` check this is a control rather than empty faceplate to
@@ -20,7 +20,7 @@ import styles from './MoogFader.module.css';
 
 const TRAVEL_PX = 58;   // must match .faderSlot height minus .faderCap height in the CSS
 
-export default function MoogFader({
+export default function VoxFader({
   label, value = 0, onChange, defaultValue = 0.8, title,
 }) {
   const bodyRef = useRef(null);

@@ -25,7 +25,7 @@ import { getSampleStatus } from '../customSampleStore';
  * @param {Function} auditionAttack / auditionRelease / auditionReleaseAll / auditionPrime
  */
 
-// Moog KeyboardModule's chromatic map (muscle-memory consistency): C → C, then
+// Vox Modular KeyboardModule's chromatic map (muscle-memory consistency): C → C, then
 // extended a further 4th into the second visible octave. Home row = white keys
 // (…j k l ; '), top row = black keys (…u [gap] o p [gap] ]) — '[' is the E–F
 // no-black-key skip, mirroring 'r'/'i' in the first octave.

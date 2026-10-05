@@ -2,7 +2,7 @@ import { useRef, useEffect } from 'react';
 import styles from './Led.module.css';
 
 // Zero-re-render analog level LED.
-// getValue() → number in [0, 1] (from getMeterValue in useMoogAudio).
+// getValue() → number in [0, 1] (from getMeterValue in useVoxAudio).
 // opacity range: 0.12 (silence) → 1.0 (peak). will-change: opacity keeps the
 // animation on the GPU compositing layer — no layout or paint cost per frame.
 //

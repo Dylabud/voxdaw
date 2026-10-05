@@ -1,5 +1,5 @@
   /* ═══════════════════════════════════════════════════════
-   MoogKnob — self-contained knob component styles
+   VoxKnob — self-contained knob component styles
    Vintage skirted bakelite knob (Phase 51 photorealistic pass).
    Default: black skirted knob, white pointer line.
    variant="cream" → ivory bakelite (960 sequencer step dials).
@@ -41,8 +41,8 @@
   /* Phase 61d: no permanent `will-change: transform` here. A per-knob layer
      (~130 across the rack) made a Retina pan composite 130 full-res textures
      every frame — the scroll bottleneck. Layer promotion moved up to `.module`
-     (MoogShell.module.css); knobs paint into their module's cached layer.
-     MoogKnob.jsx re-promotes ONLY the knob being dragged (transient
+     (VoxShell.module.css); knobs paint into their module's cached layer.
+     VoxKnob.jsx re-promotes ONLY the knob being dragged (transient
      will-change) so live rotation stays crisp. */
   background:
     /* 1. Matte-black body shoulder — ring between metal cap and flutes */

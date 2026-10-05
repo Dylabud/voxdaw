@@ -241,7 +241,7 @@ Three blocks — bare `:root` (dark), `[data-theme="slate"]`, `[data-theme="ligh
 
 ### What adapts vs stays dark
 - **Adapts:** Controls sidebar, TelemetryHUD, GestureSettings modal, MidiModal, Viewport camera bg + idle label, PianoRoll key colors, the entire Workstation/RegionEditor/HomePage/AIGen UI.
-- **Always dark, in all three themes (camera overlays + hardware surfaces):** ArpTerminal, VocoderTerminal, AutotuneTerminal, LoopProgress, and the entire MoogModular page — none of these reference the global CSS variables (zero `var(--…)` usage, by design), so a new theme block never touches them.
+- **Always dark, in all three themes (camera overlays + hardware surfaces):** ArpTerminal, VocoderTerminal, AutotuneTerminal, LoopProgress, and the entire VoxModular page — none of these reference the global CSS variables (zero `var(--…)` usage, by design), so a new theme block never touches them.
 - **Always accent-colored (unchanged):** `#5DCAA5` borders on focused elements, mint fill on active/engage buttons, recording red, arp flash gold.
 
 ### Toggle button (cycle) + HomePage settings gear
@@ -268,7 +268,7 @@ The Workstation timeline-ruler grid and the RegionEditor piano-roll grid repaint
 ## 14. Page Routing (`src/Root.js`)
 
 The app shell is a thin state-router, not React Router. `Root.js` owns:
-- `page` state — `'home' | 'voxtool' | 'workstation' | 'moogmodular' | 'aigen'`
+- `page` state — `'home' | 'voxtool' | 'workstation' | 'voxmodular' | 'aigen'`
 - `theme` state — `'dark' | 'slate' | 'light'`, persisted to `localStorage['voxdaw.theme']` (see §12), survives navigation AND reload
 - `pendingProject` state — `{ requestId, projectId, data }` open-a-project requests for the Workstation
 
@@ -278,8 +278,8 @@ It applies `data-theme={theme === 'dark' ? undefined : theme}` on a top-level wr
 index.js → <Root>
   page='home'         → <HomePage onNavigate={…} onOpenProject={…} theme={…} onThemeToggle={…} onThemeSelect={…} active={…} />
   page='voxtool'      → <App              onNavigateHome={…} theme={…} onThemeToggle={…} />
-  page='workstation'  → <WorkstationShell onNavigateHome={…} theme={…} onThemeToggle={…} getMoogBusNode={…} pendingProject={…} />
-  page='moogmodular'  → <MoogModular      onNavigateHome={…} onBusReady={…} />
+  page='workstation'  → <WorkstationShell onNavigateHome={…} theme={…} onThemeToggle={…} getVoxBusNode={…} pendingProject={…} />
+  page='voxmodular'  → <VoxModular      onNavigateHome={…} onBusReady={…} />
   page='aigen'        → <AIInstrumentGenerator onNavigateHome={…} theme={…} onThemeToggle={…} />
 ```
 
@@ -683,18 +683,18 @@ The override is applied at **every synth build** — region synths and the audit
 
 ---
 
-## 17. Moog Modular Synthesizer (`src/components/MoogModular/`)
+## 17. Moog Modular Synthesizer (`src/components/VoxModular/`)
 
 ### Component tree
 ```
-MoogShell.jsx          — cabinet, rack tiers/cases, all module components, library modal, lights-out toggle
-├── useMoogAudio.js    — all audio DSP: nodes, jack map, loops, callbacks, dynamic-instance registry
-├── MoogKnob.jsx       — black bakelite skirted knob (cream 960 variant; drag vertical, shift=fine, dblclick=reset, hover tooltip, mint glow when quantized)
+VoxShell.jsx          — cabinet, rack tiers/cases, all module components, library modal, lights-out toggle
+├── useVoxAudio.js    — all audio DSP: nodes, jack map, loops, callbacks, dynamic-instance registry
+├── VoxKnob.jsx       — black bakelite skirted knob (cream 960 variant; drag vertical, shift=fine, dblclick=reset, hover tooltip, mint glow when quantized)
 ├── Led.jsx            — zero-re-render rAF opacity LED (green/yellow/red/blue)
 ├── KeyboardModule.jsx — 61-key CV keyboard + MIDI + glide + vibrato controls
 ├── Oscilloscope.jsx   — CRT phosphor waveform display
 ├── PatchCableOverlay  — SVG cable layer (z-index:50, position:absolute inset:0)
-└── MoogPatchContext   — jack registry + drag state for cable patching
+└── VoxPatchContext   — jack registry + drag state for cable patching
 ```
 
 ### GlideBus Architecture (per-VCO pitch routing)
@@ -741,13 +741,13 @@ Stochastic probability: `fires = step.gate && Math.random() < step.prob`. Probab
 `chordseq-root-out`, `chordseq-3rd-out`, `chordseq-5th-out` output the 1st/3rd/5th chord tones per step using `CHORD_VOICE_INTERVALS` (padded to 4 tones, shared across chord types). All are MANAGED sources — loop drives connected glideBuses directly with instant `setValueAtTime`.
 
 ### 914 Fixed Filter Bank (FFBModule)
-14 bands in parallel: LP (100 Hz) + 12 bandpass at √2 intervals (125–5600 Hz) + HP (8 kHz). Architecture: `ffbIn` fans to 14 `{Tone.Filter → Tone.Gain}` pairs, all summing into `ffbSum → ffbMaster`. Band gain knobs (0–1 → amplitude), MSTR knob (0→1.5×). Activity LEDs driven by `ffbAnalyser` (FFT 512) rAF: half-octave bin range per band, dB → opacity. `FFB_BANDS` exported constant shared between `useMoogAudio.js` and `MoogShell.jsx`.
+14 bands in parallel: LP (100 Hz) + 12 bandpass at √2 intervals (125–5600 Hz) + HP (8 kHz). Architecture: `ffbIn` fans to 14 `{Tone.Filter → Tone.Gain}` pairs, all summing into `ffbSum → ffbMaster`. Band gain knobs (0–1 → amplitude), MSTR knob (0→1.5×). Activity LEDs driven by `ffbAnalyser` (FFT 512) rAF: half-octave bin range per band, dB → opacity. `FFB_BANDS` exported constant shared between `useVoxAudio.js` and `VoxShell.jsx`.
 
 ### Kick Drum (KickModule)
 `Tone.MembraneSynth` (TUNE/P.ENV/DECAY) + `Tone.NoiseSynth → highpass 2kHz → clickGain` (CLICK) in parallel into `kickOut`. `kick-gate-in` jack: `{ isGate: true, isKick: true, kickId }` — the sequencer loops detect `action.isKick`, resolve the target instance via `kickId` ('kick' = static; 'kick2'+ dynamics), and call `` n[`${kid}Synth`].triggerAttackRelease(tune, decay, time) `` sample-accurately with the instance's id-keyed tune/decay. Per-instance trig callbacks flash each module's LED. `kick-click-in` CV jack modulates the instance's `ClickGain.gain` for accent.
 
 ### Dynamic Rack (Phase 60 series — instances + persistence)
-Every removable module type (14) can be instantiated from the library modal with duplicates, capped per type. Engine: `addModule(type, desiredNum?)`/`removeModule(id)` — inline factories mirror the static recipes and register nodes under composed names (`vco6GlideBus`…) so all name-based lookups work unchanged; per-type state is id-keyed maps (seq/chord loops from shared builders, kick, vocoder shift, quantizer params); worklet types (hard sync, QNT) use synchronous registries + deferred `wire(id)` closures. The whole rack persists in localStorage `moog-rack-v2` `{modules, cables}` with **stable instance ids** on restore, cable re-bridge on an idempotent retry schedule, and drag-to-reorder via per-slot grip tabs. Full details: `src/components/MoogModular/MOOG_ARCHITECTURE.md` ("Dynamic Rack — AS BUILT") and MOOG_PLAN.md.
+Every removable module type (14) can be instantiated from the library modal with duplicates, capped per type. Engine: `addModule(type, desiredNum?)`/`removeModule(id)` — inline factories mirror the static recipes and register nodes under composed names (`vco6GlideBus`…) so all name-based lookups work unchanged; per-type state is id-keyed maps (seq/chord loops from shared builders, kick, vocoder shift, quantizer params); worklet types (hard sync, QNT) use synchronous registries + deferred `wire(id)` closures. The whole rack persists in localStorage `moog-rack-v2` `{modules, cables}` with **stable instance ids** on restore, cable re-bridge on an idempotent retry schedule, and drag-to-reorder via per-slot grip tabs. Full details: `src/components/VoxModular/VOX_ARCHITECTURE.md` ("Dynamic Rack — AS BUILT") and VOX_PLAN.md.
 
 ### Lights-Out Mode
 `data-lights-out="true"` on `.cabinet`. CSS attribute selectors (`cabinet[data-lights-out="true"] .class`) hide faceplates, knobs, text, jacks, cables (`PatchCableOverlay opacity:0`), keyboard (`opacity:0`). Visible: LEDs (Led.jsx rAF-driven opacity), power lamp (`.powerLampOn`), sequencer step LEDs (`.seqLedActive`), gate-on buttons (`.seqGateOn`), oscilloscope, hard sync blue LEDs (in `.vcoSyncLed`, sibling of `.selectorRow` so lights-out `selectorRow { opacity:0 }` can't cascade to it).

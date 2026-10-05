@@ -31,10 +31,10 @@ function frameRms(pcm, offset, len) {
  * Transcribes a decoded AudioBuffer to an array of note events using YIN
  * monophonic pitch detection (same library used by VoxTool's useAutotune).
  *
- * Works best with single-note Moog sequences (one pitch at a time). Polyphonic
+ * Works best with single-note Vox Modular sequences (one pitch at a time). Polyphonic
  * or heavily reverberated recordings will produce approximate results.
  *
- * @param {AudioBuffer} nativeBuf - Decoded audio buffer from the Moog recording.
+ * @param {AudioBuffer} nativeBuf - Decoded audio buffer from the Vox Modular recording.
  * @param {number}      bpm       - Current Workstation BPM (for seconds → beats).
  * @returns {{ note: string, startBeat: number, durationBeats: number, velocity: number }[]}
  *   Beat positions are relative to the region start (startBeat=0 = first frame of recording).
