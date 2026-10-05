@@ -44,6 +44,140 @@ const VOWEL_FORMANTS = {            // [F1, F2, F3] Hz
 };
 const VOWEL_Q    = [11, 13, 15];    // per-formant resonance (higher = more vocal)
 const VOWEL_GAIN = [1.0, 0.55, 0.28]; // F1 loudest → down to F3
+const VOWEL_MAKEUP = 7;              // ${id}Mix at RES centre (Phase 64a)
+// RES knob (Vox Phase 111): scales all three Qs together. 0.5 is ×1 EXACTLY, so a saved
+// rack (no `res` key → 0.5) sounds identical. Span ×0.4 … ×2.5 → F1 Q 4.4 … 27.5.
+// Lower = wider peaks, which also makes each vowel's loudness far less dependent on which
+// note is played (measured on a saw, vowel I across A2–C4: 15 dB spread at ×1, 9.5 at
+// ×0.4; a ±20-cent vibrato pulses 1.9 dB at ×1, 0.4 at ×0.4). Higher = narrower, more
+// whistly/resonant, and MORE note-dependent.
+const VOWEL_RES_SPAN = 2.5;
+const vowelResMult = (r) => Math.pow(VOWEL_RES_SPAN, 2 * Math.max(0, Math.min(1, r)) - 1);
+// A bandpass's bandwidth goes as 1/Q, so the energy it passes from a dense source goes
+// as 1/Q and its amplitude as 1/√Q — the makeup tracks √mult (the vocoder's Phase 83
+// rule). Keeps the average level within ~±2 dB across the whole knob; the limiter
+// catches what is left.
+const vowelMakeupFor = (mult) => VOWEL_MAKEUP * Math.sqrt(mult);
+// PANNER WIDTH (Vox Phase 114): knob 0..1 → side multiplier 0..2 (0.5 = ×1, the source's
+// own width), times ½√2 so that at centre the side matches the mono law's −3 dB on the
+// mid — the stereo image comes out exactly as it went in. See the panner factory.
+const panWidthGain = (w) => 2 * Math.max(0, Math.min(1, w)) * Math.SQRT1_2;
+const PAN_SHAPE_POINTS = 1025;   // odd — pan 0 must land exactly on a curve sample
+// CHRONOS feedback ceiling (Vox Phase 116). Loop small-signal gain = CHRONOS_SAT_SLOPE
+// (the tanh(1.2x) soft-clip's slope at 0) × (self + cross). Up to the knee the REPEATS
+// knob maps exactly as it always did; above it the gain eases toward CHRONOS_LOOP_MAX
+// instead of passing 1 (where echoes grew forever), so the top of the knob still
+// lengthens the trail but every trail fades. 0.95 ≈ −0.45 dB per pass.
+const CHRONOS_SAT_SLOPE = 1.2;
+const CHRONOS_LOOP_KNEE = 0.85;
+const CHRONOS_LOOP_MAX  = 0.95;
+const CHRONOS_FB_SHAPE_POINTS = 1025;   // odd — x = 0 must read exactly 0
+// Delay-line size, allocated once per side (Vox Phase 118: 4 → 8 s, so a synced 1 BAR
+// still fits down to ~31 BPM; free-running zones top out at 3 s as before).
+const CHRONOS_MAXD = 8;
+const CHRONOS_RANGES = { micro: [0.003, 0.03], mini: [0.03, 0.28], macro: [0.28, 3.0] };
+// Tempo SYNC (Vox Phase 118): in SYNC the TIME knob picks a note length off the rack's
+// master clock instead of a time in a zone. `beats` = quarter notes; ordered shortest →
+// longest so the knob turns the way it does in free mode. Capped below CHRONOS_MAXD
+// with a little headroom (TIME CV beyond it is clamped to the line length by Web Audio).
+export const CHRONOS_SYNC_DIVS = [
+  { label: '1/32',  beats: 0.125 }, { label: '1/16T', beats: 1 / 6 }, { label: '1/16', beats: 0.25 },
+  { label: '1/8T',  beats: 1 / 3 }, { label: '1/16D', beats: 0.375 }, { label: '1/8',  beats: 0.5 },
+  { label: '1/4T',  beats: 2 / 3 }, { label: '1/8D',  beats: 0.75 },  { label: '1/4',  beats: 1 },
+  { label: '1/4D',  beats: 1.5 },   { label: '1/2',   beats: 2 },     { label: '1/2D', beats: 3 },
+  { label: '1 BAR', beats: 4 },
+];
+const CHRONOS_SYNC_MAX_S = CHRONOS_MAXD - 0.2;
+export const chronosDivForTime = (t) =>
+  CHRONOS_SYNC_DIVS[Math.round(Math.max(0, Math.min(1, t)) * (CHRONOS_SYNC_DIVS.length - 1))];
+// The left line's delay in seconds for a CHRONOS param set — free (zone, log-mapped TIME)
+// or synced (division × the tempo passed in).
+function chronosBaseSec(p, bpm) {
+  const time = Math.max(0, Math.min(1, p.time ?? 0.5));
+  if (p.sync) return Math.min(CHRONOS_SYNC_MAX_S, chronosDivForTime(time).beats * 60 / bpm);
+  const [minT, maxT] = CHRONOS_RANGES[p.zone] || CHRONOS_RANGES.mini;
+  return minT * Math.pow(maxT / minT, time);   // log-mapped delay time
+}
+// ── Time changes by CROSSFADE, not glide (Vox Phase 119) ──
+// Gliding a delay line's read point bends the pitch of everything already in the buffer:
+// playback speed = 1 − (rate of change of the delay). The old 50 ms setTargetAtTime glide
+// moved 250 → 500 ms at up to 5 s/s, i.e. the buffer played BACKWARDS at 4× for a moment
+// (30 → 500 ms on a ZONE change: −8.4×) — and every feedback pass re-warped it. That was
+// Dylan's "space gun" sweep on every TIME / ZONE / SYNC change, worse in STEREO because
+// both sides swept at slightly different times. Each side now has TWO taps on the same
+// input (`Delay${S}` = tap 0, `DelayB${S}` = tap 1). A change sets the SILENT tap to the
+// new time instantly and crossfades to it — the audio jumps cleanly to the new echo
+// position with no pitch movement. The fade is LINEAR (gains sum to 1), so the loop
+// gain never exceeds its Phase 116 bound mid-fade (equal-power would peak at ×1.41).
+// One fade at a time: requests during a fade park in `st.target` and the newest one runs
+// when it ends — a fast knob drag steps through settled positions every ~85 ms.
+// Tiny changes (≤ 0.5 %, i.e. the tempo-follow tick tracking a tempo RAMP) still glide on
+// the active tap: following a ramp IS a gentle speed change, and crossfading every frame
+// would be worse. TIME CV is untouched — it deliberately bends (tape warp).
+const CHRONOS_XF_S      = 0.06;   // crossfade length
+const CHRONOS_GLIDE_REL = 0.005;  // ≤ this relative change → glide instead of crossfade
+const CHRONOS_TAP = ['Delay', 'DelayB'];
+const CHRONOS_XF  = ['XfA', 'XfB'];
+// TIME CV depth is PROPORTIONAL to the time (Vox Phase 120): ±1 CV = ±25 % of the tap's
+// current delay, in every zone and in SYNC. It used to be a fixed ±0.15 s — ~5× the whole
+// MICRO zone (CV could only slam it) and ~16 % of a MACRO echo (barely there). Each tap
+// owns its CV depth (`TimeCvDepthA/B`), set together with that tap's time while it is
+// SILENT, so a crossfade never makes the audible tap's CV term jump.
+const CHRONOS_TIME_CV_FRAC = 0.25;
+const CHRONOS_CV_DEPTH = ['TimeCvDepthA', 'TimeCvDepthB'];
+// st = { active: 0|1, times: [[L,R],[L,R]], target: [L,R]|null, busy, timer }.
+// Sole writer of every tap's delayTime base and of the four Xf gains.
+function chronosSetTime(n, id, st, L, R, allowGlide) {
+  st.target = [L, R];
+  if (st.busy) return;                                   // runs when the current fade ends
+  const cur = st.times[st.active];
+  if (Math.abs(cur[0] - L) < 1e-6 && Math.abs(cur[1] - R) < 1e-6) { st.target = null; return; }
+  // Tone.immediate(), NOT Tone.now(): now() adds the context lookAhead (0.1 s, 0.2 s on
+  // reduced quality), so the ramp would START after the wall-clock timer below already
+  // expired — the next fade would then re-aim a tap that is still audible.
+  const now = Tone.immediate();
+  if (allowGlide && Math.abs(L - cur[0]) <= CHRONOS_GLIDE_REL * cur[0]
+                 && Math.abs(R - cur[1]) <= CHRONOS_GLIDE_REL * cur[1]) {
+    n[`${id}${CHRONOS_TAP[st.active]}L`]?.delayTime.setTargetAtTime(L, now, 0.05);
+    n[`${id}${CHRONOS_TAP[st.active]}R`]?.delayTime.setTargetAtTime(R, now, 0.05);
+    n[`${id}${CHRONOS_CV_DEPTH[st.active]}`]?.gain.setTargetAtTime(CHRONOS_TIME_CV_FRAC * L, now, 0.05);
+    st.times[st.active] = [L, R];
+    st.target = null;
+    return;
+  }
+  const idle = 1 - st.active;
+  st.target = null;
+  st.busy = true;
+  ['L', 'R'].forEach((S, k) => {
+    const v = k ? R : L;
+    const d = n[`${id}${CHRONOS_TAP[idle]}${S}`]?.delayTime;
+    if (d) { d.cancelScheduledValues(now); d.setValueAtTime(v, now); }   // silent tap: jump is inaudible
+    n[`${id}${CHRONOS_XF[st.active]}${S}`]?.gain.linearRampTo(0, CHRONOS_XF_S, now);
+    n[`${id}${CHRONOS_XF[idle]}${S}`]?.gain.linearRampTo(1, CHRONOS_XF_S, now);
+  });
+  const cvd = n[`${id}${CHRONOS_CV_DEPTH[idle]}`]?.gain;   // its CV depth follows, also while silent
+  if (cvd) { cvd.cancelScheduledValues(now); cvd.setValueAtTime(CHRONOS_TIME_CV_FRAC * L, now); }
+  st.times[idle] = [L, R];
+  // Margin past the ramp so the old tap is truly silent before it can be re-aimed.
+  st.timer = setTimeout(() => {
+    st.timer = null;
+    st.active = idle;
+    st.busy = false;
+    if (st.target) chronosSetTime(n, id, st, st.target[0], st.target[1], false);
+  }, CHRONOS_XF_S * 1000 + 25);
+}
+const chronosTimesFor = (base, halo) => [base, base * (1 + 0.035 * halo)];   // R drifts → width
+function chronosFbFor(repeats, halo) {
+  const cross = halo * 0.4;
+  const fb    = repeats * (0.9 - 0.4 * halo);          // the original mapping
+  const loop  = CHRONOS_SAT_SLOPE * (fb + cross);
+  if (loop <= CHRONOS_LOOP_KNEE) return fb;
+  const room = CHRONOS_LOOP_MAX - CHRONOS_LOOP_KNEE;
+  const eased = CHRONOS_LOOP_KNEE + room * Math.tanh((loop - CHRONOS_LOOP_KNEE) / room);
+  return eased / CHRONOS_SAT_SLOPE - cross;
+}
+// Formant glide time constant per rAF write (Vox Phase 111) — see vowelTick.
+const VOWEL_GLIDE_TAU = 0.006;
 // morph position (0..4) → interpolated [F1,F2,F3]
 function vowelFreqsAt(pos) {
   const p  = Math.max(0, Math.min(4, pos));
@@ -1219,6 +1353,18 @@ export default function useVoxAudio() {
   const vowelDirectRefs  = useRef({});                 // id → true while MODE is DIRECT
   const vowelFromRefs    = useRef({});                 // id → FROM vowel index 0..4
   const vowelToRefs      = useRef({});                 // id → TO vowel index 0..4
+  // RES (Vox Phase 111) — id → applied Q multiplier. Delta gate for the param path,
+  // which is the sole writer of the three filters' Q and of `${id}Mix` (the makeup).
+  const vowelResRefs     = useRef({});
+  // id → { direct, pos, from, to } — the vowel actually SOUNDING (knob + FORM CV),
+  // published by vowelTick for the module's screen (Vox Phase 111). Read-only outside
+  // the tick; the screen draws it in its own rAF (Zero-Re-render).
+  const vowelLiveRefs    = useRef({});
+  // CHRONOS (Vox Phase 118) — id → last full param set (+ `_bpm` it was timed at), so the
+  // tempo-follow tick can re-time SYNCED instances when the master clock changes.
+  const chronosParamsRef = useRef({});
+  // id → two-tap crossfade state (Vox Phase 119) — see chronosSetTime.
+  const chronosXfRef     = useRef({});
   // ── LFO tempo-sync (Phase 65) ── all id-keyed; cover static 'lfo'/'lfo2' + dynamics.
   const lfoSyncActiveRef = useRef({});                 // id → true when a clock is patched to -sync
   const lfoRateRefs      = useRef({});                 // id → RATE knob 0..1 (drives sync division)
@@ -2643,14 +2789,33 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
         // differs. In DIRECT the knob is the manual position along that line, and the
         // CV rides on top of it, so a full-scale envelope with the knob at 0 travels
         // exactly FROM → TO.
-        const base = vowelMorphRefs.current[id] ?? 2;
-        const freqs = vowelDirectRefs.current[id]
-          ? vowelFreqsBetween(vowelFromRefs.current[id] ?? 4, vowelToRefs.current[id] ?? 0, base / 4 + cv)
-          : vowelFreqsAt(base + cv * 4);
+        const base   = vowelMorphRefs.current[id] ?? 2;
+        const direct = !!vowelDirectRefs.current[id];
+        const from   = vowelFromRefs.current[id] ?? 4;
+        const to     = vowelToRefs.current[id] ?? 0;
+        // Live position, clamped exactly as the two interpolators clamp it: CHAIN
+        // 0..4 along A-E-I-O-U, DIRECT 0..1 along FROM → TO. Published BEFORE the
+        // delta gate so the screen still reads it while the vowel sits still.
+        const pos = direct ? Math.max(0, Math.min(1, base / 4 + cv))
+                           : Math.max(0, Math.min(4, base + cv * 4));
+        const live = vowelLiveRefs.current[id] ??= {};
+        live.direct = direct; live.pos = pos; live.from = from; live.to = to;
+        const freqs = direct ? vowelFreqsBetween(from, to, pos) : vowelFreqsAt(pos);
         const scaled = freqs.map(f => Math.max(20, Math.min(18000, f * shape)));
         const last = vowelLastFreqRefs.current[id];
         if (last && Math.abs(scaled[0] - last[0]) < 0.5 && Math.abs(scaled[1] - last[1]) < 0.5 && Math.abs(scaled[2] - last[2]) < 0.5) continue;
-        for (let k = 0; k < 3; k++) n[`${id}F${k}`]?.frequency.setValueAtTime(scaled[k], now);
+        // Glide to the new value instead of jumping (Vox Phase 111). A frame is ~16 ms,
+        // and a fast LFO moves a formant several bandwidths per frame, so hard steps
+        // were audible as stair-step chatter. τ = 6 ms reaches ~94% of the target
+        // within the frame: smooth, and no audible lag on slow moves. First write after
+        // a mode change / creation still snaps (last == null), so the vowel lands
+        // where it should immediately.
+        for (let k = 0; k < 3; k++) {
+          const fq = n[`${id}F${k}`]?.frequency;
+          if (!fq) continue;
+          if (last) fq.setTargetAtTime(scaled[k], now, VOWEL_GLIDE_TAU);
+          else      fq.setValueAtTime(scaled[k], now);
+        }
         vowelLastFreqRefs.current[id] = scaled;
       }
     };
@@ -2803,6 +2968,30 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     };
     lfoSyncTick();
 
+    // ── CHRONOS tempo follow (Vox Phase 118) ── re-times every SYNCED delay when the master
+    // clock moves — the I/O TEMPO knob / BPM field, and equally the Workstation's tempo
+    // (and its tempo automation), since both share Tone.Transport. Polled rather than
+    // hooked into setTempo for exactly that reason. Delta-gated per instance: a steady
+    // tempo costs one comparison per synced delay per frame, zero writes. Not
+    // visibility-gated — it drives audio.
+    let chronosTempoRafId;
+    const chronosTempoTick = () => {
+      chronosTempoRafId = requestAnimationFrame(chronosTempoTick);
+      const all = chronosParamsRef.current;
+      let bpm;
+      for (const id in all) {
+        const p = all[id];
+        if (!p.sync) continue;
+        bpm ??= Tone.Transport.bpm.value;
+        if (Math.abs(bpm - p._bpm) < 1e-3) continue;
+        p._bpm = bpm;
+        const st = chronosXfRef.current[id];
+        if (st) chronosSetTime(n, id, st,
+          ...chronosTimesFor(chronosBaseSec(p, bpm), Math.max(0, Math.min(1, p.halo ?? 0.3))), true);
+      }
+    };
+    chronosTempoTick();
+
     nodesRef.current   = n;
     jackMapRef.current = buildJackMap(n);
 
@@ -2946,7 +3135,11 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
           // ...and the worklet's output re-enters through ModEnv, which keeps its existing
           // ModEnv → CarrVCA.gain edge. Reusing it as the landing point avoids 16 adapter
           // nodes AND avoids connecting a raw splitter straight to a Tone param.
-          split.connect(n[`${vid}ModEnv${i}`].input, i);
+          // Tone.connect, NOT split.connect(ModEnv.input): a Tone.Filter's `.input` is a
+          // Tone.Gain wrapper, and the native connect() threw on it at band 0 — from
+          // Phase 84 until Vox Phase 115 this whole splice silently fell into the .catch
+          // below (pre-84 symmetric followers) with band 0 left unwired. See VOX_PLAN 115.
+          Tone.connect(split, n[`${vid}ModEnv${i}`], i, 0);
           // The worklet owns the envelope SHAPE; this filter's job is now to strip the
           // pitch-rate ripple the fast attack lets through — see vocEnvPostHzFor.
           // setTargetAtTime, not safeRamp: rampTo on a frequency param goes exponential.
@@ -3033,6 +3226,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       cancelAnimationFrame(vocShiftRafId);
       cancelAnimationFrame(vowelRafId);
       cancelAnimationFrame(lfoSyncRafId);
+      cancelAnimationFrame(chronosTempoRafId);
       cancelAnimationFrame(qntFmRafId);
       cancelAnimationFrame(ffbSweepRafId);
       // Pending DAMP writes must not land on disposed Freeverbs (Phase 70).
@@ -3099,6 +3293,11 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       vowelMorphRefs.current        = {};
       vowelShapeRefs.current        = {};
       vowelLastFreqRefs.current     = {};
+      vowelResRefs.current          = {};
+      vowelLiveRefs.current         = {};
+      chronosParamsRef.current      = {};
+      Object.values(chronosXfRef.current).forEach(st => clearTimeout(st.timer));
+      chronosXfRef.current          = {};
       lfoSyncActiveRef.current      = {};
       lfoRateRefs.current           = {};
       ffbIdsRef.current             = ['ffb'];
@@ -3660,7 +3859,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       // 'I'/'U' because its low F1 sits in a strong region of the source), so a
       // big fixed makeup alone would clip 'A'. The limiter lets the closed
       // vowels be loud while catching 'A'/'O' peaks click-free.
-      n[`${id}Mix`] = new Tone.Gain(7);
+      n[`${id}Mix`] = new Tone.Gain(VOWEL_MAKEUP);   // RES (Phase 111) re-scales this
       // Hard-knee limiter (Tone.Limiter's default 30 dB soft knee barely
       // compresses). knee:0 + ratio 20 brick-walls at ~-1 dB so 'A'/'O' don't
       // clip while the closed vowels stay at full makeup. -out jack + display
@@ -3688,6 +3887,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       vowelMorphRefs.current[id]  = 2;
       vowelShapeRefs.current[id]  = 1.0;
       vowelLastFreqRefs.current[id] = null;
+      vowelResRefs.current[id] = 1;   // matches the constructed Qs + makeup
       vowelIdsRef.current = [...vowelIdsRef.current, id];
       const jackEntries = {
         [`${id}-in`]:    { type: 'in',  dest: n[`${id}In`] },
@@ -3700,33 +3900,100 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     }
 
     if (type === 'panner') {
-      // Voltage-Controlled Panner (Phase 67) — places a (typically mono) source
-      // in the stereo field. Tone.Panner wraps the native StereoPannerNode, which
-      // is already an EQUAL-POWER panner, so one node gives Gemini's requested law
-      // (no dual-VCA matrix). The whole rack downstream of io-in is 2-channel
-      // (master Volume → seqMasterGate → Destination + voxBus tap), so this pans
-      // to both the speakers and the Workstation recording tap.
+      // Voltage-Controlled Panner (Phase 67; stereo-aware since Vox Phase 114).
+      //
+      // Tone.Panner is a native StereoPannerNode forced to MONO input (channelCount 1,
+      // explicit), so the module used to fold any stereo source — BBD chorus, reverb,
+      // CHRONOS, a KEY PAN keyboard VCO — down to (L+R)/2 before panning: the width was
+      // silently thrown away. Now the input is split into MID and SIDE:
+      //
+      //   In → Up(2ch) → Split ─┬─ Mid = ½(L+R) ──► Pan (the SAME mono equal-power
+      //                         │                    panner as before) ─────────┐
+      //                         └─ Diff = ½(L−R) → Side(×g) → Merge[+s, −s] ────┴─► Out
+      //   g = WIDTH · ½√2 · (1 − |pan|)     (pan = knob + CV, the panner's own value)
+      //
+      // • A MONO source has L = R, so Diff is exactly 0 and Mid is exactly the old panner
+      //   input: mono patches are bit-for-bit what they were. WIDTH 0 also reproduces the
+      //   old output for stereo sources (Mid alone = the old downmix).
+      // • WIDTH 0.5 (×1, the default) at centre gives ½√2·(L, R) — exactly the input image
+      //   at the same −3 dB the mono law applies at centre, so nothing jumps level.
+      // • Side shrinks to 0 as the pan reaches either edge (1 − |pan|): hard-panned is a
+      //   point in one speaker, the way a pan knob is expected to behave.
+      // • Up is EXPLICIT stereo with 'speakers' interpretation so a mono source upmixes to
+      //   L = R before the splitter — a splitter is 'discrete', which would put mono in L only.
+      // • Peak: ≤ 1 per side up to WIDTH ×1; at ×2 a fully anti-phase input can reach
+      //   ~1.41. The master brick wall (Phase 103) catches it.
       const id = `panner${num}`;
+      const rawCtx = Tone.context.rawContext;
       n[`${id}In`]  = new Tone.Gain(1);
-      n[`${id}Pan`] = new Tone.Panner(0);   // -1 L … +1 R; 0 = centre (equal-power)
+      n[`${id}Up`]  = new Tone.Gain(1);
+      const up = n[`${id}Up`].input;
+      up.channelCount = 2; up.channelCountMode = 'explicit'; up.channelInterpretation = 'speakers';
+      n[`${id}In`].connect(n[`${id}Up`]);
+      const split = rawCtx.createChannelSplitter(2);
+      n[`${id}Split`] = split;
+      n[`${id}Up`].connect(split);
+      n[`${id}Mid`]  = new Tone.Gain(0.5);              // ½(L+R) — sums both splitter outs
+      n[`${id}RNeg`] = new Tone.Gain(-1);
+      n[`${id}Diff`] = new Tone.Gain(0.5);              // ½(L−R)
+      // Edges out of / into the native splitter + merger go through Tone.connect, which
+      // unwraps Tone wrappers down to the real AudioNode. Calling the native .connect()
+      // with a Tone object throws inside standardized-audio-context ("A value with the
+      // given key could not be found") — Tone.Analyser's `.input` is a Tone.Gain, not an
+      // AudioNode, which is exactly how the first Phase 114 build crashed on load.
+      Tone.connect(split, n[`${id}Mid`],  0, 0);
+      Tone.connect(split, n[`${id}Mid`],  1, 0);
+      Tone.connect(split, n[`${id}Diff`], 0, 0);
+      Tone.connect(split, n[`${id}RNeg`], 1, 0);
+      n[`${id}RNeg`].connect(n[`${id}Diff`]);
+      n[`${id}Pan`] = new Tone.Panner(0);   // -1 L … +1 R; mono equal-power (unchanged)
       n[`${id}Out`] = new Tone.Gain(1);
-      n[`${id}In`].connect(n[`${id}Pan`]);
+      n[`${id}Mid`].connect(n[`${id}Pan`]);
       n[`${id}Pan`].connect(n[`${id}Out`]);
-      // CV: cv-in → DEPTH attenuator → pan param. The PAN knob writes pan's
-      // INTRINSIC value (updateDynModuleParams); this connected CV SUMS at the
-      // AudioParam (Web Audio semantics) and clamps to [-1,1] — the established
-      // Moog knob+CV pattern (single writer per node holds: knob owns .value,
-      // the cable owns the connected input).
+      // Side: gain driven entirely by WidthAmt (intrinsic 0), then +s → L, −s → R.
+      n[`${id}Side`]    = new Tone.Gain(0);
+      n[`${id}SideInv`] = new Tone.Gain(-1);
+      n[`${id}Diff`].connect(n[`${id}Side`]);
+      n[`${id}Side`].connect(n[`${id}SideInv`]);
+      const merge = rawCtx.createChannelMerger(2);
+      n[`${id}Merge`] = merge;
+      Tone.connect(n[`${id}Side`],    merge, 0, 0);
+      Tone.connect(n[`${id}SideInv`], merge, 0, 1);
+      Tone.connect(merge, n[`${id}Out`]);
+      // Effective pan as ONE signal: PAN knob (PanKnob, sole writer) + CV × DEPTH, summed
+      // in PanSum, which drives both the panner and the side narrowing. The panner's own
+      // intrinsic value stays 0, so the sum is exactly what the param used to see.
+      n[`${id}PanKnob`] = new Tone.Signal(0);
       n[`${id}CvIn`]    = new Tone.Gain(1);
       n[`${id}CvDepth`] = new Tone.Gain(0.5); // CV DEPTH / attenuator, knob 0..1
+      n[`${id}PanSum`]  = new Tone.Gain(1);
+      n[`${id}PanKnob`].connect(n[`${id}PanSum`]);
       n[`${id}CvIn`].connect(n[`${id}CvDepth`]);
-      n[`${id}CvDepth`].connect(n[`${id}Pan`].pan);
-      // Meters — input level + CV level, read by getPanMeterData for the L/R LEDs.
-      n[`${id}InAnalyser`] = new Tone.Analyser('waveform', 128);
-      n[`${id}CvAnalyser`] = new Tone.Analyser('waveform', 128);
-      n[`${id}In`].connect(n[`${id}InAnalyser`]);
-      n[`${id}CvIn`].connect(n[`${id}CvAnalyser`]);
-      const nodeNames = [`${id}In`, `${id}Pan`, `${id}Out`, `${id}CvIn`, `${id}CvDepth`, `${id}InAnalyser`, `${id}CvAnalyser`];
+      n[`${id}CvDepth`].connect(n[`${id}PanSum`]);
+      n[`${id}PanSum`].connect(n[`${id}Pan`].pan);
+      // 1 − |pan|. ODD length so pan 0 (silence on PanSum) lands exactly on a sample and
+      // reads exactly 1 (the WaveShaper origin rule — here the value at 0 is 1, not 0,
+      // but it must still be exact). The shaper clamps to ±1 exactly as the panner does.
+      n[`${id}PanShape`] = new Tone.WaveShaper((x) => 1 - Math.abs(x), PAN_SHAPE_POINTS);
+      n[`${id}WidthAmt`] = new Tone.Gain(panWidthGain(0.5));
+      n[`${id}PanSum`].connect(n[`${id}PanShape`]);
+      n[`${id}PanShape`].connect(n[`${id}WidthAmt`]);
+      n[`${id}WidthAmt`].connect(n[`${id}Side`].gain);
+      // L/R lamps measure the REAL output per channel (Phase 114) — they used to compute
+      // input peak × the mono pan law, which is wrong once stereo passes through.
+      const meterSplit = rawCtx.createChannelSplitter(2);
+      n[`${id}MeterSplit`] = meterSplit;
+      n[`${id}Out`].connect(meterSplit);
+      n[`${id}AnL`] = new Tone.Analyser('waveform', 128);
+      n[`${id}AnR`] = new Tone.Analyser('waveform', 128);
+      Tone.connect(meterSplit, n[`${id}AnL`], 0, 0);   // NOT .input — that is a Tone.Gain
+      Tone.connect(meterSplit, n[`${id}AnR`], 1, 0);
+      // Native splitter/merger: the dispose sweep disconnects them (dispose() is absent
+      // and its throw is caught), the same way the noise module's IIR filters go.
+      const nodeNames = [`${id}In`, `${id}Up`, `${id}Split`, `${id}Mid`, `${id}RNeg`, `${id}Diff`,
+        `${id}Pan`, `${id}Out`, `${id}Side`, `${id}SideInv`, `${id}Merge`, `${id}PanKnob`,
+        `${id}CvIn`, `${id}CvDepth`, `${id}PanSum`, `${id}PanShape`, `${id}WidthAmt`,
+        `${id}MeterSplit`, `${id}AnL`, `${id}AnR`];
       const jackEntries = {
         [`${id}-in`]:    { type: 'in',  dest: n[`${id}In`] },
         [`${id}-cv-in`]: { type: 'in',  dest: n[`${id}CvIn`] },
@@ -3738,83 +4005,161 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     }
 
     if (type === 'chronos') {
-      // Chronos Multi-Zone Delay (Phase 68) — MONO in → STEREO out. A HAND-BUILT
+      // Chronos Multi-Zone Delay (Phase 68; true stereo in since Vox Phase 116). A HAND-BUILT
       // stereo feedback loop around two native Tone.Delay lines, so COLOR (loop
       // lowpass), HALO (allpass diffusion + L↔R cross-feedback smear) and a tanh
       // soft-clip all live INSIDE the feedback path (a Tone.FeedbackDelay black
-      // box can't host them). Modulating delayTime (TIME knob / TIME CV) varispeed-
-      // warps pitch with NO dropouts (native DelayNode interpolation) = tape-stop /
-      // skid. Stereo width is synthesized: the L/R delay times drift apart (HALO)
-      // and cross-feed, so WetL→OutBusL / WetR→OutBusR stay decorrelated; the dry
-      // path sums equally to both buses (centre). NB Web Audio clamps any delay in
+      // box can't host them). TIME CV varispeed-warps pitch with no dropouts (native
+      // DelayNode interpolation) = tape-stop / skid; the TIME knob, ZONE and SYNC do NOT
+      // warp since Vox Phase 119 — they crossfade between two taps (chronosSetTime). For a mono source, width is synthesized: the L/R delay times drift apart
+      // (HALO) and cross-feed, so the two wet sides stay decorrelated; a stereo source
+      // feeds each loop its own side and the dry leg passes untouched. NB Web Audio clamps any delay in
       // a feedback cycle to ≥1 render quantum (~2.9 ms), so Micro floors ~3 ms.
       const id = `chronos${num}`;
-      const MAXD = 4; // seconds — sized once; ZONE/TIME/CV always stay within it
+      const MAXD = CHRONOS_MAXD; // seconds — sized once; ZONE/SYNC/TIME/CV always stay within it
+      const rawCtx = Tone.context.rawContext;
       n[`${id}In`]      = new Tone.Gain(1);
       n[`${id}HpPre`]   = new Tone.Filter({ type: 'highpass', frequency: 90, Q: 0.5 });
       n[`${id}Dry`]     = new Tone.Gain(0.707);  // dry leg (MIX, equal-power)
-      // Internal hard-pan legs place wet-L on the left channel and wet-R on the
-      // right (dry fans to both → centred), then BOTH sum into a single stereo
-      // Out Gain feeding ONE central OUT jack — the whole stereo image travels
-      // down one cable (same convention as the Panner module). Plain Gains here
-      // would be mono and collapse the width.
-      n[`${id}OutBusL`] = new Tone.Panner(-1);
-      n[`${id}OutBusR`] = new Tone.Panner(1);
-      n[`${id}Out`]     = new Tone.Gain(1); // stereo sum → single OUT jack
-      n[`${id}OutBusL`].connect(n[`${id}Out`]);
-      n[`${id}OutBusR`].connect(n[`${id}Out`]);
+      n[`${id}Out`]     = new Tone.Gain(1);      // stereo sum → single OUT jack
+      // STEREO-SAFE I/O (Vox Phase 116). The wet legs used to reach Out through two
+      // hard-panned Tone.Panners and the dry leg through both — and Tone.Panner forces
+      // MONO input, so a stereo source (BBD, reverb, PANNER, KEY PAN) came out folded to
+      // (L+R)/2 even at MIX 0 (the Phase 114 bug, here too). Now:
+      //  • dry goes straight In → Dry → Out, so it keeps whatever width it arrived with;
+      //  • the loop input is split L/R (In → HpPre → Up → splitter → SumL / SumR), so a
+      //    stereo source echoes in true stereo;
+      //  • the wet legs are merged as [WetL, WetR] by a ChannelMerger — numerically what a
+      //    hard-panned mono panner did (cos 0 = 1, sin 0 = 0).
+      // A MONO source therefore takes exactly its old path: Up upmixes it to L = R, so
+      // each loop sees the same signal it always did, and the dry leg is (x, x) as before.
+      // Up must be explicit stereo with 'speakers' interpretation: a splitter is
+      // 'discrete' and would otherwise send a mono source to the LEFT loop only.
+      // All native-node edges go through Tone.connect (see the Phase 114 hotfix).
+      n[`${id}Up`] = new Tone.Gain(1);
+      const up = n[`${id}Up`].input;
+      up.channelCount = 2; up.channelCountMode = 'explicit'; up.channelInterpretation = 'speakers';
+      const split = rawCtx.createChannelSplitter(2);
+      const merge = rawCtx.createChannelMerger(2);
+      n[`${id}Split`] = split;
+      n[`${id}Merge`] = merge;
       n[`${id}In`].connect(n[`${id}HpPre`]);
+      n[`${id}HpPre`].connect(n[`${id}Up`]);
+      Tone.connect(n[`${id}Up`], split);
       n[`${id}In`].connect(n[`${id}Dry`]);
-      n[`${id}Dry`].connect(n[`${id}OutBusL`]);
-      n[`${id}Dry`].connect(n[`${id}OutBusR`]); // dry fans to both legs → centred
-      const nodeNames = [`${id}In`, `${id}HpPre`, `${id}Dry`, `${id}OutBusL`, `${id}OutBusR`, `${id}Out`];
+      n[`${id}Dry`].connect(n[`${id}Out`]);
+      Tone.connect(merge, n[`${id}Out`]);
+      const nodeNames = [`${id}In`, `${id}HpPre`, `${id}Dry`, `${id}Out`, `${id}Up`, `${id}Split`, `${id}Merge`];
+
+      // FEEDBACK CEILING (Vox Phase 116, Dylan: "always fade out"). Each loop's
+      // small-signal gain is 1.2 (the tanh(1.2x) slope) × (self + cross), and REPEATS at
+      // max reached 1.2 × 0.9 = 1.08 — echoes that GROW, held only by the tanh into an
+      // endless wash (more with REP CV, which summed straight onto Fb.gain unbounded,
+      // either direction). Now
+      //   Fb.gain = cap + cap · min(clamp±1((knob − cap + CV) / cap), 0)
+      //           = clamp(knob + CV, 0, cap)
+      // — FbNorm (1/cap) puts the sum on the shaper's natural ±1 input clamp, so the
+      // floor at 0 comes free and the curve never has to change. The cap (written with
+      // HALO) keeps 1.2 × (self + cross) ≤ CHRONOS_LOOP_MAX < 1, so every trail decays,
+      // whatever is patched into REP CV. Below the knee the knob maps exactly as before.
+      n[`${id}FbOff`]   = new Tone.Signal(0);      // knob fb − cap (≤ 0), param path writes
+      n[`${id}FbCap`]   = new Tone.Signal(0.4);    // cap, param path writes
+      n[`${id}FbSum`]   = new Tone.Gain(1);
+      n[`${id}FbNorm`]  = new Tone.Gain(1 / 0.4);  // 1/cap, param path writes
+      n[`${id}FbMin`]   = new Tone.WaveShaper((x) => Math.min(x, 0), CHRONOS_FB_SHAPE_POINTS);
+      n[`${id}FbScale`] = new Tone.Gain(0.4);      // cap, param path writes
+      n[`${id}FbOff`].connect(n[`${id}FbSum`]);
+      n[`${id}FbSum`].connect(n[`${id}FbNorm`]);
+      n[`${id}FbNorm`].connect(n[`${id}FbMin`]);
+      n[`${id}FbMin`].connect(n[`${id}FbScale`]);
+      nodeNames.push(`${id}FbOff`, `${id}FbCap`, `${id}FbSum`, `${id}FbNorm`, `${id}FbMin`, `${id}FbScale`);
+
+      // PING-PONG (Vox Phase 117) — a routing crossfade over five gains, no rewiring:
+      //   STEREO     InSel{L,R} 1 · PpIn 0 · Self{L,R} 1 · PpX{L,R} 0   (the pre-117 graph)
+      //   PING-PONG  InSel{L,R} 0 · PpIn 1 · Self{L,R} 0 · PpX{L,R} 1
+      // In ping-pong the input (summed to mono) enters the LEFT loop only, and each loop's
+      // REPEATS feedback is sent to the OTHER side instead of its own — so echo 1 is on the
+      // left, echo 2 on the right, echo 3 left… one delay time apart. The same bounded
+      // feedback amount (FbScale's ceiling) drives it, so the Phase 116 guarantee holds:
+      // with self = 0 the most any side receives is fb + cross ≤ cap + cross, i.e. loop
+      // gain ≤ 0.95 exactly as in stereo mode. HALO keeps its cross-smear, diffusion and
+      // R-side drift. Ramped 50 ms both ways, so flipping mid-trail doesn't click.
+      n[`${id}PpIn`] = new Tone.Gain(0);
+      const ppIn = n[`${id}PpIn`].input;   // mono sum: a stereo source enters as (L+R)/2
+      ppIn.channelCount = 1; ppIn.channelCountMode = 'explicit'; ppIn.channelInterpretation = 'speakers';
+      n[`${id}HpPre`].connect(n[`${id}PpIn`]);
+      nodeNames.push(`${id}PpIn`);
 
       for (const S of ['L', 'R']) {
         n[`${id}Sum${S}`]   = new Tone.Gain(1);
-        n[`${id}Delay${S}`] = new Tone.Delay({ delayTime: 0.18, maxDelay: MAXD });
+        n[`${id}Delay${S}`]  = new Tone.Delay({ delayTime: 0.18, maxDelay: MAXD });   // tap 0
+        n[`${id}DelayB${S}`] = new Tone.Delay({ delayTime: 0.18, maxDelay: MAXD });   // tap 1 (Phase 119)
+        n[`${id}XfA${S}`]    = new Tone.Gain(1);   // tap 0 level — chronosSetTime crossfades these
+        n[`${id}XfB${S}`]    = new Tone.Gain(0);   // tap 1 level
         n[`${id}Hp${S}`]    = new Tone.Filter({ type: 'highpass', frequency: 90,   Q: 0.5 });
         n[`${id}Lp${S}`]    = new Tone.Filter({ type: 'lowpass',  frequency: 8000, Q: 0.4 });
         n[`${id}Ap1${S}`]   = new Tone.Filter({ type: 'allpass',  frequency: 600,  Q: 1.2 });
         n[`${id}Ap2${S}`]   = new Tone.Filter({ type: 'allpass',  frequency: 1900, Q: 1.2 });
         n[`${id}Sat${S}`]   = new Tone.WaveShaper((x) => Math.tanh(1.2 * x), 2048); // loop soft-clip
-        n[`${id}Fb${S}`]    = new Tone.Gain(0.4);  // self feedback (REPEATS)
+        n[`${id}Fb${S}`]    = new Tone.Gain(0);    // self feedback (REPEATS) — driven by FbCap + FbMin
         n[`${id}Xfb${S}`]   = new Tone.Gain(0);    // cross feedback (HALO smear)
         n[`${id}Wet${S}`]   = new Tone.Gain(0.707); // wet leg level (MIX)
         // forward chain (the Delay in this cycle satisfies the ≥1-quantum rule)
-        n[`${id}HpPre`].connect(n[`${id}Sum${S}`]);
+        n[`${id}InSel${S}`] = new Tone.Gain(1);   // STEREO-mode input leg (ping-pong: 0)
+        Tone.connect(split, n[`${id}InSel${S}`], S === 'L' ? 0 : 1, 0);   // this side's input
+        n[`${id}InSel${S}`].connect(n[`${id}Sum${S}`]);
+        n[`${id}FbCap`].connect(n[`${id}Fb${S}`].gain);
+        n[`${id}FbScale`].connect(n[`${id}Fb${S}`].gain);
         n[`${id}Sum${S}`].connect(n[`${id}Delay${S}`]);
-        n[`${id}Delay${S}`].connect(n[`${id}Hp${S}`]);
+        n[`${id}Sum${S}`].connect(n[`${id}DelayB${S}`]);          // both taps hear the same input
+        n[`${id}Delay${S}`].connect(n[`${id}XfA${S}`]);
+        n[`${id}DelayB${S}`].connect(n[`${id}XfB${S}`]);
+        n[`${id}XfA${S}`].connect(n[`${id}Hp${S}`]);
+        n[`${id}XfB${S}`].connect(n[`${id}Hp${S}`]);
+        nodeNames.push(`${id}DelayB${S}`, `${id}XfA${S}`, `${id}XfB${S}`);
         n[`${id}Hp${S}`].connect(n[`${id}Lp${S}`]);
         n[`${id}Lp${S}`].connect(n[`${id}Ap1${S}`]);
         n[`${id}Ap1${S}`].connect(n[`${id}Ap2${S}`]);
         n[`${id}Ap2${S}`].connect(n[`${id}Wet${S}`]);
-        n[`${id}Wet${S}`].connect(n[`${id}OutBus${S}`]);       // wet → its own bus (stereo)
+        Tone.connect(n[`${id}Wet${S}`], merge, 0, S === 'L' ? 0 : 1);   // wet → its own side
         n[`${id}Ap2${S}`].connect(n[`${id}Sat${S}`]);          // post-diffusion → feedback
         n[`${id}Sat${S}`].connect(n[`${id}Fb${S}`]);
         n[`${id}Sat${S}`].connect(n[`${id}Xfb${S}`]);
-        n[`${id}Fb${S}`].connect(n[`${id}Sum${S}`]);           // self loop
+        n[`${id}Self${S}`] = new Tone.Gain(1);    // REPEATS → own side (ping-pong: 0)
+        n[`${id}PpX${S}`]  = new Tone.Gain(0);    // REPEATS → other side (ping-pong: 1)
+        n[`${id}Fb${S}`].connect(n[`${id}Self${S}`]);
+        n[`${id}Self${S}`].connect(n[`${id}Sum${S}`]);         // self loop
+        nodeNames.push(`${id}InSel${S}`, `${id}Self${S}`, `${id}PpX${S}`);
         nodeNames.push(`${id}Sum${S}`, `${id}Delay${S}`, `${id}Hp${S}`, `${id}Lp${S}`, `${id}Ap1${S}`, `${id}Ap2${S}`, `${id}Sat${S}`, `${id}Fb${S}`, `${id}Xfb${S}`, `${id}Wet${S}`);
       }
       n[`${id}XfbL`].connect(n[`${id}SumR`]); // L diffusion → R loop (stereo smear)
       n[`${id}XfbR`].connect(n[`${id}SumL`]); // R diffusion → L loop
+      n[`${id}PpXL`].connect(n[`${id}SumR`]); // ping-pong: L's repeats bounce to R
+      n[`${id}PpXR`].connect(n[`${id}SumL`]); // …and R's back to L
+      n[`${id}PpIn`].connect(n[`${id}SumL`]); // ping-pong: the first echo is on the left
 
       // CV: TIME CV varispeed-warps both delay lines; REPEAT CV pushes feedback
       // (the tanh soft-clip bounds self-oscillation rather than letting it blow up).
-      n[`${id}TimeCvIn`]    = new Tone.Gain(1);
-      n[`${id}TimeCvDepth`] = new Tone.Gain(0.15); // ±1 CV → ±0.15 s
-      n[`${id}TimeCvIn`].connect(n[`${id}TimeCvDepth`]);
-      n[`${id}TimeCvDepth`].connect(n[`${id}DelayL`].delayTime);
-      n[`${id}TimeCvDepth`].connect(n[`${id}DelayR`].delayTime);
+      n[`${id}TimeCvIn`]     = new Tone.Gain(1);
+      // ±1 CV → ±CHRONOS_TIME_CV_FRAC × that tap's time (Phase 120); chronosSetTime writes these.
+      n[`${id}TimeCvDepthA`] = new Tone.Gain(CHRONOS_TIME_CV_FRAC * 0.18);
+      n[`${id}TimeCvDepthB`] = new Tone.Gain(CHRONOS_TIME_CV_FRAC * 0.18);
+      n[`${id}TimeCvIn`].connect(n[`${id}TimeCvDepthA`]);
+      n[`${id}TimeCvIn`].connect(n[`${id}TimeCvDepthB`]);
+      n[`${id}TimeCvDepthA`].connect(n[`${id}DelayL`].delayTime);    // tap 0, both sides
+      n[`${id}TimeCvDepthA`].connect(n[`${id}DelayR`].delayTime);
+      n[`${id}TimeCvDepthB`].connect(n[`${id}DelayBL`].delayTime);   // tap 1, both sides
+      n[`${id}TimeCvDepthB`].connect(n[`${id}DelayBR`].delayTime);
+      chronosXfRef.current[id] = { active: 0, times: [[0.18, 0.18], [0.18, 0.18]], target: null, busy: false, timer: null };
       n[`${id}RepCvIn`]    = new Tone.Gain(1);
       n[`${id}RepCvDepth`] = new Tone.Gain(0.25);
       n[`${id}RepCvIn`].connect(n[`${id}RepCvDepth`]);
-      n[`${id}RepCvDepth`].connect(n[`${id}FbL`].gain);
-      n[`${id}RepCvDepth`].connect(n[`${id}FbR`].gain);
+      n[`${id}RepCvDepth`].connect(n[`${id}FbSum`]);   // through the ceiling, never raw onto Fb.gain
 
       n[`${id}Analyser`] = new Tone.Analyser('waveform', 128); // display energy tap
       n[`${id}Ap2L`].connect(n[`${id}Analyser`]);
       n[`${id}Ap2R`].connect(n[`${id}Analyser`]);
-      nodeNames.push(`${id}TimeCvIn`, `${id}TimeCvDepth`, `${id}RepCvIn`, `${id}RepCvDepth`, `${id}Analyser`);
+      nodeNames.push(`${id}TimeCvIn`, `${id}TimeCvDepthA`, `${id}TimeCvDepthB`, `${id}RepCvIn`, `${id}RepCvDepth`, `${id}Analyser`);
 
       const jackEntries = {
         [`${id}-in`]:      { type: 'in',  dest: n[`${id}In`] },
@@ -4296,46 +4641,74 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
         // Write refs ONLY — vowelTick is the sole writer of the filter freqs.
         if (params.vowel !== undefined) vowelMorphRefs.current[id] = Math.max(0, Math.min(4, params.vowel * 4));
         if (params.shape !== undefined) vowelShapeRefs.current[id] = 0.7 + params.shape * 0.6; // tract scale 0.7..1.3
-        if (params.direct !== undefined) {
+        // MODE / FROM / TO re-arm the delta gate so the jump lands at once (a hard set —
+        // the new path is somewhere else entirely). Delta-checked (Phase 111): the module
+        // re-sends every param on ANY knob move, and an unconditional re-arm would turn
+        // each of those into a hard set, defeating vowelTick's glide.
+        if (params.direct !== undefined && !!params.direct !== !!vowelDirectRefs.current[id]) {
           vowelDirectRefs.current[id] = !!params.direct;
-          vowelLastFreqRefs.current[id] = undefined;   // re-arm the delta gate across the mode change
+          vowelLastFreqRefs.current[id] = undefined;
         }
-        if (params.from !== undefined) { vowelFromRefs.current[id] = params.from; vowelLastFreqRefs.current[id] = undefined; }
-        if (params.to   !== undefined) { vowelToRefs.current[id]   = params.to;   vowelLastFreqRefs.current[id] = undefined; }
+        if (params.from !== undefined && params.from !== vowelFromRefs.current[id]) {
+          vowelFromRefs.current[id] = params.from; vowelLastFreqRefs.current[id] = undefined;
+        }
+        if (params.to !== undefined && params.to !== vowelToRefs.current[id]) {
+          vowelToRefs.current[id] = params.to; vowelLastFreqRefs.current[id] = undefined;
+        }
+        // RES (Phase 111) — sole writer of the three Qs and of the makeup gain.
+        if (params.res !== undefined) {
+          const mult = vowelResMult(params.res);
+          if (Math.abs(mult - (vowelResRefs.current[id] ?? 1)) > 1e-6) {
+            vowelResRefs.current[id] = mult;
+            for (let k = 0; k < 3; k++) n[`${id}F${k}`]?.Q.rampTo(VOWEL_Q[k] * mult, 0.05);
+            n[`${id}Mix`]?.gain.rampTo(vowelMakeupFor(mult), 0.05);
+          }
+        }
         break;
       case 'panner':
-        // PAN knob 0..1 → pan -1..1 (intrinsic value; CV sums on top of it).
-        if (params.pan   !== undefined) safeRamp(n[`${id}Pan`].pan, params.pan * 2 - 1, 0.02);
+        // PAN knob 0..1 → pan -1..1 on PanKnob (its sole writer; CV sums after it).
+        if (params.pan   !== undefined) safeRamp(n[`${id}PanKnob`], params.pan * 2 - 1, 0.02);
         if (params.depth !== undefined) safeRamp(n[`${id}CvDepth`].gain, Math.max(0, params.depth), 0.02);
+        // WIDTH (Phase 114) — sole writer of WidthAmt.
+        if (params.width !== undefined) safeRamp(n[`${id}WidthAmt`].gain, panWidthGain(params.width), 0.02);
         break;
       case 'chronos': {
-        // Module sends the full {zone,time,repeats,halo,color,mix} each change.
-        const CHRONOS_RANGES = { micro: [0.003, 0.03], mini: [0.03, 0.28], macro: [0.28, 3.0] };
-        const zone = params.zone ?? 'mini';
-        const [minT, maxT] = CHRONOS_RANGES[zone] || CHRONOS_RANGES.mini;
-        const time    = Math.max(0, Math.min(1, params.time    ?? 0.5));
+        // Module sends the full {zone,time,repeats,halo,color,mix,pingpong,sync} each change.
         const halo    = Math.max(0, Math.min(1, params.halo    ?? 0.3));
         const repeats = Math.max(0, Math.min(1, params.repeats ?? 0.45));
         const color   = Math.max(0, Math.min(1, params.color   ?? 0.6));
         const mix     = Math.max(0, Math.min(1, params.mix     ?? 0.5));
         const now  = Tone.now();
-        const base = minT * Math.pow(maxT / minT, time); // log-mapped delay time
-        n[`${id}DelayL`].delayTime.setTargetAtTime(base, now, 0.05);
-        n[`${id}DelayR`].delayTime.setTargetAtTime(base * (1 + 0.035 * halo), now, 0.05); // R drifts → width
+        // TIME: free (zone) or SYNC (Phase 118). The tempo-follow tick re-applies synced
+        // instances when the master clock moves, from this stored param set.
+        const bpm = Tone.Transport.bpm.value;
+        chronosParamsRef.current[id] = { ...params, _bpm: bpm };
+        const st = chronosXfRef.current[id];
+        if (st) chronosSetTime(n, id, st, ...chronosTimesFor(chronosBaseSec(params, bpm), halo), false);
         const cut = 400 * Math.pow(50, color); // 400 Hz (dark) … 20 kHz (bright)
         n[`${id}LpL`].frequency.setTargetAtTime(cut, now, 0.05);
         n[`${id}LpR`].frequency.setTargetAtTime(cut, now, 0.05);
-        // Feedback + cross share headroom so the coupled loop stays stable
-        // (|self| + |cross| ≤ ~0.9; the tanh soft-clip guards the rest).
+        // Feedback + cross share headroom (|self| + |cross| ≤ 0.9 by the knob mapping).
+        // Phase 116: the loop gain is 1.2 × (self + cross) because of the tanh(1.2x) slope,
+        // so the knob's top end used to exceed 1. chronosFbFor soft-limits it under
+        // CHRONOS_LOOP_MAX (identical below the knee); FbCap bounds knob + REP CV.
         const cross = halo * 0.4;
-        const fb    = repeats * (0.9 - 0.4 * halo);
-        safeRamp(n[`${id}FbL`].gain,  fb);    safeRamp(n[`${id}FbR`].gain,  fb);
+        const fb    = chronosFbFor(repeats, halo);
+        const cap   = CHRONOS_LOOP_MAX / CHRONOS_SAT_SLOPE - cross;
+        safeRamp(n[`${id}FbCap`], cap);       safeRamp(n[`${id}FbOff`], fb - cap);
+        safeRamp(n[`${id}FbNorm`].gain, 1 / cap); safeRamp(n[`${id}FbScale`].gain, cap);
         safeRamp(n[`${id}XfbL`].gain, cross); safeRamp(n[`${id}XfbR`].gain, cross);
         // HALO also widens the allpass diffusion spread
         n[`${id}Ap1L`].frequency.setTargetAtTime(300 + halo * 700, now, 0.05);
         n[`${id}Ap1R`].frequency.setTargetAtTime(360 + halo * 700, now, 0.05);
         n[`${id}Ap2L`].frequency.setTargetAtTime(1500 + halo * 1500, now, 0.05);
         n[`${id}Ap2R`].frequency.setTargetAtTime(1700 + halo * 1500, now, 0.05);
+        // PING-PONG (Phase 117) — absent = STEREO, so saved racks are unchanged.
+        const pp = params.pingpong ? 1 : 0;
+        safeRamp(n[`${id}InSelL`].gain, 1 - pp); safeRamp(n[`${id}InSelR`].gain, 1 - pp);
+        safeRamp(n[`${id}SelfL`].gain,  1 - pp); safeRamp(n[`${id}SelfR`].gain,  1 - pp);
+        safeRamp(n[`${id}PpXL`].gain,   pp);     safeRamp(n[`${id}PpXR`].gain,   pp);
+        safeRamp(n[`${id}PpIn`].gain,   pp);
         // MIX — equal-power dry/wet crossfade
         const wetG = Math.sin(mix * Math.PI / 2), dryG = Math.cos(mix * Math.PI / 2);
         safeRamp(n[`${id}WetL`].gain, wetG); safeRamp(n[`${id}WetR`].gain, wetG);
@@ -4475,6 +4848,12 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       delete vocShiftLastRatioRefs.current[id];
       vocIdsRef.current = vocIdsRef.current.filter(v => v !== id);
     }
+    // CHRONOS (Phase 118): stop the tempo-follow tick re-timing a disposed instance.
+    if (inst.type === 'chronos') {
+      delete chronosParamsRef.current[id];
+      clearTimeout(chronosXfRef.current[id]?.timer);   // a pending fade must not touch disposed nodes
+      delete chronosXfRef.current[id];
+    }
     if (inst.type === 'vowel') {
       vowelIdsRef.current = vowelIdsRef.current.filter(v => v !== id); // stop the rAF iterating it
       delete vowelMorphRefs.current[id];
@@ -4483,6 +4862,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       delete vowelDirectRefs.current[id];
       delete vowelFromRefs.current[id];
       delete vowelToRefs.current[id];
+      delete vowelResRefs.current[id];
+      delete vowelLiveRefs.current[id];
     }
     if (inst.type === 'lfo') {
       delete lfoSyncActiveRef.current[id]; // stop the sync rAF iterating it
@@ -5480,25 +5861,21 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     return n?.[`${id}Analyser`]?.getValue() ?? null;
   }, []);
 
-  // Panner L/R distribution (Phase 67) → drives the module's two stereo LEDs.
-  // Per-channel level = input peak × equal-power gain at the EFFECTIVE pan
-  // (knob base + sampled CV × depth), so the LEDs track both signal and motion.
-  const getPanMeterData = useCallback((id) => {
-    const n = nodesRef.current;
-    if (!n || !n[`${id}InAnalyser`]) return null;
-    const inWave = n[`${id}InAnalyser`].getValue();
+  // The vowel actually sounding — knob + FORM CV — for the module screen (Vox Phase 111).
+  // Returns the live object vowelTick mutates in place; callers only read it.
+  const getVowelLive = useCallback((id) => vowelLiveRefs.current[id] ?? null, []);
+
+  // Panner L/R lamps (Phase 67; real per-channel output since Vox Phase 114) — peak of
+  // one channel of the module's OUTPUT, so the lamps show what actually leaves each side,
+  // stereo sources and CV motion included. One analyser per call: L and R lamps each read
+  // only their own channel.
+  const getPanLevel = useCallback((id, ch) => {
+    const an = nodesRef.current?.[ch ? `${id}AnR` : `${id}AnL`];
+    if (!an) return 0;
+    const w = an.getValue();
     let peak = 0;
-    for (let i = 0; i < inWave.length; i++) { const a = Math.abs(inWave[i]); if (a > peak) peak = a; }
-    const level = Math.min(1, peak);
-    const cvWave = n[`${id}CvAnalyser`].getValue();
-    let sum = 0;
-    for (let i = 0; i < cvWave.length; i++) sum += cvWave[i];
-    const cv = sum / cvWave.length; // DC/mean of the CV input (bipolar)
-    const base  = n[`${id}Pan`].pan.value;      // knob intrinsic value
-    const depth = n[`${id}CvDepth`].gain.value; // CV attenuator
-    const eff = Math.max(-1, Math.min(1, base + cv * depth));
-    const angle = (eff + 1) * 0.25 * Math.PI;   // (eff+1)/2 · π/2 → equal-power
-    return { l: level * Math.cos(angle), r: level * Math.sin(angle) };
+    for (let i = 0; i < w.length; i++) { const a = Math.abs(w[i]); if (a > peak) peak = a; }
+    return Math.min(1, peak);
   }, []);
 
   // Chronos delay display (Phase 68) → echo-ring visualizer. energy = post-
@@ -5509,7 +5886,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     const w = n[`${id}Analyser`].getValue();
     let peak = 0;
     for (let i = 0; i < w.length; i++) { const a = Math.abs(w[i]); if (a > peak) peak = a; }
-    return { energy: Math.min(1, peak), delaySec: n[`${id}DelayL`].delayTime.value };
+    const st = chronosXfRef.current[id];   // the tap you are hearing (Phase 119)
+    return { energy: Math.min(1, peak), delaySec: st ? st.times[st.active][0] : n[`${id}DelayL`].delayTime.value };
   }, []);
 
   // Wavefolder output waveform (Phase 68c) → drives the folded-wave scope.
@@ -5830,7 +6208,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     updateFFBParams, getFFBAnalyserData,
     updateVocoderParams, getVocAnalyserData,
     getVowelAnalyserData,
-    getPanMeterData,
+    getVowelLive,
+    getPanLevel,
     getChronosDisplay,
     getFolderScope,
     enableMic, disableMic, updateVocMicGain,

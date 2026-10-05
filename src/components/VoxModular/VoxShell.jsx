@@ -4,7 +4,7 @@ import VoxKnob from './VoxKnob';
 import VoxFader from './VoxFader';
 import { VoxPatchProvider, useVoxPatch } from './VoxPatchContext';
 import PatchCableOverlay from './PatchCableOverlay';
-import useVoxAudio, { FFB_BANDS, VOC_BANDS, fftBinHz } from './useVoxAudio';
+import useVoxAudio, { FFB_BANDS, VOC_BANDS, fftBinHz, CHRONOS_SYNC_DIVS, chronosDivForTime } from './useVoxAudio';
 import Oscilloscope from './Oscilloscope';
 import KeyboardModule from './KeyboardModule';
 import Led from './Led';
@@ -2212,6 +2212,8 @@ const ROOT_OCT_STEPS  = [-3, -2, -1, 0, 1, 2, 3];
 // 3 and 6 are there so a 3-bar or 6-bar phrase is expressible too.
 const CHORD_CLK_DIVS  = [1, 2, 3, 4, 6, 8];
 const ROOT_OCT_LABELS = { '-3': '-3', '-2': '-2', '-1': '-1', '0': '0', '1': '+1', '2': '+2', '3': '+3' };
+// Every reading of the fixed-width chips (Phase 113) — derived, never retyped.
+const ROOT_OCT_TEXTS  = ROOT_OCT_STEPS.map(o => ROOT_OCT_LABELS[String(o)]);
 
 function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onClockDivChange, onSetCallback, onRootOctaveChange, onGlideChange }) {
   const p = number === 1 ? 'chordseq' : `chordseq${number}`; // jack prefix = engine instance id
@@ -2383,7 +2385,7 @@ function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onClockDi
               title="Drag up / down to shift the root octave — or click to step"
             >
               <span className={styles.selectorLabel}>ROOT OCT</span>
-              <span className={styles.selectorValue}>{ROOT_OCT_LABELS[String(rootOctave)]}</span>
+              <ChipValue all={ROOT_OCT_TEXTS} value={ROOT_OCT_LABELS[String(rootOctave)]} />
             </div>
             <VoxKnob
               label="GLIDE"
@@ -2699,6 +2701,7 @@ function ChorusModule({ onParamUpdate, isPowered = false, number = 1 }) {
 // ──────────── Vowel / Formant filter bank (Phase 64) ────────────
 
 const VOWEL_LETTERS = ['A', 'E', 'I', 'O', 'U'];
+const VOWEL_MODE_TEXTS = ['CHAIN', 'DIRECT'];   // every MODE reading — sizes its ChipValue
 
 // Formant "Space Display" — log-frequency spectrum of the module output, drawn
 // on the Aura-style OLED screen. The bandpass resonances appear as the formant
@@ -2707,17 +2710,32 @@ const VOWEL_LETTERS = ['A', 'E', 'I', 'O', 'U'];
 // content-visibility-culled).
 const VOW_W = 208, VOW_H = 92;
 const VOW_FMIN = 150, VOW_FMAX = 5000;
-function FormantDisplay({ getData }) {
+// The readout the knob label uses, from a live { direct, pos, from, to } (Phase 111):
+// CHAIN → nearest vowel on the A..U road; DIRECT → FROM / TO at the ends, "U → A" between.
+const vowelReadout = (direct, pos, from, to) => direct
+  ? (pos <= 0.01 ? VOWEL_LETTERS[from]
+    : pos >= 0.99 ? VOWEL_LETTERS[to]
+    : `${VOWEL_LETTERS[from]}\u2009\u2192\u2009${VOWEL_LETTERS[to]}`)
+  : VOWEL_LETTERS[Math.max(0, Math.min(4, Math.round(pos)))];
+
+function FormantDisplay({ getData, getLive }) {
   const canvasRef = useRef(null);
+  const letterRef = useRef(null);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     let raf;
+    let shown = null;   // last letter written — DOM writes only on change (Phase 61 paint rule)
     const tick = () => {
       raf = requestAnimationFrame(tick);
       if (canvas.offsetParent === null) return;
       if (canvas.checkVisibility && !canvas.checkVisibility({ contentVisibilityAuto: true })) return;
+      // Live vowel (Vox Phase 111) — what is SOUNDING (knob + FORM CV), which the knob
+      // label cannot show: it only knows the knob. Blank while the engine has no reading.
+      const live = getLive?.();
+      const txt = live ? vowelReadout(live.direct, live.pos, live.from, live.to) : '';
+      if (txt !== shown && letterRef.current) { letterRef.current.textContent = txt; shown = txt; }
       ctx.clearRect(0, 0, VOW_W, VOW_H);
       // faint baseline grid
       ctx.strokeStyle = 'rgba(93,202,165,0.10)';
@@ -2726,8 +2744,10 @@ function FormantDisplay({ getData }) {
 
       const data = getData?.(); // Float32Array of FFT dB values, or null (unpowered)
       if (!data || !data.length) return;
-      const nyquist = 22050;
-      const hzPerBin = nyquist / data.length;
+      // Real bin width from the live sample rate (Phase 111) — this was a hardcoded
+      // 22050 Hz Nyquist, so on a 48 kHz device every peak drew ~8% too low. Same bug
+      // the FFB / vocoder meters had until Phase 70 (fftBinHz).
+      const hzPerBin = fftBinHz(data.length);
       ctx.beginPath();
       ctx.moveTo(0, VOW_H);
       for (let px = 0; px < VOW_W; px++) {
@@ -2753,17 +2773,18 @@ function FormantDisplay({ getData }) {
     };
     tick();
     return () => cancelAnimationFrame(raf);
-  }, [getData]);
+  }, [getData, getLive]);
   return (
     <div className={styles.auraScreen}>
       <canvas ref={canvasRef} width={VOW_W} height={VOW_H} className={styles.auraCanvas} />
+      <span ref={letterRef} className={styles.vowelLiveText} />
     </div>
   );
 }
 
-// onParamUpdate({ vowel, shape }) — VOWEL morphs A→E→I→O→U (0..1), SHAPE scales
+// onParamUpdate({ vowel, shape, direct, from, to, res }) — VOWEL morphs A→E→I→O→U (0..1), SHAPE scales
 // the whole formant set (vocal-tract length). getAnalyserData() feeds the display.
-function VowelModule({ number = 1, onParamUpdate, getAnalyserData }) {
+function VowelModule({ number = 1, onParamUpdate, getAnalyserData, getLive }) {
   const p = `vowel${number}`; // dynamic-only; id = jack prefix
   const saved = useSavedSettings(p);
   const [vowel, setVowel] = useState(saved.vowel ?? 0.5); // 0.5 → 'I'
@@ -2773,19 +2794,15 @@ function VowelModule({ number = 1, onParamUpdate, getAnalyserData }) {
   const [direct, setDirect] = useState(saved.direct ?? false);
   const [from, setFrom]     = useState(saved.from ?? 4);  // U
   const [to,   setTo]       = useState(saved.to   ?? 0);  // A
-  useModulePersist(p, { vowel, shape, direct, from, to });
+  // RES (Vox Phase 111) — formant sharpness. 0.5 = the pre-111 sound exactly, so a rack
+  // saved without `res` is unchanged.
+  const [res,  setRes]      = useState(saved.res  ?? 0.5);
+  useModulePersist(p, { vowel, shape, direct, from, to, res });
 
   useEffect(() => {
-    onParamUpdate?.({ vowel, shape, direct, from, to });
-  }, [vowel, shape, direct, from, to, onParamUpdate]);
+    onParamUpdate?.({ vowel, shape, direct, from, to, res });
+  }, [vowel, shape, direct, from, to, res, onParamUpdate]);
 
-  // In DIRECT the knob is the position along the FROM→TO line, so the readout has to
-  // report that blend rather than a position on the A..U chain.
-  const letter = direct
-    ? (vowel <= 0.01 ? VOWEL_LETTERS[from]
-      : vowel >= 0.99 ? VOWEL_LETTERS[to]
-      : `${VOWEL_LETTERS[from]}\u2009\u2192\u2009${VOWEL_LETTERS[to]}`)
-    : VOWEL_LETTERS[Math.max(0, Math.min(4, Math.round(vowel * 4)))];
   const cycleFrom = () => setFrom(v => (v + 1) % 5);
   const cycleTo   = () => setTo(v => (v + 1) % 5);
 
@@ -2803,12 +2820,14 @@ function VowelModule({ number = 1, onParamUpdate, getAnalyserData }) {
         </div>
         <div className={styles.plateBody}>
           <div className={styles.knobRow}>
-            <VoxKnob label={`VOWEL · ${letter}`} size="lg" value={vowel} onChange={setVowel} defaultValue={0.5}
+            <VoxKnob label="VOWEL" size="lg" value={vowel} onChange={setVowel} defaultValue={0.5}
               hint={direct
                 ? 'Manual position along the FROM → TO line. A CV patched into FORM CV rides on top of it.'
                 : 'Position along the A-E-I-O-U chain. A CV patched into FORM CV rides on top of it.'} />
             <VoxKnob label="SHAPE" size="md" value={shape} onChange={setShape} defaultValue={0.5}
               hint="Vocal-tract scale — shifts all three formants together. Smaller = smaller head." />
+            <VoxKnob label="RES" size="md" value={res} onChange={setRes} defaultValue={0.5}
+              hint="Formant sharpness. Centre = the classic sound. Lower = wider, breathier peaks that stay even from note to note. Higher = narrower, whistly, more resonant." />
           </div>
           {/* MODE + FROM/TO. FROM and TO are dimmed in CHAIN rather than hidden: they
               are real hardware that simply isn't in circuit yet, the same treatment the
@@ -2820,22 +2839,24 @@ function VowelModule({ number = 1, onParamUpdate, getAnalyserData }) {
                 ? 'DIRECT: the sweep travels straight between FROM and TO, touching no other vowel. Click for CHAIN.'
                 : 'CHAIN: the sweep walks the whole A-E-I-O-U road. Click for DIRECT (pick two vowels and go straight between them).'}>
               <span className={styles.selectorLabel}>MODE</span>
-              <span className={styles.selectorValue}>{direct ? 'DIRECT' : 'CHAIN'}</span>
+              {/* Fixed box (Phase 112): CHAIN → DIRECT is one letter wider, which slid
+                  FROM / TO sideways on every click. ChipValue sizes to the widest reading. */}
+              <ChipValue all={VOWEL_MODE_TEXTS} value={direct ? 'DIRECT' : 'CHAIN'} />
             </div>
             <div className={`${styles.selectorGroup} ${direct ? '' : styles.selectorGroupIdle}`}
               onClick={direct ? cycleFrom : undefined}
               title={direct ? 'Vowel the sweep starts from' : 'Only active in DIRECT mode'}>
               <span className={styles.selectorLabel}>FROM</span>
-              <span className={styles.selectorValue}>{VOWEL_LETTERS[from]}</span>
+              <ChipValue all={VOWEL_LETTERS} value={VOWEL_LETTERS[from]} />
             </div>
             <div className={`${styles.selectorGroup} ${direct ? '' : styles.selectorGroupIdle}`}
               onClick={direct ? cycleTo : undefined}
               title={direct ? 'Vowel the sweep travels to' : 'Only active in DIRECT mode'}>
               <span className={styles.selectorLabel}>TO</span>
-              <span className={styles.selectorValue}>{VOWEL_LETTERS[to]}</span>
+              <ChipValue all={VOWEL_LETTERS} value={VOWEL_LETTERS[to]} />
             </div>
           </div>
-          <FormantDisplay getData={getAnalyserData} />
+          <FormantDisplay getData={getAnalyserData} getLive={getLive} />
           <PlateDivider />
           <div className={styles.jackRow}>
             <Jack id={`${p}-in`}     label="IN" />
@@ -2849,7 +2870,7 @@ function VowelModule({ number = 1, onParamUpdate, getAnalyserData }) {
 }
 
 // ──────────── Voltage-Controlled Panner (Phase 67) ────────────
-// onParamUpdate({ pan, depth }) — PAN positions the source -1..+1 (0..1 knob,
+// onParamUpdate({ pan, depth, width }) — PAN positions the source -1..+1 (0..1 knob,
 // 0.5 = centre); CV DEPTH scales an external LFO/CV patched to PAN CV. getL/getR
 // feed the two equal-power stereo LEDs. Dynamic-only.
 function PanningModule({ number = 1, onParamUpdate, getL, getR }) {
@@ -2857,9 +2878,13 @@ function PanningModule({ number = 1, onParamUpdate, getL, getR }) {
   const saved = useSavedSettings(p);
   const [pan, setPan]     = useState(saved.pan ?? 0.5);   // 0.5 → centre
   const [depth, setDepth] = useState(saved.depth ?? 0.5); // CV attenuator
-  useModulePersist(p, { pan, depth });
+  // WIDTH (Vox Phase 114) — 0.5 = the source's own stereo width. Racks saved before it
+  // existed load at 0.5 too (Dylan's call): a stereo source they already feed through a
+  // PANNER regains the width the old mono-only panner discarded. Mono sources: no change.
+  const [width, setWidth] = useState(saved.width ?? 0.5);
+  useModulePersist(p, { pan, depth, width });
 
-  useEffect(() => { onParamUpdate?.({ pan, depth }); }, [pan, depth, onParamUpdate]);
+  useEffect(() => { onParamUpdate?.({ pan, depth, width }); }, [pan, depth, width, onParamUpdate]);
 
   return (
     <div className={styles.module}>
@@ -2877,6 +2902,8 @@ function PanningModule({ number = 1, onParamUpdate, getL, getR }) {
           <div className={styles.knobRow}>
             <VoxKnob label="PAN" size="lg" value={pan} onChange={setPan} defaultValue={0.5} />
             <VoxKnob label="CV DEPTH" size="md" value={depth} onChange={setDepth} defaultValue={0.5} />
+            <VoxKnob label="WIDTH" size="md" value={width} onChange={setWidth} defaultValue={0.5}
+              hint="Stereo width of a stereo source (chorus, reverb, delay, a KEY PAN keyboard). Left = squashed to mono · centre = its natural width · right = extra wide. Mono sources have no width to change." />
           </div>
           <div className={styles.knobRow}>
             <Led getValue={getL} color="green" label="L" />
@@ -2897,6 +2924,9 @@ function PanningModule({ number = 1, onParamUpdate, getL, getR }) {
 // ──────────── Chronos Multi-Zone Delay (Phase 68) ────────────
 const CHR_ZONES = ['micro', 'mini', 'macro'];
 const CHR_ZONE_LABELS = { micro: 'MICRO', mini: 'MINI', macro: 'MACRO' };
+const CHR_ZONE_TEXTS  = CHR_ZONES.map(z => CHR_ZONE_LABELS[z]);   // fixed-width chip (Phase 113)
+const CHR_MODE_TEXTS  = ['STEREO', 'PING-PONG'];                  // MODE chip readings (Phase 117)
+const CHR_SYNC_TEXTS  = ['OFF', ...CHRONOS_SYNC_DIVS.map(d => d.label)];   // SYNC chip readings (Phase 118)
 const CHR_W = 208, CHR_H = 92; // canvas backing px (matches FormantDisplay)
 
 // Echo-ring visualizer: rings pulse outward, ring gap tracks delay time (log),
@@ -2960,13 +2990,19 @@ function ChronosDelayModule({ number = 1, onParamUpdate, getDisplay }) {
   const [halo, setHalo]       = useState(saved.halo ?? 0.3);
   const [color, setColor]     = useState(saved.color ?? 0.6);
   const [mix, setMix]         = useState(saved.mix ?? 0.5);
-  useModulePersist(p, { zone, time, repeats, halo, color, mix });
+  // PING-PONG (Vox Phase 117) — false = STEREO, the pre-117 behaviour, so old racks load unchanged.
+  const [pingpong, setPingpong] = useState(saved.pingpong ?? false);
+  // Tempo SYNC (Vox Phase 118) — false = free-running, the pre-118 behaviour. In SYNC the
+  // TIME knob picks a note length off the I/O master clock and ZONE is out of circuit.
+  const [sync, setSync]         = useState(saved.sync ?? false);
+  useModulePersist(p, { zone, time, repeats, halo, color, mix, pingpong, sync });
 
   useEffect(() => {
-    onParamUpdate?.({ zone, time, repeats, halo, color, mix });
-  }, [zone, time, repeats, halo, color, mix, onParamUpdate]);
+    onParamUpdate?.({ zone, time, repeats, halo, color, mix, pingpong, sync });
+  }, [zone, time, repeats, halo, color, mix, pingpong, sync, onParamUpdate]);
 
-  const cycleZone = () => setZone(z => CHR_ZONES[(CHR_ZONES.indexOf(z) + 1) % CHR_ZONES.length]);
+  const cycleZone = () => { if (!sync) setZone(z => CHR_ZONES[(CHR_ZONES.indexOf(z) + 1) % CHR_ZONES.length]); };
+  const syncText  = sync ? chronosDivForTime(time).label : 'OFF';
 
   return (
     <div className={styles.module}>
@@ -2982,13 +3018,34 @@ function ChronosDelayModule({ number = 1, onParamUpdate, getDisplay }) {
         </div>
         <div className={styles.plateBody}>
           <div className={styles.selectorRow}>
-            <div className={styles.selectorGroup} onClick={cycleZone} title="Click to cycle delay zone (Micro comb / Mini / Macro echo)">
+            {/* ZONE is dimmed-but-present in SYNC — real hardware that isn't in circuit
+                (the VOWEL FROM/TO and LFO division-screen treatment); hiding it would
+                change the row. */}
+            <div className={`${styles.selectorGroup} ${sync ? styles.selectorGroupIdle : ''}`} onClick={cycleZone}
+              title={sync ? 'ZONE is out of circuit while SYNC is on — TIME picks a note length instead'
+                          : 'Click to cycle delay zone (Micro comb / Mini / Macro echo)'}>
               <span className={styles.selectorLabel}>ZONE</span>
-              <span className={styles.selectorValue}>{CHR_ZONE_LABELS[zone]}</span>
+              <ChipValue all={CHR_ZONE_TEXTS} value={CHR_ZONE_LABELS[zone]} />
+            </div>
+            <div className={styles.selectorGroup} onClick={() => setPingpong(v => !v)}
+              title={pingpong
+                ? 'PING-PONG: echoes bounce left → right → left. Click for STEREO.'
+                : 'STEREO: both sides echo together (HALO spreads them). Click for PING-PONG — echoes bounce left → right → left.'}>
+              <span className={styles.selectorLabel}>MODE</span>
+              <ChipValue all={CHR_MODE_TEXTS} value={pingpong ? 'PING-PONG' : 'STEREO'} />
+            </div>
+            <div className={styles.selectorGroup} onClick={() => setSync(v => !v)}
+              title={sync
+                ? 'SYNC on: echoes land on the beat of the rack tempo (I/O TEMPO, or the Workstation while it plays). TIME picks the note length. Click for free time.'
+                : 'SYNC off: TIME is free, inside the ZONE. Click to lock the echoes to the rack tempo.'}>
+              <span className={styles.selectorLabel}>SYNC</span>
+              <ChipValue all={CHR_SYNC_TEXTS} value={syncText} />
             </div>
           </div>
           <div className={styles.knobRow}>
-            <VoxKnob label="TIME"    size="lg" value={time}    onChange={setTime}    defaultValue={0.5} />
+            <VoxKnob label="TIME"    size="lg" value={time}    onChange={setTime}    defaultValue={0.5}
+              hint={sync ? 'SYNC: picks the echo note length (1/32 … 1 BAR, dotted D and triplet T) — shown on the SYNC chip.'
+                         : 'Echo time inside the ZONE. Turning it while echoes ring bends their pitch, like tape.'} />
             <VoxKnob label="REPEATS" size="md" value={repeats} onChange={setRepeats} defaultValue={0.45} />
             <VoxKnob label="HALO"    size="md" value={halo}    onChange={setHalo}    defaultValue={0.3} />
           </div>
@@ -3364,6 +3421,10 @@ const VOC_GATE_STEPS = [
   { key: 'MID',  value: 0.75, title: 'GATE MID — typical desk/laptop mic' },
   { key: 'HIGH', value: 1.0,  title: 'GATE HIGH — noisy room; may clip quiet singing' },
 ];
+// Every reading of the PROGRAM / GATE chips (Phase 113) — fixed-width ChipValues, so
+// '--' → TALKBOX or LOW → HIGH never resizes the header controls.
+const VOC_PROGRAM_TEXTS = ['--', ...VOC_PROGRAMS.map(pr => pr.key)];
+const VOC_GATE_TEXTS    = VOC_GATE_STEPS.map(g => g.key);
 
 // onParamUpdate({ mix }) — wires the MIX knob to useVoxAudio.
 // getAnalyserData() — stable getter for the modulator FFT analyser; drives the 16-seg meter.
@@ -3495,11 +3556,11 @@ function VocoderModule({ number = 1, onParamUpdate, getAnalyserData, onMicEnable
               title={VOC_PROGRAMS.find(pr => pr.key === program)?.title
                 ?? 'PROGRAM — click to recall a voicing (NuVo / Talk Box / Alien). Writes the voice knobs; MIX, VOL, MIC and GATE are left alone.'}>
               <span className={styles.selectorLabel}>PROGRAM</span>
-              <span className={styles.selectorValue}>{program ?? '--'}</span>
+              <ChipValue all={VOC_PROGRAM_TEXTS} value={program ?? '--'} />
             </div>
             <div className={`${styles.selectorGroup} ${styles.vocHeadSel}`} onClick={cycleGate} title={gateStep.title}>
               <span className={styles.selectorLabel}>GATE</span>
-              <span className={styles.selectorValue}>{gateStep.key}</span>
+              <ChipValue all={VOC_GATE_TEXTS} value={gateStep.key} />
             </div>
           </div>
         </div>
@@ -3904,8 +3965,9 @@ export default function VoxShell({ onNavigateHome, onBusReady, recordingActiveRe
     qntLearnCb:   (fn) => audio.setQuantizerLearnCallbackById(id, fn),
     qntTrp:       () => audio.getQntTransposeData(id),
     vowelData:    () => audio.getVowelAnalyserData(id),
-    panL:         () => audio.getPanMeterData(id)?.l ?? 0,
-    panR:         () => audio.getPanMeterData(id)?.r ?? 0,
+    vowelLive:    () => audio.getVowelLive(id),
+    panL:         () => audio.getPanLevel(id, 0),
+    panR:         () => audio.getPanLevel(id, 1),
     chronosDisp:  () => audio.getChronosDisplay(id),
     folderScope:  () => audio.getFolderScope(id),
   });
@@ -4387,7 +4449,7 @@ export default function VoxShell({ onNavigateHome, onBusReady, recordingActiveRe
         : m.type === 'chordseq' ? <ChordSeqModule number={m.num} onStepsChange={b.chordSteps} onDivisionChange={b.chordDiv} onClockDivChange={b.chordClkDiv} onSetCallback={b.chordStepCb} onRootOctaveChange={b.chordRootOct} onGlideChange={b.chordGlide} />
         : m.type === 'voc'   ? <VocoderModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vocData} onMicEnable={handleMicEnable} onMicDisable={handleMicDisable} onMicGainChange={audio.updateVocMicGain} getMicLevel={getExtMicLevel} micStatus={micStatus} />
         : m.type === 'qnt'   ? <QuantizerModule number={m.num} onParamUpdate={b.params} onSetCallback={b.qntCb} onSetChordLabelCb={b.qntChordLabelCb} onGlideChange={b.qntGlide} onLearnChange={b.qntLearn} onSetLearnCb={b.qntLearnCb} getTransposeData={b.qntTrp} />
-        : m.type === 'vowel' ? <VowelModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vowelData} />
+        : m.type === 'vowel' ? <VowelModule number={m.num} onParamUpdate={b.params} getAnalyserData={b.vowelData} getLive={b.vowelLive} />
         : m.type === 'panner' ? <PanningModule number={m.num} onParamUpdate={b.params} getL={b.panL} getR={b.panR} />
         : m.type === 'chronos' ? <ChronosDelayModule number={m.num} onParamUpdate={b.params} getDisplay={b.chronosDisp} />
         : m.type === 'folder' ? <WavefolderModule number={m.num} onParamUpdate={b.params} />

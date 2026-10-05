@@ -2305,6 +2305,26 @@
   height: 100%;
 }
 
+/* VOWEL screen: the vowel actually sounding (knob + FORM CV), Vox Phase 111. Drawn
+   on the glass (the .lfoDivScreenText phosphor recipe), so it stays lit in
+   lights-out like the QNT screen's note names. Lower-left (Dylan's placement), clear
+   of the lamp sheen (upper-right), which still paints over it as the later ::after
+   sibling. It is the module's ONLY vowel readout since the knob label went back to a
+   plain silkscreened "VOWEL". */
+.vowelLiveText {
+  position: absolute;
+  bottom: 3px;
+  left: 6px;
+  font-family: 'Courier New', monospace;
+  font-size: 15px;
+  font-weight: bold;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: #5DCAA5;
+  text-shadow: 0 0 6px rgba(93, 202, 165, 0.65);
+  pointer-events: none;
+}
+
 /* ══════════════════════════════════════════════════════
    NOISE SCOPE (Phase 69) — retro CRT strip on the noise
    module. Neutral near-black glass so any colour tint reads,
