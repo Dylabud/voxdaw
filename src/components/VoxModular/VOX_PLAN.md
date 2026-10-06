@@ -43,6 +43,24 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-10-06] Vox Phase 126 — Pick up a cable end and re-plug it; edge auto-scroll while patching
+
+**Confirmed by Dylan (2026-10-06):** repatching from the boot keeps the far end seated, off-target drops snap back, pressing a jack still starts a new cable, edge auto-scroll reaches off-screen modules.
+
+Gemini directive. Phases 124–125 committed (`1ba5fa7`) after Dylan confirmed smooth scrolling.
+
+**Directive corrected on one point.** "Click near where a cable enters a jack → pick up that end" collides with how a jack already works: **pressing a jack always starts a NEW cable**, even when one is already seated — that is the only fan-out gesture (one output → several destinations). Taken literally, grabbing at the jack would have removed it. So the grab handle is the **plug's rubber boot and the first ~30 layout px of cable hanging below the jack** (an invisible `rect`, x ±8, y +3…+33 from the jack centre; endpoint tangents are vertical by construction). The jack's upper half still starts a new cable; the cable body still deletes on click.
+
+**Repatch semantics (`VoxPatchContext.grabCableEnd`):**
+- Grabbing pulls the plug: the cable leaves the list and its audio disconnects immediately (real hardware), **with no persistence write**. The drag then runs from the still-seated end (`fromJackId` = anchor) in the cable's own colour.
+- Drop on a jack → one new cable anchor→jack + **one** `onCablesChanged` = **one undo step** for the move. A moved cable keeps its colour and does not advance the new-cable palette.
+- Drop in empty space, back on its own jack, or onto a duplicate → `putBack` restores the original cable object exactly (audio reconnected, no persistence write). A slip of the mouse cannot lose a cable. (Unplugging entirely is still a click on the body.)
+- The handle carries `data-jack-id`, so the camera's `isInteractive` guard never turns a grab into a pan, and a drop onto another cable's boot lands on that jack.
+
+**Edge auto-scroll:** while a cable end is in hand, within 56 px of the rack viewport's edge (the shell insets fit() uses: 16 px sides, 44 px top, 16 px bottom) the camera pans toward it — speed rises linearly to 18 px/frame (~1000 px/s) at the edge and stays full past it, so the pointer can leave the window and keep scrolling. The in-hand cable is redrawn each panned frame (its anchor moves with the rack, the cursor doesn't). New `cameraApiRef.panBy(dx, dy)` from VoxShell's camera (same clamp + apply + transient promotion as a drag-pan; returns false when nothing moved, so an unpannable or end-stopped rack costs nothing) — **prop-drilled into PatchCableOverlay, not put in VoxPatchContext** (that context owns cable state only — the standing rule). At z = 1 the rack fits the window's width (Phase 125), so auto-scroll is vertical unless zoomed.
+
+*Verified: production build clean, lint count unchanged across all Vox files (45 → 45). A temporary Jest + Testing Library test drove the **real** `VoxPatchProvider` (6/6, deleted after): grab → drop on a new jack (other end stays seated, colour kept, one removal + one add to the audio bridge, exactly one persistence write); grabbing either end anchors on the other; cancel restores the identical cable with no persistence write; dropping on its own jack or a duplicate restores; palette rotation unaffected by moves; a second grab while one is in hand is ignored. Edge-speed table checked (0 outside the zone, linear to 18 px/frame, full past the edge). **Dylan's hand test:** grab a plug's boot just below a jack and move it to another jack (the far end must stay put; ⌘Z puts it back in one step); let go over empty faceplate — the cable returns; press a jack that already has a cable — a new cable still starts; click the middle of a cable — it unplugs; drag a cable toward the bottom/top edge — the rack scrolls.*
+
 ### [2026-10-06] Vox Phase 125 — The real cause of "lag grows with every module": fit() flip-flopping every frame
 
 Phase 124 did not fix it (Dylan: still laggy, powered on AND off). Instead of a third guess, Dylan recorded a **Chrome DevTools Performance trace** on his Retina Mac (`Vox Modular Lag Test (Lights On).gz`, 40 MB gz / 706 MB JSON, `hostDPR: 2`), parsed here by a line-streaming node script (V8 cannot hold the whole file as one string).

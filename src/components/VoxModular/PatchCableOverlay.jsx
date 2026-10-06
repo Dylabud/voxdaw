@@ -45,10 +45,29 @@ const findJackId = (el) => {
   return null;
 };
 
-export default function PatchCableOverlay() {
+// ── Edge auto-scroll while a cable end is in the hand (Vox Phase 126) ──
+// Within EDGE_PX of the rack viewport's edge the camera pans toward that edge, faster
+// the closer the cursor (full speed at or past the edge — the pointer can leave the
+// window and keep scrolling). The viewport is the shell's content box: 16 px sides,
+// 44 px top (toolbar), 16 px bottom — the same insets fit() uses.
+const EDGE_PX   = 56;
+const EDGE_MAX  = 18;   // screen px per frame at full speed (~1000 px/s)
+const edgeSpeed = (pos, lo, hi) => {
+  if (pos < lo + EDGE_PX) return  EDGE_MAX * Math.min(1, (lo + EDGE_PX - pos) / EDGE_PX);
+  if (pos > hi - EDGE_PX) return -EDGE_MAX * Math.min(1, (pos - (hi - EDGE_PX)) / EDGE_PX);
+  return 0;
+};
+// The grab handle: the plug's rubber boot plus the first stretch of cable hanging below
+// the jack (endpoint tangents are vertical by construction). It starts BELOW the jack's
+// centre, so the jack's upper half still starts a NEW cable — fan-out from a jack that
+// already carries one keeps working. Carries data-jack-id so the camera's isInteractive
+// guard never treats a grab as a pan, and so a drop onto it lands on that jack.
+const GRAB_W = 16, GRAB_TOP = 3, GRAB_H = 30;
+
+export default function PatchCableOverlay({ cameraApiRef }) {
   const {
     cables, jackRefs, dragRef,
-    completeDrag, cancelDrag, removeCable,
+    completeDrag, cancelDrag, removeCable, grabCableEnd,
   } = useVoxPatch();
 
   const svgRef         = useRef(null);
@@ -67,7 +86,19 @@ export default function PatchCableOverlay() {
   useEffect(() => {
     const svgEl = svgRef.current;
 
-    const onMove = (e) => {
+    let lastX = 0, lastY = 0, edgeRaf = null;
+    // Pan the rack while the cursor sits in an edge zone, redrawing the in-hand cable each
+    // frame (the anchor jack moves with the rack; the cursor does not).
+    const edgeTick = () => {
+      edgeRaf = null;
+      if (!dragRef.current.active) return;
+      const dx = edgeSpeed(lastX, 16, window.innerWidth - 16);
+      const dy = edgeSpeed(lastY, 44, window.innerHeight - 16);
+      if ((dx || dy) && cameraApiRef?.current?.panBy(dx, dy)) draw(lastX, lastY);
+      edgeRaf = requestAnimationFrame(edgeTick);
+    };
+
+    const draw = (clientX, clientY) => {
       const { active, fromJackId, color } = dragRef.current;
       if (!active || !svgEl || !activePathRef.current) return;
 
@@ -80,14 +111,22 @@ export default function PatchCableOverlay() {
       const natH   = parent ? parent.offsetHeight : sr.height;
       const sx     = sr.width  / natW;
       const sy     = sr.height / natH;
-      const mx     = (e.clientX - sr.left) / sx;
-      const my     = (e.clientY - sr.top)  / sy;
+      const mx     = (clientX - sr.left) / sx;
+      const my     = (clientY - sr.top)  / sy;
 
       activePathRef.current.setAttribute('d', cablePath(fromCoords.x, fromCoords.y, mx, my));
       activePathRef.current.setAttribute('stroke', color ?? '#d4d0b8');
     };
 
+    const onMove = (e) => {
+      if (!dragRef.current.active) return;
+      lastX = e.clientX; lastY = e.clientY;
+      draw(lastX, lastY);
+      if (edgeRaf === null) edgeRaf = requestAnimationFrame(edgeTick);
+    };
+
     const onUp = (e) => {
+      if (edgeRaf !== null) { cancelAnimationFrame(edgeRaf); edgeRaf = null; }
       if (!dragRef.current.active) return;
 
       // Mark drag-just-ended so cable onClick can suppress accidental removal
@@ -108,10 +147,11 @@ export default function PatchCableOverlay() {
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup',   onUp);
     return () => {
+      if (edgeRaf !== null) cancelAnimationFrame(edgeRaf);
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup',   onUp);
     };
-  }, [dragRef, jackRefs, completeDrag, cancelDrag]);
+  }, [dragRef, jackRefs, completeDrag, cancelDrag, cameraApiRef]);
 
   return (
     <svg ref={svgRef} className={styles.overlay}>
@@ -205,6 +245,23 @@ export default function PatchCableOverlay() {
                 <rect x={p.x - 5} y={p.y - 4} width={10} height={6.5} rx={1.8} fill="url(#voxPlugMetal)" />
                 <rect x={p.x - 5} y={p.y - 4} width={10} height={1.6} rx={0.8} fill="rgba(255,255,255,0.35)" />
               </g>
+            ))}
+            {/* Grab handles (Phase 126) — invisible, above the body path, so pressing the
+                plug's boot picks up THIS end; the cable body still deletes on click. */}
+            {[[a, cable.fromJackId], [b, cable.toJackId]].map(([p, jackId]) => (
+              <rect
+                key={jackId}
+                data-jack-id={jackId}
+                x={p.x - GRAB_W / 2} y={p.y + GRAB_TOP} width={GRAB_W} height={GRAB_H}
+                fill="transparent"
+                pointerEvents="all"
+                style={{ cursor: 'grab' }}
+                onMouseDown={(e) => {
+                  if (e.button !== 0) return;
+                  e.preventDefault(); e.stopPropagation();
+                  grabCableEnd(cable.id, jackId);
+                }}
+              />
             ))}
           </g>
         );

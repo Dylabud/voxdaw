@@ -3641,6 +3641,9 @@ export default function VoxShell({ onNavigateHome, onBusReady, recordingActiveRe
   // the other's lifecycle.
   const cameraViewRef = useRef(null);
   const moduleVisRef  = useRef(null);
+  // Vox Phase 126: imperative camera handle for the cable overlay's edge auto-scroll —
+  // prop-drilled, never through VoxPatchContext (that context owns cable state only).
+  const cameraApiRef  = useRef(null);
   const [lightsOut, setLightsOut] = useState(false);
   // VCOs whose FREQ knob is in quantized/note-stepper mode (Phase 57). Updated
   // by useVoxAudio on patch/bypass changes — event-driven, not per-frame, so
@@ -4256,6 +4259,24 @@ export default function VoxShell({ onNavigateHome, onBusReady, recordingActiveRe
       setTimeout(() => { el.style.transition = 'none'; }, 400);
     };
     const onDblClick = (e) => { if (!isInteractive(e.target)) reset(); };
+
+    // Edge auto-scroll while patching (Phase 126). Pans by screen px through the same
+    // clamp + apply path as a drag-pan; returns whether the view actually moved, so the
+    // caller only redraws its in-hand cable when something changed (an unpannable or
+    // already-at-the-end rack costs nothing).
+    cameraApiRef.current = {
+      panBy: (dx, dy) => {
+        const tx = view.tx, ty = view.ty;
+        view.tx += dx;
+        view.ty += dy;
+        clampPan();
+        if (view.tx === tx && view.ty === ty) return false;
+        el.style.transition = 'none';
+        touchWillChange();
+        apply();
+        return true;
+      },
+    };
     const onKeyDown  = (e) => { if (e.key === 'Escape') reset(); };
 
     fit(); // immediate on mount
@@ -4279,6 +4300,7 @@ export default function VoxShell({ onNavigateHome, onBusReady, recordingActiveRe
       clearTimeout(wcTimer);
       ro.disconnect();
       cameraViewRef.current = null; // Phase 61: a remount mints a fresh view object
+      cameraApiRef.current  = null;
       shell.removeEventListener('wheel', onWheel);
       el.removeEventListener('mousedown', onMouseDown);
       el.removeEventListener('dblclick', onDblClick);
@@ -4535,7 +4557,7 @@ export default function VoxShell({ onNavigateHome, onBusReady, recordingActiveRe
 
         <div className={styles.cabinet} ref={cabinetRef} data-lights-out={lightsOut ? 'true' : undefined}>
           {/* SVG patch cable overlay — position:absolute, inset:0, z-index:50 */}
-          <PatchCableOverlay />
+          <PatchCableOverlay cameraApiRef={cameraApiRef} />
           {/* Unified studio lamp — single radial gradient covering the whole rack.
               mix-blend-mode:screen brightens modules proportionally to their position
               under the lamp; z-index:49 keeps it above module content, below cables. */}

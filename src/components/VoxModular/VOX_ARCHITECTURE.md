@@ -832,6 +832,7 @@ seq-gate-out → env1-gate,  env1-out → vca-cv          ← gated sequencer ar
 | Moog Phase 87e ✅ | BPM field restored to chip type scale — `font-size`/`weight`/`letter-spacing: inherit` were overriding `.selectorValue`'s 21px down to the body size | I/O |
 | Moog Phase 89 ✅ | Per-step **SKIP** — third step-switch state removed from the cycle (vs REST, which keeps its time), making 3/4, 5/4, 7/8 etc. possible on a 16-step 960; live cycle-length readout in the plate subtitle | 960 SEQ |
 | Moog Phase 89b ✅ | SKIP restyled as a **lit red lamp** on the `.seqGateOn` recipe (was an amber slash + dimmed column); column dimming dropped, lights-out exempts both lamp states | 960 SEQ (visual) |
+| Vox Phase 126 ✅ | **Cable handling** — grab a plug's boot (below the jack) to move that end (one undo step; dropping elsewhere puts it back; the jack itself still starts a new cable for fan-out); edge auto-scroll while a cable end is in hand via a prop-drilled `cameraApiRef.panBy` | Patch cables · Shell (camera) |
 | Vox Phase 125 ✅ | **The real scroll-lag cause** (from Dylan's DevTools trace): fit() flip-flopped between two layouts every frame in tall windows once added modules could re-wrap → full repaint per frame, GPU 100 %. fit() is now fit-width only (constant 3010 layout width) | Shell (camera / render perf) |
 | Vox Phase 124 ✅ | Scroll lag growing with each added module — the rack-wide studio-lamp overlay's `mix-blend-mode: screen` (full-rack offscreen blend every pan frame) replaced by plain alpha, visually identical | Shell (render perf) |
 | Vox Phase 123 ✅ | **FOLD → clean** — new low-end knob map (unchanged ≥ 25 %) + audio-rate level makeup below the first fold (THD at minimum 45 % → 0.26 %), offset scaled by 1/makeup so SYM doesn't thump harder | FOLD |
@@ -962,6 +963,15 @@ Single Writer per node (per instance now); Zero-Re-render (all per-frame work st
 4. **Registry/UI drift** — the registry must be the single source for what exists; VoxShell renders purely from state (no hardcoded rows after 60d).
 
 ---
+
+### Patch cable gestures (as of Vox Phase 126)
+
+| Gesture | Result |
+|---|---|
+| Press a jack (anywhere on it above the plug boot) | Start a NEW cable from that jack — even if one is already seated (fan-out) |
+| Press a seated plug's boot / the cable just below the jack | Pick up THAT end (`grabCableEnd`): audio disconnects at once, nothing persisted; drop on a jack = one move = one undo step; drop elsewhere / on its own jack / on a duplicate = put back exactly |
+| Click the cable body | Remove the cable |
+| Hold a cable end within 56 px of the rack viewport edge | Camera auto-scrolls toward it (`cameraApiRef.panBy`, prop-drilled — never via VoxPatchContext) |
 
 ### Undo / Redo (Phase 107) — AS BUILT
 

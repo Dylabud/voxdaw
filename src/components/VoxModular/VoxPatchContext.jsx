@@ -52,22 +52,55 @@ export function VoxPatchProvider({ children, onCableAdded, onCableRemoved, onCab
     dragRef.current = { active: true, fromJackId, color };
   }, []);
 
+  // ── Repatch: pick up one END of a seated cable (Vox Phase 126) ──
+  // Grabbing a plug pulls it: the cable leaves the list and its audio disconnects at
+  // once (real hardware — the sound changes the moment the plug is out), but NOTHING is
+  // persisted yet. The drag then runs from the end still seated (`fromJackId` = the
+  // anchor) with the cable's own colour. Dropped on a jack → one new cable anchor→jack
+  // and ONE persistence write, so a move is a single undo step. Dropped anywhere else
+  // (or back where it came from, or onto a duplicate) → the original cable goes back
+  // exactly as it was, silently — a slip of the mouse can never lose a cable.
+  const putBack = useCallback((cable) => {
+    if (!cable) return;
+    cableSetRef.current.add(`${cable.fromJackId}→${cable.toJackId}`);
+    const next = [...cablesRef.current, cable];
+    cablesRef.current = next;
+    setCables(next);
+    onAddedRef.current?.(cable.fromJackId, cable.toJackId);   // audio back; no persistence write
+  }, [setCables]);
+
+  const grabCableEnd = useCallback((id, endJackId) => {
+    if (dragRef.current.active) return;
+    const cable = cablesRef.current.find(c => c.id === id);
+    if (!cable) return;
+    const anchor = cable.fromJackId === endJackId ? cable.toJackId : cable.fromJackId;
+    cableSetRef.current.delete(`${cable.fromJackId}→${cable.toJackId}`);
+    const next = cablesRef.current.filter(c => c.id !== id);
+    cablesRef.current = next;
+    setCables(next);
+    onRemovedRef.current?.(cable.fromJackId, cable.toJackId);  // audio out; no persistence write
+    dragRef.current = { active: true, fromJackId: anchor, color: cable.color, repatch: cable, movedEnd: endJackId };
+  }, [setCables]);
+
   const cancelDrag = useCallback(() => {
+    const { repatch } = dragRef.current;
     dragRef.current = { active: false, fromJackId: null, color: null };
-  }, []);
+    putBack(repatch);
+  }, [putBack]);
 
   const completeDrag = useCallback((toJackId) => {
-    const { fromJackId, color } = dragRef.current;
+    const { fromJackId, color, repatch, movedEnd } = dragRef.current;
     dragRef.current = { active: false, fromJackId: null, color: null };
-    if (!fromJackId || fromJackId === toJackId) return;
+    if (!fromJackId || fromJackId === toJackId || (repatch && toJackId === movedEnd)) { putBack(repatch); return; }
 
     // Synchronous duplicate check via cableSetRef (no setState read needed)
     const keyFwd = `${fromJackId}→${toJackId}`;
     const keyRev = `${toJackId}→${fromJackId}`;
-    if (cableSetRef.current.has(keyFwd) || cableSetRef.current.has(keyRev)) return;
+    if (cableSetRef.current.has(keyFwd) || cableSetRef.current.has(keyRev)) { putBack(repatch); return; }
 
     cableSetRef.current.add(keyFwd);
-    colorIdxRef.current = (colorIdxRef.current + 1) % CABLE_COLORS.length;
+    // A moved cable keeps its colour, so the palette rotation is for NEW cables only.
+    if (!repatch) colorIdxRef.current = (colorIdxRef.current + 1) % CABLE_COLORS.length;
 
     const newId = `cable-${++cableIdRef.current}`;
     const next  = [...cablesRef.current, { id: newId, fromJackId, toJackId, color }];
@@ -77,7 +110,7 @@ export function VoxPatchProvider({ children, onCableAdded, onCableRemoved, onCab
     // Audio bridge + persistence — called AFTER state update, outside the updater fn
     onAddedRef.current?.(fromJackId, toJackId);
     onChangedRef.current?.(next);
-  }, [setCables]);
+  }, [setCables, putBack]);
 
   const removeCable = useCallback((id) => {
     // Synchronous lookup via cablesRef (avoids side effects inside setState)
@@ -150,6 +183,7 @@ export function VoxPatchProvider({ children, onCableAdded, onCableRemoved, onCab
       registerJack,
       unregisterJack,
       startDrag,
+      grabCableEnd,
       cancelDrag,
       completeDrag,
       removeCable,
