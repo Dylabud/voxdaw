@@ -202,6 +202,12 @@ function vowelFreqsBetween(from, to, t) {
   return [0, 1, 2].map(k => a[k] + (b[k] - a[k]) * u);
 }
 
+// ── Wavefolder (Phase 68c; widened / oversampled / DC-blocked in Vox Phase 122) ──
+const FOLDER_FOLDS        = 4;      // folds across ±1 of drive — the original curve's shape
+const FOLDER_RANGE        = 4;      // the curve now spans ±4 of drive; ±1 is unchanged
+const FOLDER_CURVE_POINTS = 8193;   // odd → x = 0 lands on a sample; 512 points per sine cycle
+const FOLDER_DC_HZ        = 10;     // DC blocker corner — below anything audible
+
 // ── Kick CLICK TONE (Phase 80) ──
 // The click transient's highpass was hardcoded at 2 kHz. Exposing it costs no new nodes
 // and spans soft mallet thud → sharp beater snap. The range is built around the old
@@ -461,6 +467,58 @@ const bbdDelayMs = (d) => 2 * Math.pow(10, Math.max(0, Math.min(1, d)));
 // TONE: the bucket-brigade voice — real BBD chips lose their top end badly, and that
 // dark blur is the whole character. knob 0..1 → 700 Hz … 14 kHz.
 const bbdToneHz  = (t) => 700 * Math.pow(20, Math.max(0, Math.min(1, t)));
+
+// ── BBD feedback that can never sing on its own (Vox Phase 121) ──
+// Loop small-signal gain = FBK × 1.2 (the tanh(1.2x) slope at 0) × the peak of the two
+// Q-1 biquads in the loop (TONE lowpass × the 120 Hz highpass — each bumps ~+1.25 dB at
+// its corner). At the old 0.9 clamp that reached ~1.25, so from FBK ≈ 0.72 a comb peak
+// grew until the tanh held it: a steady self-sustaining tone (the code meant 0.9 to be
+// the "no runaway" ceiling). Now the knob maps exactly as before up to loop gain
+// BBD_LOOP_KNEE and eases toward BBD_LOOP_MAX above it, computed against the REAL peak for
+// the current TONE (bbdLoopPeak — exact digital RBJ responses at the live sample rate).
+// FEEDBACK has no CV input, so a knob-domain limit is the whole fix.
+const BBD_SAT_SLOPE = 1.2;
+const BBD_LOOP_KNEE = 0.8;
+const BBD_LOOP_MAX  = 0.9;
+function bbdLoopPeak(toneHz) {
+  const fs = voxSampleRate();
+  const mag = (type, f0, Q, f) => {
+    const w0 = 2 * Math.PI * f0 / fs, c = Math.cos(w0), al = Math.sin(w0) / (2 * Q);
+    const b = type === 'lp' ? [(1 - c) / 2, 1 - c, (1 - c) / 2] : [(1 + c) / 2, -(1 + c), (1 + c) / 2];
+    const a = [1 + al, -2 * c, 1 - al];
+    const w = 2 * Math.PI * f / fs;
+    const ev = (k) => [k[0] + k[1] * Math.cos(w) + k[2] * Math.cos(2 * w), -(k[1] * Math.sin(w) + k[2] * Math.sin(2 * w))];
+    const [nr, ni] = ev(b), [dr, di] = ev(a);
+    return Math.hypot(nr, ni) / Math.hypot(dr, di);
+  };
+  const fMax = Math.min(toneHz * 4, fs * 0.49);
+  let peak = 0;
+  for (let i = 0; i <= 600; i++) {
+    const f = 20 * Math.pow(fMax / 20, i / 600);
+    peak = Math.max(peak, mag('lp', Math.min(toneHz, fs * 0.49), 1, f) * mag('hp', BBD_FB_HP_HZ, 1, f));
+  }
+  return peak;
+}
+function bbdFbFor(feedback, toneHz) {
+  const fb   = Math.max(0, Math.min(BBD_MAX_FEEDBACK, feedback));
+  const g    = BBD_SAT_SLOPE * bbdLoopPeak(toneHz);
+  const loop = fb * g;
+  if (loop <= BBD_LOOP_KNEE) return fb;
+  const room = BBD_LOOP_MAX - BBD_LOOP_KNEE;
+  return (BBD_LOOP_KNEE + room * Math.tanh((loop - BBD_LOOP_KNEE) / room)) / g;
+}
+// Tone.Chorus (a StereoFeedbackEffect) carries its OWN feedback cycle
+// (_merge → _feedbackSplit → _feedbackL/R → _feedbackMerge → _split → the delays), wired
+// permanently even at feedback 0 — and Web Audio clamps every DelayNode in a cycle to
+// ≥ 1 render quantum (~2.7–2.9 ms), so the chorus sweep sat flat on that floor for about
+// a third of every cycle at default settings. We never use Tone's internal feedback (the
+// hand-built return replaces it), so its return edge is cut once at construction.
+// PRIVATE Tone API (verified on Tone 15.1.22, like the Sampler `_activeSources` fix):
+// if `_feedbackMerge` ever disappears the call is a no-op and the clamp simply returns —
+// re-verify on any Tone.js bump.
+function detachToneChorusFeedback(chorus) {
+  try { chorus?._feedbackMerge?.disconnect(); } catch (_) {}
+}
 
 // ── Quantized FM (Phase 70) ──
 // When a quantizer drives a VCO's CV and an LFO is patched to that VCO's FM jack,
@@ -2537,7 +2595,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     n.chorusFbHp.connect(n.chorusSat);
     n.chorusSat.connect(n.chorusFb);
     n.chorusFb.connect(n.chorusFbDly);
-    n.chorusFbDly.connect(n.chorus);
+    n.chorusFbDly.connect(n.chorus);   // connected only while FEEDBACK > 0 (Phase 121 — see setBbdReturn)
+    detachToneChorusFeedback(n.chorus);
 
     // LFO output stage (Phase 65): osc → oscGain → Out; syncSig → syncGain → Out.
     // Out is the sole node the output jacks + meter + wave analyser tap.
@@ -3231,6 +3290,10 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       cancelAnimationFrame(ffbSweepRafId);
       // Pending DAMP writes must not land on disposed Freeverbs (Phase 70).
       Object.values(revDampTimerRef.current).forEach(clearTimeout);
+      // Phase 121: pending BBD return-edge cuts; a rebuilt engine starts fully wired, so the
+      // state must start fresh too (connected: true is the default for a new entry).
+      Object.values(bbdFbStateRef.current).forEach(st => clearTimeout(st.timer));
+      bbdFbStateRef.current = {};
       revDampTimerRef.current  = {};
       revDampTargetRef.current = {};
       // A remount rebuilds every WaveShaper at the LIN curve — the delta cache
@@ -3836,7 +3899,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       n[`${id}FbHp`].connect(n[`${id}Sat`]);
       n[`${id}Sat`].connect(n[`${id}Fb`]);
       n[`${id}Fb`].connect(n[`${id}FbDly`]);
-      n[`${id}FbDly`].connect(n[id]);
+      n[`${id}FbDly`].connect(n[id]);   // connected only while FEEDBACK > 0 (Phase 121)
+      detachToneChorusFeedback(n[id]);
       if (isPoweredRef.current) { try { n[id].start(); } catch (_) {} }
       const jackEntries = {
         [`${id}-in`]:      { type: 'in',  dest: n[`${id}In`] },
@@ -4173,33 +4237,58 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     }
 
     if (type === 'folder') {
-      // Wavefolder (Phase 68c) — a West-Coast sine wavefolder. FOLD pre-gain drives
-      // the signal into a fixed multi-fold sine transfer curve (Tone.WaveShaper), so
-      // more drive = more folds = more added harmonics. SYMMETRY adds a DC offset
-      // before the fold for asymmetric (even-harmonic) folding. Output-domain
-      // waveshaping — works on ANY audio in (VCO, chord, external), which is exactly
-      // why it is its OWN module rather than a VCO knob (VCO SHAPE is phase-domain).
+      // Wavefolder (Phase 68c; Vox Phase 122 audit) — a West-Coast sine wavefolder. FOLD
+      // pre-gain drives the signal into a multi-fold sine transfer curve, so more drive =
+      // more folds = more added harmonics. SYMMETRY (+ SYM CV) adds an offset before the
+      // fold for asymmetric (even-harmonic) folding. Output-domain waveshaping — works on
+      // ANY audio in (VCO, chord, external), which is why it is its OWN module rather than
+      // a VCO knob (VCO SHAPE is phase-domain).
+      //
+      // Phase 122:
+      //  • WIDER CURVE. A WaveShaper clamps its input to ±1, and the curve used to END
+      //    there (sin(x·4π)), so any drive + SYM + CV past ±1 sat on the end value — sin(4π)
+      //    = 0 — and the output went flat-silent for that part of the wave instead of
+      //    folding further. `Norm` (1/FOLDER_RANGE) now maps ±FOLDER_RANGE of input onto the
+      //    curve's ±1, and the curve is sin(x·FOLDER_RANGE·4π) — IDENTICAL to the old shape
+      //    for |x| ≤ 1, with FOLDER_RANGE× more room beyond it.
+      //  • 4× OVERSAMPLING. Folding throws harmonics far past Nyquist; un-oversampled they
+      //    alias back down as gritty inharmonic noise, worst on high notes.
+      //  • DC BLOCKER. An offset before an odd curve leaves an offset after it: with no input
+      //    at all the output sat at sin(SYM·4π) — 0.95 of full scale at SYM 0.6 — a constant
+      //    push into whatever was patched next, thumping as SYM moved. A 2nd-order 10 Hz
+      //    highpass after the shaper removes it; everything audible passes.
+      //  • SYM CV jack, summed onto the offset (±1 V = the SYM knob's full ±0.5 travel).
+      //  • The unused scope analyser is gone (the screen draws its shape from the knobs).
       const id = `folder${num}`;
-      const FOLDS = 4; // fold count across the full ±1 curve at max drive
       n[`${id}In`]      = new Tone.Gain(1);
       n[`${id}Drive`]   = new Tone.Gain(0.4);  // FOLD amount (pre-shaper gain 0.2..1.0)
       n[`${id}FoldCv`]  = new Tone.Gain(0.5);  // FOLD-CV → Drive.gain (sums onto knob)
-      n[`${id}Bias`]    = new Tone.Signal(0);  // SYMMETRY — DC offset before the fold
+      n[`${id}Bias`]    = new Tone.Signal(0);  // SYMMETRY — offset before the fold
+      n[`${id}SymCvIn`] = new Tone.Gain(1);
+      n[`${id}SymCv`]   = new Tone.Gain(0.5);  // SYM CV depth: ±1 V → ±0.5 offset
       n[`${id}BiasSum`] = new Tone.Gain(1);
-      n[`${id}Shaper`]  = new Tone.WaveShaper((x) => Math.sin(x * Math.PI * FOLDS), 4096);
+      n[`${id}Norm`]    = new Tone.Gain(1 / FOLDER_RANGE);
+      n[`${id}Shaper`]  = new Tone.WaveShaper((x) => Math.sin(x * FOLDER_RANGE * Math.PI * FOLDER_FOLDS),
+                                              FOLDER_CURVE_POINTS);
+      n[`${id}Shaper`].oversample = '4x';
+      n[`${id}DcBlock`] = new Tone.Filter({ type: 'highpass', frequency: FOLDER_DC_HZ, Q: Math.SQRT1_2 });
       n[`${id}Out`]     = new Tone.Gain(1);    // OUTPUT level
-      n[`${id}Analyser`] = new Tone.Analyser('waveform', 256); // → folded-wave scope
       n[`${id}In`].connect(n[`${id}Drive`]);
       n[`${id}Drive`].connect(n[`${id}BiasSum`]);
-      n[`${id}Bias`].connect(n[`${id}BiasSum`]);   // DC offset sums with the driven signal
-      n[`${id}BiasSum`].connect(n[`${id}Shaper`]);
-      n[`${id}Shaper`].connect(n[`${id}Out`]);
-      n[`${id}Shaper`].connect(n[`${id}Analyser`]);
+      n[`${id}Bias`].connect(n[`${id}BiasSum`]);   // offset sums with the driven signal
+      n[`${id}SymCvIn`].connect(n[`${id}SymCv`]);
+      n[`${id}SymCv`].connect(n[`${id}BiasSum`]);  // …and so does SYM CV
+      n[`${id}BiasSum`].connect(n[`${id}Norm`]);
+      n[`${id}Norm`].connect(n[`${id}Shaper`]);
+      n[`${id}Shaper`].connect(n[`${id}DcBlock`]);
+      n[`${id}DcBlock`].connect(n[`${id}Out`]);
       n[`${id}FoldCv`].connect(n[`${id}Drive`].gain); // CV sums onto the FOLD knob
-      const nodeNames = [`${id}In`, `${id}Drive`, `${id}FoldCv`, `${id}Bias`, `${id}BiasSum`, `${id}Shaper`, `${id}Out`, `${id}Analyser`];
+      const nodeNames = [`${id}In`, `${id}Drive`, `${id}FoldCv`, `${id}Bias`, `${id}SymCvIn`, `${id}SymCv`,
+        `${id}BiasSum`, `${id}Norm`, `${id}Shaper`, `${id}DcBlock`, `${id}Out`];
       const jackEntries = {
         [`${id}-in`]:      { type: 'in',  dest: n[`${id}In`] },
         [`${id}-fold-cv`]: { type: 'in',  dest: n[`${id}FoldCv`] },
+        [`${id}-sym-cv`]:  { type: 'in',  dest: n[`${id}SymCvIn`] },
         [`${id}-out`]:     { type: 'out', node: n[`${id}Out`] },
       };
       jackMapRef.current = { ...jackMapRef.current, ...jackEntries };
@@ -4519,6 +4608,30 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     if (n && n[nodeName]) n[nodeName].delayTime = ms;
   }, []);
 
+  // The BBD's feedback return (FbDly → chorus) closes a cycle around the chorus delays,
+  // and a cycle is what clamps them to ≥ 1 render quantum (Phase 121). So the edge exists
+  // only while FEEDBACK is above zero: at 0 the sweep has its full range. Click-free both
+  // ways — connect while the Fb gain is still ~0 then ramp up; ramp down, then cut the
+  // edge once the ramp is over (the mute-node pruning pattern, Phase 141).
+  const bbdFbStateRef = useRef({});
+  const setBbdReturn = useCallback((id, st, want) => {
+    const n = nodesRef.current;
+    const dly = n?.[`${id}FbDly`], ch = n?.[id];
+    if (!dly || !ch) return;
+    clearTimeout(st.timer); st.timer = null;
+    if (want) {
+      if (!st.connected) { try { dly.connect(ch); } catch (_) {} st.connected = true; }
+    } else if (st.connected) {
+      st.timer = setTimeout(() => {
+        st.timer = null;
+        if (st.connected && bbdFbFor(st.feedback, bbdToneHz(st.tone)) <= 0) {
+          try { dly.disconnect(ch); } catch (_) {}
+          st.connected = false;
+        }
+      }, 120);
+    }
+  }, []);
+
   // Shared by the static + dynamic BBD paths so the two can never drift.
   const applyChorusParams = useCallback((id, { rate, depth, wet, feedback, delay, tone } = {}) => {
     const n = nodesRef.current;
@@ -4531,12 +4644,20 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       safeRamp(n[`${id}Dry`].gain, 1 - wet);
       safeRamp(n[`${id}Wet`].gain, wet);
     }
-    // Drives the HAND-BUILT return gain, not Tone's internal `feedback` (kept at 0 —
-    // its loop has no in-line filtering). Clamped: >0.9 runs away, the roomSize lesson.
-    if (feedback !== undefined) safeRamp(n[`${id}Fb`].gain, Math.min(BBD_MAX_FEEDBACK, feedback));
     // Filter frequency IS an AudioParam, so TONE is smooth — unlike the reverb's DAMP.
     if (tone  !== undefined) n[`${id}Tone`].frequency.setTargetAtTime(bbdToneHz(tone), Tone.now(), 0.02);
-  }, [applyChorusDepth, applyChorusDelay]);
+    // Drives the HAND-BUILT return gain, not Tone's internal `feedback` (kept at 0 —
+    // its loop has no in-line filtering). Phase 121: eased under a real loop-gain ceiling
+    // that depends on TONE, so both are remembered and either one re-derives the gain.
+    if (feedback !== undefined || tone !== undefined) {
+      const st = bbdFbStateRef.current[id] ??= { feedback: 0, tone: 0.75, connected: true, timer: null };
+      if (feedback !== undefined) st.feedback = feedback;
+      if (tone     !== undefined) st.tone     = tone;
+      const fb = bbdFbFor(st.feedback, bbdToneHz(st.tone));
+      setBbdReturn(id, st, fb > 0);
+      safeRamp(n[`${id}Fb`].gain, fb);
+    }
+  }, [applyChorusDepth, applyChorusDelay, setBbdReturn]);
 
   const scheduleRevDamp = useCallback((nodeName, damp) => {
     const hz = revDampHz(damp);
@@ -4801,7 +4922,10 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       try { node.dispose(); }      catch (_) {}
       delete n[name];
     });
-    if (inst.type === 'bbd') { delete chorusDepthRef.current[id]; delete chorusDelayRef.current[id]; }
+    if (inst.type === 'bbd') {
+      delete chorusDepthRef.current[id]; delete chorusDelayRef.current[id];
+      clearTimeout(bbdFbStateRef.current[id]?.timer); delete bbdFbStateRef.current[id];   // Phase 121
+    }
     if (inst.type === 'vca') delete vcaLinRefs.current[id];
     if (inst.type === 'rev') {
       // Kill any debounced DAMP write before the Freeverb is gone (Phase 70).
@@ -5891,10 +6015,6 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
   }, []);
 
   // Wavefolder output waveform (Phase 68c) → drives the folded-wave scope.
-  const getFolderScope = useCallback((id) => {
-    const n = nodesRef.current;
-    return n?.[`${id}Analyser`]?.getValue() ?? null;
-  }, []);
 
   // Built-in vocoder mic — opens a Tone.UserMedia stream (requires a user gesture for the
   // browser permission prompt) and routes it into extMicGain, which feeds the vocoder
@@ -6211,7 +6331,6 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     getVowelLive,
     getPanLevel,
     getChronosDisplay,
-    getFolderScope,
     enableMic, disableMic, updateVocMicGain,
     updateKickParams, triggerKick, triggerKickById, setKickTrigCallbackById,
     setKickTrigCallback: (fn) => { kickTrigCbRef.current.kick = fn; },

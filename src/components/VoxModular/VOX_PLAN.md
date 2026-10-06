@@ -29,13 +29,9 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 **Roadmap clear (2026-07-12).** Every planned phase is either shipped or resolved with a logged decision — see the Completed Phases Log. New phases go here.
 
-- **BBD audit findings (2026-10-05, audited, nothing built — Dylan redirected to CHRONOS; Phase 115 confirmed good by ear the same day):**
-  1. **Self-oscillates above FBK ≈ 0.72.** Loop small-signal gain = FBK × tanh(1.2x) slope 1.2 × the Q-1 biquad bumps of TONE + FbHp (≈1.155) → up to **1.25** at FBK 0.9, against the code's own "clamp 0.9 = no runaway" intent. tanh bounds it, so it becomes a steady self-sustaining tone. Fix if wanted: unity-slope saturation + Q 0.707 loop filters → max loop gain 0.9. Ask Dylan whether the howl is a feature.
-  2. **The sweep flattens at the bottom.** The hand-built feedback return puts Tone.Chorus's two delays in a cycle **even at FBK 0** (cycle detection is topological), and Web Audio clamps a delay in a cycle to ≥ 1 render quantum (2.67 ms @48k). Defaults sweep 1.78–5.34 ms → ~⅓ of every LFO cycle parked at the floor; the bottom ~12% of DELAY does nothing. Cheap fix: connect the return edge only while FBK > 0.
-  3. **DELAY / DEPTH drags step the delay time** — Tone.Chorus `depth`/`delayTime` setters write `LFO.min/max` → `Scale._setRange` with plain `.value =` (instant). Probable crackle on bright material while turning (ear test).
-  4. **Feedback resonance is tuned 5 ms off the sweep** (`BBD_FB_DELAY_S`, needed only because Tone.Chorus has a delay-free internal dry branch), so the regen comb doesn't track the flange.
-  5. **RATE LED is synthetic** (`Date.now()`), ignores RATE CV, not phase-locked to the real LFO.
-  Plan offered: **A** = fixes 1–2 (small); **B** = hand-built core (own two Delays + LFOs with rampable centre/depth, no dry branch) fixing 3–5 — its own ear-tested round.
+- **FOLD → clean (approved 2026-10-05, next round = Phase 123):** at minimum FOLD a full-level input still folds ~twice per half-cycle (drive 0.2 → peak at 1.6 half-waves of the curve; the first fold starts at drive 0.125). Remap FOLD so its minimum sits below the first fold. Changes low-FOLD timbre in existing patches — accepted by Dylan, built as its own round so it can be judged alone.
+
+- **BBD remaining (audited 2026-10-05; findings 1–2 shipped as Phase 121):** **3.** DELAY / DEPTH drags step the delay time — Tone.Chorus `depth`/`delayTime` setters write `LFO.min/max` → `Scale._setRange` with plain `.value =` (probable crackle on bright material while turning; ear test). **4.** Feedback resonance tuned 5 ms off the sweep (`BBD_FB_DELAY_S`, needed only because Tone.Chorus has a delay-free internal dry branch), so the regen comb doesn't track the flange. **5.** RATE LED synthetic (`Date.now()`), ignores RATE CV. All three want the **hand-built core** (own two Delays + LFOs, rampable centre/depth, no dry branch) — its own ear-tested round. Also noticed: the Workstation's `doubler` insert effect, if built on Tone.Chorus, carries the same internal-feedback cycle clamp (unverified, outside the Vox rack).
 
 
 - **912 sub-octave (deferred from Phase 74):** the directive's "Synth Up / Synth Down" modes — a square sub-octave under the dry signal. A proper one is a flip-flop dividing the input's zero crossings by two, which is inherently sample-serial state, so unlike the envelope follower this genuinely *does* need an AudioWorklet (`sub-octave-worklet.js`, plus the loader + deferred-wiring pattern from `hard-sync-worklet.js`). Monophonic and glitchy on chords — true of the real pedal too.
@@ -47,6 +43,35 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 ---
 
 ## Completed Phases Log
+
+### [2026-10-05] Vox Phase 122 — Wavefolder audit: no DC push, no choking past the edge, oversampled, SYM CV
+
+Standard module-perfection checklist on FOLD (Phase 68c). **Checked and correct:** jack wiring, FOLD CV summing onto the knob's drive gain (sample-accurate), fixed panel. **Found and approved by Dylan (all four + SYM CV):**
+1. **DC offset from SYM.** An offset before an odd curve leaves an offset after it — with **no input at all** the output sat at `sin(SYM·4π)`: 0.59 of full scale at SYM 0.55, **0.95 at 0.6**, swinging back through 0 at 0.75. A constant push into the next module (a VCA or VCF sees a phantom "always on" signal), lost master headroom, thumps as SYM moved. Same family as the WaveShaper-origin rule (memory: shaper fed silence emits `curve(0)`), except here the offset is deliberate and must be removed *after* the curve.
+2. **FOLD never reaches clean** — at minimum a full-level input still folds ~twice per half-cycle. *Deferred to Phase 123* (its own ear round — it changes low-FOLD timbre).
+3. **Choking past the edge.** A WaveShaper clamps its input to ±1 and the curve ended there (`sin(4π)` = 0), so drive + SYM + CV past ±1 went **flat-silent** for that part of the wave instead of folding further: 33 % of every wave at FOLD max + SYM max, 50 % with CV on top.
+4. **Aliasing** — folding creates harmonics far past Nyquist with no oversampling.
+
+**As built (`addModule('folder')`):** `In → Drive → BiasSum (+ Bias + SymCv) → Norm (1/FOLDER_RANGE) → Shaper → DcBlock → Out`.
+- **Wider curve, identical shape:** the curve is `sin(x·FOLDER_RANGE·4π)` over the shaper's ±1 with `Norm` = 1/4 in front, i.e. the old `sin(4πx)` for |x| ≤ 1 (max difference = interpolation only) with 4× more room. Full knob + both CVs at ±1 reach 2.5 — always inside. 8193 points (odd → x = 0 exact; 512 per sine cycle).
+- `Shaper.oversample = '4x'`.
+- **DC blocker:** 2nd-order 10 Hz highpass after the shaper (−0.26 dB at 20 Hz, −0.02 dB at 40 Hz, nothing above).
+- **SYM CV jack** (`-sym-cv`): ±1 V = the SYM knob's full ±0.5 travel, summed into the offset.
+- Removed the unused scope analyser + `getFolderScope` (the screen has drawn its shape from the knobs since the still-preview change); the preview's maths is unchanged and is now *truthful* past ±1, where the old engine went flat but the preview kept folding.
+
+*Verified: production build clean, lint count unchanged (44). `fold-verify122.mjs` (scratch, 13 checks — Tone's `setMap` sampling + the ±1 clamp + linear interpolation modelled): same curve within ±1; silence → exactly 0; flat-silent share at FOLD max + SYM max 33 % → 0 % (39 % / 50 % with CV → 0 %); full knob + both CVs fit the curve; DC removed while bass above 40 Hz is untouched; 4× oversampling, DC blocker order and the SYM CV jack wired; old analyser gone. **Panel check for Dylan:** the jack row gained a 4th jack (SYM CV) in the 300 px slot — confirm it stays on one line. **Ear test:** SYM off-centre with nothing playing — no thump when turning SYM; FOLD max + SYM max — keeps folding instead of choking; high notes through FOLD sound smoother; an LFO into SYM CV gives the moving West-Coast timbre.*
+
+### [2026-10-05] Vox Phase 121 — BBD: feedback can no longer sing on its own; the sweep no longer sticks at the bottom
+
+Dylan confirmed Phase 120 by ear, had Phases 111–120 committed (`b7e7efe`), and asked for the two BBD fixes from the audit parked on 2026-10-05.
+
+**1. High-FEEDBACK self-oscillation.** Loop small-signal gain = FBK × 1.2 (the `tanh(1.2x)` slope at 0) × the peak of the two Q-1 biquads in the loop (TONE lowpass × 120 Hz highpass, each bumping ~+1.25 dB at its corner): **1.28 at the old 0.9 clamp** — from FBK ≈ 0.72 a comb peak grew until the tanh held it, a steady tone that outlived the input. **Fix:** `bbdFbFor(feedback, toneHz)` keeps the knob's mapping exactly up to loop gain 0.8 (**unchanged up to FBK 57 %** at every TONE) and eases toward 0.9 above it. The ceiling uses the **real** filter peak for the current TONE (`bbdLoopPeak` — exact digital RBJ magnitudes at the live sample rate, scanned on each FBK/TONE change; verified never optimistic against a brute-force grid at 44.1 and 48 kHz). FEEDBACK has no CV input, so a knob-domain limit is complete. Max loop gain now **0.900**.
+
+**2. The sweep stuck at the bottom — and the cause was deeper than the audit said.** The audit blamed the hand-built return loop; reading Tone's source while fixing it showed **`Tone.Chorus` (a `StereoFeedbackEffect`) carries its own permanent feedback cycle** (`_merge → _feedbackSplit → _feedbackL/R → _feedbackMerge → _split → delays`), wired even at feedback 0. Web Audio clamps every DelayNode in a cycle to ≥ 1 render quantum, so the default sweep (1.78–5.33 ms) sat flat at 2.67 ms (48 kHz) / 2.90 ms (44.1 kHz) for **33–38 % of every cycle**, regardless of FEEDBACK. Two parts:
+- `detachToneChorusFeedback` cuts Tone's internal return edge (`_feedbackMerge.disconnect()`) once at construction, static + every dynamic BBD. We never used Tone's internal feedback (kept at 0), so there is no audible change from this alone. **PRIVATE Tone API**, verified on 15.1.22 like the Sampler `_activeSources` fix — a no-op if the field disappears (the clamp would simply return); re-verify on any Tone.js bump.
+- `setBbdReturn` keeps OUR return edge (`FbDly → chorus`) connected **only while FEEDBACK > 0**: connect while the Fb gain is still ~0 then ramp; ramp to 0, then cut the edge 120 ms later if FEEDBACK is still 0 (the Phase 141 mute-pruning pattern — click-free both ways). With FEEDBACK at 0 there is no cycle and the sweep has its full range. With FEEDBACK up, the clamp is inherent to any feedback flanger in Web Audio and remains.
+
+*Verified: production build clean, lint count unchanged (44). `bbd-verify121.mjs` (scratch, 48 checks): peak estimate never optimistic (21 TONE positions × 2 sample rates); max loop gain 1.28 → 0.900; knob unchanged up to 57 %; default-sweep floor time 33 % / 38 % → 0 % with FEEDBACK at 0; the internal-loop cut is applied to the static and dynamic BBDs; the return edge is only cut if FEEDBACK is still 0 when the timer fires; timers cleared on removal + unmount. The cycle clamp itself cannot be observed outside a browser — **Dylan's ear test:** FEEDBACK at 0, short DELAY, DEPTH up — the swoosh should travel further and stop "parking" at the bottom of each sweep; FEEDBACK all the way up — strong resonant flanging that stops when the sound stops (no lingering whine); move FEEDBACK between 0 and a little — no click.*
 
 ### [2026-10-05] Vox Phase 120 — CHRONOS: TIME CV scales with the time (option D — the CHRONOS series is complete)
 

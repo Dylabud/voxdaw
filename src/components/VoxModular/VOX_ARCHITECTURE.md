@@ -622,7 +622,9 @@ g = WIDTH·2·½√2 · (1 − |pan|)        PanSum = PanKnob (Signal, knob's so
 
 **Function:** Drives a signal into a fixed multi-fold sine transfer curve — more drive = more folds = more added harmonics. **Dynamic-only.** Output-domain waveshaping, so it works on ANY audio in (VCO, chord, external) — which is why it's its own module rather than a VCO knob (the VCO's SHAPE is phase-domain).
 
-**As built:** `In → Drive(FOLD pre-gain 0.2..1.0) → BiasSum → Shaper → Out`, where `Shaper = Tone.WaveShaper(x ⇒ sin(x·π·4))` (4 folds across ±1 at max drive) and `Bias` (a `Tone.Signal`, SYMMETRY −0.5..0.5) adds a DC offset before the fold for asymmetric/even-harmonic folding. FOLD-CV (`${id}FoldCv`) sums onto `Drive.gain`. Jacks `-in` / `-fold-cv` / `-out`; `getFolderScope(id)` draws the folded output waveform.
+**Vox Phase 122:** `In → Drive → BiasSum (+ Bias + SymCv) → Norm(1/4) → Shaper (sin(x·4·4π), 8193 pts, oversample 4x) → DcBlock (HP 10 Hz) → Out`. The ×4 range keeps the old shape exactly within ±1 of drive but stops drive+SYM+CV past ±1 sitting on the shaper's clamped end (flat silence); the DC blocker removes the offset SYM leaves after an odd curve (0.95 of full scale with NO input at SYM 0.6). SYM CV jack `-sym-cv` (±1 V = ±0.5 offset). Scope analyser removed — the screen is a still preview from the knobs.
+
+**Original (Phase 68c):** `In → Drive(FOLD pre-gain 0.2..1.0) → BiasSum → Shaper → Out`, where `Shaper = Tone.WaveShaper(x ⇒ sin(x·π·4))` (4 folds across ±1 at max drive) and `Bias` (a `Tone.Signal`, SYMMETRY −0.5..0.5) adds a DC offset before the fold for asymmetric/even-harmonic folding. FOLD-CV (`${id}FoldCv`) sums onto `Drive.gain`. Jacks `-in` / `-fold-cv` / `-out`; `getFolderScope(id)` draws the folded output waveform.
 
 ---
 
@@ -658,6 +660,8 @@ The Chorus runs 100% wet and MIX crossfades the two external gains, because the 
 **Controls / jacks:** RATE (0.1–5 Hz), DEPTH, MIX, **FBK**, **DELAY** (2–20 ms), **TONE** (700 Hz–14 kHz lowpass). Jacks `-in` / `-rate-cv` / `-out`.
 
 **FEEDBACK is hand-built; Tone's internal `feedback` stays 0.** Tone's loop is a bare gain — nothing damps the resonance as it recirculates and nothing stops low frequencies accumulating, so at high settings the comb peak (which tracks `delayTime`, ≈190–560 Hz at DELAY 3.5 ms / DEPTH 0.5) sings as a low bee-like hum, one per channel offset by the 180° stereo spread. The return path puts **TONE inside the loop**, adds a 120 Hz highpass to kill the mud, and a `tanh` to bound runaway. Clamped to `BBD_MAX_FEEDBACK` (0.9). Same reasoning as CHRONOS's hand-built loop (§15).
+
+**No self-oscillation, no stuck sweep (Vox Phase 121).** (a) `bbdFbFor` eases FEEDBACK so the loop gain `FBK × 1.2 × bbdLoopPeak(TONE)` (exact digital RBJ peak of TONE-LP × 120 Hz-HP at the live rate) never exceeds 0.9; unchanged up to loop 0.8 (FBK ≈ 57 %). (b) **Tone.Chorus has its own permanent internal feedback cycle** (StereoFeedbackEffect `_feedbackMerge → _split`), which alone clamps its delays to ≥ 1 render quantum — `detachToneChorusFeedback` cuts it at construction (**private Tone API, verified 15.1.22; re-verify on a bump**). Our return edge `FbDly → chorus` is connected only while FEEDBACK > 0 (`setBbdReturn`, ramp-then-cut 120 ms), so at FEEDBACK 0 the delays are in no cycle and sweep their full range.
 
 **`BBD_FB_DELAY_S` (5 ms) in the return path is LOAD-BEARING.** Web Audio **mutes any cycle that contains no DelayNode**, and `Tone.Chorus` has an internal DRY branch (input → CrossFade → output) with no delay in it — so feeding back into the chorus input creates a delay-free cycle and Chrome silences the entire loop. Symptom: the wet path goes dead, MIX only makes things quieter, and every wet-side knob does nothing. **Cycle detection is topological**, so running the chorus at `wet: 1` does NOT help. 5 ms clears one render quantum at every sample rate.
 
@@ -826,6 +830,8 @@ seq-gate-out → env1-gate,  env1-out → vca-cv          ← gated sequencer ar
 | Moog Phase 87e ✅ | BPM field restored to chip type scale — `font-size`/`weight`/`letter-spacing: inherit` were overriding `.selectorValue`'s 21px down to the body size | I/O |
 | Moog Phase 89 ✅ | Per-step **SKIP** — third step-switch state removed from the cycle (vs REST, which keeps its time), making 3/4, 5/4, 7/8 etc. possible on a 16-step 960; live cycle-length readout in the plate subtitle | 960 SEQ |
 | Moog Phase 89b ✅ | SKIP restyled as a **lit red lamp** on the `.seqGateOn` recipe (was an amber slash + dimmed column); column dimming dropped, lights-out exempts both lamp states | 960 SEQ (visual) |
+| Vox Phase 122 ✅ | **FOLD audit** — DC blocker (SYM left up to 0.95 FS of offset with no input), curve widened ×4 with the same shape inside ±1 (no flat-silent choking past the edge), 4× oversampling, SYM CV jack, dead scope analyser removed | FOLD |
+| Vox Phase 121 ✅ | BBD: loop gain capped at 0.9 against the real TONE filter peak (was 1.28 → self-sustaining tone); Tone.Chorus's own internal feedback cycle cut + our return connected only while FBK > 0, so the sweep no longer parks on the render-quantum floor | BBD |
 | Vox Phase 120 ✅ | CHRONOS **TIME CV proportional** — ±25 % of the current time in every zone/SYNC (was fixed ±0.15 s), per-tap depths so crossfades stay clean | CHRONOS |
 | Vox Phase 119 ✅ | CHRONOS "space gun" fixed — TIME/ZONE/SYNC changes crossfade between two taps instead of gliding the read point (which played the buffer at up to −8.4×); TIME CV still warps by design | CHRONOS |
 | Vox Phase 118 ✅ | CHRONOS **tempo SYNC** — SYNC chip, TIME → 13 note lengths off the shared Transport tempo (polled, so Workstation tempo/automation is followed too), ZONE inert while synced, delay lines 4 → 8 s | CHRONOS |

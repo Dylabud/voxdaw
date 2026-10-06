@@ -3074,7 +3074,7 @@ const FLD_W = 208, FLD_H = 92;
 // EXACT fold math the engine uses (`sin((drive·x + bias)·π·FOLDS)`), computed
 // straight from the FOLD / SYM knobs. No live audio, so nothing scrolls: it just
 // shows the shape the folder is imposing and morphs only when you turn a knob.
-const FLD_FOLDS = 4; // must match the engine's folder factory
+const FLD_FOLDS = 4; // must match the engine's FOLDER_FOLDS (the curve is unchanged within ±1)
 function FolderScope({ fold, symmetry }) {
   const canvasRef = useRef(null);
   useEffect(() => {
@@ -3146,6 +3146,7 @@ function WavefolderModule({ number = 1, onParamUpdate }) {
           <div className={styles.jackRow}>
             <Jack id={`${p}-in`}      label="IN" />
             <Jack id={`${p}-fold-cv`} label="FOLD CV" />
+            <Jack id={`${p}-sym-cv`}  label="SYM CV" />
             <Jack id={`${p}-out`}     label="OUT" />
           </div>
         </div>
@@ -3969,7 +3970,6 @@ export default function VoxShell({ onNavigateHome, onBusReady, recordingActiveRe
     panL:         () => audio.getPanLevel(id, 0),
     panR:         () => audio.getPanLevel(id, 1),
     chronosDisp:  () => audio.getChronosDisplay(id),
-    folderScope:  () => audio.getFolderScope(id),
   });
 
   useEffect(() => {
