@@ -29,7 +29,6 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 **Roadmap clear (2026-07-12).** Every planned phase is either shipped or resolved with a logged decision — see the Completed Phases Log. New phases go here.
 
-- **FOLD → clean (approved 2026-10-05, next round = Phase 123):** at minimum FOLD a full-level input still folds ~twice per half-cycle (drive 0.2 → peak at 1.6 half-waves of the curve; the first fold starts at drive 0.125). Remap FOLD so its minimum sits below the first fold. Changes low-FOLD timbre in existing patches — accepted by Dylan, built as its own round so it can be judged alone.
 
 - **BBD remaining (audited 2026-10-05; findings 1–2 shipped as Phase 121):** **3.** DELAY / DEPTH drags step the delay time — Tone.Chorus `depth`/`delayTime` setters write `LFO.min/max` → `Scale._setRange` with plain `.value =` (probable crackle on bright material while turning; ear test). **4.** Feedback resonance tuned 5 ms off the sweep (`BBD_FB_DELAY_S`, needed only because Tone.Chorus has a delay-free internal dry branch), so the regen comb doesn't track the flange. **5.** RATE LED synthetic (`Date.now()`), ignores RATE CV. All three want the **hand-built core** (own two Delays + LFOs, rampable centre/depth, no dry branch) — its own ear-tested round. Also noticed: the Workstation's `doubler` insert effect, if built on Tone.Chorus, carries the same internal-feedback cycle clamp (unverified, outside the Vox rack).
 
@@ -43,6 +42,21 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 ---
 
 ## Completed Phases Log
+
+### [2026-10-05] Vox Phase 123 — FOLD can go to clean
+
+Dylan confirmed Phases 121–122 by ear and on screen (jack row fits; SYM silent with no input; no choking; smoother highs; SYM CV sweep) — committed as `c58e19b` — and asked for the deferred item.
+
+**Problem:** the curve `sin(4π·d·x)` first folds a full-level input at d = 1/8, and the FOLD knob started at d = 0.2 — so the minimum already folded ~twice per half-cycle (**45 % THD at FOLD 0**). Simply lowering the drive is not enough: below the first fold the curve's output level falls with d (a unit peak comes out at sin(4πd)), so "clean" would also mean "quiet".
+
+**As built:**
+- **Knob map (`foldDriveFor`):** the bottom quarter sweeps d exponentially from 0.02 to 0.4 (where the old map stood at 25 %); **from 25 % up it is the original linear map exactly**, so every saved FOLD ≥ 25 % — including the 0.35 default — is unchanged. 0–15 % = clean → warm saturation, 15–25 % = the first folds.
+- **Level makeup (`folderMakeup`)** = `1/sin(4πd)` below the first fold (capped at d = 0.02), 1 from it up. Small signals pass at `4πd/sin(4πd)` ≈ unity, so it is clean and level-true at **any** input level.
+- **Makeup runs at audio rate:** the drive is now ONE signal — `DriveSig` (knob, sole writer) + FOLD CV summed in `DriveSum` — feeding both the pre-gain (`Drive`, intrinsic 0) and `MkShaper` → `Mk.gain` after the fold. A JS-written makeup would have left a FOLD CV that opens a low FOLD up to 12 dB too loud; measured with CV now: RMS 0.71–0.86 across CV 0…1.
+- **SYM thump regression caught before shipping:** the makeup also multiplies the DC that an offset leaves after the curve, so a quick SYM turn at FOLD 0 thumped **0.70 vs Phase 122's 0.17** through the DC blocker (simulated, 50 ms knob ramp). The offset (SYM + SYM CV) is now scaled by `1/makeup` (`InvMkShaper` → `BiasScale.gain`), making the post-curve DC `m·sin(4π·b/m) ≈ sin(4π·b)`: thump back to 0.09 / 0.18 / 0.36 vs Phase 122's 0.09 / 0.17 / 0.41. Exactly 1 from the first fold up.
+- The screen preview uses the same map, makeup and offset scaling (clamped to the glass).
+
+*Verified: production build clean, lint count unchanged (44). `fold-verify123.mjs` (scratch, 16 checks — sample-level model incl. Tone's WaveShaper sampling for all three shapers): FOLD 0 THD 45 % → **0.26 %** at full level and clean at 0.25 level, both within 0.2 dB of the input; **FOLD ≥ 25 % identical to Phase 122 at every SYM** (max diff < 1e-6); distortion grows monotonically through the new low range; SYM-turn thump no louder than Phase 122; FOLD CV from FOLD 0 never jumps level; wiring. `fold-verify122.mjs` re-run (13/13) — one text check updated because the DC blocker now follows the makeup stage by design. **Dylan's ear test:** FOLD fully down with SYM centred — a VCO should sound like itself; turn FOLD slowly up — warmth, then the first folds, then exactly the old character from a quarter-turn on; turn SYM quickly at FOLD 0 — no thump; an LFO into FOLD CV from FOLD 0 — the folds bloom without a volume jump.*
 
 ### [2026-10-05] Vox Phase 122 — Wavefolder audit: no DC push, no choking past the edge, oversampled, SYM CV
 

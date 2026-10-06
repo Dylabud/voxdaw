@@ -207,6 +207,31 @@ const FOLDER_FOLDS        = 4;      // folds across ±1 of drive — the origina
 const FOLDER_RANGE        = 4;      // the curve now spans ±4 of drive; ±1 is unchanged
 const FOLDER_CURVE_POINTS = 8193;   // odd → x = 0 lands on a sample; 512 points per sine cycle
 const FOLDER_DC_HZ        = 10;     // DC blocker corner — below anything audible
+// FOLD → CLEAN (Vox Phase 123). The curve sin(4π·d·x) starts folding a full-level input
+// once d > 1/8 (its first peak), and the old knob began at d = 0.2, so FOLD could never
+// be clean (45 % THD at minimum). Now the bottom quarter of the knob sweeps d
+// exponentially from FOLDER_DRIVE_MIN up to where the old map stood at FOLDER_KNEE_K, and
+// the old linear map is kept EXACTLY above it — every saved FOLD ≥ 25 % (incl. the 0.35
+// default) sounds as before. Below the first fold a makeup gain restores the level the
+// curve's small-signal slope would otherwise lose: at d the curve turns a unit peak into
+// sin(4πd), so makeup = 1/sin(4πd) (capped at FOLDER_DRIVE_MIN; 1 from the first fold
+// up). Small signals then pass at ≈ 4πd/sin(4πd) ≈ unity — clean at any input level.
+const FOLDER_DRIVE_MIN = 0.02;
+const FOLDER_KNEE_K    = 0.25;
+const FOLDER_FOLD_ON   = 1 / 8;      // drive where a unit input reaches the first fold
+const FOLDER_MK_RANGE  = 2;          // makeup shaper covers |drive| ≤ 2 (beyond: makeup 1)
+const FOLDER_MK_POINTS = 4097;       // odd
+export const foldDriveFor = (k) => {
+  const kk = Math.max(0, Math.min(1, k));
+  const dKnee = 0.2 + 0.8 * FOLDER_KNEE_K;
+  return kk < FOLDER_KNEE_K
+    ? FOLDER_DRIVE_MIN * Math.pow(dKnee / FOLDER_DRIVE_MIN, kk / FOLDER_KNEE_K)
+    : 0.2 + 0.8 * kk;                // the original map
+};
+export const folderMakeup = (d) => {
+  const a = Math.abs(d);
+  return a >= FOLDER_FOLD_ON ? 1 : 1 / Math.sin(Math.PI * FOLDER_FOLDS * Math.max(a, FOLDER_DRIVE_MIN));
+};
 
 // ── Kick CLICK TONE (Phase 80) ──
 // The click transient's highpass was hardcoded at 2 kHz. Exposing it costs no new nodes
@@ -4261,8 +4286,32 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       //  • The unused scope analyser is gone (the screen draws its shape from the knobs).
       const id = `folder${num}`;
       n[`${id}In`]      = new Tone.Gain(1);
-      n[`${id}Drive`]   = new Tone.Gain(0.4);  // FOLD amount (pre-shaper gain 0.2..1.0)
-      n[`${id}FoldCv`]  = new Tone.Gain(0.5);  // FOLD-CV → Drive.gain (sums onto knob)
+      // Drive as ONE signal (Phase 123): knob (DriveSig, sole writer) + FOLD CV summed in
+      // DriveSum, which sets the pre-gain AND, through MkShaper, the level makeup — so the
+      // makeup tracks FOLD CV at audio rate (a JS-written makeup would leave a CV that
+      // opens a low FOLD up to 12 dB too loud).
+      n[`${id}Drive`]    = new Tone.Gain(0);    // gain driven entirely by DriveSum
+      n[`${id}DriveSig`] = new Tone.Signal(0.4);
+      n[`${id}FoldCv`]   = new Tone.Gain(0.5);  // FOLD-CV depth (sums onto the knob)
+      n[`${id}DriveSum`] = new Tone.Gain(1);
+      n[`${id}MkNorm`]   = new Tone.Gain(1 / FOLDER_MK_RANGE);
+      n[`${id}MkShaper`] = new Tone.WaveShaper((u) => folderMakeup(u * FOLDER_MK_RANGE), FOLDER_MK_POINTS);
+      n[`${id}Mk`]       = new Tone.Gain(0);    // makeup gain driven by MkShaper
+      n[`${id}DriveSig`].connect(n[`${id}DriveSum`]);
+      n[`${id}FoldCv`].connect(n[`${id}DriveSum`]);
+      n[`${id}DriveSum`].connect(n[`${id}Drive`].gain);
+      n[`${id}DriveSum`].connect(n[`${id}MkNorm`]);
+      n[`${id}MkNorm`].connect(n[`${id}MkShaper`]);
+      n[`${id}MkShaper`].connect(n[`${id}Mk`].gain);
+      // The OFFSET (SYM + SYM CV) is scaled by 1/makeup before the fold. Otherwise the
+      // makeup also boosts the DC an offset leaves after the curve, and a quick SYM turn at
+      // FOLD 0 thumped ~4× harder than Phase 122 (measured 0.70 vs 0.17 through the DC
+      // blocker). With it, the post-curve DC is m·sin(4π·b/m) ≈ sin(4π·b) — the Phase 122
+      // level — and from the first fold up the scale is exactly 1, so nothing changes there.
+      n[`${id}InvMkShaper`] = new Tone.WaveShaper((u) => 1 / folderMakeup(u * FOLDER_MK_RANGE), FOLDER_MK_POINTS);
+      n[`${id}BiasScale`]   = new Tone.Gain(0);   // gain driven by InvMkShaper
+      n[`${id}MkNorm`].connect(n[`${id}InvMkShaper`]);
+      n[`${id}InvMkShaper`].connect(n[`${id}BiasScale`].gain);
       n[`${id}Bias`]    = new Tone.Signal(0);  // SYMMETRY — offset before the fold
       n[`${id}SymCvIn`] = new Tone.Gain(1);
       n[`${id}SymCv`]   = new Tone.Gain(0.5);  // SYM CV depth: ±1 V → ±0.5 offset
@@ -4275,15 +4324,17 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       n[`${id}Out`]     = new Tone.Gain(1);    // OUTPUT level
       n[`${id}In`].connect(n[`${id}Drive`]);
       n[`${id}Drive`].connect(n[`${id}BiasSum`]);
-      n[`${id}Bias`].connect(n[`${id}BiasSum`]);   // offset sums with the driven signal
+      n[`${id}Bias`].connect(n[`${id}BiasScale`]);   // offset (scaled 1/makeup) sums with the driven signal
       n[`${id}SymCvIn`].connect(n[`${id}SymCv`]);
-      n[`${id}SymCv`].connect(n[`${id}BiasSum`]);  // …and so does SYM CV
+      n[`${id}SymCv`].connect(n[`${id}BiasScale`]);  // …and so does SYM CV
+      n[`${id}BiasScale`].connect(n[`${id}BiasSum`]);
       n[`${id}BiasSum`].connect(n[`${id}Norm`]);
       n[`${id}Norm`].connect(n[`${id}Shaper`]);
-      n[`${id}Shaper`].connect(n[`${id}DcBlock`]);
+      n[`${id}Shaper`].connect(n[`${id}Mk`]);       // level makeup below the first fold
+      n[`${id}Mk`].connect(n[`${id}DcBlock`]);
       n[`${id}DcBlock`].connect(n[`${id}Out`]);
-      n[`${id}FoldCv`].connect(n[`${id}Drive`].gain); // CV sums onto the FOLD knob
-      const nodeNames = [`${id}In`, `${id}Drive`, `${id}FoldCv`, `${id}Bias`, `${id}SymCvIn`, `${id}SymCv`,
+      const nodeNames = [`${id}In`, `${id}Drive`, `${id}DriveSig`, `${id}DriveSum`, `${id}MkNorm`,
+        `${id}MkShaper`, `${id}Mk`, `${id}InvMkShaper`, `${id}BiasScale`, `${id}FoldCv`, `${id}Bias`, `${id}SymCvIn`, `${id}SymCv`,
         `${id}BiasSum`, `${id}Norm`, `${id}Shaper`, `${id}DcBlock`, `${id}Out`];
       const jackEntries = {
         [`${id}-in`]:      { type: 'in',  dest: n[`${id}In`] },
@@ -4837,7 +4888,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
         break;
       }
       case 'folder':
-        if (params.fold     !== undefined) safeRamp(n[`${id}Drive`].gain, 0.2 + params.fold * 0.8); // 0.2..1.0
+        if (params.fold     !== undefined) safeRamp(n[`${id}DriveSig`], foldDriveFor(params.fold)); // Phase 123 map
         if (params.symmetry !== undefined) safeRamp(n[`${id}Bias`], (params.symmetry - 0.5));       // -0.5..0.5 DC
         if (params.output   !== undefined) safeRamp(n[`${id}Out`].gain, params.output * 2);          // 0..2×
         break;

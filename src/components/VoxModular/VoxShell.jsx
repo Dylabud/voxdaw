@@ -4,7 +4,8 @@ import VoxKnob from './VoxKnob';
 import VoxFader from './VoxFader';
 import { VoxPatchProvider, useVoxPatch } from './VoxPatchContext';
 import PatchCableOverlay from './PatchCableOverlay';
-import useVoxAudio, { FFB_BANDS, VOC_BANDS, fftBinHz, CHRONOS_SYNC_DIVS, chronosDivForTime } from './useVoxAudio';
+import useVoxAudio, { FFB_BANDS, VOC_BANDS, fftBinHz, CHRONOS_SYNC_DIVS, chronosDivForTime,
+  foldDriveFor, folderMakeup } from './useVoxAudio';
 import Oscilloscope from './Oscilloscope';
 import KeyboardModule from './KeyboardModule';
 import Led from './Led';
@@ -3082,7 +3083,8 @@ function FolderScope({ fold, symmetry }) {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, FLD_W, FLD_H);
-    const drive = 0.2 + fold * 0.8;   // matches updateDynModuleParams 'folder'
+    const drive = foldDriveFor(fold);   // the engine's own map (Phase 123)
+    const mk    = folderMakeup(drive);  // …and its level makeup
     const bias  = symmetry - 0.5;
     // faint zero line for reference
     ctx.strokeStyle = 'rgba(93,202,165,0.18)';
@@ -3092,7 +3094,7 @@ function FolderScope({ fold, symmetry }) {
     ctx.beginPath();
     for (let i = 0; i < FLD_W; i++) {
       const inp    = Math.sin((i / (FLD_W - 1)) * 2 * Math.PI); // one cycle of a sine input
-      const folded = Math.sin((inp * drive + bias) * Math.PI * FLD_FOLDS);
+      const folded = Math.max(-1, Math.min(1, mk * Math.sin((inp * drive + bias / mk) * Math.PI * FLD_FOLDS)));
       const y = FLD_H / 2 - folded * (FLD_H / 2 - 5);
       if (i === 0) ctx.moveTo(i, y); else ctx.lineTo(i, y);
     }
