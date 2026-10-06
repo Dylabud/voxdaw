@@ -2024,8 +2024,10 @@
 /* ══════════════════════════════════════════════════════
    UNIFIED STUDIO LAMP — single light source overlay
    Sits at z-index:49 (above all module content, below
-   patch cables at z-index:50). mix-blend-mode:screen
-   brightens what's below proportionally — knobs, jacks,
+   patch cables at z-index:50). A near-white light with
+   plain alpha (Phase 124 — was mix-blend-mode:screen, the
+   same result for white, far cheaper) brightens what's
+   below proportionally — knobs, jacks,
    and labels all receive the same directional light
    instead of each module having its own hotspot.
    ══════════════════════════════════════════════════════ */
@@ -2035,7 +2037,16 @@
   pointer-events: none;
   z-index: 49;
   border-radius: inherit;
-  mix-blend-mode: screen;
+  /* NO mix-blend-mode (Vox Phase 124 — scroll performance). This used to be
+     `mix-blend-mode: screen`, which makes the compositor render EVERYTHING beneath
+     the overlay — the whole rack, every module layer — into an offscreen surface on
+     every frame of a camera pan so it can blend against it: a full-cabinet pass at
+     Retina density whose cost grows with every module added. For a near-white light,
+     screen and plain alpha blending are the same equation: screen gives
+     Cb + a·Cs·(1−Cb), normal gives Cb + a·(Cs−Cb), equal when Cs = 1. With this colour
+     (255,253,246) at its peak alpha 0.13 the worst difference over every backdrop
+     level is 0.00 / 0.26 / 1.17 of 255 (R/G/B) — invisible. Do not reintroduce a
+     blend mode on a rack-sized element. */
   background: radial-gradient(
     ellipse at 78% 18%,
     rgba(255, 253, 246, 0.13) 0%,

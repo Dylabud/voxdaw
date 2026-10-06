@@ -4065,12 +4065,10 @@ export default function VoxShell({ onNavigateHome, onBusReady, recordingActiveRe
     cameraViewRef.current = view; // Phase 61: visibility manager reads this live object
     el.style.transformOrigin = '0 0';
 
-    // Fit-width floor (Phase 60a): auto-shrink never goes below the scale that
-    // renders a FLOOR_LAYOUT_W-wide layout at exactly screen width — the Phase 55
-    // typography readability floor. Chosen just under the default rack's layout
-    // width (availW/0.4919 ≈ 3009 at 1512×945) so today's rack is untouched;
-    // any added case pushes height-fit below the floor and the rack becomes
-    // vertically pannable instead of shrinking further.
+    // Layout width (Phase 60a floor; since Vox Phase 125 the ONLY fit rule): the rack
+    // is laid out FLOOR_LAYOUT_W wide and scaled to the window's width — the Phase 55
+    // typography readability floor, chosen just under the default rack's natural width
+    // (≈ 3009). Taller racks pan vertically; shorter ones leave space below.
     const FLOOR_LAYOUT_W = 3010;
 
     // True when the scaled rack is taller than the viewport (floored or zoomed) —
@@ -4132,9 +4130,21 @@ export default function VoxShell({ onNavigateHome, onBusReady, recordingActiveRe
       // Available space (shell padding: 16px sides, 44px top + 16px bottom).
       view.availW = window.innerWidth  - 32;
       view.availH = window.innerHeight - 60;
-      // Height-fit, floored at fit-width (Phase 60a), capped at 1.
-      const sFloor = Math.min(view.availW / FLOOR_LAYOUT_W, 1);
-      const s0 = Math.min(Math.max(view.availH / natH, sFloor), 1);
+      // FIT-WIDTH, always (Vox Phase 125). The layout is FLOOR_LAYOUT_W wide and scaled
+      // to the window's width, capped at 1. It used to be height-fit floored at
+      // fit-width: in a window taller than the rack's own shape, height-fit won and the
+      // width compensation below SQUEEZED the layout narrower than 3010 to fill the
+      // height. A narrower layout re-wraps the expansion row (and squeezed modules'
+      // knob/jack rows), which changes natH, which changes height-fit, which changes the
+      // width again — the Phase 55 two-candidate-width trap, now unconditional. Dylan's
+      // trace (2026-10-06, window 1124×1722) showed it flipping between 2345×2818 and
+      // 1865×3544 on EVERY frame: fit() 88× in 24 s, a full-document relayout + repaint
+      // each time, GPU 100 % busy, ~2800 dropped frames. With the width pinned, natH can
+      // no longer feed back into the scale, so no oscillation is possible. A window taller
+      // than the rack now leaves empty space below it (top-anchored by clampPan); on the
+      // usual landscape window this is within a pixel of the old height-fit (0.4917 vs
+      // 0.4919 at 1512×945). Never reintroduce a height-driven layout width.
+      const s0 = Math.min(view.availW / FLOOR_LAYOUT_W, 1);
 
       if (s0 < 1) {
         // Width compensation: widen the layout box so that after scale(), the visual

@@ -43,6 +43,40 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-10-06] Vox Phase 125 — The real cause of "lag grows with every module": fit() flip-flopping every frame
+
+Phase 124 did not fix it (Dylan: still laggy, powered on AND off). Instead of a third guess, Dylan recorded a **Chrome DevTools Performance trace** on his Retina Mac (`Vox Modular Lag Test (Lights On).gz`, 40 MB gz / 706 MB JSON, `hostDPR: 2`), parsed here by a line-streaming node script (V8 cannot hold the whole file as one string).
+
+**What the trace showed (24.5 s recording window):**
+- GPU process main thread **busy 100 % of the time**; 2 804 `DroppedFrame`s vs ~360 presented; GPU tasks up to 326 ms.
+- Renderer main only 20 % busy — but just **88 main frames in 24 s** (3.6 fps), each with a `Commit` (up to 653 ms), a full `#document` / `HTML` **Paint**, ~35 Paint events per frame, 14 451 RasterTasks (29 % of a raster worker) feeding the GPU.
+- `fit()` ran **88 times — once per main frame**.
+- The cabinet's painted size **alternated every frame** between two layouts: 4690×5636 and 3730×7087 device px = **2345×2818 and 1865×3544 CSS px**, 44 + 44 times in strict alternation.
+
+**Mechanism — the Phase 55 two-candidate-width trap, unconditional.** `fit()` was height-fit floored at fit-width, with width compensation `width = availW / s0`. Dylan's viewport was **1124×1722** (portrait-ish — DevTools docked beside the page may have contributed), so height-fit beat the floor and the compensation **squeezed the layout below the 3010 px design width** to fill the height. The expansion row (`flex-wrap`) and the squeezed modules' own wrapping rows re-wrap at a narrower width → taller natH → smaller height-fit → wider layout → shorter natH → … forever, each lap a full relayout + repaint of the whole rack. The built-in rack alone has no width-sensitive wrapping, which is why it stayed stable and why "even one added module" set it off. Phase 60a's "below the floor the layout width is pinned, so wrapping cannot oscillate" only held when height-fit LOST to the floor — i.e. landscape windows.
+
+**Fix:** `s0 = min(availW / FLOOR_LAYOUT_W, 1)` — **always fit-width**; the layout width is a constant 3010, so natH can no longer feed back into the scale. A window taller than the rack leaves empty space below (top-anchored by `clampPan`); taller racks pan as before. On the usual 1512×945 window the scale is 0.4917 vs 0.4919 — within a pixel. Comment in `fit()`: never reintroduce a height-driven layout width.
+
+**Phase 124 stays** (plain-alpha lamp: identical look, strictly cheaper) but was not the cause. Also seen in the trace, not ours: ~117 000 timer fires of a function `init` from a script with no URL on the main thread (~2 % CPU) — almost certainly a browser extension; harmless here.
+
+*Verified: production build clean, lint count unchanged (44). A node simulation of the fit loop with the trace's own sizes reproduces the old rule's endless flip (≈2329×3544 ↔ 1852×2818, vs the trace's 2345×3544 ↔ 1865×2818) and shows the new rule settling at 3010 wide on the first pass. **Dylan's test:** reload, add several modules, scroll — smooth, in a tall window too; and a new DevTools trace should show `fit` running only on real window/content changes.*
+
+### [2026-10-05] Vox Phase 124 — Scroll lag that grows with every added module: the rack-wide blend overlay
+
+Dylan (after confirming Phase 123, committed `f787c45`): adding even one module — VCO or library — made scrolling noticeably choppier, quickly getting worse; he suspected Phase 109's cause (a panel missing its own GPU layer).
+
+> **Outcome (2026-10-06):** did NOT fix Dylan's lag — the real cause was fit() oscillation, Phase 125. The change itself is kept (identical look, cheaper).
+
+**Not a missing layer.** Every added module renders through the same `.module` element as the built-ins, which carries the Phase 61d `will-change: transform`; the expansion-row slot adds no paint of its own.
+
+**What does scale with each module:** the studio-lamp `.lightOverlay` — `position:absolute; inset:0` over the WHOLE cabinet with **`mix-blend-mode: screen`**. A blend mode forces the compositor to render everything beneath it (the whole rack, every module layer) into an offscreen surface and blend against it, every frame of a camera pan, at Retina density — so its cost grows with rack area, i.e. with every module added. Two diagnostic questions to Dylan pinned it: **laggy with POWER off too** (so not the Phase 61 culling manager — it is dormant unpowered) and **smooth in LIGHTS OUT** (which `display:none`s this overlay — consistent with the long-standing "lights-out is smooth" observation from Phases 61/109).
+
+**Fix:** plain alpha instead of `screen`. For a near-white light the two are the same equation — screen `Cb + a·Cs·(1−Cb)`, normal `Cb + a·(Cs−Cb)`, equal at Cs = 1. With the lamp colour (255,253,246) at its peak alpha 0.13, the worst difference over every backdrop level is **0.00 / 0.26 / 1.17 of 255** (R/G/B) — invisible. Comment in the CSS: **never put a blend mode on a rack-sized element.**
+
+**Watched, not changed:** the Phase 61 culling manager re-checks its 2500 px size gate whenever modules are added, and when it engages (powered racks only) it toggles `content-visibility` while the camera moves — the churn Phase 61b measured at p95 83 ms. It is not the cause here (lag persisted unpowered), but if a large *powered* rack still pans worse than the same rack unpowered after this fix, that is the next suspect (render everything while the camera moves, re-cull once idle).
+
+*Verified: production build clean; colour equivalence computed over all 256 backdrop levels per channel. No headless browser here, so the performance result is **Dylan's test on his Retina Mac**: add several modules, scroll with lights ON (powered and unpowered) — should now feel like the default rack did; the lamp glow should look unchanged.*
+
 ### [2026-10-05] Vox Phase 123 — FOLD can go to clean
 
 Dylan confirmed Phases 121–122 by ear and on screen (jack row fits; SYM silent with no input; no choking; smoother highs; SYM CV sweep) — committed as `c58e19b` — and asked for the deferred item.
