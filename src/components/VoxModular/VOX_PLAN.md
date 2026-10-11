@@ -43,6 +43,18 @@ A massive, photorealistic 1960s-style Moog Modular Synthesizer embedded as a ded
 
 ## Completed Phases Log
 
+### [2026-10-07] Vox Phase 128 — VEL SENS: firm MIDI hits reach full
+
+**Confirmed by Dylan (2026-10-11):** hard MIDI hits now open envelopes and filters all the way, softer touches keep their dynamics, and VEL SENS at 0 gives the exact legacy behaviour.
+
+Gemini directive ("Keyboard Velocity Sensitivity Scaling"). **Diagnosis first:** the engine was already correct — velocity is linear (`d2/127`), an envelope peaks at it, and at 127 a fully-closed VCF with ENV AMT max opens to 20 kHz. Dylan's mouse test confirmed it (mouse = velocity 1, much brighter than his hardest MIDI hit). The real cause is the exponential cutoff: each missing bit of velocity costs a lot of brightness (peak 20·1000^v — 102/127 peaks at 5.1 kHz, 80/127 at 1.6 kHz), and real keyboards top out ~100–110 on a hit that feels hard.
+
+**Directive corrected:** "increase the velocity gain" would push envelopes past 1 (VCF beyond its range, VCAs past unity → clipping). Instead a bounded **curve**, `velCurve(v, k) = min(1, v/top)^pow` in `KeyboardModule.jsx`, `top` 1 → 0.75 and `pow` 1 → 0.5 as the new **VEL SENS** knob goes 0 → 1. k = 0 is linear = the pre-128 behaviour exactly; output always 0..1 and ordered (soft stays softer). Applied **once at the MIDI input** (`handleMidiMessage`), so envelopes (GATE + TRIG), KICK velocity and the VEL jack all see it; mouse / QWERTY send 1 and are unaffected at every setting. **Default = 1 (all the way up, Dylan's call)**, also for racks saved before the knob existed. Persisted under `kbd` (so, like the other keyboard knobs, not undoable). Knob sits after KEY PAN in the non-wrapping control strip.
+
+At VEL SENS max (cutoff 0, ENV AMT max): hit 30 → peak 965 Hz (was 102) · 64 → 5.8 kHz (650) · 80 → 11.2 kHz (1.6 k) · 95 and up → fully open (3.5 k at 95 before).
+
+*Verified: production build clean, no new warnings in KeyboardModule. `vel128.mjs` (scratch) reads the real `velCurve` from source: k = 0 identical to linear for all 127 velocities; bounded (0, 1] and monotone at k 0 / 0.3 / 0.7 / 1; full hit = exactly 1 at every setting. **Dylan's ear test:** Gemini's patch (KBD GATE → ENV → VCF ENV, cutoff min, ENV AMT max) — a hard hit should now be as bright as a mouse click, a soft hit clearly darker; turn VEL SENS to 0 and it behaves like before; check the knob sits on the keyboard strip without crowding.*
+
 ### [2026-10-06] Vox Phase 126 — Pick up a cable end and re-plug it; edge auto-scroll while patching
 
 **Confirmed by Dylan (2026-10-06):** repatching from the boot keeps the far end seated, off-target drops snap back, pressing a jack still starts a new cable, edge auto-scroll reaches off-screen modules.

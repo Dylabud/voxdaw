@@ -30,6 +30,26 @@ const QWERTY_OCT_MIN = -3;        // C1
 const QWERTY_OCT_MAX = 3;         // C7 (its k = C8, the top key)
 const PEDAL_SRC = 'sus';          // held-map source for sustain pedal / HOLD
 
+// VEL SENS (Vox Phase 128) — MIDI velocity curve. The engine is linear (a hit at
+// 127 opens a fully-closed VCF all the way), but the VCF cutoff is exponential, so
+// each bit of velocity a keyboard doesn't send costs a lot of brightness — and most
+// keyboards top out ~100–110 on a hit that feels hard. Rather than a gain (which
+// would push envelopes past 1: VCFs past their range, VCAs past unity), the curve
+// stays inside 0..1:  out = min(1, v / top)^pow.
+//   k = 0 → top 1, pow 1 = linear, the pre-128 behaviour exactly.
+//   k = 1 → top VEL_TOP_MIN (a hit of ~95/127 counts as full), pow VEL_POW_MIN
+//           (softer hits lifted, still ordered — soft is still softer).
+// Applied once at the MIDI input, so envelopes, KICK and the VEL jack all see it.
+// Mouse / QWERTY send 1 and are unaffected at every setting.
+const VEL_TOP_MIN = 0.75;
+const VEL_POW_MIN = 0.5;
+export const velCurve = (v, k) => {
+  const kk  = Math.max(0, Math.min(1, k));
+  const top = 1 - (1 - VEL_TOP_MIN) * kk;
+  const pow = 1 - (1 - VEL_POW_MIN) * kk;
+  return Math.pow(Math.min(1, Math.max(0, v) / top), pow);
+};
+
 // Black-key lefts are DERIVED: a black key sits centred on the boundary before the
 // next white key, i.e. nextWhiteIdx × WW − BW/2 (the same rule the QNT keyboard uses).
 function buildKeys() {
@@ -65,10 +85,13 @@ export default function KeyboardModule({
   const [vibratoDelay, setVibratoDelay] = useState(saved.vibratoDelay ?? 0);   // 0–1 → 0–4 s ramp time
   const [keyPan,       setKeyPan]       = useState(saved.keyPan ?? 0);         // 0 = centred (pre-106 sound)
   const [qwertyOct,    setQwertyOct]    = useState(saved.qwertyOct ?? 0);      // Z / X octave shift
+  const [velSens,      setVelSens]      = useState(saved.velSens ?? 1);        // Phase 128 — default full (Dylan's call)
   const [hold,         setHold]         = useState(false);                     // HOLD latch — runtime, never persisted
   // Knob positions survive a reload / SAVE SETUP like every other module's (Phase 63
   // store, id 'kbd'). The hook is passed in from VoxShell, which owns the store.
-  usePersist?.('kbd', { glide, vibrato, vibratoRate, vibratoDelay, keyPan, qwertyOct });
+  usePersist?.('kbd', { glide, vibrato, vibratoRate, vibratoDelay, keyPan, qwertyOct, velSens });
+  const velSensRef = useRef(velSens);
+  velSensRef.current = velSens;
   const qwertyOctRef = useRef(qwertyOct);
   qwertyOctRef.current = qwertyOct;
   const rootRef = useRef(null);   // page-visibility guard + pressed-key DOM lookups
@@ -233,7 +256,7 @@ export default function KeyboardModule({
     const [status, d1, d2] = event.data;
     const type = status & 0xF0; // strip channel nibble
     if (type === 0x90 && d2 > 0) {
-      press(d1, 'midi', d2 / 127);
+      press(d1, 'midi', velCurve(d2 / 127, velSensRef.current));
       flashMidiLed();
     } else if (type === 0x80 || (type === 0x90 && d2 === 0)) {
       release(d1, 'midi');
@@ -495,6 +518,15 @@ export default function KeyboardModule({
           value={keyPan}
           onChange={setKeyPan}
           defaultValue={0}
+        />
+
+        <VoxKnob
+          label="VEL SENS"
+          size="sm"
+          value={velSens}
+          onChange={setVelSens}
+          defaultValue={1}
+          hint="How strongly MIDI key hits count: 0 = as sent · up = firm hits reach full (mouse / computer keys are always full)"
         />
 
         {/* HOLD — every key pressed stays on until it is pressed again (or HOLD is switched off) */}
