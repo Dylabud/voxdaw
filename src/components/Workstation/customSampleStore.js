@@ -5,7 +5,8 @@
 // in-memory cache that makeSynth can read SYNCHRONOUSLY.
 //
 // Record layout (all keys are strings; instrument ids are `custom:<uuid>`):
-//   `${id}|n${midi}` → { wav: ArrayBuffer, midi }   one 16-bit PCM WAV per note
+//   `${id}|n${midi}` → { wav: ArrayBuffer, midi, loop? }   one 16-bit PCM WAV per note
+//                       loop = [startSec, endSec] sustain loop (vox takes, Phase 131)
 //   `${id}|meta`     → { schemaVersion, minMidi, maxMidi, sampleRate, release, createdAt }
 //
 // The meta record is written LAST — its presence is the completeness marker,
@@ -31,11 +32,16 @@ const metaKey = (id) => `${id}|meta`;
 // Key range covering every record of one instrument ('|' < '}' in UTF-16).
 const idRange = (id) => IDBKeyRange.bound(`${id}|`, `${id}|￿`);
 
-// id → { urls: { <midi>: AudioBuffer }, release }
+// id → { urls: { <midi>: AudioBuffer }, release, loops: { <midi>: [startSec, endSec] } }
 const cache = new Map();
 // id → 'loading' | 'ready' | 'missing'   (absent = 'unknown': never probed)
 const status = new Map();
 const subscribers = new Set();
+
+// A stored loop is trusted only as two ordered, non-negative numbers.
+export const cleanLoop = (lp) =>
+  (Array.isArray(lp) && lp.length === 2 && lp.every(Number.isFinite) && lp[0] >= 0 && lp[1] > lp[0])
+    ? [lp[0], lp[1]] : null;
 
 function notify() {
   for (const cb of subscribers) {
@@ -82,13 +88,16 @@ export async function primeSampleSet(id) {
     // resamples at playback time if the live context runs at another rate.)
     const ctx = new OfflineAudioContext(1, 1, meta.sampleRate || 44100);
     const urls = {};
+    const loops = {};
     for (const rec of records) {
       if (rec?.midi == null || !rec.wav) continue; // the meta record / junk
       // slice(): decodeAudioData detaches its input in some browsers.
       urls[rec.midi] = await ctx.decodeAudioData(rec.wav.slice(0));
+      const lp = cleanLoop(rec.loop);
+      if (lp) loops[rec.midi] = lp;
     }
     if (!Object.keys(urls).length) throw new Error('empty sample set');
-    cache.set(id, { urls, release: meta.release });
+    cache.set(id, { urls, release: meta.release, loops });
     status.set(id, 'ready');
   } catch {
     cache.delete(id);
@@ -107,10 +116,11 @@ export async function saveSampleSet(id, notes, { release }) {
   let maxMidi = -Infinity;
   let sampleRate = 0;
   try {
-    for (const { midi, buffer } of notes) {
+    for (const { midi, buffer, loop } of notes) {
       const wav = encodeWavArrayBuffer(buffer);
+      const lp = cleanLoop(loop);
       const s = await sampleStore('readwrite');
-      await req(s.put({ wav, midi }, noteKey(id, midi)));
+      await req(s.put({ wav, midi, ...(lp ? { loop: lp } : {}) }, noteKey(id, midi)));
       minMidi = Math.min(minMidi, midi);
       maxMidi = Math.max(maxMidi, midi);
       sampleRate = buffer.sampleRate;
@@ -129,8 +139,13 @@ export async function saveSampleSet(id, notes, { release }) {
     throw err;
   }
   const urls = {};
-  for (const { midi, buffer } of notes) urls[midi] = buffer;
-  cache.set(id, { urls, release });
+  const loops = {};
+  for (const { midi, buffer, loop } of notes) {
+    urls[midi] = buffer;
+    const lp = cleanLoop(loop);
+    if (lp) loops[midi] = lp;
+  }
+  cache.set(id, { urls, release, loops });
   status.set(id, 'ready');
   notify();
 }
@@ -143,4 +158,55 @@ export async function deleteSampleSet(id) {
     const s = await sampleStore('readwrite');
     await req(s.delete(idRange(id)));
   } catch { /* orphan cleanup is best-effort */ }
+}
+
+// ── Raw WAV transfer (Vox Phase 130 — .voxdaw packing) ─────────────────────
+// Read a complete persisted set as its stored WAVs (no decode), or null when
+// the set is absent/incomplete. Used to embed vox take instruments in a
+// downloaded .voxdaw.
+export async function readSampleSetWavs(id) {
+  try {
+    const s = await sampleStore('readonly');
+    const [meta, records] = await Promise.all([
+      req(s.get(metaKey(id))),
+      req(s.getAll(idRange(id))),
+    ]);
+    if (!meta || meta.schemaVersion !== SAMPLE_SCHEMA_VERSION) return null;
+    const notes = records
+      .filter((r) => r?.midi != null && r.wav)
+      .map((r) => ({ midi: r.midi, wav: r.wav, ...(cleanLoop(r.loop) ? { loop: cleanLoop(r.loop) } : {}) }));
+    return notes.length ? { meta, notes } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Write a set from raw WAVs (notes: [{ midi, wav: ArrayBuffer, loop? }]) — the
+// .voxdaw unpack path. Same completeness contract as saveSampleSet (notes
+// first, meta LAST, range-delete on failure), then re-primes the cache from
+// IDB so the decoded buffers are what every later reader sees.
+export async function writeSampleSetWavs(id, { sampleRate, release }, notes) {
+  try {
+    for (const { midi, wav, loop } of notes) {
+      const lp = cleanLoop(loop);
+      const s = await sampleStore('readwrite');
+      await req(s.put({ wav, midi, ...(lp ? { loop: lp } : {}) }, noteKey(id, midi)));
+    }
+    const midis = notes.map((n) => n.midi);
+    const s = await sampleStore('readwrite');
+    await req(s.put({
+      schemaVersion: SAMPLE_SCHEMA_VERSION,
+      minMidi: Math.min(...midis), maxMidi: Math.max(...midis),
+      sampleRate, release, createdAt: Date.now(),
+    }, metaKey(id)));
+  } catch (err) {
+    try {
+      const s = await sampleStore('readwrite');
+      await req(s.delete(idRange(id)));
+    } catch { /* rollback is best-effort */ }
+    throw err;
+  }
+  cache.delete(id);
+  status.delete(id);
+  await primeSampleSet(id);
 }

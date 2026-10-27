@@ -379,6 +379,15 @@ function managedPitchSourceFor(csId, connections) {
   return null;
 }
 
+// Is any cable out of this chord seq's 7TH jack? That cable IS the "make it a 7th chord"
+// switch (Vox Phase 129). Read live off the connection map, the managedPitchSourceFor way,
+// so there is no flag for a disconnect branch to forget to clear.
+function seventhPatched(csId, connections) {
+  const prefix = `${csId}-7th-out→`;
+  for (const key of connections.keys()) if (key.startsWith(prefix)) return true;
+  return false;
+}
+
 // ── Chord voice → VCO octave select (Phase 94) ──
 // Patch a chord seq's ROOT / 3RD / 5TH / 7TH into a VCO's cv-in and the chord owns the
 // NOTE, which left that VCO's FREQ knob doing nothing at all — the only octave control
@@ -867,29 +876,37 @@ const SCALE_DEFS = {
   PMIN: [0,3,5,7,10],
   BLUES:[0,3,5,6,7,10],     // minor pentatonic + the flat 5 "blue note"
   WHOLE:[0,2,4,6,8,10],     // whole tone — six equal steps, no root pull
-  // Chord intervals — used by chord-aware quantization (ChordSeqModule → Quantizer).
-  // When the chord sequencer fires, it sets root AND scale to one of these interval arrays;
-  // the quantizer then snaps incoming melody notes to chord tones only.
-  CMAJ:  [0,4,7],
-  CMIN:  [0,3,7],
-  CDOM:  [0,4,7,10],
-  CMAJ7: [0,4,7,11],
-  CMIN7: [0,3,7,10],
-  CSUS4: [0,5,7],
-  CDIM:  [0,3,6],
 };
 
-// Per-chord-type voice intervals for the polyphonic CV outputs (voices 2–4).
-// Triads get an octave as their 4th voice; 4-note chords use all four tones.
-const CHORD_VOICE_INTERVALS = {
-  CMAJ:  [0, 4,  7, 12],
-  CMIN:  [0, 3,  7, 12],
-  CDOM:  [0, 4,  7, 10],
-  CMAJ7: [0, 4,  7, 11],
-  CMIN7: [0, 3,  7, 10],
-  CSUS4: [0, 5,  7, 12],
-  CDIM:  [0, 3,  6,  9],
+// ── Chord qualities (Vox Phase 129) ──
+// A step picks a QUALITY; the 7th is a patch decision, not a menu item. Each quality
+// carries its own natural 7th, the 7TH jack always emits it, and while any cable is
+// out of the 7TH jack the chord's TONES (the quantizer's chord scale, the cv-in
+// snapper, the panel/QNT labels) gain it too — patch the 7th and you have a 7th
+// chord everywhere at once. Before this the 7TH jack played the root an octave up on
+// every triad, and with each VCO's FREQ knob picking its own octave (Phase 94) that
+// folded onto the root: a doubled root wherever a step wasn't set to a 7th-chord type.
+// CDOM's triad is the same as CMAJ's — the two differ only in the 7th they add.
+// tones7 is built once here so every lookup returns the SAME array: the qnt override
+// rAF delta-checks the scale by identity.
+const CHORD_QUALITIES = {
+  CMAJ:  { triad: [0,4,7], seventh: 11 },   // + maj7
+  CMIN:  { triad: [0,3,7], seventh: 10 },   // + min7
+  CDOM:  { triad: [0,4,7], seventh: 10 },   // + dom7 (flat 7)
+  CSUS4: { triad: [0,5,7], seventh: 10 },   // + 7sus4
+  CDIM:  { triad: [0,3,6], seventh:  9 },   // + dim7 (the old 4-voice dim, unchanged)
 };
+for (const q of Object.values(CHORD_QUALITIES)) q.tones7 = [...q.triad, q.seventh];
+// Saved steps from before Phase 129 can still say CMAJ7 / CMIN7 — read as their triad.
+const LEGACY_CHORD_TYPES = { CMAJ7: 'CMAJ', CMIN7: 'CMIN' };
+const chordQuality = (type) =>
+  CHORD_QUALITIES[LEGACY_CHORD_TYPES[type] ?? type] ?? CHORD_QUALITIES.CMAJ;
+// The chord's tones as the quantizer / snapper / labels see them.
+const chordTones = (type, withSeventh) =>
+  withSeventh ? chordQuality(type).tones7 : chordQuality(type).triad;
+// The chord-name key the panel labels (VoxShell CHORD_TYPE_LABELS): 'CMAJ' or 'CMAJ+7'.
+const chordLabelKey = (type, withSeventh) =>
+  (LEGACY_CHORD_TYPES[type] ?? type) + (withSeventh ? '+7' : '');
 
 // Base Hz for chord sequencer root CV output — C3 (MIDI 48).
 // rootClass 0→11 maps to C3→B3 (130.81–246.94 Hz).
@@ -953,10 +970,10 @@ function quantizeHzJs(inputHz, { scale, root, octShift, snapMode = 0 }) {
 }
 
 // Snap an input Hz to the nearest chord tone across all musical octaves.
-// intervals: semitone array from SCALE_DEFS (e.g. [0,4,7] for major triad).
+// The chord's tones come from chordTones — triad, plus the 7th while it is patched.
 // Returns the chord-tone Hz closest in semitone distance to the input.
-function snapToChordHz(inputHz, rootClass, chordType) {
-  const intervals = SCALE_DEFS[chordType] ?? SCALE_DEFS.CMAJ;
+function snapToChordHz(inputHz, rootClass, chordType, withSeventh) {
+  const intervals = chordTones(chordType, withSeventh);
   const rootHz    = CHORD_BASE_HZ * Math.pow(2, rootClass / 12);
   const inputMidi = 69 + 12 * Math.log2(Math.max(0.001, inputHz) / 440);
   let bestHz   = rootHz;
@@ -1398,6 +1415,10 @@ export default function useVoxAudio() {
   const [isPowered, setIsPowered] = useState(false);
 
   const isPoweredRef        = useRef(false);
+  // Resolves once the rack's AudioWorklets (VCO cores, quantizers, envelope
+  // followers) have loaded and wired — before that the VCOs are silent. Lets the
+  // Workstation start a take on a rack it just mounted in the background (Phase 135).
+  const readyRef            = useRef(null);
   const nodesRef            = useRef(null);
   const jackMapRef          = useRef(null);
   const connectionsRef      = useRef(new Map()); // key: "fromId→toId" → { node, dest }
@@ -1464,6 +1485,16 @@ export default function useVoxAudio() {
   const kbdVibratoDelayRef = useRef(0);     // delay ramp time in seconds (0 = instant)
   const kbdBaseHzRef       = useRef(220);   // last note Hz from keyboard, for vibrato center
   const kbdNoteOnsetRef    = useRef(null);  // AudioContext time of last note-on (null = no note yet)
+  // Workstation take listener (Vox Phases 130/132): fn(event) for every note the ENGINE
+  // plays while a take records —
+  //   { type: 'on',  key, group, hz, vel, time }   keyboard key down (one per voice group)
+  //   { type: 'off', key, time }                   keyboard key up
+  //   { type: 'note', group, hz, vel, time, dur, src, stepSec }  a played 960 step / chord
+  //                                                  (dur = gate length; src = the sequencer id)
+  //   { type: 'step', src, time }                   every step a sequencer takes (Phase 133)
+  // `group` = the VCO CV source jack (voice group), `hz` = the pitch that group plays.
+  // `time` is the audio time the engine's own gate/pitch writes use.
+  const kbdNoteTapRef      = useRef(null);
   const kbdVibratoResetRef = useRef(false); // set true on note-on; rAF consumes it with its own `now`
   const kbdCurrentHzRef    = useRef(220);   // smoothly-interpolated Hz (glide state, base only)
   const kbdLastOutputHzRef = useRef(220);   // actual last-written Hz including swing — glide seeds from here
@@ -1537,7 +1568,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
 
 
   // Chord sequencer — separate slower-clocked 8-step pitch CV source.
-  // Each step stores { rootClass: 0-11, chordType: keyof SCALE_DEFS }.
+  // Each step stores { rootClass: 0-11, chordType: keyof CHORD_QUALITIES }.
   // On step fire: outputs root Hz via `${csId}PitchOut` AND calls the instance's
   // chord callback so VoxShell can sync the quantizer scale / chord label.
   // All state is id-keyed (Phase 60e part 2): 'chordseq' = the static module,
@@ -1732,6 +1763,38 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
   }, [dispatchStepActions]);
   fireQntTrigRef.current = fireQntTrig;
 
+  // ── Workstation take capture (Vox Phases 130/132) ──
+  // A take is recorded per VOICE GROUP: the VCOs that share one CV source jack (two
+  // VCOs on seq-pitch-out are one detuned voice; ROOT-out and 3RD-out are two). Every
+  // group whose pitch ORIGINATES at `origin` (directly, or through a quantizer / a
+  // chord seq's cv-in → cv-out), with the pitch that group actually plays for an origin
+  // pitch `hz` — the quantizer and chord snap applied the way the live path applies
+  // them (quantizeHzJs is the worklet's own maths; its hysteresis is not modelled).
+  // Only runs while a take tap is set: zero cost on the normal step path.
+  const takeGroupsFor = useCallback((origin, hz) => {
+    const out = [];
+    const seen = new Set();
+    const conns = connectionsRef.current;
+    for (const vcoId of allVcoIdsRef.current) {
+      const src = vcoActiveCvRef.current[vcoId];
+      if (!src || seen.has(src)) continue;
+      if (src !== origin && resolveCvOrigin(src, conns) !== origin) continue;
+      seen.add(src);
+      let heard = hz;
+      const q = src.match(/^(qnt\d*)-cv-out$/);
+      const c = src.match(/^(chordseq\d*)-cv-out$/);
+      if (q) {
+        const qp = quantizerParamsRefs.current[q[1]];
+        if (qp) heard = quantizeHzJs(hz, qp);
+      } else if (c) {
+        const st = chordSeqStepsRefs.current[c[1]]?.[Math.max(0, chordSeqCurrentStepRefs.current[c[1]] ?? 0)];
+        if (st) heard = snapToChordHz(hz, st.rootClass, st.chordType, seventhPatched(c[1], conns));
+      }
+      out.push({ group: src, hz: heard });
+    }
+    return out;
+  }, []);
+
   const advanceSeqRef = useRef(null);
   const advanceSeq = useCallback((seqId, timeArg) => {
     const n = nodesRef.current;
@@ -1795,7 +1858,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       const csStep = chordSeqStepsRefs.current[csId]?.[
         Math.max(0, chordSeqCurrentStepRefs.current[csId] ?? 0)];
       if (!csStep) continue;
-      const snapped = snapToChordHz(hz, csStep.rootClass, csStep.chordType);
+      const snapped = snapToChordHz(hz, csStep.rootClass, csStep.chordType,
+        seventhPatched(csId, connectionsRef.current));
       n[`${csId}PitchOut`]?.setValueAtTime(snapped, time);
       const cvOutSrc = `${csId}-cv-out`;
       for (const vcoId of allVcoIdsRef.current) {
@@ -1834,17 +1898,31 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     // used to be a hardcoded '8n', so a sequencer at any other division held its
     // envelopes for the wrong slice of the step. Under an external clock the incoming
     // pulse rate is unknown, so the instance's own division stands in as gate width.
+    const gateDur = Tone.Time(seqDivisionRefs.current[seqId] ?? '8n').toSeconds() * 0.8;
     dispatchStepActions({
       n, time, fires, isCycleStart,
       gateSrc:  `${seqId}-gate-out`,
       clkSrc:   `${seqId}-clk-out`,
       cycleSrc: `${seqId}-cycle-out`,
-      gateDur:  Tone.Time(seqDivisionRefs.current[seqId] ?? '8n').toSeconds() * 0.8,
+      gateDur,
     });
+    // Workstation take (Phase 132): a PLAYED step is a note on every voice group this
+    // 960 drives — gate length, at the step's audio time. Rests / failed-probability
+    // steps play nothing, so they record nothing.
+    // Every step (played or not) is reported too: on a rest-gated patch (VCA resting
+    // open) a note sounds until this 960's NEXT step, not for its gate (Phase 133).
+    const tap = kbdNoteTapRef.current;
+    if (tap) {
+      tap({ type: 'step', src: seqId, time });
+      if (fires) {
+        for (const g of takeGroupsFor(pitchSrc, hz))
+          tap({ type: 'note', group: g.group, hz: g.hz, vel: 1, time, dur: gateDur, src: seqId, stepSec: gateDur / 0.8 });
+      }
+    }
     // Notify UI for LED animation, scheduled AT the step's audio time — firing it
     // straight from this callback lit the LED ~lookAhead early (see drawAt).
     drawAt(time, () => seqStepCbRefs.current[seqId]?.(idx));
-  }, [dispatchStepActions]);
+  }, [dispatchStepActions, takeGroupsFor]);
   advanceSeqRef.current = advanceSeq;
 
   // The internal clock. Interval reads the instance's division at construction; later
@@ -1929,6 +2007,9 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     chordSeqCurrentStepRefs.current[csId] = idx;
     const step = steps[idx];
     if (!step) return;
+    // A cable on 7TH makes this a 7th chord for every reader below (Phase 129).
+    const with7  = seventhPatched(csId, connectionsRef.current);
+    const tones  = chordTones(step.chordType, with7);
     // Only write root Hz when no CV source is patched — the rAF snapper owns
     // the PitchOut while an input is active (single-writer rule).
     const chordHz  = CHORD_BASE_HZ * Math.pow(2, step.rootClass / 12);
@@ -1955,7 +2036,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       const seqId = managedSrc.replace('-pitch-out', '');
       const srcHz = seqLastHzRef.current[seqId];
       if (srcHz !== undefined) {
-        const snapped = snapToChordHz(srcHz, step.rootClass, step.chordType);
+        const snapped = snapToChordHz(srcHz, step.rootClass, step.chordType, with7);
         n[`${csId}PitchOut`].setValueAtTime(snapped, time);
         const seqGlide = seqGlideRefs.current[seqId] ?? 0;
         for (const vcoId of allVcoIdsRef.current) {
@@ -1970,15 +2051,15 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     // Polyphonic voice outputs — always fire regardless of cv-in state.
     const oct         = Math.pow(2, chordSeqRootOctaveRefs.current[csId] ?? 0);
     const shiftedRoot = chordHz * oct;
-    const intervals   = CHORD_VOICE_INTERVALS[step.chordType] ?? CHORD_VOICE_INTERVALS.CMAJ;
+    // The voice jacks always carry the full 7th chord — ROOT/3RD/5TH the triad, 7TH the
+    // quality's own 7th (Phase 129; it was the root an octave up on every triad step).
+    const intervals   = chordQuality(step.chordType).tones7;
     const voiceHz     = intervals.map(st => shiftedRoot * Math.pow(2, st / 12));
     n[`${csId}RootOut`].setValueAtTime(voiceHz[0], time);
     n[`${csId}ThirdOut`].setValueAtTime(voiceHz[1], time);
     n[`${csId}FifthOut`].setValueAtTime(voiceHz[2], time);
-    // 4th voice (Phase 91). CHORD_VOICE_INTERVALS has always carried four tones and this
-    // one was computed and thrown away, because only three jacks existed — so ROOT/3RD/5TH
-    // emitted [0,4,7] for CMAJ, CDOM *and* CMAJ7 alike. Picking "dom7" or "maj7" changed
-    // the label and the quantizer scale but not one note of the chord you could patch.
+    // 4th voice (Phase 91). This tone was once computed and thrown away, because only
+    // three jacks existed — so the patchable chord never had a 7th at all.
     n[`${csId}SeventhOut`].setValueAtTime(voiceHz[3], time);
     // Glide (portamento) for the voice CV outs — applied at each VCO's glideBus,
     // matching the seq-pitch-out convention (instant signal jump, ramp at the bus).
@@ -1992,6 +2073,28 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     // Remember the raw voice pitches so a FREQ-knob turn can re-pick its octave without
     // waiting for the next chord (see updateVcoParams).
     for (const jack in VOICE_HZ) chordVoiceLastHzRef.current[jack] = VOICE_HZ[jack];
+    // Workstation take (Phase 132): a PLAYED chord is one note per patched voice group,
+    // at the octave its VCO's FREQ knob selects (what you hear). The melody cv-out joins
+    // only when this chord seq runs its own program — a 960-fed cv-out records from the
+    // 960's step instead (advanceSeq → takeGroupsFor).
+    const tap = kbdNoteTapRef.current;
+    if (tap) tap({ type: 'step', src: csId, time });   // REST steps too (see advanceSeq)
+    if (tap && step.gate !== false) {
+      const stepSec = Tone.Time(chordSeqDivisionRefs.current[csId] ?? '1m').toSeconds();
+      const dur = stepSec * 0.8;
+      const ownCv = !chordSeqInputActiveRefs.current[csId] && !managedSrc;
+      const seen = new Set();
+      for (const vcoId of allVcoIdsRef.current) {
+        const src = vcoActiveCvRef.current[vcoId];
+        if (!src || seen.has(src)) continue;
+        let hz;
+        if (VOICE_HZ[src] !== undefined) hz = snapVoiceToKnobOctave(VOICE_HZ[src], vcoKnobHzRef.current[vcoId]);
+        else if (ownCv && src === cvOutSrc) hz = chordHz;
+        else continue;
+        seen.add(src);
+        tap({ type: 'note', group: src, hz, vel: 1, time, dur, src: csId, stepSec });
+      }
+    }
     for (const vcoId of allVcoIdsRef.current) {
       const src = vcoActiveCvRef.current[vcoId];
       const vhz = VOICE_HZ[src];
@@ -2023,7 +2126,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       for (const [qid, owner] of Object.entries(qntChordOverrideRef.current))
         if (owner === csId)
           qntChordLabelCbRefs.current[qid]?.(
-            step.rootClass, step.chordType, SCALE_DEFS[step.chordType] ?? SCALE_DEFS.CMAJ);
+            step.rootClass, chordLabelKey(step.chordType, with7), tones);
     });
     // Push root+scale into every quantizer whose transpose-in THIS instance's
     // cv-out is patched to (override owner per quantizer — Single Writer).
@@ -2032,7 +2135,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       const qp = quantizerParamsRefs.current[qid];
       if (!qp) continue;
       qp.root  = step.rootClass;
-      qp.scale = SCALE_DEFS[step.chordType] ?? SCALE_DEFS.CMAJ;
+      qp.scale = tones;
       n.qntNodes[qid].port.postMessage(qp);
     }
     // GATE↑ / CLK↑ (Phase 92) — a chord change can now fire an envelope directly, so
@@ -2177,7 +2280,11 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       // warn you that you are driving it too hot.
       masterLimit: new Tone.Compressor({ threshold: -1, ratio: 20, knee: 0,
                                          attack: 0.003, release: 0.05 }),
-      seqMasterGate: new Tone.Gain(1).toDestination(), // sole gateway to speakers — Loop gates here
+      seqMasterGate: new Tone.Gain(1), // sole gateway to speakers (via speakerGate) — powerOff gates here
+      // Speaker mute for the Workstation's silent photograph (Vox Phase 131): sits AFTER the
+      // voxBus tap, so the take capture still hears the rack while the room hears nothing.
+      // Single writer: setSpeakerMuted.
+      speakerGate:   new Tone.Gain(1).toDestination(),
       analyser:    new Tone.Analyser('waveform', 512),
       seqPitchOut:       new Tone.Signal(SEQ_HZ_MIN), // never init to 0 — exponential ramps from 0 are undefined
       seq2PitchOut:      new Tone.Signal(SEQ_HZ_MIN), // second sequencer pitch CV — same non-zero init rule
@@ -2230,8 +2337,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       // cable patched. buildSeqLoop's write is optional-chained, so the statics now
       // behave exactly like the dynamic sequencers, which never had a VCA tap.)
 
-      // Recording tap — side connection from seqMasterGate so the Workstation's
-      // Tone.Recorder can capture Vox Modular audio without touching the speaker path.
+      // Recording tap — side connection from seqMasterGate (BEFORE speakerGate) so the
+      // Workstation's photograph captures the rack even while the speakers are muted.
       voxBus: new Tone.Gain(1),
 
       // I/O 4-channel input gains — each sums independently into n.master.
@@ -2507,6 +2614,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     // voxBus: side tap after the master gate, feeds the Workstation's Tone.Recorder.
     // Does not connect to Destination — purely a recording tap.
     n.seqMasterGate.connect(n.voxBus);
+    n.seqMasterGate.connect(n.speakerGate);
 
     // Oscilloscope taps master (pre-gate, so the scope still shows waveform shape
     // even on muted steps — useful for debugging patches).
@@ -2699,7 +2807,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
           // kill the whole snapper rAF for every chord seq in the rack, not just this one.
           const step    = chordSeqStepsRefs.current[csId]?.[Math.max(0, stepIdx)];
           if (!step) continue;
-          const snapped = snapToChordHz(avgHz, step.rootClass, step.chordType);
+          const snapped = snapToChordHz(avgHz, step.rootClass, step.chordType,
+            seventhPatched(csId, connectionsRef.current));
           // Use value setter (immediate) — setValueAtTime with a future-scheduled
           // chord loop tick would otherwise fight this write in the same block.
           n[`${csId}PitchOut`].value = snapped;
@@ -2733,6 +2842,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     let qntOverrideRafId;
     const lastOverrideRoots  = {};
     const lastOverrideScales = {};
+    const lastOverride7      = {};
     const qntOverrideTick = () => {
       qntOverrideRafId = requestAnimationFrame(qntOverrideTick);
       for (const [qid, csId] of Object.entries(qntChordOverrideRef.current)) {
@@ -2742,14 +2852,24 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
         if (!node || !steps || !qp) continue;
         const stepIdx  = chordSeqCurrentStepRefs.current[csId];
         const step     = steps[Math.max(0, stepIdx)];
+        if (!step) continue;
+        const with7    = seventhPatched(csId, connectionsRef.current);
         const newRoot  = step.rootClass;
-        const newScale = SCALE_DEFS[step.chordType] ?? SCALE_DEFS.CMAJ;
+        const newScale = chordTones(step.chordType, with7);   // stable identity per (type, with7)
+        // A 7TH cable plugged or pulled mid-chord changes the chord with no step to carry
+        // the new name, so the label is re-sent here — ONLY for that case: a step change
+        // gets its label at draw time from advanceChordSeq, and doing it here as well
+        // would light it a lookAhead early (the Phase 79 bug).
+        const sevenFlipped = lastOverride7[qid] !== undefined && with7 !== lastOverride7[qid];
+        lastOverride7[qid] = with7;
         if (newRoot === lastOverrideRoots[qid] && newScale === lastOverrideScales[qid]) continue;
         lastOverrideRoots[qid]  = newRoot;
         lastOverrideScales[qid] = newScale;
         qp.root  = newRoot;
         qp.scale = newScale;
         node.port.postMessage(qp);
+        if (sevenFlipped)
+          qntChordLabelCbRefs.current[qid]?.(newRoot, chordLabelKey(step.chordType, with7), newScale);
       }
     };
     qntOverrideTick();
@@ -3088,7 +3208,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     // synchronously so lookups always share it, keys appear at load).
     const qntNodes = {};
     n.qntNodes = qntNodes;
-    rawCtx.audioWorklet.addModule('/quantizer-worklet.js').then(() => {
+    const workletLoads = []; // → readyRef (each chain already swallows its own failure)
+    workletLoads.push(rawCtx.audioWorklet.addModule('/quantizer-worklet.js').then(() => {
       if (nodesRef.current !== n) return;
 
       // Idempotent per-instance wiring: creates the worklet node, connects it to
@@ -3179,7 +3300,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       jackMapRef.current = { ...buildJackMap(n), ...dynEntries };
     }).catch(err => {
       console.warn('[VoxAudio] Quantizer worklet unavailable:', err);
-    });
+    }));
 
     // Load the hard sync AudioWorklet asynchronously.
     // One worklet node is created per VCO, keyed by vcoId (Phase 60d — dynamic
@@ -3199,7 +3320,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     // did before, just symmetrically.
     const envFollowNodes = {};
     n.envFollowNodes = envFollowNodes;
-    rawCtx.audioWorklet.addModule('/env-follower-worklet.js').then(() => {
+    workletLoads.push(rawCtx.audioWorklet.addModule('/env-follower-worklet.js').then(() => {
       if (nodesRef.current !== n) return;
       const wireEnv = (vid) => {
         if (envFollowNodes[vid] || !n[`${vid}ModRect0`]) return;
@@ -3241,9 +3362,9 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       wireEnvFollowRef.current = wireEnv;   // and any added later
     }).catch(err => {
       console.warn('[VoxAudio] Envelope-follower worklet unavailable, using symmetric filters:', err);
-    });
+    }));
 
-    rawCtx.audioWorklet.addModule('/hard-sync-worklet.js').then(() => {
+    workletLoads.push(rawCtx.audioWorklet.addModule('/hard-sync-worklet.js').then(() => {
       if (nodesRef.current !== n) return;
 
       // Idempotent per-VCO wiring (Phase 68b): the worklet is the VCO CORE. Its
@@ -3301,7 +3422,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       wireHardSyncRef.current = wire;
     }).catch(err => {
       console.warn('[VoxAudio] Hard sync worklet unavailable:', err);
-    });
+    }));
+    readyRef.current = Promise.all(workletLoads);
 
     return () => {
       cancelAnimationFrame(chordSnapRafId);
@@ -3417,7 +3539,11 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     };
   }, []);
 
-  const powerOn = useCallback(async () => {
+  // startTransport: false (Phase 135) = everything POWER ON does except starting the
+  // shared Transport — a Workstation take powers the rack on and then runs its own
+  // count-in from a parked Transport; a start + immediate stop could still fire a
+  // stray step or backing note at the old position.
+  const powerOn = useCallback(async ({ startTransport = true } = {}) => {
     if (isPoweredRef.current) return;
     await Tone.start(); // satisfies browser autoplay policy
     isPoweredRef.current = true;
@@ -3451,7 +3577,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       chordSeqCurrentStepRefs.current[id]  = -1;
       chordSeqClockCountRefs.current[id]   = 0;   // divider re-phases on power-up
     }
-    Tone.Transport.start();
+    if (startTransport) Tone.Transport.start();
     // A 960 with a cable on its CLK↓ is driven by that pulse, not by its own clock —
     // starting its Loop here would run it at both rates at once.
     Object.entries(seqLoopsRef.current).forEach(([id, loop]) => {
@@ -5361,12 +5487,13 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       const step    = chordSeqStepsRefs.current[csId]?.[Math.max(0, stepIdx)];
       const qp      = quantizerParamsRefs.current[qid];
       if (step && qp) {
+        const with7 = seventhPatched(csId, connectionsRef.current);
         qp.root  = step.rootClass;
-        qp.scale = SCALE_DEFS[step.chordType] ?? SCALE_DEFS.CMAJ;
+        qp.scale = chordTones(step.chordType, with7);
         n.qntNodes?.[qid]?.port.postMessage(qp);
         // Label lands with the cable, for the same reason the scale does — waiting
         // for the next bar boundary would show an empty chord slot until then.
-        qntChordLabelCbRefs.current[qid]?.(step.rootClass, step.chordType, qp.scale);
+        qntChordLabelCbRefs.current[qid]?.(step.rootClass, chordLabelKey(step.chordType, with7), qp.scale);
       }
     }
 
@@ -6240,6 +6367,12 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     kbdHeldRef.current.push(midi);
     const hz = midiToHz(midi);
     const vel = Math.max(0, Math.min(1, velocity));
+    const tap = kbdNoteTapRef.current;
+    if (tap) {
+      const t = Tone.now();
+      for (const g of takeGroupsFor('kbd-pitch-out', hz))
+        tap({ type: 'on', key: midi, group: g.group, hz: g.hz, vel, time: t });
+    }
     // PITCH jack = newest note (last-note priority) for every non-VCO reader
     // (QNT, KICK TUNE, chord-seq cv-in) — those stay one note by nature.
     writeKbdPitch(hz);
@@ -6266,7 +6399,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     for (const qid in qntLearnRefs.current)
       if (qntLearnRefs.current[qid]) qntLearnCbRefs.current[qid]?.(pc);
     fireKbdGates(true, vel);
-  }, [setKbdBaseHz, writeKbdPitch, kbdPolyVoices, broadcastKbdVoices, fireKbdGates]);
+  }, [setKbdBaseHz, writeKbdPitch, kbdPolyVoices, broadcastKbdVoices, fireKbdGates, takeGroupsFor]);
 
   const keyboardNoteOff = useCallback((midi) => {
     const n = nodesRef.current;
@@ -6274,6 +6407,7 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     const idx = held.indexOf(midi);
     if (!n || idx < 0) return;
     held.splice(idx, 1);
+    kbdNoteTapRef.current?.({ type: 'off', key: midi, time: Tone.now() });
     kbdVoiceIdsRef.current.delete(midi);
     if (held.length === 0) {
       // Last key up: close the gate but leave the voices ringing — the envelope's
@@ -6291,6 +6425,147 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
       setKbdBaseHz(lastHz);                      // mono legato: back to the previous key
     }
   }, [setKbdBaseHz, writeKbdPitch, kbdPolyVoices, broadcastKbdVoices, fireKbdGates]);
+
+  // ── Workstation take bridge (Vox Phase 130) ──
+  // Silent photograph (Phase 131): mute only the speaker leg; voxBus keeps the signal.
+  // 30 ms ramp each way, so neither edge clicks.
+  const setSpeakerMuted = useCallback((muted) => {
+    const g = nodesRef.current?.speakerGate;
+    if (g) safeRamp(g.gain, muted ? 0 : 1, 0.03);
+  }, []);
+  const setKbdNoteTap = useCallback((fn) => { kbdNoteTapRef.current = fn ?? null; }, []);
+  // Is any VCO's pitch driven (directly or through a quantizer / chord seq) by the
+  // keyboard, a 960 or a chord sequencer? Those are the sources a take can record.
+  const hasTakeSources = useCallback(() => {
+    const conns = connectionsRef.current;
+    for (const vcoId of allVcoIdsRef.current) {
+      const src = vcoActiveCvRef.current[vcoId];
+      if (src && /^(kbd|seq\d*|chordseq\d*)-/.test(resolveCvOrigin(src, conns))) return true;
+    }
+    return false;
+  }, []);
+
+  // ── Photograph drivers (Vox Phase 132) ──
+  // The Workstation photographs each voice group by playing it "as its source": the
+  // keyboard group through keyboardNoteOn (paraphony, vibrato and all), every other
+  // group by writing its VCOs' GlideBus directly (the same final write the step loop /
+  // quantizer port / chord loop make — bypassing the quantizer is deliberate: a photo
+  // note must sound at exactly the pitch it is filed under) and firing the envelopes
+  // its source's GATE drives. Only used while the Transport is stopped, so none of those
+  // usual writers is running.
+  const photoGroupVcos = (group) =>
+    allVcoIdsRef.current.filter(v => vcoActiveCvRef.current[v] === group);
+  const photoGateSrc = (group) => {
+    if (group === 'kbd-pitch-out') return null;               // keyboardNoteOn gates itself
+    const origin = resolveCvOrigin(group, connectionsRef.current);
+    if (origin === 'kbd-pitch-out') return 'kbd-gate-out';
+    const m = origin.match(/^(seq\d*|chordseq\d*)-/);
+    return m ? `${m[1]}-gate-out` : null;
+  };
+  // The group's VCO output gate (`${vcoId}bus` — the 960's rest-step mute). A photo note
+  // OPENS it (a group starts each photo note muted) and photoMute closes it again: on a
+  // patch whose VCA rests open, that mute is the only thing that ends a note — exactly
+  // what a REST step does live (Phase 132b).
+  // 5 ms ramps, not steps (Phase 133): a rest-gated photo note is switched on and off by
+  // this gate alone, and an instant jump from silence to a full-level waveform is a click
+  // baked into every sample. (The LIVE rest mute is still an instant write — unchanged.)
+  const PHOTO_BUS_RAMP = 0.005;
+  const setGroupBus = (group, value) => {
+    const n = nodesRef.current;
+    const now = Tone.now();
+    for (const v of photoGroupVcos(group)) {
+      const g = n?.[`${v}bus`]?.gain;
+      if (!g) continue;
+      const param = g._param ?? g;
+      // Hold the value AT `now` (mid-ramp included) so the new ramp starts where the
+      // gain really is then; plain cancel + .value would read the current, earlier level.
+      if (typeof param.cancelAndHoldAtTime === 'function') param.cancelAndHoldAtTime(now);
+      else { try { param.cancelScheduledValues(now); } catch (_) {} param.setValueAtTime(param.value, now); }
+      param.linearRampToValueAtTime(value, now + PHOTO_BUS_RAMP);
+    }
+  };
+  const photoNoteOn = useCallback((group, midi) => {
+    // A sequencer group's VCOs open with its GATE (photoGate), not here: this pitch write
+    // runs PITCH_SETTLE_MS early, and opening now put that much un-faded drone in front
+    // of every photo note's onset (Phase 133). The keyboard sets pitch + gate together.
+    if (group === 'kbd-pitch-out') { setGroupBus(group, 1); keyboardNoteOn(midi, 1); return; }
+    const n = nodesRef.current;
+    const hz = midiToHz(midi);
+    const now = Tone.now();
+    for (const v of photoGroupVcos(group)) {
+      const gb = n?.[`${v}GlideBus`];
+      if (!gb) continue;
+      try { gb.cancelScheduledValues(now); } catch (_) {}
+      gb.setValueAtTime(hz, now);
+    }
+  }, [keyboardNoteOn]);
+  const photoNoteOff = useCallback((group, midi) => {
+    if (group === 'kbd-pitch-out') keyboardNoteOff(midi);
+  }, [keyboardNoteOff]);
+  const photoMute = useCallback((group) => setGroupBus(group, 0), []);
+  // Envelopes ONLY — a photo note must never step a sequencer (CLK) or fire a drum.
+  const photoGate = useCallback((group, down) => {
+    if (down && group !== 'kbd-pitch-out') setGroupBus(group, 1);
+    const src = photoGateSrc(group);
+    if (!src) return;
+    for (const [, a] of gateActionsRef.current) {
+      if (a.fromId !== src || !a.env) continue;
+      if (a.isTrig) { if (down) triggerEnvOneShot(a.env, undefined, 1); continue; }
+      if (down) a.env.triggerAttack(undefined, 1);
+      else      a.env.triggerRelease();
+    }
+  }, []);
+  // Photograph isolation: open the VCOs of the `open` groups (a 960 that stopped on a
+  // REST leaves its VCOs muted) and mute those of the `mute` groups (the take's OTHER
+  // voice groups), so a probe/photo note is one voice group. VCOs outside both lists —
+  // free-running ones with no CV source — are left alone on purpose: they are often an
+  // FM / sync modulator of the voice being photographed, i.e. part of its sound.
+  // Returns the restore. The step loop is these gains' usual writer; it is stopped for
+  // the photograph and rewrites them on its next step anyway.
+  const setPhotoGroupLevels = useCallback((openGroups, muteGroups = []) => {
+    const n = nodesRef.current;
+    const open = new Set(openGroups);
+    const mute = new Set(muteGroups);
+    const saved = [];
+    const now = Tone.now();
+    for (const v of allVcoIdsRef.current) {
+      const src = vcoActiveCvRef.current[v];
+      const value = open.has(src) ? 1 : mute.has(src) ? 0 : null;
+      if (value === null) continue;
+      const g = n?.[`${v}bus`]?.gain;
+      if (!g) continue;
+      const param = g._param ?? g;
+      saved.push([param, param.value]);
+      try { param.cancelScheduledValues(now); } catch (_) {}
+      param.setValueAtTime(value, now);
+    }
+    return () => {
+      const t = Tone.now();
+      for (const [param, value] of saved) {
+        try { param.cancelScheduledValues(t); } catch (_) {}
+        param.setValueAtTime(value, t);
+      }
+    };
+  }, []);
+  // The eight I/O input channels (post-fader, pre-master) — one Workstation track each.
+  // `io-in` IS channel 5 (its jack id predates the eight-channel I/O).
+  const getIoChannels = useCallback(() => {
+    const n = nodesRef.current;
+    if (!n) return [];
+    return [1, 2, 3, 4, 5, 6, 7, 8]
+      .filter(c => n[`ioCh${c}`])
+      .map(c => ({ ch: c, label: `IN ${c}`, node: n[`ioCh${c}`] }));
+  }, []);
+  // The MASTER knob's gain — the channel taps sit before it, so the photo applies it.
+  const getMasterGain = useCallback(() => {
+    const m = nodesRef.current?.master;
+    if (!m) return 1;
+    return m.mute ? 0 : Tone.dbToGain(m.volume.value);
+  }, []);
+  // Let go of every key the engine holds (the photographer's clean start/finish).
+  const releaseAllKeys = useCallback(() => {
+    for (const m of [...kbdHeldRef.current]) keyboardNoteOff(m);
+  }, [keyboardNoteOff]);
 
   // ── Performance controls (Phase 106) ──
   // Pitch bend in semitones (MIDI wheel → ±2). vibratoTick applies it to the kbd VCOs'
@@ -6338,23 +6613,51 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     broadcastKbdVoices();
   }, [kbdPolyVoices, broadcastKbdVoices]);
 
+  // Glide off for the Workstation's photograph sweep (Vox Phase 130) — each note must
+  // start on its own pitch, not slide in from the previous one. Returns the restore.
+  const suspendKbdGlide = useCallback(() => {
+    const prev = kbdGlideRef.current;
+    setKbdGlide(0);
+    return () => setKbdGlide(prev);
+  }, [setKbdGlide]);
+
   // Restart every sequencer (960 + chord) from step 0 — the next Transport tick
   // lands on the first step. Used by the Workstation's modular-record count-in so a
   // take begins at the top of the sequence (Phase 66). Same reset powerOn does.
+  // Restart every sequencer from step 1, exactly as POWER ON does (Phase 135):
+  // step counters back to "before step 1", the chord-seq clock dividers re-phased,
+  // the step LEDs cleared, and every internally clocked Loop re-armed on the bar
+  // grid (stop + start(0)). Re-arming is what makes a take start clean even when a
+  // Loop's Transport events were wiped while the rack was running — a Tone.Loop
+  // whose events are gone stays "started", so start() alone is a no-op and only a
+  // power cycle used to revive it. Call with the Transport STOPPED (the take's
+  // count-in parks it); the first step then lands on the next bar line it plays.
   const resetSequencers = useCallback(() => {
-    for (const id of Object.keys(seqLoopsRef.current))      seqCurrentStepRefs.current[id]      = -1;
-    for (const id of Object.keys(chordSeqLoopsRef.current)) {
-      chordSeqCurrentStepRefs.current[id]   = -1;
-      chordSeqClockCountRefs.current[id]    = 0;   // divider re-phases with the take
+    const powered = isPoweredRef.current;
+    for (const [id, loop] of Object.entries(seqLoopsRef.current)) {
+      seqCurrentStepRefs.current[id] = -1;
+      seqStepCbRefs.current[id]?.(-1);
+      if (powered && !seqExtClockRefs.current[id]) {
+        try { loop.stop(); loop.start(0); } catch (_) {}
+      }
+    }
+    for (const [id, loop] of Object.entries(chordSeqLoopsRef.current)) {
+      chordSeqCurrentStepRefs.current[id] = -1;
+      chordSeqClockCountRefs.current[id]  = 0;   // divider re-phases with the take
+      chordSeqStepCbRefs.current[id]?.(-1);
+      if (powered && !chordSeqExtClockRefs.current[id]) {
+        try { loop.stop(); loop.start(0); } catch (_) {}
+      }
     }
   }, []);
+  const whenReady = useCallback(() => readyRef.current ?? Promise.resolve(), []);
 
   // Live power state for cross-page callers (the boolean in the return is a
   // render-time snapshot; this reads the ref that powerOn/powerOff own).
   const getIsPowered = useCallback(() => isPoweredRef.current, []);
 
   return {
-    powerOn, powerOff, connect, disconnect, isPowered,
+    powerOn, powerOff, connect, disconnect, isPowered, whenReady,
     updateVcoParams, updateVcfParams, updateVcf2Params, updateEnvParams, triggerGate,
     updateVcaParams, updateVca2Params, updateVca3Params,
     updateLfoParams, updateLfo2Params, updateIoParams, updateIoChannelVol,
@@ -6363,6 +6666,8 @@ const triggerEnvOneShot = (env, time, velocity = 1) => {
     getLfoInstant, getLfo2Instant,
     setTempo, updateSequencerSteps, setSeqStepCallback,
     updateSeq2Steps, setSeq2StepCallback, keyboardNoteOn, keyboardNoteOff,
+    setKbdNoteTap, hasTakeSources, releaseAllKeys, suspendKbdGlide, setSpeakerMuted,
+    photoNoteOn, photoNoteOff, photoGate, photoMute, setPhotoGroupLevels, getIoChannels, getMasterGain,
     updateSeqStepsById, setSeqStepCallbackById, setSeqGlideById, setSeqDivisionById,
     setSeqDivision, setSeq2Division,
     updateChordSeqSteps, setChordSeqStepCallback, setChordSeqDivision, setChordSeqClockDiv,

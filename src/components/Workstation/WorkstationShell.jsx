@@ -10,7 +10,19 @@ import PanKnob from './PanKnob';
 import { serializeProject, deserializeProject, downloadJSON, readJSONFile, hashProjectData } from './projectIO';
 import { remapProjectAsGroup } from './projectImport';
 import { registerInstruments, customInstrumentsForIds, isCustomInstrument, isInLibrary, addToLibrary, getCustomInstrument } from './customInstruments';
-import { getSampleStatus, primeSampleSet, saveSampleSet } from './customSampleStore';
+import { getSampleStatus, primeSampleSet, saveSampleSet, hasSampleSet } from './customSampleStore';
+import { registerVoxInstruments, voxInstrumentsForIds, isVoxInstrument, mintVoxInstrumentId,
+  addVoxInstrument, deleteVoxInstrument, findVoxInstrumentByPhotoKey, nextVoxPatchName,
+  hashRackSnapshot, VOX_FORMAT } from './voxInstruments';
+import { openPhotoSession, FREEZE_MIDIS } from './voxFreeze';
+import { hzToMidi, assignChannels, planPhotoPasses, trackNotes, channelLabel, nextStepOff } from './voxTakePlan';
+import VoxPhotoBanner from './VoxPhotoBanner';
+import AudioRegionWave from './AudioRegionWave';
+import { openAudioCapture } from './voxAudioTake';
+import { AUDIO_INSTRUMENT, isAudioTrack, isAudioRegion, mintClipId } from './audioClipMath';
+import { saveClip } from './voxClipStore';
+import { setVoxRecStatus, setVoxRecControl } from './voxRecStatus';
+import { withVoxSamples, ingestVoxSamples } from './voxSamplePack';
 import { renderInstrumentSamples, SAMPLE_NOTE_COUNT } from './customSampleRenderer';
 import { saveProject as storeSaveProject, savePreview, listProjects as storeListProjects, getProject as storeGetProject } from '../../utils/projectStore';
 import { EFFECT_DEFS, defaultParamsFor, automationTargetsFor, labelForTarget, metaForTarget } from './effectDefs';
@@ -23,8 +35,8 @@ import AutomationLane from './AutomationLane';
 import GroupModal from './GroupModal';
 import GroupFxPanel from './GroupFxPanel';
 import { bounceProject } from './audioBounce';
+import { buildMidiFile, midiTrackIdsForProject } from './midiExport';
 import { exportWAV, exportMP3, trimExportBuffer, encodeWavArrayBuffer, computePeaks } from '../../utils/audioExport';
-import { transcribeAudio } from './transcribeAudio';
 import { TRACK_COLORS } from './trackColors';
 import { defaultEnvelopeFor, customMaxRelease } from './synthFactory';
 import { tickOf, normalizeGlide, retargetConnectedGlides, planChordConnections } from './glideMath';
@@ -175,7 +187,7 @@ const transposeWithRetarget = (prev, hit, semis) => {
   return rt.size ? next.map(n => rt.has(n.id) ? { ...n, glide: rt.get(n.id) } : n) : next;
 };
 
-export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle, getVoxBusNode, resetVoxSequencers, isVoxPowered, setVoxRecordingActive, pendingProject }) {
+export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle, setVoxRecordingActive, getVoxApi, ensureVoxApi, onOpenVox, pendingProject }) {
   const [isPlaying,      setIsPlaying]      = useState(false);
   const [tracks,         setTracks]         = useState([]);
   const [regions,        setRegions]        = useState([]);
@@ -246,18 +258,36 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
   const [voxRecording, setVoxRecording] = useState(false);
   const [voxRecordSec, setVoxRecordSec] = useState(0);
   const [voxCountingIn, setVoxCountingIn] = useState(false); // 1-bar count-in before record (Phase 66)
-  const voxRecorderRef  = useRef(null);  // Tone.Recorder instance while recording
-  const voxBusNodeRef   = useRef(null);  // connected bus node (for cleanup)
   const voxTimerRef     = useRef(null);  // setInterval id for elapsed-time display
   const voxRecordingRef = useRef(false); // ref mirror of voxRecording (avoids stale closures)
   const voxCountingInRef = useRef(false); // ref mirror of voxCountingIn
   const voxCountInTimerRef = useRef(null); // setTimeout id for count-in → record
+  const voxPowerTimerRef = useRef(null);   // setTimeout id for POWER ON just before the downbeat (135c)
   const voxClickSynthRef = useRef(null);   // Tone.Synth for count-in clicks
-  const voxTargetRegionIdRef = useRef(null); // region captured at record-start (seek + placement)
-
-  // Audio region playback — keyed by regionId
-  const audioBuffersByRegionId = useRef(new Map()); // regionId → native AudioBuffer
-  const audioPlayersRef        = useRef(new Map()); // regionId → Tone.Player (synced to transport)
+  const voxTakeRef = useRef(null);         // { startTicks, open: 'key|group' → note, notes[], steps: src → [tick] } while recording
+  // Photograph of the patch after a take (Vox Phase 130): { done, total, startedAt, name }
+  // while running — drives the progress banner (Phase 131).
+  const [voxFreeze, setVoxFreeze] = useState(null);
+  const voxFreezingRef     = useRef(false);
+  const voxFreezeAbortRef  = useRef(null);
+  // What ● MODULAR records (Vox Phase 134): 'notes' = editable notes + a photographed
+  // instrument (Phases 130–133); 'audio' = the rack itself, live, every knob move
+  // included. Remembered per machine.
+  const [voxRecMode, setVoxRecMode] = useState(() => {
+    try { return localStorage.getItem('voxdaw.voxRecMode') === 'audio' ? 'audio' : 'notes'; } catch { return 'notes'; }
+  });
+  const voxRecModeRef = useRef(voxRecMode); voxRecModeRef.current = voxRecMode;
+  const changeVoxRecMode = useCallback((m) => {
+    setVoxRecMode(m);
+    try { localStorage.setItem('voxdaw.voxRecMode', m); } catch {}
+  }, []);
+  // Audio take in progress: { capture, mode, startTicks, startTime } — set at the
+  // count-in (the capture opens then), startTime once recording starts.
+  const voxCaptureRef = useRef(null);
+  const voxRecStartedAtRef = useRef(0);
+  const voxStartingRef = useRef(false); // waking the Vox for a take (Phase 135) — ignore re-clicks
+  const voxAutoPoweredRef = useRef(false); // this take switched the Vox on → switch it off after (135b)
+  const [voxSavingAudio, setVoxSavingAudio] = useState(false);
 
   // ── Undo/redo history (arrangement data only: tracks/regions/notes) ──────────
   const [past,   setPast]   = useState([]);   // [{tracks,regions,notes}, …] oldest→newest
@@ -453,6 +483,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     // audio reconciler's makeSynth resolves their ids (imported projects whose
     // instruments aren't in this machine's library).
     registerInstruments(data.customInstruments);
+    registerVoxInstruments(data.voxInstruments);
     // Offer to persist any project instruments not yet in this machine's library
     // (they play regardless; this makes them permanent + selectable across
     // projects). Only prompts when there's something new.
@@ -505,7 +536,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
   // preview stamp — the preview-freshness contract compares hashProjectData of
   // the save-time and export-time payloads, so they must serialize identically.
   const buildProjectPayload = useCallback(() =>
-    serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups, customInstruments: customInstrumentsForIds(tracks.map(t => t.instrument)) }),
+    serializeProject({ bpm, totalMeasures, tracks, regions, notes, name: projectName, globalAutomations, groups, customInstruments: customInstrumentsForIds(tracks.map(t => t.instrument)), voxInstruments: voxInstrumentsForIds(tracks.map(t => t.instrument)) }),
   [bpm, totalMeasures, tracks, regions, notes, globalAutomations, groups, projectName]);
 
   // [ save ] writes to the browser project store (IndexedDB) — the homepage
@@ -526,18 +557,26 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     }
   }, [buildProjectPayload, bpm, tracks, projectName, currentProjectId, showToast]);
 
-  const handleExportProjectFile = useCallback(() => {
+  const handleExportProjectFile = useCallback(async () => {
     setShowExportMenu(false);
-    const payload = buildProjectPayload();
     const filename = `${sanitizeFilename(projectName)}.voxdaw`;
-    downloadJSON(payload, filename);
-    showToast(`exported ${filename}`);
+    try {
+      // The download (only) carries the vox take samples so the file sounds
+      // right on any machine (Phase 130).
+      downloadJSON(await withVoxSamples(buildProjectPayload()), filename);
+      showToast(`exported ${filename}`);
+    } catch (e) {
+      console.error('export project failed', e);
+      showToast(`export failed: ${e.message}`);
+    }
   }, [buildProjectPayload, projectName, showToast]);
 
   const handleLoadProject = useCallback(async (file) => {
     if (!file) return;
     try {
-      const raw = await readJSONFile(file);
+      // Vox take samples are written to this machine's store BEFORE the apply,
+      // so the instruments are already playable when the reconciler builds.
+      const { raw } = await ingestVoxSamples(await readJSONFile(file));
       const data = deserializeProject(raw);
       applyProjectData(data);
       // A raw file open isn't tied to a stored project yet — first save creates one.
@@ -559,6 +598,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     // Embedded custom-instrument defs must register BEFORE the state commit so
     // the audio reconciler's makeSynth resolves their ids.
     registerInstruments(clean.customInstruments);
+    registerVoxInstruments(clean.voxInstruments);
     const newInstrIds = [...new Set((clean.tracks ?? []).map(t => t.instrument))]
       .filter(id => isCustomInstrument(id) && !isInLibrary(id));
     if (newInstrIds.length &&
@@ -599,7 +639,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
   const handleImportGroupFile = useCallback(async (file) => {
     if (!file) return;
     try {
-      const raw = await readJSONFile(file);
+      const { raw } = await ingestVoxSamples(await readJSONFile(file));
       applyImportedGroup(deserializeProject(raw));
     } catch (e) {
       console.error('import as group failed', e);
@@ -650,6 +690,31 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     setEditingName(false);
   }, [tempName]);
 
+  // ── MIDI export (Phase 159) — notes only, no bounce. A project export writes
+  // what the mix plays (mute / solo); a track's context menu writes that track.
+  const downloadMidi = useCallback((trackIds, fileName) => {
+    const { bytes, trackCount, noteCount } = buildMidiFile({
+      name: projectName, tracks: tracksRef.current, regions: regionsRef.current, notes: notesRef.current,
+      bpm, globalAutomations: globalAutomationsRef.current, trackIds,
+    });
+    if (!trackCount) { showToast('no notes to export as MIDI'); return; }
+    const safe = String(fileName || 'project').replace(/[\\/:*?"<>|]+/g, '_');
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/midi' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${safe}.mid`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast(`exported ${safe}.mid — ${trackCount} track${trackCount !== 1 ? 's' : ''}, ${noteCount} note${noteCount !== 1 ? 's' : ''}`);
+  }, [projectName, bpm, showToast]);
+
+  const handleExportMidi = useCallback(() => {
+    setShowExportMenu(false);
+    const skippedAudio = tracksRef.current.some(t => t.instrument === 'audio');
+    downloadMidi(midiTrackIdsForProject(tracksRef.current, groupsRef.current), projectName);
+    if (skippedAudio) setTimeout(() => showToast('audio tracks have no notes, so they aren\'t in the MIDI file', 4000), 3200);
+  }, [downloadMidi, projectName, showToast]);
+
   const handleExportAudio = useCallback(async (format) => {
     setShowExportMenu(false);
     if (isBouncing) return;
@@ -659,7 +724,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
       // Hard right stop through the tempo map (constant-bpm math would mis-cap
       // a project whose tempo lane speeds up or slows down).
       const capSec = buildTempoMap(bpm, tempoPointsOf(globalAutomations)).secondsAtMeasure(totalMeasures);
-      const { buffer, firstOnsetSec } = await bounceProject({ tracks, regions, notes, bpm, globalAutomations, groups, audioBuffers: audioBuffersByRegionId.current, capSec });
+      const { buffer, firstOnsetSec } = await bounceProject({ tracks, regions, notes, bpm, globalAutomations, groups, capSec });
       // Trim leading silence to the first note's onset and trailing silence
       // after the last audible sample; null = nothing audible to export.
       const trimmed = firstOnsetSec == null
@@ -1371,9 +1436,14 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
   }, []);
 
   const exportTrack = useCallback(async (trackId, format = 'wav') => {
-    if (isBouncing) return;
     const track = tracksRef.current.find(t => t.id === trackId);
     if (!track) return;
+    if (format === 'midi') {
+      if (track.instrument === 'audio') { showToast('an audio track has no notes to export as MIDI'); return; }
+      downloadMidi([trackId], track.name);
+      return;
+    }
+    if (isBouncing) return;
     setIsBouncing(true);
     showToast(`bouncing ${track.name}…`, 60000);
     try {
@@ -1389,7 +1459,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
       const { buffer, firstOnsetSec } = await bounceProject({
         tracks: soloed, regions: regionsRef.current, notes: notesRef.current, bpm,
         globalAutomations: globalAutos, groups: neutralGroups,
-        audioBuffers: audioBuffersByRegionId.current, capSec,
+        capSec,
       });
       const trimmed = firstOnsetSec == null
         ? null
@@ -1409,7 +1479,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     } finally {
       setIsBouncing(false);
     }
-  }, [bpm, isBouncing, showToast]);
+  }, [bpm, isBouncing, showToast, downloadMidi]);
 
   // Split a region at global measure P into Left (keeps id + notes) and Right
   // (new id + cloned notes). Bottle-preserving; phase-aware for looped regions
@@ -2659,6 +2729,12 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
   }, [isPlaying, updatePlayhead, silenceAll]);
 
   const handlePlayPause = useCallback(async () => {
+    // The photograph needs the Transport stopped: the rack's sequencers ride it and
+    // would play into every captured note (Vox Phase 130).
+    if (voxFreezingRef.current) {
+      showToast('Photographing the Vox patch — playback is paused until it finishes (or click the photo button to cancel).', 4000);
+      return;
+    }
     await Tone.start();
     // No direct Transport.bpm write — recomputeFades → recomputeTempo (the
     // signal's single writer) re-anchors the bpm curve on the resume branch.
@@ -2673,7 +2749,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
       Tone.Transport.start();
       setIsPlaying(true);
     }
-  }, [updatePlayhead, silenceAll, recomputeFades]);
+  }, [updatePlayhead, silenceAll, recomputeFades, showToast]);
 
   const handleStop = useCallback(() => {
     Tone.Transport.stop();
@@ -2685,31 +2761,339 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
     if (timeRef.current)              timeRef.current.textContent                  = '00:00:00';
   }, [silenceAll, recomputeFades]);
 
-  // ── Vox Modular recording ────────────────────────────────────────
-  // Connects a Tone.Recorder to the Vox Modular's voxBus tap node and captures audio.
-  // Three-state toggle: idle → (count-in) → recording → stop+place.
-  // Count-in (1 bar), auto-seek to the selected bar, restart the Vox Modular sequence,
-  // and play the timeline as backing while capturing the Vox Modular (Phase 66).
+  // ── Vox Modular takes (Vox Phases 130–132) ─────────────────────
+  // A take records what the rack PLAYS as notes — keys on the Vox keyboard
+  // (computer keys, mouse, MIDI) AND every played step of each 960 / chord
+  // sequencer — then photographs the patch into sampled instruments
+  // (voxFreeze.js), so each new track is an ordinary instrument track: notes are
+  // editable, the sound and each note's velocity are kept, and later rack changes
+  // can't touch it.
+  //   idle → count-in (1 bar) → recording → [stop] → probe → tracks → photo → idle
+  // Notes come from the engine's own take tap (exact keys / steps, timing and
+  // velocity — no pitch detection), stamped in Transport ticks at the audio time
+  // the engine played them, so they line up with the backing you heard. They are
+  // kept per VOICE GROUP (the VCOs sharing one CV source jack). The probe then
+  // finds which I/O input each group reaches, and every reached input becomes ONE
+  // track (Dylan's rule: what is mixed into one input is one sound) — see
+  // voxTakePlan.js.
+  // A photograph that didn't happen: drop its instrument, keep the notes on a plain synth.
+  const revertInstruments = useCallback((ids) => {
+    if (!ids.length) return;
+    const set = new Set(ids);
+    ids.forEach(deleteVoxInstrument);
+    setTracks(prev => prev.map(t => set.has(t.instrument)
+      ? { ...t, instrument: 'analog', envelope: undefined } : t));
+  }, []);
+
+  const finishVoxTake = useCallback(async (api, take, endTicks) => {
+    const PPQ = Tone.Transport.PPQ;
+    // Notes per group, clipped to the take window.
+    const notesByGroup = new Map();
+    let rounded = 0;
+    for (const n of take.notes) {
+      const on = Math.max(n.on, take.startTicks);
+      const off = Math.min(n.off, endTicks);
+      if (!(off > on)) continue;
+      const { midi, cents } = hzToMidi(n.hz);
+      // A 960's pitch knobs are continuous; the piano roll holds whole notes only.
+      if (n.group !== 'kbd-pitch-out' && Math.abs(cents) > 20) rounded++;
+      if (!notesByGroup.has(n.group)) notesByGroup.set(n.group, []);
+      notesByGroup.get(n.group).push({ midi, on, off, vel: n.vel, src: n.src, stepOff: n.stepOff });
+    }
+    // Rest-gated groups (the probe's verdict: VCA resting open) sound until their
+    // sequencer's NEXT step, not for its gate — the recorded note must too, or every
+    // note ends ~20 % early with a gap before the next (Phase 133). Enveloped groups keep
+    // the gate length, which is what they really play. Keyboard notes are untouched.
+    for (const ticks of take.steps.values()) ticks.sort((x, y) => x - y);
+    const withRestGatedLengths = (drones) => {
+      const out = new Map();
+      for (const [g, list] of notesByGroup) {
+        if (!drones.has(g)) { out.set(g, list); continue; }
+        out.set(g, list.map(n => {
+          const steps = n.src ? take.steps.get(n.src) : null;
+          if (!steps || n.stepOff == null) return n;
+          const off = Math.min(endTicks, nextStepOff(n.on, steps, n.stepOff));
+          return off > n.on ? { ...n, off } : n;
+        }));
+      }
+      return out;
+    };
+    const groups = [...notesByGroup.keys()];
+    if (!groups.length) {
+      showToast('Nothing was played during the take — no keys, no sequencer steps — so no take was made.', 5000);
+      return;
+    }
+    const counts = new Map(groups.map(g => [g, notesByGroup.get(g).length]));
+    const takeNumber = tracksRef.current.filter(t => isVoxInstrument(t.instrument)).length + 1;
+
+    // One batched commit (→ one undo entry) of the take's tracks.
+    // specs: [{ name, instrument, notes: [{ midi, on, off, vel }] }]
+    const createTracks = (specs) => {
+      const newTracks = [];
+      const newRegions = [];
+      const newNotes = [];
+      let maxEnd = 0;
+      for (const spec of specs) {
+        const tn = nextIdRef.current++;
+        const trackId  = `t${tn}`;
+        const regionId = `r${nextRegionIdRef.current++}`;
+        const startMeasure = take.startTicks / (PPQ * 4);
+        const lastBeat = Math.max(...spec.notes.map(n => (n.off - take.startTicks) / PPQ));
+        const durationMeasures = Math.max(1, Math.ceil(lastBeat / 4 - 1e-6));
+        maxEnd = Math.max(maxEnd, startMeasure + durationMeasures);
+        newTracks.push({
+          id: trackId, name: spec.name, instrument: spec.instrument,
+          color: TRACK_COLORS[(tn - 1) % TRACK_COLORS.length],
+          isMuted: false, isSolo: false, volume: 75, pan: 0, effects: [],
+        });
+        newRegions.push({
+          id: regionId, trackId, startMeasure, durationMeasures,
+          clipOffset: 0, fadeIn: 0, fadeOut: 0, fadeInFloor: 0, fadeOutFloor: 0, loopInterval: null,
+        });
+        for (const n of spec.notes) {
+          newNotes.push({
+            id: `note_${nextNoteIdRef.current++}`,
+            trackId, regionId,
+            note: Tone.Frequency(n.midi, 'midi').toNote(),
+            startBeat: (n.on - take.startTicks) / PPQ,
+            durationBeats: Math.max(1 / 64, (n.off - n.on) / PPQ),
+            velocity: Math.max(1, Math.min(120, Math.round(n.vel * 120))),
+          });
+        }
+      }
+      setTracks(prev => [...prev, ...newTracks]);
+      setRegions(prev => [...prev, ...newRegions]);
+      setNotes(prev => [...prev, ...newNotes]);
+      setTotalMeasures(prev => (maxEnd + 16 > prev ? maxEnd + 16 : prev));
+      setSelectedRegionIds(new Set(newRegions.map(r => r.id)));
+    };
+    // Notes are never lost: if routing or the photo can't run, they land on a plain synth.
+    const fallbackTrack = () => createTracks([{
+      name: `Vox take ${takeNumber}`, instrument: 'analog',
+      notes: trackNotes(groups, notesByGroup),
+    }]);
+
+    const abort = new AbortController();
+    voxFreezeAbortRef.current = abort;
+    voxFreezingRef.current = true;
+    const startedAt = Date.now();
+    let phase = { phase: 'probe', done: 0, total: groups.length, startedAt, name: null };
+    setVoxFreeze(phase);
+    let session = null;
+    let created = false;
+    const fresh = []; // [{ ch, instrumentId }] photographs still to take
+    try {
+      session = await openPhotoSession(api, { signal: abort.signal });
+      const { routes, drones } = await session.probe(groups, {
+        onEach: () => { phase = { ...phase, done: phase.done + 1 }; setVoxFreeze(phase); },
+      });
+      // Kept in the console on purpose: the first thing to read when a take
+      // comes back on a basic synth.
+      console.info('Vox take routing', { routes, restGated: [...drones] });
+      const channels = assignChannels(counts, routes);
+      if (!channels.length) throw new Error('unrouted');
+      const finalNotes = withRestGatedLengths(drones);
+
+      // Instruments: an exact photoKey match (same rack, same input, same voice)
+      // reuses its photograph; everything else is photographed now.
+      const rackHash = hashRackSnapshot(api.getRackSnapshot?.());
+      const multi = channels.length > 1;
+      const patchBase = nextVoxPatchName();
+      const specs = [];
+      let reused = 0;
+      for (const c of channels) {
+        const label = channelLabel(c.ch);
+        const photoKey = `${rackHash}|${c.ch}|${c.selected}`;
+        const prior = findVoxInstrumentByPhotoKey(photoKey);
+        let instrumentId;
+        if (prior && await hasSampleSet(prior.id)) {
+          instrumentId = prior.id;
+          reused++;
+        } else {
+          instrumentId = mintVoxInstrumentId();
+          // Registered up front so the dropdown names it while it's photographed; until
+          // its samples exist it plays as a default synth (makeSynth fallback).
+          addVoxInstrument({
+            id: instrumentId, name: multi ? `${patchBase} · ${label}` : patchBase,
+            rackHash, photoKey, createdAt: Date.now(), format: VOX_FORMAT,
+          });
+          fresh.push({ ch: c.ch, selected: c.selected, instrumentId });
+        }
+        specs.push({
+          name: multi ? `Vox take ${takeNumber} · ${label}` : `Vox take ${takeNumber}`,
+          instrument: instrumentId,
+          notes: trackNotes(c.groups, finalNotes),
+        });
+      }
+      createTracks(specs);
+      created = true;
+
+      const unrouted = groups.filter(g => !(routes[g]?.length)).length;
+      const notesMsg = `Vox take ${takeNumber}: ${channels.length} track${multi ? 's' : ''}`
+        + (rounded ? ` — ${rounded} sequencer note${rounded !== 1 ? 's were' : ' was'} between piano keys and got rounded` : '')
+        + (unrouted ? ` — ${unrouted} part${unrouted !== 1 ? 's' : ''} reached no I/O input and ${unrouted !== 1 ? 'were' : 'was'} left out` : '');
+      if (!fresh.length) {
+        showToast(`${notesMsg}. Same patch as before, so the existing sound${reused !== 1 ? 's were' : ' was'} reused.`, 6000);
+        return;
+      }
+      showToast(`${notesMsg}. Photographing (silently)…`, 5000);
+
+      const passes = planPhotoPasses(fresh, routes);
+      phase = { phase: 'photo', done: 0, total: passes.length * FREEZE_MIDIS.length, startedAt: Date.now(), name: fresh.length > 1 ? `${fresh.length} sounds` : patchBase };
+      setVoxFreeze(phase);
+      const results = await session.sweep(passes, groups, drones, {
+        onNote: () => { phase = { ...phase, done: phase.done + 1 }; setVoxFreeze(phase); },
+      });
+      const failed = [];
+      for (const f of fresh) {
+        const res = results.get(f.ch);
+        if (!res) { failed.push(f); continue; }
+        await saveSampleSet(f.instrumentId, res.notes, { release: res.release });
+      }
+      revertInstruments(failed.map(f => f.instrumentId));
+      showToast(failed.length
+        ? `Photographed ${fresh.length - failed.length} of ${fresh.length} sounds — ${failed.length} input${failed.length !== 1 ? 's were' : ' was'} silent and kept a basic synth.`
+        : `Vox take ${takeNumber} is ready — ${channels.length > 1 ? 'every track plays' : 'it plays'} with your patch's sound.`, 6000);
+    } catch (err) {
+      if (err?.name !== 'AbortError') console.error('Vox photograph failed', err);
+      if (!created) fallbackTrack();
+      else revertInstruments(fresh.map(f => f.instrumentId));
+      showToast(
+        err?.name === 'AbortError' ? 'Photograph cancelled — the notes were kept on a basic synth.'
+        : err?.message === 'unrouted' ? 'None of the recorded parts reached an I/O input, so nothing could be photographed. The notes were kept on a basic synth.'
+        : `Photograph failed (${err?.message ?? err}). The notes were kept on a basic synth.`,
+        7000);
+    } finally {
+      session?.close();
+      voxFreezeAbortRef.current = null;
+      voxFreezingRef.current = false;
+      setVoxFreeze(null);
+    }
+  }, [showToast, revertInstruments]);
+
+  // ── Audio take (Vox Phase 134) → one AUDIO track per I/O input that carried
+  // sound. The clip is playable at once (cache seeded) and persisted in the
+  // background; one batched commit = one undo entry.
+  const finishAudioTake = useCallback(async (cap, endTime, endTicks, onCaptured) => {
+    const PPQ = Tone.Transport.PPQ;
+    const sr = cap.capture.sampleRate;
+    const startFrame = Math.round(cap.startTime * sr);
+    const endFrame = Math.round(endTime * sr);
+    setVoxSavingAudio(true);
+    try {
+      const { clips, limited } = await cap.capture.finish(endFrame);
+      onCaptured?.(); // the last frame is in — the rack may power down now (135b)
+      const measures = (endTicks - cap.startTicks) / (PPQ * 4);
+      if (!clips.size || !(measures > 0) || endFrame <= startFrame) {
+        showToast('Nothing reached the Vox I/O inputs during the take, so no audio was recorded.', 5000);
+        return;
+      }
+      // The take's own tempo, frozen into its regions: later tempo edits move the
+      // audio with its bar but never stretch it.
+      const secPerMeasure = ((endFrame - startFrame) / sr) / measures;
+      const startMeasure = cap.startTicks / (PPQ * 4);
+      const takeNumber = tracksRef.current.filter(isAudioTrack).length + 1;
+      const chans = [...clips.keys()].sort((a, b) => a - b);
+      const multi = chans.length > 1;
+      const newTracks = [];
+      const newRegions = [];
+      const saves = [];
+      for (const ch of chans) {
+        const { channels, peak } = clips.get(ch);
+        // A per-input track (several inputs) is tapped before the MASTER limiter,
+        // so a hot one can pass full scale, which a 16-bit clip can't hold. Only
+        // then: store it just under, and give the track the difference back on
+        // its fader (slider max +8 dB). Anything that fits is stored untouched.
+        let volume = 75;
+        if (peak > 1) {
+          const scale = 0.999 / peak;
+          for (const c of channels) for (let i = 0; i < c.length; i++) c[i] *= scale;
+          volume = Math.min(100, Math.round(75 + (20 * Math.log10(1 / scale)) * 100 / 32));
+        }
+        const clipId = mintClipId();
+        saves.push(saveClip(clipId, channels, sr));
+        const tn = nextIdRef.current++;
+        const trackId = `t${tn}`;
+        newTracks.push({
+          id: trackId, name: multi ? `Vox audio ${takeNumber} · ${channelLabel(ch)}` : `Vox audio ${takeNumber}`,
+          instrument: AUDIO_INSTRUMENT,
+          color: TRACK_COLORS[(tn - 1) % TRACK_COLORS.length],
+          isMuted: false, isSolo: false, volume, pan: 0, effects: [],
+        });
+        newRegions.push({
+          id: `r${nextRegionIdRef.current++}`, trackId, startMeasure, durationMeasures: measures,
+          clipOffset: 0, fadeIn: 0, fadeOut: 0, fadeInFloor: 0, fadeOutFloor: 0, loopInterval: null,
+          audio: { clipId, secPerMeasure },
+        });
+      }
+      const maxEnd = startMeasure + measures;
+      setTracks(prev => [...prev, ...newTracks]);
+      setRegions(prev => [...prev, ...newRegions]);
+      setTotalMeasures(prev => (maxEnd + 16 > prev ? Math.ceil(maxEnd + 16) : prev));
+      setSelectedRegionIds(new Set(newRegions.map(r => r.id)));
+      showToast(`Vox audio ${takeNumber}: ${chans.length} audio track${multi ? 's' : ''}, with every knob move you made.`
+        + (limited ? ' The Vox\'s output limiter was squashing peaks during this take; split into separate inputs those peaks can come out a little louder. Turn the Vox MASTER down a touch for an exact match.' : ''),
+        limited ? 9000 : 5000);
+      try {
+        await Promise.all(saves);
+      } catch (err) {
+        console.error('Vox audio save failed', err);
+        showToast(`The recording plays now but couldn't be stored (${err?.message ?? err}) — it will be gone after a reload.`, 8000);
+      }
+    } finally {
+      setVoxSavingAudio(false);
+    }
+  }, [showToast]);
+
   const handleVoxRecord = useCallback(async () => {
+    // Phase 135b: a take that switched the Vox on switches it back off when it's
+    // over (stop, cancel, error) — a rack you powered yourself is left running.
+    const powerBackOff = () => {
+      if (!voxAutoPoweredRef.current) return;
+      voxAutoPoweredRef.current = false;
+      try { getVoxApi?.()?.powerOff?.(); } catch (_) {}
+    };
+    // ── Photographing: the button cancels it ──
+    if (voxFreezingRef.current) {
+      voxFreezeAbortRef.current?.abort();
+      return;
+    }
     // ── Cancel during count-in ──
     if (voxCountingInRef.current) {
       clearTimeout(voxCountInTimerRef.current);
       voxCountInTimerRef.current = null;
+      clearTimeout(voxPowerTimerRef.current);
+      voxPowerTimerRef.current = null;
       try { voxClickSynthRef.current?.dispose(); } catch (_) {}
       voxClickSynthRef.current = null;
       voxCountingInRef.current = false;
       setVoxCountingIn(false);
+      voxCaptureRef.current?.capture.cancel();
+      voxCaptureRef.current = null;
+      powerBackOff();
       return;
     }
+
+    if (voxStartingRef.current) return;
+    let api = getVoxApi?.();
 
     if (voxRecordingRef.current) {
       // ── Stop ──
       clearInterval(voxTimerRef.current);
       voxTimerRef.current = null;
-      const blob = await voxRecorderRef.current?.stop();
-      try { voxBusNodeRef.current?.disconnect(voxRecorderRef.current); } catch (_) {}
-      voxRecorderRef.current = null;
-      voxBusNodeRef.current  = null;
+      api?.setNoteTap?.(null);
+      const take = voxTakeRef.current;
+      voxTakeRef.current = null;
+      const audioTake = voxCaptureRef.current;
+      voxCaptureRef.current = null;
+      // Keys still down when the take ends are closed at the stop point; sequencer
+      // notes already scheduled past it are clipped by finishVoxTake.
+      const endTime = Tone.now();
+      const endTicks = Tone.Transport.getTicksAtTime(endTime);
+      if (take) {
+        for (const o of take.open.values()) take.notes.push({ ...o, off: endTicks });
+        take.open.clear();
+      }
       voxRecordingRef.current = false;
       setVoxRecording(false);
       setVoxRecordSec(0);
@@ -2719,96 +3103,66 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
       silenceAll();
       setIsPlaying(false);
       updatePlayhead();
-      if (blob) {
-        // Place into the region captured at record-start (seek + placement agree).
-        const regionId = voxTargetRegionIdRef.current;
-        const region   = regionsRef.current.find(r => r.id === regionId);
-        if (!region) { setToastMessage('Selected region not found.'); return; }
-
-        try {
-          // Decode WebM blob → native AudioBuffer via the live AudioContext.
-          const arrayBuffer = await blob.arrayBuffer();
-          const nativeBuf   = await Tone.context.rawContext.decodeAudioData(arrayBuffer);
-
-          // Dispose any existing player for this region (re-recording support).
-          const existing = audioPlayersRef.current.get(regionId);
-          if (existing) { try { existing.stop(); existing.dispose(); } catch (_) {} }
-
-          // Create a Tone.Player synced to the transport, starting at the region's measure.
-          // player.sync().start(offset) means: every time Transport plays, the audio starts
-          // at this transport position — the same semantics as Tone.Part.start().
-          const player = new Tone.Player(new Tone.ToneAudioBuffer(nativeBuf)).toDestination();
-          player.sync().start(`${region.startMeasure}m`);
-
-          audioBuffersByRegionId.current.set(regionId, nativeBuf);
-          audioPlayersRef.current.set(regionId, player);
-
-          // Mark region so the timeline shows the audio badge.
-          setRegions(prev => prev.map(r => r.id === regionId ? { ...r, hasAudio: true } : r));
-
-          // ── Transcription ──────────────────────────────────────────────────
-          // Run YIN pitch detection on the decoded buffer, extract note events,
-          // and replace any existing notes for this region with the transcription.
-          // The existing piano roll (RegionEditor) and MIDI playback (useWorkstationAudio)
-          // handle display and playback without any additional code.
-          const transcribed = transcribeAudio(nativeBuf, Tone.Transport.bpm.value);
-          // Mint ids eagerly, OUTSIDE the updater — StrictMode double-invokes
-          // updaters, which double-mints (the eager-mint rule from splitRegion).
-          const newNotes = transcribed.map(n => ({
-            id:            `note_${nextNoteIdRef.current++}`,
-            regionId,
-            trackId:       region.trackId,
-            note:          n.note,
-            startBeat:     n.startBeat,
-            durationBeats: n.durationBeats,
-            velocity:      n.velocity,
-          }));
-          setNotes(prev => [...prev.filter(n => n.regionId !== regionId), ...newNotes]);
-
-          const count = transcribed.length;
-          setToastMessage(
-            count > 0
-              ? `Modular recording placed — ${count} note${count !== 1 ? 's' : ''} transcribed. Click [ edit ] to view in piano roll.`
-              : 'Modular recording placed. No pitched notes detected — check signal level or try drier settings.'
-          );
-        } catch (err) {
-          setToastMessage(`Could not decode modular recording: ${err.message}`);
-        }
+      // Power down only once the take is safe: an audio take after its last frame
+      // arrives (endTime is a look-ahead in the future); a notes take after its
+      // photograph, which plays the powered rack.
+      try {
+        if (audioTake) await finishAudioTake(audioTake, endTime, endTicks, powerBackOff);
+        else if (take && api) await finishVoxTake(api, take, endTicks);
+      } finally {
+        powerBackOff();
       }
       return;
     }
 
-    // ── Start (validate → count-in → record) ──
-    const busNode = getVoxBusNode?.();
-    if (!busNode) {
-      setToastMessage('Open the Vox Modular page first to initialise the audio connection.');
+    // ── Start (wake the Vox → validate → count-in → record) ──
+    // Phase 135: no need to open the Vox page or press its POWER first. The click
+    // resumes the audio context (must happen inside the user gesture), Root mounts
+    // the Vox Modular in the background if it never was, and we wait for its
+    // worklets (silent VCOs before that). POWER ON itself waits for the count-in
+    // (Phase 135b) so the rack doesn't sound before the counting starts.
+    try { await Tone.start(); } catch (_) {}
+    voxStartingRef.current = true;
+    try {
+      if (!api?.getBusNode?.() && ensureVoxApi) {
+        showToast('Starting the Vox Modular…', 10000);
+        api = await Promise.race([ensureVoxApi(), new Promise(r => setTimeout(() => r(null), 15000))]);
+        setToastMessage(null);
+      }
+      if (!api?.getBusNode?.()) {
+        setToastMessage('The Vox Modular could not start. Open its page once, then try again.');
+        return;
+      }
+      await api.whenReady?.();
+    } finally {
+      voxStartingRef.current = false;
+    }
+    const audioMode = voxRecModeRef.current === 'audio';
+    if (!audioMode && !api.hasTakeSources?.()) {
+      setToastMessage('Nothing in the patch can be recorded yet: plug the Vox keyboard\'s PITCH, a 960\'s PITCH or a chord sequencer\'s ROOT/3RD/5TH/7TH into a VCO first.');
       return;
     }
-    if (isVoxPowered && !isVoxPowered()) {
-      setToastMessage('Power on the Vox Modular first (its POWER switch) so it makes sound.');
-      return;
-    }
-    // The recording is placed in the selected region and playback starts at its bar.
-    const selIds = selectedRegionIdsRef.current;
-    if (selIds.size !== 1) {
-      setToastMessage('Select exactly one region — the recording lands there and playback starts at its bar.');
-      return;
-    }
-    const regionId = [...selIds][0];
-    const region   = regionsRef.current.find(r => r.id === regionId);
-    if (!region) { setToastMessage('Selected region not found.'); return; }
-    voxTargetRegionIdRef.current = regionId;
+    // The take starts at the playhead's bar.
+    const PPQ = Tone.Transport.PPQ;
+    const startBar = Math.max(0, Math.floor(Tone.Transport.ticks / (PPQ * 4) + 1e-6));
 
     try {
       await Tone.start();
-      // Park the shared transport at the target bar during the count-in.
+      // Audio take: the capture opens now (its worklet loads asynchronously) and
+      // starts keeping audio at the downbeat.
+      if (audioMode) {
+        voxCaptureRef.current = { capture: await openAudioCapture(api), startTicks: startBar * 4 * PPQ, startTime: null };
+      }
+      // Park the shared transport at the start bar during the count-in.
       Tone.Transport.stop();
-      Tone.Transport.position = `${region.startMeasure}m`;
+      Tone.Transport.ticks = startBar * 4 * PPQ;
       updatePlayhead();
+      // Every sequencer back to step 1, re-armed on the bar grid — exactly as POWER
+      // ON starts them — so the take begins at the top of each pattern (Phase 135).
+      api.resetSequencers?.();
 
-      // ── 1-bar count-in: 4 clicks at the project tempo, accented downbeat.
-      // Routed to Destination (NOT voxBus), so the clicks are heard but never
-      // captured by the recorder tapping the Vox Modular bus.
+      // ── 1-bar count-in: 4 clicks at the project tempo, accented downbeat. Routed to
+      // Destination (never voxBus), so the clicks are heard but can't reach the photo.
       const beatSec = 60 / (bpm || 120);
       const t0 = Tone.now() + 0.12;
       const click = new Tone.Synth({
@@ -2822,24 +3176,97 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
       setVoxCountingIn(true);
 
       const countInMs = ((t0 - Tone.now()) + 4 * beatSec) * 1000;
-      voxCountInTimerRef.current = setTimeout(() => {
+      // POWER ON at the record bar, not during the count-in (Phase 135c) — the same
+      // POWER ON as the Vox's switch, minus starting the parked Transport. Fired
+      // POWER_LEAD_MS early only so its 30 ms click-free gate ramp has finished by
+      // the downbeat (else the first note fades in); the Transport is still
+      // stopped then, so no sequencer step can fire early.
+      const POWER_LEAD_MS = 60;
+      const wakeRack = async (a) => {
+        if (!a || a.isPowered?.()) return;
+        voxAutoPoweredRef.current = true;
+        await a.powerOn?.();
+      };
+      if (!api.isPowered?.()) {
+        voxPowerTimerRef.current = setTimeout(() => {
+          voxPowerTimerRef.current = null;
+          wakeRack(getVoxApi?.()).catch(() => {});
+        }, Math.max(0, countInMs - POWER_LEAD_MS));
+      }
+      voxCountInTimerRef.current = setTimeout(async () => {
         voxCountInTimerRef.current = null;
         try { voxClickSynthRef.current?.dispose(); } catch (_) {}
         voxClickSynthRef.current = null;
         voxCountingInRef.current = false;
         setVoxCountingIn(false);
 
-        const bus = getVoxBusNode?.();
-        if (!bus) { setToastMessage('Vox Modular audio not available.'); return; }
-        // Restart the Vox Modular sequence from the top + arm QWERTY into the Vox Modular keyboard.
-        resetVoxSequencers?.();
+        const liveApi = getVoxApi?.();
+        if (!liveApi?.setNoteTap) {
+          voxCaptureRef.current?.capture.cancel();
+          voxCaptureRef.current = null;
+          powerBackOff();
+          setToastMessage('Vox Modular not available.');
+          return;
+        }
+        // The power timer normally beat us here; if it ran late, power on now.
+        clearTimeout(voxPowerTimerRef.current);
+        voxPowerTimerRef.current = null;
+        try { await wakeRack(liveApi); } catch (_) {}
+        if (!liveApi.isPowered?.()) {
+          voxCaptureRef.current?.capture.cancel();
+          voxCaptureRef.current = null;
+          powerBackOff();
+          setToastMessage('The Vox Modular could not power on.');
+          return;
+        }
+        // Restart the Vox Modular sequence from the top + arm QWERTY into the Vox keyboard.
+        liveApi.resetSequencers?.();
         setVoxRecordingActive?.(true);
+        voxRecStartedAtRef.current = Date.now();
 
-        const recorder = new Tone.Recorder();
-        bus.connect(recorder);
-        recorder.start();
-        voxRecorderRef.current  = recorder;
-        voxBusNodeRef.current   = bus;
+        const cap = voxCaptureRef.current;
+        if (cap) {
+          // Audio take: keep everything from the downbeat — the Transport starts at
+          // exactly this audio time, so clip frame 0 IS the start bar.
+          voxRecordingRef.current = true;
+          setVoxRecording(true);
+          setVoxRecordSec(0);
+          voxTimerRef.current = setInterval(() => setVoxRecordSec(s => s + 1), 1000);
+          silenceAll();
+          recomputeFades();
+          const t = Tone.now();
+          cap.startTime = t;
+          cap.capture.begin(Math.round(t * cap.capture.sampleRate));
+          Tone.Transport.start(t);
+          setIsPlaying(true);
+          return;
+        }
+
+        const take = { startTicks: startBar * 4 * PPQ, open: new Map(), notes: [], steps: new Map() };
+        voxTakeRef.current = take;
+        // Engine take tap (useVoxAudio kbdNoteTapRef): keyboard on/off per voice group,
+        // and whole notes from the sequencers' played steps.
+        liveApi.setNoteTap((ev) => {
+          const ticksAt = (t) => Tone.Transport.getTicksAtTime(t);
+          if (ev.type === 'step') {
+            if (!take.steps.has(ev.src)) take.steps.set(ev.src, []);
+            take.steps.get(ev.src).push(ticksAt(ev.time));   // in time order — loops fire in order
+          } else if (ev.type === 'note') {
+            take.notes.push({ group: ev.group, hz: ev.hz, vel: ev.vel, src: ev.src,
+                              on: ticksAt(ev.time), off: ticksAt(ev.time + ev.dur),
+                              stepOff: ev.stepSec != null ? ticksAt(ev.time + ev.stepSec) : null });
+          } else if (ev.type === 'on') {
+            take.open.set(`${ev.key}|${ev.group}`,
+              { group: ev.group, hz: ev.hz, vel: ev.vel, key: ev.key, on: ticksAt(ev.time) });
+          } else {
+            const off = ticksAt(ev.time);
+            for (const [k, o] of take.open) {
+              if (o.key !== ev.key) continue;   // keys pressed before the take never opened
+              take.open.delete(k);
+              take.notes.push({ ...o, off });
+            }
+          }
+        });
         voxRecordingRef.current = true;
         setVoxRecording(true);
         setVoxRecordSec(0);
@@ -2853,40 +3280,44 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
         setIsPlaying(true);
       }, countInMs);
     } catch (err) {
+      clearTimeout(voxPowerTimerRef.current);
+      voxPowerTimerRef.current = null;
       voxCountingInRef.current = false;
       setVoxCountingIn(false);
+      voxCaptureRef.current?.capture.cancel();
+      voxCaptureRef.current = null;
+      powerBackOff();
       setToastMessage(`Modular recording error: ${err.message}`);
     }
-  }, [getVoxBusNode, isVoxPowered, resetVoxSequencers, setVoxRecordingActive, bpm, silenceAll, recomputeFades, updatePlayhead]);
+  }, [getVoxApi, ensureVoxApi, setVoxRecordingActive, bpm, silenceAll, recomputeFades, updatePlayhead, finishVoxTake, finishAudioTake, showToast]);
 
-  // Clean up recorder and audio players on unmount.
+  // Other pages show the take and can stop it (VoxRecIndicator, Phase 134).
+  useEffect(() => { setVoxRecControl(handleVoxRecord); }, [handleVoxRecord]);
+  useEffect(() => {
+    setVoxRecStatus(
+      voxCountingIn ? { phase: 'countin', mode: voxRecMode }
+      : voxRecording ? { phase: 'recording', mode: voxRecMode, startedAt: voxRecStartedAtRef.current }
+      : voxSavingAudio ? { phase: 'saving', mode: 'audio' }
+      : voxFreeze ? { phase: 'photo', mode: 'notes', done: voxFreeze.done, total: voxFreeze.total }
+      : null);
+  }, [voxCountingIn, voxRecording, voxSavingAudio, voxFreeze, voxRecMode]);
+
+  // Clean up on unmount: never leave the take tap set, the QWERTY armed, or a
+  // photograph running.
   useEffect(() => {
     return () => {
       clearInterval(voxTimerRef.current);
       clearTimeout(voxCountInTimerRef.current);
+      clearTimeout(voxPowerTimerRef.current);
       try { voxClickSynthRef.current?.dispose(); } catch (_) {}
-      setVoxRecordingActive?.(false); // never leave the Vox Modular QWERTY armed
-      if (voxRecorderRef.current) {
-        voxRecorderRef.current.stop().catch(() => {});
-        try { voxBusNodeRef.current?.disconnect(voxRecorderRef.current); } catch (_) {}
-      }
-      for (const [, player] of audioPlayersRef.current) {
-        try { player.stop(); player.dispose(); } catch (_) {}
-      }
-      audioPlayersRef.current.clear();
+      setVoxRecordingActive?.(false);
+      getVoxApi?.()?.setNoteTap?.(null);
+      voxFreezeAbortRef.current?.abort();
+      voxCaptureRef.current?.capture.cancel();
+      setVoxRecStatus(null);
+      setVoxRecControl(null);
     };
-  }, []);
-
-  // Dispose audio players whenever their region is deleted from the arrangement.
-  useEffect(() => {
-    for (const [regionId, player] of audioPlayersRef.current) {
-      if (!regions.find(r => r.id === regionId)) {
-        try { player.stop(); player.dispose(); } catch (_) {}
-        audioPlayersRef.current.delete(regionId);
-        audioBuffersByRegionId.current.delete(regionId);
-      }
-    }
-  }, [regions]);
+  }, [getVoxApi, setVoxRecordingActive]); // both stable (Root useCallback [])
 
   // ── BPM editing ──────────────────────────────────────────
   function handleBpmCommit() {
@@ -3551,13 +3982,14 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
               className={`${isBouncing ? styles.transportBtnActive : styles.transportBtn} ${styles.transportTextBtn}`}
               onClick={() => { setShowImportMenu(false); setShowExportMenu(v => !v); }}
               disabled={isBouncing}
-              title="Export audio bounce">
+              title="Export — mp3 / wav audio, a MIDI file of the notes, or the .voxdaw project">
               {isBouncing ? '[ bouncing… ]' : '[ export ]'}
             </button>
             {showExportMenu && !isBouncing && (
               <div className={styles.exportMenu}>
                 <button className={styles.exportMenuItem} onClick={() => handleExportAudio('mp3')}>mp3</button>
                 <button className={styles.exportMenuItem} onClick={() => handleExportAudio('wav')}>wav</button>
+                <button className={styles.exportMenuItem} onClick={handleExportMidi}>midi</button>
                 <button className={styles.exportMenuItem} onClick={handleExportProjectFile}>.voxdaw</button>
               </div>
             )}
@@ -4110,7 +4542,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
                     if (e.target.closest(`.${styles.region}`)) return;
                     const rect = e.currentTarget.getBoundingClientRect();
                     const measure = Math.max(0, Math.floor((e.clientX - rect.left) / pixelsPerMeasure));
-                    if (regions.some(r => r.trackId === t.id) && !isPositionOccupied(t.id, measure)) {
+                    if (!isAudioTrack(t) && regions.some(r => r.trackId === t.id) && !isPositionOccupied(t.id, measure)) {
                       const n = nextRegionIdRef.current++;
                       const newRegion = { id: `r${n}`, trackId: t.id, startMeasure: measure, durationMeasures: 1, clipOffset: 0, fadeIn: 0, fadeOut: 0, fadeInFloor: 0, fadeOutFloor: 0, loopInterval: null };
                       const result = applyDestructiveEdit(regionsRef.current, notesRef.current, newRegion);
@@ -4130,7 +4562,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
                       style={{
                         left:  `${r.startMeasure    * pixelsPerMeasure}px`,
                         width: `${r.durationMeasures * pixelsPerMeasure}px`,
-                        ...(r.hasAudio ? { borderTop: '2px solid #5DCAA5' } : {}),
+                        ...(isVoxInstrument(t.instrument) ? { borderTop: '2px solid #5DCAA5' } : {}),
                       }}
                       onMouseDownCapture={(e) => { capturedRegionStartRef.current = { x: e.clientX, y: e.clientY }; }}
                       onMouseDown={(e) => startRegionDrag(e, r, 'move')}
@@ -4141,7 +4573,27 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
                         setContextMenu({ x: e.clientX, y: e.clientY, targetType: 'region', targetId: r.id });
                       }}
                       onDoubleClick={(e) => { e.stopPropagation(); setEditingTrackId(r.trackId); }}>
-                      {r.hasAudio && (
+                      {/* Vox audio take (Phase 134): the recording's waveform through the region window. */}
+                      {isAudioRegion(r) && (
+                        <AudioRegionWave
+                          clipId={r.audio.clipId} secPerMeasure={r.audio.secPerMeasure}
+                          durationMeasures={r.durationMeasures} clipOffset={r.clipOffset ?? 0}
+                          loopInterval={r.loopInterval ?? null} loopPhase={r.loopPhase ?? 0}
+                          pixelsPerMeasure={pixelsPerMeasure} />
+                      )}
+                      {isAudioRegion(r) && (
+                        <div style={{
+                          position: 'absolute', top: 3, left: 6,
+                          fontSize: 8, fontWeight: 700, letterSpacing: '0.08em',
+                          color: '#5DCAA5',
+                          textShadow: '0 0 6px rgba(93,202,165,0.55)',
+                          pointerEvents: 'none', userSelect: 'none', zIndex: 2,
+                        }}>
+                          ∿ AUDIO
+                        </div>
+                      )}
+                      {/* Vox take (Phase 130): a track playing a photographed Vox patch. */}
+                      {isVoxInstrument(t.instrument) && (
                         <div style={{
                           position: 'absolute', top: 3, left: 6,
                           fontSize: 8, fontWeight: 700, letterSpacing: '0.08em',
@@ -4362,6 +4814,9 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
         </div>
       </div>
       {toastMessage && <div className={styles.toast}>{toastMessage}</div>}
+      {voxFreeze && (
+        <VoxPhotoBanner progress={voxFreeze} onCancel={() => voxFreezeAbortRef.current?.abort()} />
+      )}
 
       {/* ── Group effects rack (bottom dock, editor's slot) ── */}
       {editingGroupId && !editingTrackId && groupById.get(editingGroupId) && (
@@ -4435,6 +4890,7 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
               auditionRelease={auditionRelease}
               auditionReleaseAll={auditionReleaseAll}
               auditionPrime={auditionPrime}
+              isAudioTrack={isAudioTrack(editingTrack)}
             />
           </div>
         </>
@@ -4446,17 +4902,44 @@ export default function WorkstationShell({ onNavigateHome, theme, onThemeToggle,
           onClick={handlePlayPause} title="Play / Pause (Space)">▶</button>
         <button className={styles.transportBtn} onClick={handleStop} title="Stop">■</button>
         <button
-          className={(voxRecording || voxCountingIn) ? styles.transportBtnActive : styles.transportBtn}
+          className={(voxRecording || voxCountingIn || voxFreeze) ? styles.transportBtnActive : styles.transportBtn}
           onClick={handleVoxRecord}
           title={
-            voxCountingIn ? 'Count-in… (click to cancel)'
-            : voxRecording ? 'Stop Vox Modular recording'
-            : 'Record from Vox Modular — 1-bar count-in, then plays from the selected region'
+            voxFreeze ? 'Photographing the Vox patch into an instrument — click to cancel'
+            : voxCountingIn ? 'Count-in… (click to cancel)'
+            : voxRecording ? 'Stop the take'
+            : voxSavingAudio ? 'Saving the audio take…'
+            : voxRecMode === 'audio'
+              ? 'Record an AUDIO take of the Vox Modular — 1-bar count-in from the playhead\'s bar, then play and tweak the Vox (go to its page with vox ↗; it keeps recording). Every I/O input you use becomes an audio track.'
+              : 'Record a Vox Modular take — 1-bar count-in from the playhead\'s bar, then play the Vox keyboard. Becomes a new track with its own instrument.'
           }
           style={(voxRecording || voxCountingIn) ? { color: '#e04848' } : undefined}
         >
-          {voxCountingIn ? '● count-in…' : voxRecording ? `■ ${voxRecordSec}s` : '● MODULAR'}
+          {voxFreeze ? `◉ photo ${voxFreeze.done}/${voxFreeze.total}`
+            : voxSavingAudio ? '◉ saving…'
+            : voxCountingIn ? '● count-in…' : voxRecording ? `■ ${voxRecordSec}s` : '● MODULAR'}
         </button>
+        {/* What a take records (Vox Phase 134) — locked while one is running. */}
+        <div className={styles.voxModeToggle} role="group" aria-label="Vox take records">
+          {[
+            ['notes', 'notes', 'NOTES — records what you play as editable notes, then photographs the patch into an instrument. Knob moves during the take are not kept.'],
+            ['audio', 'audio', 'AUDIO — records the Vox Modular itself, live: every knob turn and patch change is in the recording. One audio track per I/O input; notes can\'t be edited.'],
+          ].map(([m, label, title]) => (
+            <button key={m}
+              className={voxRecMode === m ? styles.voxModeBtnActive : styles.voxModeBtn}
+              disabled={voxRecording || voxCountingIn || !!voxFreeze || voxSavingAudio}
+              onClick={() => changeVoxRecMode(m)}
+              title={title}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {onOpenVox && (
+          <button className={`${styles.transportBtn} ${styles.transportTextBtn}`} onClick={onOpenVox}
+            title="Go to the Vox Modular — a take keeps recording while you're there">
+            vox ↗
+          </button>
+        )}
       </div>
       <ContextMenu menu={contextMenu} onClose={closeContextMenu} onCommand={handleContextCommand} tracks={tracks} />
       {groupModal && (

@@ -2196,14 +2196,19 @@ function QuantizerModule({ number = 1, onParamUpdate, onSetCallback, onSetChordL
 const CHORD_DIVS   = ['2n', '1m', '2m', '4m'];
 const CHORD_LABELS = { '2n': '½ BAR', '1m': '1 BAR', '2m': '2 BAR', '4m': '4 BAR' };
 
-// Chord types mirror the CHORD_* entries added to SCALE_DEFS in useVoxAudio.js.
-// When a step fires, its chordType is sent to updateQuantizerParams({ scale: chordType })
-// so the quantizer snaps melody notes to chord tones instead of a diatonic scale.
-const CHORD_TYPES = ['CMAJ', 'CMIN', 'CDOM', 'CMAJ7', 'CMIN7', 'CSUS4', 'CDIM'];
+// Chord QUALITIES — mirror CHORD_QUALITIES in useVoxAudio.js (a key here must exist there).
+// There are no 7th-chord types (Vox Phase 129): a cable in the 7TH jack turns every step
+// into its quality's 7th chord — MAJ→maj7, min→min7, dom→dom7, sus4→7sus4, dim→dim7.
+// `dom` is a major triad that differs from MAJ only in the 7th it adds (♭7, not maj7).
+const CHORD_TYPES = ['CMAJ', 'CMIN', 'CDOM', 'CSUS4', 'CDIM'];
+// Keyed by the engine's chordLabelKey: the quality, plus '+7' while the 7TH is patched.
 const CHORD_TYPE_LABELS = {
-  CMAJ: 'MAJ', CMIN: 'min', CDOM: 'dom7',
-  CMAJ7: 'maj7', CMIN7: 'min7', CSUS4: 'sus4', CDIM: 'dim',
+  CMAJ: 'MAJ', CMIN: 'min', CDOM: 'dom', CSUS4: 'sus4', CDIM: 'dim',
+  'CMAJ+7': 'maj7', 'CMIN+7': 'min7', 'CDOM+7': 'dom7', 'CSUS4+7': '7sus4', 'CDIM+7': 'dim7',
 };
+// Steps saved before Phase 129 can say CMAJ7 / CMIN7 — they load as the plain quality.
+const LEGACY_CHORD_TYPES = { CMAJ7: 'CMAJ', CMIN7: 'CMIN' };
+const normChordType = (t) => LEGACY_CHORD_TYPES[t] ?? t;
 
 // 8-step chord sequencer — each step stores { rootClass, chordType }.
 // rootClass cycles through the 12 chromatic notes; chordType selects the chord quality.
@@ -2219,7 +2224,8 @@ const ROOT_OCT_TEXTS  = ROOT_OCT_STEPS.map(o => ROOT_OCT_LABELS[String(o)]);
 function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onClockDivChange, onSetCallback, onRootOctaveChange, onGlideChange }) {
   const p = number === 1 ? 'chordseq' : `chordseq${number}`; // jack prefix = engine instance id
   const saved = useSavedSettings(p);
-  const [steps, setSteps] = useState(() => saved.steps ??
+  const [steps, setSteps] = useState(() =>
+    saved.steps?.map(s => ({ ...s, chordType: normChordType(s.chordType) })) ??
     Array.from({ length: 8 }, (_, i) => ({
       rootClass: [9, 9, 5, 5, 0, 0, 4, 4][i],
       chordType: ['CMIN','CMIN','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ','CMAJ'][i],
@@ -2242,6 +2248,9 @@ function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onClockDi
   const { cables }  = useVoxPatch();
   const clkInJack   = `${p}-clk-in`;
   const extClocked  = cables.some(c => c.toJackId === clkInJack || c.fromJackId === clkInJack);
+  // A cable on 7TH makes every step a 7th chord (Phase 129) — the chips say so.
+  const sevenJack   = `${p}-7th-out`;
+  const with7       = cables.some(c => c.toJackId === sevenJack || c.fromJackId === sevenJack);
 
   useEffect(() => { onStepsChange?.(steps); },             [steps,       onStepsChange]);
   useEffect(() => { onDivisionChange?.(division); },       [division,    onDivisionChange]);
@@ -2338,11 +2347,11 @@ function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onClockDi
                 <button
                   className={styles.chordSeqType}
                   {...dragChipProps({
-                    values: CHORD_TYPES, current: step.chordType, wrap: true,
+                    values: CHORD_TYPES, current: normChordType(step.chordType), wrap: true,
                     onChange: v => setStepField(i, 'chordType', v) })}
-                  title="Drag up / down to change chord type — or click to step"
+                  title="Drag up / down to change chord type — or click to step. A cable in 7TH makes every chord a 7th chord."
                 >
-                  {CHORD_TYPE_LABELS[step.chordType]}
+                  {CHORD_TYPE_LABELS[normChordType(step.chordType) + (with7 ? '+7' : '')]}
                 </button>
                 {/* Mode lamp — same three-state contract and colours as the 960's step
                     switch: green lit = playing, dark = rest, red lit = skipped. */}
@@ -2403,9 +2412,9 @@ function ChordSeqModule({ number = 1, onStepsChange, onDivisionChange, onClockDi
             <Jack id={`${p}-root-out`} label="ROOT" />
             <Jack id={`${p}-3rd-out`}  label="3RD" />
             <Jack id={`${p}-5th-out`}  label="5TH" />
-            {/* 4th voice (Phase 91) — the 7th on a 7th chord, the octave on a triad.
-                Its value was always computed; without this jack the three 7th chord
-                types were audibly identical to their plain triads. */}
+            {/* 4th voice (Phase 91) — always the step quality's own 7th (Phase 129).
+                Patching it is also the switch that makes the chord a 7th chord for the
+                quantizer, the cv-in snapper and the labels. */}
             <Jack id={`${p}-7th-out`}  label="7TH" />
             {/* Gate + clock (Phase 92). GATE↑ fires on every PLAY chord, so a chord
                 change can trigger an envelope directly instead of borrowing a 960's
@@ -3990,8 +3999,33 @@ export default function VoxShell({ onNavigateHome, onBusReady, recordingActiveRe
       getBusNode:      () => audio.getVoxBusNode(),
       resetSequencers: audio.resetSequencers,
       isPowered:       audio.getIsPowered,
+      // Phase 135 — a take can start on a rack that's off / was never opened.
+      powerOn:         () => audio.powerOn({ startTransport: false }),
+      // Phase 135b — a take that switched the rack on switches it back off at the end.
+      powerOff:        audio.powerOff,
+      whenReady:       audio.whenReady,
+      // Vox Phase 130 — keyboard takes + photographing the patch into an instrument.
+      releaseAllKeys:  audio.releaseAllKeys,
+      suspendGlide:    audio.suspendKbdGlide,
+      setSpeakerMuted: audio.setSpeakerMuted,
+      setNoteTap:      audio.setKbdNoteTap,
+      hasTakeSources:  audio.hasTakeSources,
+      // Vox Phase 132 — photograph each voice group as its own source, per I/O channel.
+      photoNoteOn:     audio.photoNoteOn,
+      photoNoteOff:    audio.photoNoteOff,
+      photoGate:       audio.photoGate,
+      photoMute:       audio.photoMute,
+      setPhotoGroupLevels: audio.setPhotoGroupLevels,
+      getIoChannels:   audio.getIoChannels,
+      getMasterGain:   audio.getMasterGain,
+      // Fingerprint of the whole rack setup (modules, cables, every knob) — an
+      // unchanged rack reuses its last photograph instead of taking a new one.
+      getRackSnapshot: () => JSON.stringify(readRackStore()),
     });
-  }, [onBusReady, audio.getVoxBusNode, audio.resetSequencers, audio.getIsPowered]);
+  }, [onBusReady, audio.getVoxBusNode, audio.resetSequencers, audio.getIsPowered, audio.powerOn, audio.powerOff, audio.whenReady,
+      audio.releaseAllKeys, audio.setKbdNoteTap, audio.hasTakeSources, audio.suspendKbdGlide,
+      audio.setSpeakerMuted, audio.photoNoteOn, audio.photoNoteOff, audio.photoGate, audio.photoMute,
+      audio.setPhotoGroupLevels, audio.getIoChannels, audio.getMasterGain]);
 
   // The EXT chord-name label used to be wired from here: one shell-owned ref handed
   // to quantizer #1, written by a callback bound to chord seq #1. Every QuantizerModule

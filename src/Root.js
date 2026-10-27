@@ -5,6 +5,7 @@ import App from './App';
 import WorkstationShell from './components/Workstation/WorkstationShell';
 import VoxModular from './components/VoxModular/VoxShell';
 import AIInstrumentGenerator from './components/AIGen/AIInstrumentGenerator';
+import VoxRecIndicator from './components/Workstation/VoxRecIndicator';
 
 const THEME_KEY = 'voxdaw.theme';
 
@@ -85,6 +86,28 @@ export default function Root() {
   const resetVoxSequencers = useCallback(() => voxApiRef.current?.resetSequencers?.(), []);
   const isVoxPowered       = useCallback(() => voxApiRef.current?.isPowered?.() ?? false, []);
   const setVoxRecordingActive = useCallback((v) => { voxRecordingActiveRef.current = !!v; }, []);
+  // Vox Phase 130: the whole registered surface (keyboard take tap, note on/off for the
+  // photographer, rack fingerprint) — null until the Vox Modular page has mounted.
+  const getVoxApi = useCallback(() => voxApiRef.current ?? null, []);
+  // Phase 135: a Vox take can start before the Vox Modular page was ever opened.
+  // Mount it (hidden, like every visited page) and resolve once it has registered.
+  const voxWaitersRef = useRef([]);
+  const onVoxBusReady = useCallback((api) => {
+    voxApiRef.current = api;
+    const waiters = voxWaitersRef.current;
+    voxWaitersRef.current = [];
+    waiters.forEach(resolve => resolve(api));
+  }, []);
+  const ensureVoxApi = useCallback(() => {
+    if (voxApiRef.current) return Promise.resolve(voxApiRef.current);
+    setVisited(prev => {
+      if (prev.has('voxmodular')) return prev;
+      const next = new Set(prev);
+      next.add('voxmodular');
+      return next;
+    });
+    return new Promise(resolve => voxWaitersRef.current.push(resolve));
+  }, []);
 
   // Returns display:none style for any page that isn't active; undefined (no style) otherwise.
   const hide = (p) => page !== p ? { display: 'none' } : undefined;
@@ -128,6 +151,9 @@ export default function Root() {
             resetVoxSequencers={resetVoxSequencers}
             isVoxPowered={isVoxPowered}
             setVoxRecordingActive={setVoxRecordingActive}
+            getVoxApi={getVoxApi}
+            ensureVoxApi={ensureVoxApi}
+            onOpenVox={() => navigate('voxmodular')}
             pendingProject={pendingProject}
           />
         </div>
@@ -138,10 +164,16 @@ export default function Root() {
         <div style={hide('voxmodular')}>
           <VoxModular
             onNavigateHome={() => navigate('home')}
-            onBusReady={(api) => { voxApiRef.current = api; }}
+            onBusReady={onVoxBusReady}
             recordingActiveRef={voxRecordingActiveRef}
           />
         </div>
+      )}
+
+      {/* A Vox take keeps recording on every page (Vox Phase 134) — this pill shows it
+          and stops it anywhere but the Workstation, which has its own button. */}
+      {visited.has('workstation') && page !== 'workstation' && (
+        <VoxRecIndicator onGoToWorkstation={() => navigate('workstation')} />
       )}
 
       {/* AI Instrument Generator — mounted on first visit, kept alive like the rest */}

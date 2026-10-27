@@ -3,6 +3,7 @@ import styles from './HomePage.module.css';
 import ProjectCard from './ProjectCard';
 import { listProjects, getProject, saveProject, deleteProject, renameProject, listPreviewMetas, getPreviewWav, copyPreview } from '../../utils/projectStore';
 import { deserializeProject, downloadJSON, readJSONFile, hashProjectData } from '../Workstation/projectIO';
+import { withVoxSamples, ingestVoxSamples } from '../Workstation/voxSamplePack';
 import { THEME_ORDER, THEME_GLYPHS, THEME_LABELS, nextTheme } from '../../utils/theme';
 
 export default function HomePage({ onNavigate, onOpenProject, theme, onThemeToggle, onThemeSelect, active }) {
@@ -149,7 +150,7 @@ export default function HomePage({ onNavigate, onOpenProject, theme, onThemeTogg
       const record = await getProject(id);
       if (!record) throw new Error('project not found');
       const filename = `${(record.name || 'project').replace(/[/\\:*?"<>|]/g, '').trim() || 'project'}.voxdaw`;
-      downloadJSON(record.data, filename);
+      downloadJSON(await withVoxSamples(record.data), filename); // + vox take samples (Phase 130)
     } catch (e) {
       console.error('download failed', e);
       showToast(`download failed: ${e.message}`);
@@ -161,7 +162,8 @@ export default function HomePage({ onNavigate, onOpenProject, theme, onThemeTogg
   const handleImport = useCallback(async (file) => {
     if (!file) return;
     try {
-      const raw = await readJSONFile(file);
+      // Vox take samples go to the sample store; the stored record never holds them.
+      const { raw } = await ingestVoxSamples(await readJSONFile(file));
       const data = deserializeProject(raw);
       const fallbackName = file.name.replace(/\.(voxdaw|json)$/i, '') || 'untitled';
       const name = data.name !== 'untitled' ? data.name : fallbackName;

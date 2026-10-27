@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import * as Tone from 'tone';
-import { makeSynth, makeGlideVoice, applyEnvelope, defaultEnvelopeFor, customMaxRelease, isSampledInstrument, isCustomInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
+import { makeSynth, makeGlideVoice, applyEnvelope, defaultEnvelopeFor, customMaxRelease, isSampledInstrument, isCustomInstrument, isVoxInstrument, isDrumKit, chokeTargetsFor } from '../components/Workstation/synthFactory';
 import { getSampleStatus, primeSampleSet, subscribeSampleSets } from '../components/Workstation/customSampleStore';
 import { makeFx } from '../components/Workstation/fxChain';
 import { HEAVY_EFFECT_TYPES, EFFECT_DEFS, metaForTarget } from '../components/Workstation/effectDefs';
@@ -10,6 +10,8 @@ import {
 } from '../components/Workstation/automationMath';
 import { buildTempoMap, tempoPointsOf, tempoScheduleOps } from '../components/Workstation/tempoMath';
 import { firstLoopOffsetMeasures } from '../components/Workstation/loopMath';
+import { isAudioRegion, audioRegionPlan } from '../components/Workstation/audioClipMath';
+import { getClip, getClipStatus, primeClip, subscribeClips } from '../components/Workstation/voxClipStore';
 import {
   compileGlideChains, clipSegments, segmentsAreInert, planGlideSegments,
 } from '../components/Workstation/glideMath';
@@ -20,6 +22,8 @@ import {
  * Per-region signal flow:
  *   regionSynth → regionFadeGain → trackVolumeGain → trackPanner
  *     → [insert FX wrappers, track.effects order] → trackMuteGain → Destination
+ *   (an AUDIO region — Vox Phase 134 — has no synth/Part: its clip's buffer
+ *    sources feed the same regionFadeGain; see scheduleRegionAudio)
  *
  * - regionFadeGain runs a per-region linear fade envelope (in→out, with floors).
  *   Scheduled via Tone.Transport.schedule so it fires synchronously with the
@@ -59,7 +63,10 @@ export const clampPan = (v) => Math.max(-1, Math.min(1, v));
 // composite anyway, and the prime completion re-runs the reconciler to swap).
 // Consulted by the region reconciler (#4) and the audition cache.
 function synthKeyFor(t) {
-  const sampled = t.useSampled && getSampleStatus(t.instrument) === 'ready';
+  // Vox takes (Phase 130) are always sampled — 'L' is only their default-synth
+  // stand-in while the set isn't decoded.
+  const sampled = (t.useSampled || isVoxInstrument(t.instrument))
+    && getSampleStatus(t.instrument) === 'ready';
   return `${t.instrument}|${sampled ? 'S' : 'L'}`;
 }
 
@@ -234,6 +241,13 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   const fadeEventIdByRegionRef = useRef(new Map()); // regionId → Transport schedule id
   const appliedRegionStateRef  = useRef(new Map()); // regionId → { instrument, partKey, fadeKey, loaded }
 
+  // Audio regions (Vox Phase 134): one-shot buffer sources per region, started
+  // in absolute audio time from the Transport's own start/stop events (+ every
+  // re-anchor: seek, tempo edit, region edit). The scheduler below is their
+  // SINGLE writer; silenceAll / stop / pause cut them.
+  const audioSourcesByRegionIdRef = useRef(new Map()); // regionId → Map(ToneBufferSource → startAt)
+  const lastTransportStartRef     = useRef(0);         // audio time of the latest 'start' event
+
   // Live sampler buffer sources, tracked by us because Tone.Sampler forgets
   // them at schedule time (see makePartCallback). Consumed by silenceAll.
   const liveSamplerSourcesRef  = useRef(new Set()); // ToneBufferSource
@@ -304,11 +318,81 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
   useEffect(() => subscribeSampleSets(() => setSampleSetsVersion(v => v + 1)), []);
   useEffect(() => {
     for (const t of tracks) {
-      if (t.useSampled && isCustomInstrument(t.instrument) && getSampleStatus(t.instrument) === 'unknown') {
+      if (((t.useSampled && isCustomInstrument(t.instrument)) || isVoxInstrument(t.instrument))
+          && getSampleStatus(t.instrument) === 'unknown') {
         primeSampleSet(t.instrument);
       }
     }
   }, [tracks]);
+
+  // Recorded audio clips (voxClipStore): same version-bump pattern — a clip that
+  // finishes decoding re-runs the reconciler, which starts it if playing.
+  const [clipsVersion, setClipsVersion] = useState(0);
+  useEffect(() => subscribeClips(() => setClipsVersion(v => v + 1)), []);
+  useEffect(() => {
+    for (const r of regions) {
+      if (isAudioRegion(r) && getClipStatus(r.audio.clipId) === 'unknown') primeClip(r.audio.clipId);
+    }
+  }, [regions]);
+
+  // ── Audio-region scheduler ─────────────────────────────────────────────
+  // Cut a region's sources at `at`: a started one fades out (no click), one
+  // still waiting to start is simply dropped.
+  const stopRegionAudio = useCallback((regionId, at) => {
+    const srcs = audioSourcesByRegionIdRef.current.get(regionId);
+    if (!srcs) return;
+    for (const [src, startAt] of srcs) {
+      if (src.disposed) continue;
+      try {
+        if (startAt > at + AUDIO_EDGE_FADE) { src.disconnect(); src.dispose(); }
+        else { src.fadeOut = AUDIO_EDGE_FADE; src.stop(at); }
+      } catch (_) { /* already ended */ }
+    }
+    srcs.clear();
+  }, []);
+  // (Re)start one audio region from audio time `t` (the Transport must be running
+  // at t): what's left of every window part, through the CURRENT tempo map.
+  const scheduleRegionAudio = useCallback((r, t) => {
+    stopRegionAudio(r.id, t);
+    if (!isAudioRegion(r)) return;
+    const clip = getClip(r.audio.clipId);
+    const fadeGain = fadeGainsByRegionIdRef.current.get(r.id);
+    if (!clip || !fadeGain || fadeGain.disposed) return;
+    let srcs = audioSourcesByRegionIdRef.current.get(r.id);
+    if (!srcs) { srcs = new Map(); audioSourcesByRegionIdRef.current.set(r.id, srcs); }
+    const map = tempoMapRef.current;
+    const nowSec = map.secondsAtMeasure(Tone.Transport.getTicksAtTime(t) / (Tone.Transport.PPQ * 4));
+    for (const seg of audioRegionPlan(r, map, clip.durationSec)) {
+      if (seg.endSec <= nowSec + 1e-3) continue;
+      const into = Math.max(0, nowSec - seg.startSec);
+      const at = t + Math.max(0, seg.startSec - nowSec);
+      const dur = seg.endSec - seg.startSec - into;
+      const src = new Tone.ToneBufferSource({ url: clip.buffer, fadeIn: AUDIO_EDGE_FADE, fadeOut: AUDIO_EDGE_FADE });
+      src.connect(fadeGain);
+      src.onended = () => { srcs.delete(src); setTimeout(() => { if (!src.disposed) src.dispose(); }, 0); };
+      src.start(at, seg.offsetSec + into, dur);
+      srcs.set(src, at);
+      noteLifecycleRef.current.onNoteScheduled(r.trackId, at, dur);
+    }
+  }, [stopRegionAudio]);
+
+  useEffect(() => {
+    const onStart = (time) => {
+      lastTransportStartRef.current = time;
+      for (const r of regionsRef.current) if (isAudioRegion(r)) scheduleRegionAudio(r, time);
+    };
+    const onStop = (time) => {
+      for (const rid of audioSourcesByRegionIdRef.current.keys()) stopRegionAudio(rid, time);
+    };
+    Tone.Transport.on('start', onStart);
+    Tone.Transport.on('stop', onStop);
+    Tone.Transport.on('pause', onStop);
+    return () => {
+      Tone.Transport.off('start', onStart);
+      Tone.Transport.off('stop', onStop);
+      Tone.Transport.off('pause', onStop);
+    };
+  }, [scheduleRegionAudio, stopRegionAudio]);
 
   // Sampler-load tracking: which regions are still downloading buffers,
   // and the derived per-track set for the UI loading indicator.
@@ -662,7 +746,11 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     for (const g of groups) {
       if (mutesG.has(g.id)) continue;
       const mute = new Tone.Gain(1).toDestination();
-      const pan  = new Tone.Panner(0).connect(mute); // inert glue — group pan is a member offset
+      // Inert glue — group pan is a member offset, so this stays at 0. STEREO
+      // (channelCount 2): at pan 0 a stereo panner is a pure passthrough, where
+      // Tone's default mono panner summed the whole bus to mono and cost it
+      // −3 dB (Phase 134c — grouped tracks keep their stereo and level).
+      const pan  = new Tone.Panner({ pan: 0, channelCount: 2 }).connect(mute);
       const vol  = new Tone.Gain(volForSliderValue(g.volume ?? 75)).connect(pan);
       const gin  = new Tone.Gain(1).connect(vol);
       mutesG.set(g.id, mute);
@@ -713,9 +801,16 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       }
     }
     for (const t of tracks) {
-      if (mutes.has(t.id)) continue;
+      if (mutes.has(t.id)) {
+        // A track that became / stopped being a Vox track (instrument change)
+        // switches its panner between stereo and mono — see trackPanChannels.
+        const p = panners.get(t.id);
+        const ch = trackPanChannels(t);
+        if (p && !p.disposed && p.channelCount !== ch) p.channelCount = ch;
+        continue;
+      }
       const mute   = new Tone.Gain(1).toDestination();
-      const pan    = new Tone.Panner(t.pan ?? 0).connect(mute);
+      const pan    = new Tone.Panner({ pan: t.pan ?? 0, channelCount: trackPanChannels(t) }).connect(mute);
       const volume = new Tone.Gain(volForSliderValue(t.volume ?? 75)).connect(pan);
       mutes.set(t.id, mute);
       panners.set(t.id, pan);
@@ -1150,9 +1245,11 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     const liveIds  = new Set(regions.map(r => r.id));
     const trackById = new Map(tracks.map(t => [t.id, t]));
 
-    // Dispose removed regions
-    for (const id of [...synths.keys()]) {
+    // Dispose removed regions (every region — note or audio — owns a fadeGain)
+    for (const id of [...fades.keys()]) {
       if (liveIds.has(id)) continue;
+      stopRegionAudio(id, Tone.now());
+      audioSourcesByRegionIdRef.current.delete(id);
       const evtId = fadeIds.get(id);
       if (evtId != null) Tone.Transport.clear(evtId);
       parts.get(id)?.dispose();
@@ -1198,6 +1295,35 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       if (!trackVolume) continue; // race during initial mount — will reconcile on next pass
 
       const prev = applied.get(r.id);
+
+      // Audio region (Vox Phase 134): a fadeGain and its clip's sources — no synth,
+      // no Part. Any edit that changes what it plays re-anchors it mid-play.
+      if (isAudioRegion(r)) {
+        const fadeKey = computeFadeKey(r);
+        const audioKey = `${r.audio.clipId}|${getClipStatus(r.audio.clipId)}|${r.audio.secPerMeasure}|${r.startMeasure}|${r.durationMeasures}|${r.clipOffset ?? 0}|${r.loopInterval ?? 'n'}|${r.loopPhase ?? 0}|${r.isMuted ? 'm' : ''}`;
+        if (synths.has(r.id)) { synths.get(r.id).dispose(); synths.delete(r.id); }
+        if (parts.has(r.id)) { parts.get(r.id).dispose(); parts.delete(r.id); }
+        if (!fades.has(r.id)) {
+          fades.set(r.id, new Tone.Gain(1).connect(trackVolume));
+        } else if (prev && prev.trackId !== r.trackId) {
+          const fadeGain = fades.get(r.id);
+          fadeGain.disconnect();
+          fadeGain.connect(trackVolume);
+        }
+        if (!prev || prev.fadeKey !== fadeKey) {
+          const prevEvt = fadeIds.get(r.id);
+          if (prevEvt != null) Tone.Transport.clear(prevEvt);
+          const evtId = scheduleFadeEnvelope(fades.get(r.id), r, tempoMapRef);
+          if (evtId != null) fadeIds.set(r.id, evtId);
+          else               fadeIds.delete(r.id);
+        }
+        if ((!prev || prev.audioKey !== audioKey) && Tone.Transport.state === 'started') {
+          scheduleRegionAudio(r, audioRefTime(lastTransportStartRef));
+        }
+        applied.set(r.id, { instrument: track.instrument, synthKey: 'audio', partKey: '', fadeKey, audioKey, loaded: true, trackId: r.trackId });
+        continue;
+      }
+
       const partKey = computePartKey(r, notes);
       const fadeKey = computeFadeKey(r);
       // synthKey = instrument + sampled/live engine — a useSampled toggle (or
@@ -1234,13 +1360,11 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
         }
       }
 
-      // (Re)build Part. A region with a live Vox Modular recording (hasAudio) plays via
-      // its Tone.Player in WorkstationShell — its transcription notes are silenced
-      // here so the two don't layer (the transcription is for piano-roll editing).
+      // (Re)build Part.
       if (partChanged || synthChanged) {
         const existing = parts.get(r.id);
         if (existing) { existing.dispose(); parts.delete(r.id); }
-        const events = r.hasAudio ? [] : buildRegionEvents(r, notes);
+        const events = buildRegionEvents(r, notes);
         if (events.length > 0) {
           const synth = synths.get(r.id);
           const part = new Tone.Part(
@@ -1273,7 +1397,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     }
     // sampleSetsVersion: a finished primeSampleSet flips synthKeyFor to 'S',
     // and this re-run performs the live→Sampler hot swap.
-  }, [tracks, regions, notes, bpm, sampleSetsVersion, recomputeLoadingTrackIds, disposeGlidePool]);
+  }, [tracks, regions, notes, bpm, sampleSetsVersion, clipsVersion, recomputeLoadingTrackIds, disposeGlidePool, scheduleRegionAudio, stopRegionAudio]);
 
   // Silence in-flight voices on pause/stop/seek (Tone.Transport.pause keeps
   // tails alive). Three layers:
@@ -1322,6 +1446,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       }
     }
     liveSamplerSourcesRef.current.clear();
+    for (const rid of audioSourcesByRegionIdRef.current.keys()) stopRegionAudio(rid, audioNow);
     const hardCutSynth = (s) => {
       if (!s || s.disposed) return;
       if (s._activeSources) {
@@ -1365,7 +1490,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       g.gain.setValueAtTime(g.gain.value, audioNow);
       g.gain.linearRampToValueAtTime(0, audioNow + HARD_CUT_SEC);
     }
-  }, []);
+  }, [stopRegionAudio]);
 
   // Reset every region's fade gain to its correct value at the current Transport
   // position. Schedules the remaining envelope ramps in absolute AudioContext
@@ -1419,7 +1544,13 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     // recomputeFades' 7 call sites in the shell cover every transport
     // transition, so automation needs zero new shell wiring.
     recomputeAutomation();
-  }, [recomputeTempo, recomputeAutomation]);
+    // Audio regions ride the same moments: a seek / tempo edit / undo while
+    // playing restarts them from the new place (stopped → the 'start' event will).
+    if (Tone.Transport.state === 'started') {
+      const t = audioRefTime(lastTransportStartRef);
+      for (const r of regionsRef.current) if (isAudioRegion(r)) scheduleRegionAudio(r, t);
+    }
+  }, [recomputeTempo, recomputeAutomation, scheduleRegionAudio]);
 
   // ── 1f. Tempo sync — re-anchor the bpm curve (and everything that consumes
   // the tempo map: fades + automation) when the global tempo lane or the base
@@ -1451,6 +1582,7 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     const fxBypApp = appliedFxBypassByIdRef.current;
     const fxParApp = appliedFxParamsByIdRef.current;
     const liveSrcs = liveSamplerSourcesRef.current;
+    const audioSrcs = audioSourcesByRegionIdRef.current;
     const glidePools = glideVoicesByRegionIdRef.current;
     const auditions = auditionByTrackIdRef.current;
     const muteConns = muteConnByTrackIdRef.current;
@@ -1474,8 +1606,8 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
     const groupKeyApp  = appliedFxKeyByGroupIdRef.current;
     const outApp       = appliedOutputByTrackIdRef.current;
     return () => {
-      // Transport.cancel(0) below wipes the automation schedules — reset the
-      // delta keys so a remount (StrictMode's simulated one included) re-runs
+      // The automation schedules are cleared below — reset the delta keys so a
+      // remount (StrictMode's simulated one included) re-runs
       // recomputeAutomation/recomputeTempo instead of skipping on stale matches.
       appliedAutoKey.current = '';
       appliedTempoKey.current = '';
@@ -1485,7 +1617,8 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       tails.clear();
       actives.clear();
       liveSrcs.clear(); // sources die with their synths below
-      steppedId.current = null; // Transport.cancel(0) below clears the repeat
+      if (steppedId.current != null) Tone.Transport.clear(steppedId.current);
+      steppedId.current = null;
       steppedTargets.current = [];
       prevAutomated.current.clear();
       Tone.Transport.stop();
@@ -1494,13 +1627,21 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
       // — leftover tempo ramps would warp it. Restore the flat base bpm.
       // Runs AFTER stop() so the timeline wipe never happens under a running
       // clock (a mid-ramp cancel would corrupt the tick integral — see
-      // recomputeTempo); with the transport stopped, cancel(0) + flat reset
-      // is safe.
+      // recomputeTempo); with the transport stopped, the flat reset is safe.
+      //
+      // NEVER Transport.cancel(0) here (Phase 135): the Transport is SHARED, and a
+      // blanket cancel also wiped the Vox Modular's sequencer Loops. A Loop whose
+      // events are gone stays "started" and never fires again, so every 960 /
+      // chord sequencer froze until a power cycle. StrictMode's simulated unmount
+      // ran this on the Workstation's FIRST open. Clear only what this hook
+      // scheduled: the stepped-automation repeat (above), the fade envelopes
+      // (below), and the Parts (dispose clears their events).
       Tone.Transport.bpm.cancelScheduledValues(0);
       Tone.Transport.bpm.value = bpmR.current;
-      Tone.Transport.cancel(0);
       for (const id of fadeIds.values()) Tone.Transport.clear(id);
       for (const p of parts.values())   p.dispose();
+      for (const srcs of audioSrcs.values()) for (const src of srcs.keys()) { if (!src.disposed) src.dispose(); }
+      audioSrcs.clear();
       for (const e of auditions.values()) e.synth.dispose();
       auditions.clear();
       for (const s of synths.values())  s.dispose();
@@ -1555,6 +1696,27 @@ export default function useWorkstationAudio({ tracks, regions, notes, bpm, perfo
 // `map` is a tempoMath buildTempoMap result — boundaries land on the region's
 // measure positions through any tempo curve; the fade itself stays linear in
 // seconds (what the scheduled Web Audio ramps actually do).
+// How many channels a track's panner takes in. Tone.Panner defaults to ONE: it
+// sums its input to mono before panning, so a stereo source loses its stereo —
+// a BBD chorus (L/R swept in opposite phase) and a reverb (decorrelated L/R)
+// partly CANCEL in that sum, and a mono source comes out −3 dB at centre.
+// Vox audio takes and Vox-photographed instruments carry the rack's real
+// stereo (and its level: the live rack reaches the speakers L = R = x), so
+// their panner is stereo — pan 0 passes them through untouched, exactly as heard
+// live (Vox Phase 134b). Every other track keeps the mono panner, so existing
+// mixes don't change level.
+export function trackPanChannels(t) {
+  return (t?.instrument === 'audio' || isVoxInstrument(t?.instrument)) ? 2 : 1;
+}
+
+// Audio-region edges fade this long (a mid-clip start after a seek, a cut on stop).
+const AUDIO_EDGE_FADE = 0.005;
+// Where the running Transport can be read from: a seek-while-playing restarts the
+// clock a tick AFTER now, and until that moment it still reports the old place.
+function audioRefTime(lastStartRef) {
+  return Math.max(Tone.now(), lastStartRef.current);
+}
+
 export function computeFadeGainAt(r, transportSec, map) {
   const startSec  = map.secondsAtMeasure(r.startMeasure);
   const endSec    = map.secondsAtMeasure(r.startMeasure + r.durationMeasures);
@@ -1980,10 +2142,8 @@ export function scheduleFadeEnvelope(fadeGain, r, mapRef) {
 
 // Internal — change-detection keys
 function computePartKey(r, notes) {
-  // Anything that buildRegionEvents reads. `hasAudio` is included so a region
-  // that gains/loses a live Vox Modular recording rebuilds its Part — its transcription
-  // notes are silenced while the recorded audio plays (they're edit-only).
-  let key = `${r.id}|${r.startMeasure}|${r.durationMeasures}|${r.clipOffset ?? 0}|${r.loopInterval ?? 'n'}|${r.loopPhase ?? 0}|${r.isMuted ? 'm' : ''}|${r.hasAudio ? 'A' : ''}`;
+  // Anything that buildRegionEvents reads.
+  let key = `${r.id}|${r.startMeasure}|${r.durationMeasures}|${r.clipOffset ?? 0}|${r.loopInterval ?? 'n'}|${r.loopPhase ?? 0}|${r.isMuted ? 'm' : ''}`;
   for (const n of notes) {
     if (n.regionId !== r.id) continue;
     key += `|${n.id}:${n.note}:${n.startBeat.toFixed(4)}:${n.durationBeats.toFixed(4)}:${n.velocity ?? 100}`;

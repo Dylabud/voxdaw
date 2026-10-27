@@ -1,0 +1,72 @@
+/* Vox take photograph progress (Vox Phase 131). Theme tokens only, so it follows
+   dark / slate / light like the toast it sits above. */
+.banner {
+  position: fixed;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(520px, calc(100vw - 32px));
+  box-sizing: border-box;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-mid);
+  border-radius: 4px;
+  padding: 10px 14px 9px;
+  color: var(--text-primary);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  z-index: 210;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eta {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.cancel {
+  flex: 0 0 auto;
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-mid);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font: inherit;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.cancel:hover { border-color: var(--accent-color); color: var(--accent-color); }
+
+.track {
+  margin-top: 8px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-mid);
+  overflow: hidden;
+}
+
+.fill {
+  height: 100%;
+  background: var(--accent-color);
+  transition: width 0.4s ease;
+}
+
+.hint {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}

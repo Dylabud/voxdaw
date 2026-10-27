@@ -5,7 +5,7 @@ import DrumKitPanel from './DrumKitPanel';
 import KeyboardPanel from './KeyboardPanel';
 import RotaryKnob from './RotaryKnob';
 import { DRUM_KITS, isDrumKit } from '../drumKits';
-import { isSampledInstrument, isCustomInstrument, defaultEnvelopeFor } from '../synthFactory';
+import { isSampledInstrument, isCustomInstrument, isVoxInstrument, defaultEnvelopeFor } from '../synthFactory';
 import { getSampleStatus } from '../customSampleStore';
 
 /**
@@ -219,7 +219,8 @@ export default function InstrumentPanel({
   // it joins the attack/release-only surface.
   const custom = isCustomInstrument(instrument);
   const customSampled    = custom && useSampled;
-  const sampledMelodic   = !drums && (isSampledInstrument(instrument) || customSampled);
+  // A vox take (Phase 130) is always a Tone.Sampler.
+  const sampledMelodic   = !drums && (isSampledInstrument(instrument) || customSampled || isVoxInstrument(instrument));
   const showDecaySustain = !drums && !sampledMelodic;
   const defEnv = defaultEnvelopeFor(instrument, { useSampled: customSampled }) || {};
   const curEnv = { ...defEnv, ...(envelope || {}) };

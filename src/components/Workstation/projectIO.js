@@ -2,11 +2,12 @@
 
 import { EFFECT_DEFS, isAutomatableParam } from './effectDefs';
 import { sanitizeGlide } from './glideMath';
+import { isClipId } from './audioClipMath';
 
 const SCHEMA_VERSION = 1;
 const KIND = 'voxdaw-project';
 
-export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, name, globalAutomations, groups, customInstruments }) {
+export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, name, globalAutomations, groups, customInstruments, voxInstruments }) {
   return {
     version: SCHEMA_VERSION,
     kind: KIND,
@@ -21,6 +22,13 @@ export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, n
     // for unknown instrument ids).
     ...(Array.isArray(customInstruments) && customInstruments.length
       ? { customInstruments: customInstruments.map(ci => ({ id: ci.id, name: ci.name, patch: ci.patch })) }
+      : {}),
+    // Vox take instrument defs (Vox Phase 130) — names only; the photographed
+    // WAVs ride a downloaded file's top-level `voxSamples` (voxSamplePack.js),
+    // never this payload (it is also the IndexedDB save + the preview hash).
+    // Additive, SCHEMA_VERSION NOT bumped.
+    ...(Array.isArray(voxInstruments) && voxInstruments.length
+      ? { voxInstruments: voxInstruments.map(vi => ({ id: vi.id, name: vi.name, rackHash: vi.rackHash ?? null, photoKey: vi.photoKey ?? null, createdAt: vi.createdAt, format: vi.format ?? 1 })) }
       : {}),
     // Global automation lanes (tempo) — optional, additive.
     ...(Array.isArray(globalAutomations) && globalAutomations.length
@@ -89,6 +97,10 @@ export function serializeProject({ bpm, totalMeasures, tracks, regions, notes, n
       loopInterval: r.loopInterval ?? null,
       loopPhase: r.loopPhase ?? 0,
       isMuted: !!r.isMuted,
+      // Audio region (Vox Phase 134) — the clip id only; its WAVs ride a
+      // downloaded file's top-level `voxClips` (voxSamplePack.js). Additive,
+      // SCHEMA_VERSION NOT bumped (an older app sees an empty region).
+      ...(r.audio ? { audio: { clipId: r.audio.clipId, secPerMeasure: r.audio.secPerMeasure } } : {}),
     })),
     notes: notes.map(n => {
       // Glide is additive too (SCHEMA_VERSION intentionally NOT bumped) and
@@ -145,6 +157,9 @@ export function deserializeProject(raw) {
     loopInterval: r.loopInterval == null ? null : Number(r.loopInterval),
     loopPhase: Number(r.loopPhase) || 0,
     isMuted: !!r.isMuted,
+    ...(isClipId(r.audio?.clipId) && Number(r.audio.secPerMeasure) > 0
+      ? { audio: { clipId: r.audio.clipId, secPerMeasure: Number(r.audio.secPerMeasure) } }
+      : {}),
   }));
 
   // ── Note repair pass ──────────────────────────────────────────────────
@@ -239,6 +254,11 @@ export function deserializeProject(raw) {
       ? raw.customInstruments
           .filter(ci => ci && typeof ci.id === 'string' && ci.patch)
           .map(ci => ({ id: ci.id, name: String(ci.name ?? 'Custom'), patch: ci.patch }))
+      : [],
+    // Vox take defs (additive, Phase 130) — registered by the load path; the
+    // registry cleans each field.
+    voxInstruments: Array.isArray(raw.voxInstruments)
+      ? raw.voxInstruments.filter(vi => vi && typeof vi.id === 'string')
       : [],
     nextId:       nextSuffix(tracks),
     nextRegionId: nextSuffix(regions),

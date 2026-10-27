@@ -6,6 +6,7 @@ import { KEYS, KEY_H, PIANO_ROLL_H } from '../pitchKeys';
 import { firstLoopOffsetMeasures } from '../loopMath';
 import { SYNTH_INSTRUMENTS, SAMPLED_MELODIC_NAMES, DRUM_KIT_NAMES, isDrumKit } from '../synthFactory';
 import { customInstrumentList } from '../customInstruments';
+import { voxInstrumentList } from '../voxInstruments';
 import {
   normalizeGlide, indexNotesByStartTick, resolveGlideTarget,
   svgPathFor, tensionHandlePoint, keyIndexOf, TENSION_LIMIT,
@@ -72,9 +73,13 @@ export default function RegionEditor({
   auditionRelease,
   auditionReleaseAll,
   auditionPrime,
+  isAudioTrack = false,
 }) {
   const [instrument,        setInstrument]        = useState(track?.instrument ?? 'fm pluck');
-  const [activeTab,         setActiveTab]         = useState('notes');
+  const [chosenTab,         setActiveTab]         = useState('notes');
+  // An audio track (a Vox audio take, Phase 134) has no notes or instrument to
+  // edit — only its effects.
+  const activeTab = isAudioTrack ? 'effects' : chosenTab;
   const [selectedNoteIds,   setSelectedNoteIds]   = useState(() => new Set());
   const [noteSnapDivision,  setNoteSnapDivision]  = useState('grid');
   // 'editor' = move/resize/draw; 'velocity' = vertical drag edits note velocity;
@@ -1015,7 +1020,7 @@ export default function RegionEditor({
     <div ref={editorRootRef} className={styles.editor} style={{ '--track-color': track?.color }}>
       <div className={styles.editorBar}>
         <div className={styles.editorTabs}>
-          {['notes', 'instrument', 'effects'].map(tab => (
+          {(isAudioTrack ? ['effects'] : ['notes', 'instrument', 'effects']).map(tab => (
             <button
               key={tab}
               className={`${styles.tabBtn}${activeTab === tab ? ` ${styles.tabActive}` : ''}`}
@@ -1074,9 +1079,15 @@ export default function RegionEditor({
         </div>
 
         <p className={styles.sub}>
-          {track?.instrument ?? '—'}
+          {isAudioTrack ? 'audio — recorded from the Vox Modular' : (track?.instrument ?? '—')}
         </p>
 
+        {isAudioTrack ? (
+          <p className={styles.sub}>
+            Move, trim, split, loop and fade it on the timeline; mix it with the
+            track&apos;s fader, pan and these effects.
+          </p>
+        ) : (
         <div className={styles.field}>
           <label className={styles.fieldLabel}>preview</label>
           <select
@@ -1101,8 +1112,15 @@ export default function RegionEditor({
                 {customInstrumentList().map(ci => <option key={ci.id} value={ci.id}>{ci.name}</option>)}
               </optgroup>
             )}
+            {/* Vox takes (Phase 130) — Vox Modular patches photographed at record time. */}
+            {voxInstrumentList().length > 0 && (
+              <optgroup label="vox modular">
+                {voxInstrumentList().map(vi => <option key={vi.id} value={vi.id}>{vi.name}</option>)}
+              </optgroup>
+            )}
           </select>
         </div>
+        )}
 
         <EffectsList
           effects={track?.effects ?? []}

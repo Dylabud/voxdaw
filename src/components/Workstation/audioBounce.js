@@ -5,6 +5,8 @@ import { EFFECT_DEFS } from './effectDefs';
 import { automationValueAt, denorm, isPanAutomated } from './automationMath';
 import { buildTempoMap, tempoPointsOf, tempoScheduleOps } from './tempoMath';
 import { planGlideSegments } from './glideMath';
+import { isAudioRegion, audioRegionPlan } from './audioClipMath';
+import { getClip } from './voxClipStore';
 import {
   buildRegionEvents,
   volForSliderValue,
@@ -14,6 +16,7 @@ import {
   clampPan,
   scheduleGlideSynthVoice,
   scheduleGlideSamplerChain,
+  trackPanChannels,
 } from '../../hooks/useWorkstationAudio';
 
 // Group-aware audibility — the live engine's effect #2 rule: a solo anywhere
@@ -132,10 +135,7 @@ function scheduleOfflineAutomation(t, { volume, pan, panEntries = null, graphByF
  * across audible tracks (for export start-trim), or null if nothing audible
  * is scheduled at all.
  */
-export async function bounceProject({ tracks, regions, notes, bpm, globalAutomations = [], groups = [], audioBuffers = new Map(), tailSec = null, capSec = Infinity }) {
-  // Recorded Vox Modular audio lives in a regionId → native AudioBuffer map (session
-  // only — not persisted). Look-up tolerates a Map or a plain object.
-  const getBuf = (id) => (audioBuffers instanceof Map ? audioBuffers.get(id) : audioBuffers?.[id]) || null;
+export async function bounceProject({ tracks, regions, notes, bpm, globalAutomations = [], groups = [], tailSec = null, capSec = Infinity }) {
   const rightMeasure = regions.reduce(
     (m, r) => Math.max(m, r.startMeasure + r.durationMeasures), 0,
   );
@@ -143,20 +143,10 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
   // offline transport starts at 0 so map seconds == context seconds exactly.
   const tempoMap = buildTempoMap(bpm, tempoPointsOf(globalAutomations));
   const tail = tailSec ?? estimateFxTailSec(tracks, groups);
-  // Content end = the note-based right edge, extended by any recorded buffer that
-  // rings past its region (the live Tone.Player plays the whole buffer from the
-  // region start regardless of drawn length). Only audible tracks extend it.
-  const { trackAudible: trackAudibleForDur } = computeAudibility(tracks, groups);
-  let contentEndSec = tempoMap.secondsAtMeasure(rightMeasure);
-  for (const r of regions) {
-    if (!r.hasAudio) continue;
-    const buf = getBuf(r.id);
-    const track = tracks.find(t => t.id === r.trackId);
-    if (!buf || !track || !trackAudibleForDur(track)) continue;
-    contentEndSec = Math.max(contentEndSec, tempoMap.secondsAtMeasure(r.startMeasure) + buf.duration);
-  }
+  const contentEndSec = tempoMap.secondsAtMeasure(rightMeasure);
   const durationSec = Math.max(0.1, Math.min(contentEndSec + tail, capSec));
   let minOnsetTicks = Infinity;
+  let minAudioOnsetSec = Infinity; // audio regions (Vox Phase 134) start in seconds, not ticks
 
   const buffer = await Tone.Offline(async ({ transport }) => {
     // Schedule the same bpm curve the live transport plays (flat base bpm
@@ -195,7 +185,7 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
         gr.out.connect(gHead);
         gHead = gr.in;
       }
-      const gPan = new Tone.Panner(0).connect(gHead); // inert glue — see clampPan
+      const gPan = new Tone.Panner({ pan: 0, channelCount: 2 }).connect(gHead); // inert stereo glue — see clampPan / live #0g
       const gVol = new Tone.Gain(volForSliderValue(g.volume ?? 75)).connect(gPan);
       const gIn  = new Tone.Gain(1).connect(gVol);
       groupInById.set(g.id, gIn);
@@ -227,7 +217,7 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
       // Effective pan bakes the group offset (clampPan(t.pan + g.pan)); when
       // a group pan LANE exists, its scheduler below overwrites at t=0.
       const grp = t.groupId ? groups.find(g => g.id === t.groupId) : null;
-      const pan     = new Tone.Panner(clampPan((t.pan ?? 0) + (grp?.pan ?? 0))).connect(head);
+      const pan     = new Tone.Panner({ pan: clampPan((t.pan ?? 0) + (grp?.pan ?? 0)), channelCount: trackPanChannels(t) }).connect(head);
       const volume  = new Tone.Gain(volForSliderValue(t.volume ?? 75)).connect(pan);
       trackVolumeByTrackId.set(t.id, volume);
       trackPannerByTrackId.set(t.id, pan);
@@ -264,21 +254,23 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
       const track = tracks.find(t => t.id === r.trackId);
       if (!track) continue;
 
-      // Recorded Vox Modular audio region: render the captured buffer instead of the
-      // transcription notes — raw to destination (matching the live Tone.Player),
-      // gated on track audibility so mute/solo apply. A missing buffer falls
-      // through to the note path (the transcription persists; the buffer does not).
-      const recBuf = r.hasAudio ? getBuf(r.id) : null;
-      if (recBuf) {
-        if (audibleTrackIds.has(r.trackId)) {
-          const startSec = tempoMap.secondsAtMeasure(r.startMeasure);
-          new Tone.Player(recBuf).toDestination().start(startSec);
-          minOnsetTicks = Math.min(minOnsetTicks, r.startMeasure * Tone.Transport.PPQ * 4);
-        }
-        continue; // no synth, no transcription notes — the buffer is the sound
-      }
-
       const fadeGain = new Tone.Gain(1).connect(trackVolume);
+
+      // Audio region (Vox Phase 134): the clip's buffer through the same fade, at
+      // the live scheduler's times — the offline transport starts at 0, so map
+      // seconds ARE context seconds. A clip not decoded on this machine is silent.
+      if (isAudioRegion(r)) {
+        scheduleFadeEnvelope(fadeGain, r, { current: tempoMap });
+        const clip = getClip(r.audio.clipId);
+        if (!clip) continue;
+        for (const seg of audioRegionPlan(r, tempoMap, clip.durationSec)) {
+          new Tone.ToneBufferSource({ url: clip.buffer, fadeIn: 0.005, fadeOut: 0.005 })
+            .connect(fadeGain)
+            .start(seg.startSec, seg.offsetSec, seg.endSec - seg.startSec);
+          if (audibleTrackIds.has(r.trackId)) minAudioOnsetSec = Math.min(minAudioOnsetSec, seg.startSec);
+        }
+        continue;
+      }
       // useSampled: a rendered custom set (module-level customSampleStore cache,
       // native AudioBuffers — context-free) builds a real Tone.Sampler here in
       // the offline context, matching live playback. Set not decoded → live
@@ -368,8 +360,10 @@ export async function bounceProject({ tracks, regions, notes, bpm, globalAutomat
     transport.start();
   }, durationSec);
 
-  const firstOnsetSec = minOnsetTicks === Infinity
-    ? null
+  const noteOnsetSec = minOnsetTicks === Infinity
+    ? Infinity
     : tempoMap.secondsAtMeasure(minOnsetTicks / (Tone.Transport.PPQ * 4));
+  const onset = Math.min(noteOnsetSec, minAudioOnsetSec);
+  const firstOnsetSec = onset === Infinity ? null : onset;
   return { buffer: buffer.get(), firstOnsetSec };
 }

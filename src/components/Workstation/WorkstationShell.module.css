@@ -111,6 +111,39 @@
   white-space: nowrap;
 }
 
+/* Vox take mode switch (Vox Phase 134): NOTES | AUDIO, one segmented control. */
+.voxModeToggle {
+  display: flex;
+  height: 30px;
+  flex-shrink: 0;
+}
+.voxModeBtn,
+.voxModeBtnActive {
+  appearance: none;
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0 9px;
+  border: 1px solid var(--border-mid);
+  background: transparent;
+  color: var(--form-text-mid);
+  cursor: pointer;
+}
+.voxModeBtn + .voxModeBtn,
+.voxModeBtn + .voxModeBtnActive,
+.voxModeBtnActive + .voxModeBtn { border-left: none; }
+.voxModeToggle > :first-child { border-radius: 2px 0 0 2px; }
+.voxModeToggle > :last-child  { border-radius: 0 2px 2px 0; }
+.voxModeBtn:hover:not(:disabled) { color: var(--accent-color); border-color: var(--accent-color); }
+.voxModeBtnActive {
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 14%, transparent);
+}
+.voxModeBtn:disabled,
+.voxModeBtnActive:disabled { cursor: default; opacity: 0.55; }
+
 .transportBtnActive {
   appearance: none;
   background: var(--accent-color);

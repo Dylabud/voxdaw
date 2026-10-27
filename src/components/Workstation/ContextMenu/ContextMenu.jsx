@@ -21,7 +21,7 @@ const PITCH_STEPS = [12, 7, 5, 4, 3, 2, 1, -1, -2, -3, -4, -5, -7, -12];
 //     'pitch'     → semitone list         → onCommand('pitch', …, semis)
 //     'color'     → TRACK_COLORS swatches → onCommand('color', …, hex)
 //     'pasteFx'   → other-track list      → onCommand('pasteEffects', …, targetTrackId)
-//     'exportFmt' → WAV / MP3             → onCommand('export', …, 'wav'|'mp3')
+//     'exportFmt' → WAV / MP3 / MIDI      → onCommand('export', …, 'wav'|'mp3'|'midi')
 const ITEMS = {
   region: [
     { action: 'copy',  label: 'Copy' },
@@ -252,7 +252,7 @@ export default function ContextMenu({ menu, onClose, onCommand, tracks = [] }) {
                       ))}
                     </div>
                   )}
-                  {kind === 'exportFmt' && ['wav', 'mp3'].map(fmt => (
+                  {kind === 'exportFmt' && ['wav', 'mp3', 'midi'].map(fmt => (
                     <button
                       key={fmt}
                       type="button"

@@ -4,6 +4,7 @@ import { DRUM_KIT_NAMES, isDrumKit, chokeTargetsFor } from './drumKits';
 import { isCustomInstrument, getCustomInstrument } from './customInstruments';
 import { makeCustomInstrumentNode, makeMonoGlideVoice } from './customInstrumentSynth';
 import { getSampleSet } from './customSampleStore';
+import { isVoxInstrument } from './voxInstruments';
 
 // sampleInstruments added Phase 131 — re-exported for RegionEditor / audioBounce consumers
 export const SYNTH_INSTRUMENTS = [
@@ -12,7 +13,7 @@ export const SYNTH_INSTRUMENTS = [
 ];
 
 export { SAMPLED_INSTRUMENT_NAMES, SAMPLED_MELODIC_NAMES, DRUM_KIT_NAMES, isDrumKit, chokeTargetsFor };
-export { isCustomInstrument };
+export { isCustomInstrument, isVoxInstrument };
 
 export const INSTRUMENTS = [...SYNTH_INSTRUMENTS, ...SAMPLED_INSTRUMENT_NAMES];
 
@@ -34,6 +35,13 @@ const SYNTH_ENVELOPES = {
   'sawtooth': PLAIN_OSC_ENV, 'triangle': PLAIN_OSC_ENV,
   'analog':   DEFAULT_SYNTH_ENV,
 };
+// Release for a vox take whose sample set isn't decoded (yet, or on this machine).
+const VOX_FALLBACK_RELEASE = 0.3;
+// Shortest fade-in a vox take note ever gets (Phase 133). A rest-gated (droning) patch
+// is photographed mid-waveform at full level from its first sample, so with attack 0
+// every note started as a step from silence — a click on each note, loudest on
+// back-to-back sequencer lines. 5 ms is below any audible softening of the attack.
+const VOX_MIN_FADE_IN = 0.005;
 const envFor = (instrument) => ({ ...(SYNTH_ENVELOPES[instrument] ?? DEFAULT_SYNTH_ENV) });
 
 // The effective amplitude envelope a track starts from before any override.
@@ -41,6 +49,11 @@ const envFor = (instrument) => ({ ...(SYNTH_ENVELOPES[instrument] ?? DEFAULT_SYN
 // only fields Tone.Sampler exposes); drum kits → null (no ADSR surface).
 export function defaultEnvelopeFor(instrument, { useSampled = false } = {}) {
   if (isDrumKit(instrument)) return null;
+  // Vox take (Phase 130): a real Tone.Sampler over the photographed notes →
+  // attack/release only, with the release measured at photograph time.
+  if (isVoxInstrument(instrument)) {
+    return { attack: 0, release: getSampleSet(instrument)?.release ?? VOX_FALLBACK_RELEASE };
+  }
   // Custom instrument: a patch is a STACK of layers, each with its own envelope
   // baked in at build. A SINGLE layer → its own ADSR (applying it is a no-op).
   // MULTIPLE layers → null: there is no single default, and returning one would
@@ -136,6 +149,60 @@ function voiceSpecFor(instrument) {
   }
 }
 
+// ── Vox take sampler with sustain loops (Vox Phase 131) ─────────────────────
+// A photographed note is only 4 s long, so a held note used to stop dead at 4 s.
+// voxFreeze now marks a seamless (pre-crossfaded) sustain loop inside each
+// steady note; this Sampler plays those notes LOOPED so they hold for as long as
+// the note does, then fade with the release on note-off. Decaying notes (plucks)
+// carry no loop and play exactly as before.
+//
+// Still a real Tone.Sampler, so every _activeSources path (ghost-note fix,
+// silenceAll, sampler glide, synthIsRinging) applies unchanged. Its own attack is
+// a copy of Tone 15.1.22's Sampler.triggerAttack (PRIVATE _findClosest /
+// _buffers / _activeSources) with one change: the loop is set BEFORE start().
+// Setting `source.loop` after start runs cancelStop, which also cancels the
+// fade-in ramp's target — any attack > 0 would leave the note silent at gain 0.
+// Second change (Phase 133): a VOX_MIN_FADE_IN floor on every note's fade-in.
+// Re-verify on a Tone bump, with the ghost-note fix; private fields missing →
+// plain Sampler attack (no loop, the pre-131 behaviour).
+class VoxLoopSampler extends Tone.Sampler {
+  constructor(options) {
+    super(options);
+    this._voxLoops = options?.loops ?? {};
+  }
+  triggerAttack(notes, time, velocity = 1) {
+    if (typeof this._findClosest !== 'function' || !this._buffers || !this._activeSources) {
+      return super.triggerAttack(notes, time, velocity);
+    }
+    for (const note of Array.isArray(notes) ? notes : [notes]) {
+      const midiFloat = 69 + 12 * Math.log2(this.toFrequency(note) / 440);
+      const midi = Math.round(midiFloat);
+      const difference = this._findClosest(midi);
+      const closest = midi - difference;
+      const buffer = this._buffers.get(closest);
+      const playbackRate = Math.pow(2, (difference + (midiFloat - midi)) / 12);
+      const lp = this._voxLoops[closest];
+      const loop = Array.isArray(lp) && lp[1] > lp[0] && lp[1] <= buffer.duration;
+      const source = new Tone.ToneBufferSource({
+        url: buffer, context: this.context, curve: this.curve,
+        fadeIn: Math.max(this.attack, VOX_MIN_FADE_IN), fadeOut: this.release, playbackRate,
+        ...(loop ? { loop: true, loopStart: lp[0], loopEnd: lp[1] } : {}),
+      }).connect(this.output);
+      // Looped: no scheduled end — the note lasts until its release. Offset 0
+      // explicitly (a looped start would otherwise default to loopStart).
+      source.start(time, 0, loop ? undefined : buffer.duration / playbackRate, velocity);
+      if (!Array.isArray(this._activeSources.get(midi))) this._activeSources.set(midi, []);
+      this._activeSources.get(midi).push(source);
+      source.onended = () => {
+        const list = this._activeSources?.get(midi);
+        const i = list ? list.indexOf(source) : -1;
+        if (i !== -1) list.splice(i, 1);
+      };
+    }
+    return this;
+  }
+}
+
 // Builds a fresh PolySynth or Tone.Sampler for the given instrument name.
 // Caller owns disposal and routing. For sampled instruments, pass { onLoad }
 // to be notified when buffers are decoded; Tone.Sampler silently ignores
@@ -143,7 +210,20 @@ function voiceSpecFor(instrument) {
 // override on top of the instrument default.
 export function makeSynth(instrument, opts = {}) {
   let synth;
-  if (isCustomInstrument(instrument)) {
+  if (isVoxInstrument(instrument)) {
+    // Vox take (Phase 130): the photographed notes, one every 3 semitones —
+    // Tone.Sampler repitches the notes in between. Buffer urls → `loaded`
+    // synchronously (the sampled-custom contract). No set decoded → default
+    // synth; the prime completion bumps sampleSetsVersion and synthKeyFor
+    // flips to 'S', so the reconciler hot-swaps the real sound in.
+    const set = getSampleSet(instrument);
+    if (set) {
+      synth = new VoxLoopSampler({ urls: set.urls, release: set.release ?? VOX_FALLBACK_RELEASE, loops: set.loops });
+    } else {
+      const { Voice, options } = voiceSpecFor('analog');
+      synth = new Tone.PolySynth(Voice, options);
+    }
+  } else if (isCustomInstrument(instrument)) {
     // Baked composite (voice + filter + FX + level). Missing def (imported id
     // this machine never registered) → graceful default synth, same spirit as
     // the deserialize instrument fallback.
